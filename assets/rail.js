@@ -13,6 +13,8 @@
  */
 (function () {
   'use strict';
+  const T = (k) => (window.LG ? window.LG.t(k) : k);
+  function build() {
   const quiz = document.querySelector('form.quiz[data-quiz]');
   if (!quiz) return;
   const m = /^(.+)\/phase-(\d+)$/.exec(quiz.dataset.quiz || '');
@@ -49,16 +51,24 @@
 
   const aside = document.createElement('aside');
   aside.className = 'rail';
-  aside.setAttribute('aria-label', '本页导航');
+  aside.setAttribute('aria-label', T('nav'));
   const panel = document.createElement('div');
   panel.className = 'rail-panel';
   aside.appendChild(panel);
 
-  if (crumb) {
-    const t = document.createElement('a');
-    t.className = 'rail-topic'; t.href = crumb.getAttribute('href'); t.textContent = crumb.textContent.trim();
-    panel.appendChild(t);
-  }
+  // Breadcrumb that the page header merges into once it scrolls away.
+  const headerEl = document.querySelector('header.top');
+  const brand = headerEl && headerEl.querySelector('.brand[href]');
+  const themeBtn = headerEl && headerEl.querySelector('button.theme');
+  const rc = document.createElement('div'); rc.className = 'rail-crumb';
+  if (brand) { const b = document.createElement('a'); b.className = 'rail-brand'; b.href = brand.getAttribute('href'); b.textContent = brand.textContent.trim(); rc.appendChild(b); }
+  if (crumb) { const t = document.createElement('a'); t.className = 'rail-topic'; t.href = crumb.getAttribute('href'); t.textContent = crumb.textContent.trim(); rc.appendChild(t); }
+  panel.appendChild(rc);
+  // Language and theme controls live at the foot of the rail (shown while the header is docked).
+  const tools = document.createElement('div'); tools.className = 'rail-tools';
+  const langBtn = headerEl && headerEl.querySelector('button.lang');
+  if (langBtn) { const b = langBtn.cloneNode(true); b.classList.add('rail-lang'); tools.appendChild(b); }
+  if (themeBtn) { const b = themeBtn.cloneNode(true); b.classList.add('rail-theme'); tools.appendChild(b); }
   if (meta) {
     const p = document.createElement('p'); p.className = 'rail-meta'; p.textContent = meta.textContent.trim();
     panel.appendChild(p);
@@ -78,19 +88,20 @@
     const label = document.createElement('span');
     label.textContent = 'Phase ' + i + (i === here && title ? ' · ' + title : '');
     a.appendChild(label);
-    const st = states[i] === 'done' ? '自测全对' : i === now ? '正在学' : '还没到';
+    const st = states[i] === 'done' ? T('done') : i === now ? T('now') : T('ahead');
     a.setAttribute('aria-label', 'Phase ' + i + '，' + st);
     li.appendChild(a); ol.appendChild(li); items.push({ li, label, i });
   }
   panel.appendChild(ol);
   const count = document.createElement('p'); count.className = 'rail-count';
-  count.textContent = '自测全对 ' + doneCount + ' / ' + total;
+  count.textContent = T('done') + ' ' + doneCount + ' / ' + total;
   panel.appendChild(count);
 
   // sections
-  const h2s = Array.from(document.querySelectorAll('h2'));
+  const cur = window.LG ? window.LG.lang() : 'zh-CN';
+  const h2s = Array.from(document.querySelectorAll('h2')).filter(h => { const l = h.closest('[lang]'); return !l || l === document.documentElement || l.getAttribute('lang') === cur; });
   if (h2s.length) {
-    const nav = document.createElement('nav'); nav.setAttribute('aria-label', '本页章节');
+    const nav = document.createElement('nav'); nav.setAttribute('aria-label', T('sections'));
     const toc = document.createElement('ol'); toc.className = 'rail-toc';
     const used = new Set();
     h2s.forEach((h, idx) => {
@@ -98,10 +109,13 @@
       used.add(h.id);
       const li = document.createElement('li'); const a = document.createElement('a');
       a.href = '#' + h.id; a.textContent = h.textContent.split('：')[0].trim();
-      if (/^自测/.test(a.textContent) && states[here] === 'done') a.textContent += ' · 自测全对';
+      if (/^(自测|Quiz|Self-check)/.test(a.textContent) && states[here] === 'done') a.textContent += ' · ' + T('done');
       li.appendChild(a); toc.appendChild(li);
     });
     nav.appendChild(toc); panel.appendChild(nav);
+  }
+  if (tools.childNodes.length) panel.appendChild(tools);
+  if (false) {
     if ('IntersectionObserver' in window) {
       const map = new Map(h2s.map((h, i) => [h, toc.children[i].firstChild]));
       let current = null;
@@ -114,9 +128,11 @@
     }
   }
 
-  const header = document.querySelector('header.top');
+  const header = headerEl;
   (header ? header.parentNode : document.body).insertBefore(aside, header ? header.nextSibling : document.body.firstChild);
   document.body.classList.add('lesson');
+
+  // body.scrolled (header docked) is set by the shared sentinel in diagram.js.
 
   // phase titles from the topic page, only when served over http(s)
   if (/^https?:$/.test(location.protocol) && crumb) {
@@ -139,4 +155,11 @@
       });
     }).catch(() => {});
   }
+  }
+  build();
+  document.addEventListener('lg-lang', () => {
+    document.querySelectorAll('aside.rail').forEach(el => el.remove());
+    document.body.classList.remove('lesson');
+    build();
+  });
 })();

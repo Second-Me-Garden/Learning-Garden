@@ -32,13 +32,14 @@
         q.classList.toggle('bad', !right);
         if (why) why.hidden = false;
       }
-      result.textContent = `${ok} / ${qs.length} 正确` + (ok === qs.length ? ' — 可以进入下一阶段' : ' — 回看标出的概念再试一次');
+      const T = (k) => (window.LG ? window.LG.t(k) : k);
+      result.textContent = `${ok} / ${qs.length} ${T('correct')}` + (ok === qs.length ? ' — ' + T('pass') : ' — ' + T('retry'));
       result.className = 'result ' + (ok === qs.length ? 'ok' : 'bad');
       try { localStorage.setItem('lg-quiz:' + id, JSON.stringify({ ok, total: qs.length, at: Date.now() })); } catch (_) {}
     });
     try {
       const prev = JSON.parse(localStorage.getItem('lg-quiz:' + id) || 'null');
-      if (prev) result.textContent = `上次：${prev.ok} / ${prev.total}`;
+      if (prev) result.textContent = `${window.LG ? window.LG.t('last') : '上次'}：${prev.ok} / ${prev.total}`;
     } catch (_) {}
   }
   function init() { document.querySelectorAll('form.quiz').forEach(setup); }

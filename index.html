@@ -1,55 +1,102 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Learning Garden</title>
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/theme.js"></script>
+<script src="assets/lang.js"></script>
 </head>
 <body class="hub">
 <div class="wrap">
   <header class="top">
-    <span class="brand">Learning Garden</span>
+    <span class="brand"><span class="mark" aria-hidden="true"><img src="assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></span>
     <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
     <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
-  <h1>Learning Garden
-    <span class="en">一块地一块地学。每个 topic 是一畦，分成若干阶段；每一步配一张能逐步播放的图，学完做一组自测。</span>
+  <h1 class="wordmark">Learning Garden
+    <span class="tagline">Deep Roots. Fresh Ideas.</span>
+    <span class="en" lang="zh-CN">一个用来深入理解、独立思考、认真创造的个人空间。一块地一块地学：每个 topic 是一畦，分成若干阶段；每一步配一张能逐步播放的图，学完做一组自测。</span>
+    <span class="en" lang="en">A personal space to understand deeply, think independently, and create thoughtfully. One plot at a time: each topic is a bed, split into phases; every step comes with a diagram you can play step by step, and a short quiz at the end.</span>
+    <span class="bed-mark" aria-hidden="true"><i></i></span>
   </h1>
 
   <div class="garden">
   <article class="topic-card" aria-labelledby="t-kernel">
+    <figure class="topic-art" aria-hidden="true">
+      <svg viewBox="20 12 320 216" preserveAspectRatio="xMaxYMin meet">
+        <!-- a chip: four privilege layers EL3→EL0, pins, and one syscall crossing from EL0 to EL1 and back -->
+        <g class="art-pin">
+          <path d="M60 36 v-18 M90 36 v-18 M120 36 v-18 M150 36 v-18 M180 36 v-18 M210 36 v-18 M240 36 v-18 M270 36 v-18 M300 36 v-18"/>
+          <path d="M60 204 v18 M90 204 v18 M120 204 v18 M150 204 v18 M180 204 v18 M210 204 v18 M240 204 v18 M270 204 v18 M300 204 v18"/>
+          <path d="M42 54 h-18 M42 84 h-18 M42 114 h-18 M42 144 h-18 M42 174 h-18"/>
+          <path d="M318 54 h18 M318 84 h18 M318 114 h18 M318 144 h18 M318 174 h18"/>
+        </g>
+        <rect class="art-layer l3" x="42" y="36" width="276" height="168" rx="18"/>
+        <rect class="art-layer l2" x="66" y="56" width="228" height="128" rx="14"/>
+        <rect class="art-layer l1" x="90" y="76" width="180" height="88" rx="10"/>
+        <rect class="art-layer l0" x="114" y="96" width="132" height="48" rx="7"/>
+        <path class="art-path" d="M150 120 C 150 95, 120 92, 104 100 S 96 140, 130 142 S 190 150, 210 120"/>
+        <circle class="art-dot" cx="150" cy="120" r="4"/>
+        <circle class="art-dot" cx="210" cy="120" r="4"/>
+      </svg>
+    </figure>
     <h2 id="t-kernel"><a href="topics/kernel-engineering/index.html">Kernel Engineering</a></h2>
-    <p class="what">目标：Apple 的 kernel engineer 岗位。九个阶段，Linux 为教学载体，XNU 并排对照。</p>
+    <p class="what" lang="zh-CN">目标：Apple 的 kernel engineer 岗位。九个阶段，Linux 为教学载体，XNU 并排对照。</p>
+    <p class="what" lang="en">Goal: a kernel engineer role at Apple. Nine phases, Linux as the teaching vehicle, XNU side by side.</p>
     <div class="track" data-topic="kernel">
       <svg viewBox="0 0 900 120" role="group" aria-labelledby="track-kernel-title">
-        <title id="track-kernel-title">Kernel Engineering 九个阶段的进度</title>
+        <title id="track-kernel-title">Kernel Engineering: progress across nine phases / 九个阶段的进度</title>
         <path class="bed-line" d="M50 50 L850 50"/>
         <path class="grown" data-track d="M50 50 L50 50"/>
-        <a href="topics/kernel-engineering/phase-0-foundations/index.html"><rect x="0" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-0" data-href="topics/kernel-engineering/phase-0-foundations/index.html" data-title="Phase 0 · Foundations" cx="50" cy="50" r="11"/><text class="n" x="50" y="22" text-anchor="middle">0</text><text data-phase-label="kernel/phase-0" x="50" y="88" text-anchor="middle">基础</text></a>
-        <a href="topics/kernel-engineering/phase-1-boot-and-processes/index.html"><rect x="100" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-1" data-href="topics/kernel-engineering/phase-1-boot-and-processes/index.html" data-title="Phase 1 · Boot &amp; Processes" cx="150" cy="50" r="11"/><text class="n" x="150" y="22" text-anchor="middle">1</text><text data-phase-label="kernel/phase-1" x="150" y="88" text-anchor="middle">启动与进程</text></a>
-        <a href="topics/kernel-engineering/phase-2-memory/index.html"><rect x="200" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-2" data-href="topics/kernel-engineering/phase-2-memory/index.html" data-title="Phase 2 · Memory" cx="250" cy="50" r="11"/><text class="n" x="250" y="22" text-anchor="middle">2</text><text data-phase-label="kernel/phase-2" x="250" y="88" text-anchor="middle">内存</text></a>
-        <a href="topics/kernel-engineering/phase-3-concurrency-and-ipc/index.html"><rect x="300" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-3" data-href="topics/kernel-engineering/phase-3-concurrency-and-ipc/index.html" data-title="Phase 3 · Concurrency &amp; IPC" cx="350" cy="50" r="11"/><text class="n" x="350" y="22" text-anchor="middle">3</text><text data-phase-label="kernel/phase-3" x="350" y="88" text-anchor="middle">并发与 IPC</text></a>
-        <a href="topics/kernel-engineering/phase-4-syscalls-vfs-filesystems/index.html"><rect x="400" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-4" data-href="topics/kernel-engineering/phase-4-syscalls-vfs-filesystems/index.html" data-title="Phase 4 · Syscalls, VFS &amp; Filesystems" cx="450" cy="50" r="11"/><text class="n" x="450" y="22" text-anchor="middle">4</text><text data-phase-label="kernel/phase-4" x="450" y="88" text-anchor="middle">系统调用与文件</text></a>
-        <a href="topics/kernel-engineering/phase-5-device-drivers/index.html"><rect x="500" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-5" data-href="topics/kernel-engineering/phase-5-device-drivers/index.html" data-title="Phase 5 · Device Drivers" cx="550" cy="50" r="11"/><text class="n" x="550" y="22" text-anchor="middle">5</text><text data-phase-label="kernel/phase-5" x="550" y="88" text-anchor="middle">驱动</text></a>
-        <a href="topics/kernel-engineering/phase-6-debugging-and-tooling/index.html"><rect x="600" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-6" data-href="topics/kernel-engineering/phase-6-debugging-and-tooling/index.html" data-title="Phase 6 · Debugging &amp; Tooling" cx="650" cy="50" r="11"/><text class="n" x="650" y="22" text-anchor="middle">6</text><text data-phase-label="kernel/phase-6" x="650" y="88" text-anchor="middle">调试</text></a>
-        <a href="topics/kernel-engineering/phase-7-security-and-hardening/index.html"><rect x="700" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-7" data-href="topics/kernel-engineering/phase-7-security-and-hardening/index.html" data-title="Phase 7 · Security &amp; Hardening" cx="750" cy="50" r="11"/><text class="n" x="750" y="22" text-anchor="middle">7</text><text data-phase-label="kernel/phase-7" x="750" y="88" text-anchor="middle">安全</text></a>
-        <a href="topics/kernel-engineering/phase-8-xnu-and-apple-track/index.html"><rect x="800" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-8" data-href="topics/kernel-engineering/phase-8-xnu-and-apple-track/index.html" data-title="Phase 8 · XNU &amp; the Apple Track" cx="850" cy="50" r="11"/><text class="n" x="850" y="22" text-anchor="middle">8</text><text data-phase-label="kernel/phase-8" x="850" y="88" text-anchor="middle">XNU 与 Apple</text></a>
+        <a href="topics/kernel-engineering/phase-0-foundations/index.html"><rect x="0" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-0" data-href="topics/kernel-engineering/phase-0-foundations/index.html" data-title="Phase 0 · Foundations" cx="50" cy="50" r="11"/><text class="n" x="50" y="22" text-anchor="middle">0</text><text data-phase-label="kernel/phase-0" x="50" y="88" text-anchor="middle" lang="zh-CN">基础</text><text data-phase-label="kernel/phase-0" x="50" y="88" text-anchor="middle" lang="en">Foundations</text></a>
+        <a href="topics/kernel-engineering/phase-1-boot-and-processes/index.html"><rect x="100" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-1" data-href="topics/kernel-engineering/phase-1-boot-and-processes/index.html" data-title="Phase 1 · Boot &amp; Processes" cx="150" cy="50" r="11"/><text class="n" x="150" y="22" text-anchor="middle">1</text><text data-phase-label="kernel/phase-1" x="150" y="88" text-anchor="middle" lang="zh-CN">启动与进程</text><text data-phase-label="kernel/phase-1" x="150" y="88" text-anchor="middle" lang="en">Boot &amp; processes</text></a>
+        <a href="topics/kernel-engineering/phase-2-memory/index.html"><rect x="200" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-2" data-href="topics/kernel-engineering/phase-2-memory/index.html" data-title="Phase 2 · Memory" cx="250" cy="50" r="11"/><text class="n" x="250" y="22" text-anchor="middle">2</text><text data-phase-label="kernel/phase-2" x="250" y="88" text-anchor="middle" lang="zh-CN">内存</text><text data-phase-label="kernel/phase-2" x="250" y="88" text-anchor="middle" lang="en">Memory</text></a>
+        <a href="topics/kernel-engineering/phase-3-concurrency-and-ipc/index.html"><rect x="300" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-3" data-href="topics/kernel-engineering/phase-3-concurrency-and-ipc/index.html" data-title="Phase 3 · Concurrency &amp; IPC" cx="350" cy="50" r="11"/><text class="n" x="350" y="22" text-anchor="middle">3</text><text data-phase-label="kernel/phase-3" x="350" y="88" text-anchor="middle" lang="zh-CN">并发与 IPC</text><text data-phase-label="kernel/phase-3" x="350" y="88" text-anchor="middle" lang="en">Concurrency &amp; IPC</text></a>
+        <a href="topics/kernel-engineering/phase-4-syscalls-vfs-filesystems/index.html"><rect x="400" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-4" data-href="topics/kernel-engineering/phase-4-syscalls-vfs-filesystems/index.html" data-title="Phase 4 · Syscalls, VFS &amp; Filesystems" cx="450" cy="50" r="11"/><text class="n" x="450" y="22" text-anchor="middle">4</text><text data-phase-label="kernel/phase-4" x="450" y="88" text-anchor="middle" lang="zh-CN">系统调用与文件</text><text data-phase-label="kernel/phase-4" x="450" y="88" text-anchor="middle" lang="en">Syscalls &amp; files</text></a>
+        <a href="topics/kernel-engineering/phase-5-device-drivers/index.html"><rect x="500" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-5" data-href="topics/kernel-engineering/phase-5-device-drivers/index.html" data-title="Phase 5 · Device Drivers" cx="550" cy="50" r="11"/><text class="n" x="550" y="22" text-anchor="middle">5</text><text data-phase-label="kernel/phase-5" x="550" y="88" text-anchor="middle" lang="zh-CN">驱动</text><text data-phase-label="kernel/phase-5" x="550" y="88" text-anchor="middle" lang="en">Drivers</text></a>
+        <a href="topics/kernel-engineering/phase-6-debugging-and-tooling/index.html"><rect x="600" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-6" data-href="topics/kernel-engineering/phase-6-debugging-and-tooling/index.html" data-title="Phase 6 · Debugging &amp; Tooling" cx="650" cy="50" r="11"/><text class="n" x="650" y="22" text-anchor="middle">6</text><text data-phase-label="kernel/phase-6" x="650" y="88" text-anchor="middle" lang="zh-CN">调试</text><text data-phase-label="kernel/phase-6" x="650" y="88" text-anchor="middle" lang="en">Debugging</text></a>
+        <a href="topics/kernel-engineering/phase-7-security-and-hardening/index.html"><rect x="700" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-7" data-href="topics/kernel-engineering/phase-7-security-and-hardening/index.html" data-title="Phase 7 · Security &amp; Hardening" cx="750" cy="50" r="11"/><text class="n" x="750" y="22" text-anchor="middle">7</text><text data-phase-label="kernel/phase-7" x="750" y="88" text-anchor="middle" lang="zh-CN">安全</text><text data-phase-label="kernel/phase-7" x="750" y="88" text-anchor="middle" lang="en">Security</text></a>
+        <a href="topics/kernel-engineering/phase-8-xnu-and-apple-track/index.html"><rect x="800" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="kernel/phase-8" data-href="topics/kernel-engineering/phase-8-xnu-and-apple-track/index.html" data-title="Phase 8 · XNU &amp; the Apple Track" cx="850" cy="50" r="11"/><text class="n" x="850" y="22" text-anchor="middle">8</text><text data-phase-label="kernel/phase-8" x="850" y="88" text-anchor="middle" lang="zh-CN">XNU 与 Apple</text><text data-phase-label="kernel/phase-8" x="850" y="88" text-anchor="middle" lang="en">XNU &amp; Apple</text></a>
       </svg>
       <p class="next" data-next>从这里开始：<a href="topics/kernel-engineering/phase-0-foundations/index.html">Phase 0 · Foundations</a></p>
     </div>
   </article>
   </div>
-  <div class="legend"><span><i class="done"></i>自测全对</span><span><i class="now"></i>正在学</span><span><i></i>还没到</span></div>
+  <div class="legend" lang="zh-CN"><span><i class="done"></i>自测全对</span><span><i class="now"></i>正在学</span><span><i></i>还没到</span></div>
+  <div class="legend" lang="en"><span><i class="done"></i>Quiz passed</span><span><i class="now"></i>In progress</span><span><i></i>Not yet</span></div>
 
+  <div lang="zh-CN">
   <h2 class="plain">怎么用</h2>
   <ul class="howto">
     <li>按顺序读一个阶段：目标 → 核心概念 → 对照表 → 动画 → 实验 → 自测。</li>
     <li>动画可以点「播放」自动走，也可以用 <kbd>←</kbd> <kbd>→</kbd> 逐步看，<kbd>space</kbd> 暂停。</li>
     <li>自测全对，那一块地就会变绿。分数只存在这台浏览器里，不上传。</li>
   </ul>
+  </div>
+  <div lang="en">
+  <h2 class="plain">How to use</h2>
+  <ul class="howto">
+    <li>Read a phase in order: goals → core concepts → comparison table → diagram → lab → quiz.</li>
+    <li>Diagrams play on their own, or step with <kbd>←</kbd> <kbd>→</kbd>; <kbd>space</kbd> pauses.</li>
+    <li>A perfect quiz turns that plot green. Scores stay in this browser only; nothing is uploaded.</li>
+  </ul>
+  </div>
+  <section class="about" id="about">
+    <div class="seal" aria-hidden="true"><img src="assets/brand/learning-garden-logo-navy.svg" alt=""></div>
+    <div>
+      <h2 lang="zh-CN">关于</h2><h2 lang="en">About</h2>
+      <p class="meta" lang="zh-CN">创始人的自述，原文为英文。</p>
+      <p>Learning Garden is my personal space for learning, experimenting, and understanding how things work. Inspired by the Garden of Eden and rooted in my Christian faith, it reflects a desire to understand God's creation with humility and care. I study underlying principles, test what I learn, and use that understanding to create and serve.</p>
+      <p class="meta" lang="en">Deep Roots: understanding principles and mechanisms. Fresh Ideas: independent thought and creative use of knowledge.</p>
+      <p class="meta" lang="zh-CN">Deep Roots：理解原理与机制。Fresh Ideas：独立思考，把理解用于创造。</p>
+    </div>
+  </section>
 </div>
 <script src="assets/diagram.js"></script>
 <script src="assets/progress.js"></script>

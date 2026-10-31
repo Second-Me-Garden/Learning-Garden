@@ -1,23 +1,28 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 4 · Syscalls, VFS &amp; Filesystems · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
 <script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
-    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
     <a class="crumb" href="../index.html">Kernel Engineering</a>
-    <span class="crumb">Phase 4</span>
+    <span class="crumb current" aria-current="page">Phase 4 · Syscalls, VFS &amp; Filesystems</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
   <p class="meta">Phase 4 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>Syscalls, VFS &amp; Filesystems <span class="en">系统调用入口、VFS 层次、ext4 ↔ APFS、块 I/O</span></h1>
   <p class="lede">一次 <code>open()</code>/<code>read()</code> 会穿过系统调用入口、VFS 抽象层、页缓存、具体文件系统和块层，最终到达存储设备。Apple 的内核工程师经常要回答「数据到底什么时候落盘」「APFS 的 clone 和 snapshot 是怎么实现的」这类问题，这一阶段把整条 I/O 路径串起来。</p>
 
@@ -49,7 +54,7 @@
   <h3>2. VFS 对象模型</h3>
   <p>VFS 让 <code>read()</code> 不必知道底下是 ext4、NFS 还是 procfs：通用代码只操作抽象对象，具体行为通过<strong>操作表</strong>（函数指针结构）分派给文件系统。</p>
   <p><strong>Linux</strong> 有四个核心对象：<code>struct super_block</code>——一个已挂载的文件系统实例（<code>s_op</code> 指向 <code>super_operations</code>）；<code>struct inode</code>——一个文件本身（元数据、<code>i_op</code>、<code>i_fop</code>、<code>i_mapping</code> 指向它的页缓存）；<code>struct dentry</code>——一个<strong>名字</strong>到 inode 的绑定（<code>d_parent</code>、<code>d_name</code>、<code>d_inode</code>），硬链接就是多个 dentry 指向同一 inode；<code>struct file</code>——一次 <code>open</code> 的结果（<code>f_pos</code> 偏移、打开标志、<code>f_op</code>）。进程的 fd 表 <code>files_struct</code>/<code>fdtable</code> 是 <code>struct file *</code> 数组，fd 就是下标。</p>
-  <p><strong>XNU</strong>（BSD 层）：<code>struct mount</code> 对应 super_block（<code>mnt_op</code>）；<code>struct vnode</code> 同时扮演 inode 的角色（<code>v_type</code>、<code>v_op</code> 操作向量、<code>v_mount</code>、<code>v_data</code> 指向文件系统私有节点、<code>v_ubcinfo</code>），文件系统操作统一走 <code>VNOP_LOOKUP</code>、<code>VNOP_OPEN</code>、<code>VNOP_READ</code>、<code>VNOP_WRITE</code>、<code>VNOP_PAGEIN</code> 等 KPI。XNU <strong>没有独立的 dentry</strong>：名字信息由 name cache 和 vnode 上的 <code>v_name</code>/<code>v_parent</code> 承担。打开的文件分两层：<code>struct fileglob</code> 是真正的打开文件（偏移、标志、<code>fg_ops</code>、<code>fg_data</code> 指向 vnode 或 socket），<code>struct fileproc</code> 是 fd 表里的每进程条目，指向 fileglob——<code>dup</code> 和 <code>fork</code> 后多个 fileproc 共享一个 fileglob，这与 Linux 多个 fd 共享同一 <code>struct file</code> 是同一件事。</p>
+  <p><strong>XNU</strong>（BSD 层）：<code>struct mount</code> 对应 super_block（<code>mnt_op</code>）；<code>struct vnode</code> 同时扮演 inode 的角色（<code>v_type</code>、<code>v_op</code> 操作向量、<code>v_mount</code>、<code>v_data</code> 指向文件系统私有节点、<code>v_ubcinfo</code>），文件系统操作统一走 <code>VNOP_LOOKUP</code>、<code>VNOP_OPEN</code>、<code>VNOP_READ</code>、<code>VNOP_WRITE</code>、<code>VNOP_PAGEIN</code> 等 KPI。XNU <strong>没有独立的 dentry</strong>：名字信息由 name cache 和 vnode 上的 <code>v_name</code>/<code>v_parent</code> 承担。打开的文件分两层：<code>struct fileglob</code> 是真正的打开文件（偏移、标志、<code>fg_ops</code>、<code>fg_data</code> 指向 vnode 或 socket），<code>struct fileproc</code> 是 fd 表里的每进程条目，指向 fileglob——<code>dup</code> 和 <code>fork</code> 后多个 fileproc 共享一个 fileglob，这与 Linux 多个 fd 共享同一 <code>struct file</code> 是同一件事。延伸阅读：《Linux Kernel Development》第 13 章「虚拟文件系统」；《Understanding the Linux Kernel》第 12 章「虚拟文件系统」。</p>
 
   <h3>3. 路径查找</h3>
   <p><strong>Linux</strong>（<code>fs/namei.c</code>）：<code>do_sys_openat2</code> → <code>do_filp_open</code> → <code>path_openat</code>。<code>path_init</code> 定起点（绝对路径用 <code>current-&gt;fs</code> 的 root，相对路径用 cwd 或 <code>dirfd</code>），<code>link_path_walk</code> 逐个分量循环，每个分量 <code>walk_component</code>：先 <code>lookup_fast</code> 在 <strong>dcache</strong>（按「父 dentry + 名字」散列）里找，未命中才 <code>lookup_slow</code> 调父目录的 <code>i_op-&gt;lookup</code>（如 <code>ext4_lookup</code>）去读磁盘上的目录、分配新 dentry 和 inode。途中处理挂载点（dentry 被挂载时换到被挂载文件系统的根）、符号链接（有深度上限，防循环）和每级目录的执行权限（<code>may_lookup</code> → <code>inode_permission</code>）。</p>
@@ -59,12 +64,12 @@
   <h3>4. 页缓存 ↔ UBC</h3>
   <p>文件数据被缓存在内存页里，<code>read</code>/<code>write</code> 只是在用户缓冲区和这些页之间拷贝；同一个文件被 <code>mmap</code> 时，进程页表直接映射<strong>同一批物理页</strong>——所以 <code>write()</code> 的结果立即在 <code>mmap</code> 里可见，反之亦然，不存在两份缓存的一致性问题。</p>
   <p><strong>Linux</strong>：每个 inode 有一个 <code>struct address_space</code>（<code>inode-&gt;i_mapping</code>），用 xarray（<code>i_pages</code>）按文件页偏移索引 folio，操作表 <code>address_space_operations</code>（<code>read_folio</code>、<code>readahead</code>、<code>writepages</code>、<code>dirty_folio</code> 等）由文件系统提供。读路径 <code>filemap_read</code> → <code>filemap_get_pages</code>：命中直接拷贝，未命中触发<strong>预读</strong>（readahead，顺序读时窗口逐步变大）。写路径 <code>generic_perform_write</code>：把数据拷进页缓存、标脏，然后<strong>立即返回</strong>；回写由 per-bdi 的 writeback 工作线程完成，触发条件是脏页超时（<code>/proc/sys/vm/dirty_expire_centisecs</code>，默认 3000 即 30 秒）、脏页比例超限（<code>dirty_background_ratio</code>/<code>dirty_ratio</code>）或显式 <code>fsync</code>/<code>sync</code>。<code>/proc/meminfo</code> 的 <code>Cached</code>、<code>Dirty</code>、<code>Writeback</code> 就是这几类页的数量。</p>
-  <p><strong>XNU 的 UBC</strong>（Unified Buffer Cache）把文件缓存直接做成 Mach VM 对象：vnode 的 <code>ubc_info</code>（<code>bsd/sys/ubc_internal.h</code>）通过 <code>ui_control</code> 关联一个 <code>vm_object</code>，文件页就是这个 object 里的 <code>vm_page</code>，背后的 pager 是 vnode pager——Phase 2 讲的「<code>vm_object</code> + pager」在这里落地。文件系统在 <code>VNOP_READ</code>/<code>VNOP_WRITE</code> 里调用通用的 <strong>cluster 层</strong>（<code>bsd/vfs/vfs_cluster.c</code>：<code>cluster_read</code>、<code>cluster_write</code>、<code>cluster_push</code>），它负责查 UBC、预读、聚合 I/O；缺页时 VM 经 vnode pager 调 <code>VNOP_PAGEIN</code>，换出脏页调 <code>VNOP_PAGEOUT</code>。I/O 以 <strong>UPL</strong>（universal page list，一组被锁定的页）为单位在 VM 与文件系统之间传递。<code>bsd/kern/ubc_subr.c</code> 是 UBC 的主要实现文件。</p>
+  <p><strong>XNU 的 UBC</strong>（Unified Buffer Cache）把文件缓存直接做成 Mach VM 对象：vnode 的 <code>ubc_info</code>（<code>bsd/sys/ubc_internal.h</code>）通过 <code>ui_control</code> 关联一个 <code>vm_object</code>，文件页就是这个 object 里的 <code>vm_page</code>，背后的 pager 是 vnode pager——Phase 2 讲的「<code>vm_object</code> + pager」在这里落地。文件系统在 <code>VNOP_READ</code>/<code>VNOP_WRITE</code> 里调用通用的 <strong>cluster 层</strong>（<code>bsd/vfs/vfs_cluster.c</code>：<code>cluster_read</code>、<code>cluster_write</code>、<code>cluster_push</code>），它负责查 UBC、预读、聚合 I/O；缺页时 VM 经 vnode pager 调 <code>VNOP_PAGEIN</code>，换出脏页调 <code>VNOP_PAGEOUT</code>。I/O 以 <strong>UPL</strong>（universal page list，一组被锁定的页）为单位在 VM 与文件系统之间传递。<code>bsd/kern/ubc_subr.c</code> 是 UBC 的主要实现文件。延伸阅读：《Linux Kernel Development》第 16 章「页缓存与页回写」；《Understanding the Linux Kernel》第 15 章「页缓存」。</p>
 
   <h3>5. ext4 vs APFS</h3>
   <p><strong>ext4</strong> 是「原地更新 + 日志」：磁盘分成若干 block group，每组有位图和 inode 表；文件数据用 <strong>extent</strong>（起始块 + 长度，单个 extent 最多 32768 块，4 KB 块时为 128 MB）描述，比 ext2/3 的间接块表紧凑得多；目录用 htree 散列索引；新版 mkfs.ext4（e2fsprogs ≥ 1.43）默认开启元数据校验和（metadata_csum）。崩溃一致性靠 <strong>jbd2 日志</strong>：元数据修改先写进日志并提交，再写回原位；默认 <code>data=ordered</code> 模式保证数据块在引用它的元数据提交<strong>之前</strong>落盘（不会在崩溃后看到别的文件的旧数据），但数据本身不进日志。<strong>延迟分配</strong>让块分配推迟到回写时，有利于连续分配，但也是「应用不 fsync 就 rename」在崩溃后得到空文件的历史原因。</p>
   <p><strong>APFS</strong> 是「从不原地覆盖」的 <strong>copy-on-write</strong> 文件系统，为闪存设计。磁盘上一个<strong>容器</strong>（container superblock <code>nx_superblock_t</code>）内含多个<strong>卷</strong>（<code>apfs_superblock_t</code>），卷之间<strong>共享空闲空间</strong>（macOS 的系统卷、数据卷、Preboot、VM 卷都在一个容器里）。元数据是 B-tree，改一个节点就写一个新副本并向上更新到根，再通过<strong>对象映射</strong>（omap，虚拟对象 ID → 物理地址）和<strong>检查点</strong>原子地切换——没有传统日志，因为旧版本始终完好。</p>
-  <p>COW 直接带来三项能力：<strong>snapshot</strong>——保留某个事务时刻的树根，代价几乎为零（Time Machine 本地快照、系统更新都依赖它；macOS 11 起系统卷是带哈希校验的<strong>签名快照</strong>，即 SSV）；<strong>clone</strong>——<code>clonefile(2)</code> 或 <code>cp -c</code> 让新文件共享原文件的 extent（带引用计数），之后哪边写就只复制被写的块；<strong>原生加密</strong>——按卷或按文件的密钥（FileVault、iOS Data Protection 的各保护等级），加密在文件系统层而不是整盘层。APFS 的实现（apfs.kext）不开源，但 Apple 公开了磁盘格式规范 <em>Apple File System Reference</em>。</p>
+  <p>COW 直接带来三项能力：<strong>snapshot</strong>——保留某个事务时刻的树根，代价几乎为零（Time Machine 本地快照、系统更新都依赖它；macOS 11 起系统卷是带哈希校验的<strong>签名快照</strong>，即 SSV）；<strong>clone</strong>——<code>clonefile(2)</code> 或 <code>cp -c</code> 让新文件共享原文件的 extent（带引用计数），之后哪边写就只复制被写的块；<strong>原生加密</strong>——按卷或按文件的密钥（FileVault、iOS Data Protection 的各保护等级），加密在文件系统层而不是整盘层。APFS 的实现（apfs.kext）不开源，但 Apple 公开了磁盘格式规范 <em>Apple File System Reference</em>。延伸阅读：《Operating Systems: Three Easy Pieces》第 42 章「崩溃一致性：FSCK 与日志」；《Practical File System Design with the Be File System》的日志相关章节（作者后来主导了 APFS）。</p>
 
   <h3>6. 块层与 I/O 调度</h3>
   <p><strong>Linux</strong>：文件系统把要读写的页组织成 <code>struct bio</code>（目标设备、起始扇区、一组 <code>bio_vec</code> 页段），<code>submit_bio</code> 交给块层。现代块层是 <strong>blk-mq</strong>：每 CPU 一个软件队列，合并相邻请求成 <code>struct request</code>，再分发到与硬件队列一一对应的 hardware dispatch queue，最后调驱动的 <code>queue_rq</code>（QEMU 里的 virtio-blk 是 <code>virtio_queue_rq</code>，NVMe 是 <code>nvme_queue_rq</code>）。NVMe 本身就有多个硬件队列，blk-mq 的设计正是为它们准备的。I/O 调度器可选 <code>none</code>、<code>mq-deadline</code>、<code>bfq</code>、<code>kyber</code>（<code>/sys/block/&lt;dev&gt;/queue/scheduler</code>），NVMe 上常用 <code>none</code>。设备完成后中断 → 驱动 → <code>blk_mq_complete_request</code> → <code>bio_endio</code>，回调解锁页并唤醒等待者。</p>
@@ -454,6 +459,18 @@ grep -rn "F_FULLFSYNC\|F_BARRIERFSYNC" bsd/kern/kern_descrip.c | head</pre>
     <li>Jonathan Levin, <em>*OS Internals</em> Vol. II（Kernel Mode）文件系统章节 <span class="lvl">进阶，XNU VFS、UBC 与 APFS</span></li>
   </ul>
 
+  <h2 id="books">参考书目</h2>
+  <ol class="books">
+    <li>Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 5 章「系统调用」、第 13 章 VFS、第 14 章「块 I/O 层」、第 16 章页缓存，对应概念 1、2、4、6</span></li>
+    <li>Daniel P. Bovet &amp; Marco Cesati, 《Understanding the Linux Kernel》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 12 章 VFS、第 14 章「块设备驱动程序」、第 15 章页缓存、第 16 章「访问文件」、第 18 章 Ext2 / Ext3（ext4 的前身）</span></li>
+    <li>Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 36–45 章：I/O 设备、磁盘、文件与目录、文件系统实现、FFS、日志、LFS、SSD、数据完整性；LFS 一章可对照 APFS 的不原地覆盖 · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li>Dominic Giampaolo, 《Practical File System Design with the Be File System》, Morgan Kaufmann, 1999. <span class="lvl">日志、B+ 树索引与元数据设计，对应概念 5、7；作者后来主导了 APFS · 「免费在线」<a href="https://www.nobius.org/dbg/practical-file-system-design.pdf">www.nobius.org/dbg/practical-file-system-design.pdf</a></span></li>
+    <li>Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, 《The Design and Implementation of the FreeBSD Operating System》, 2nd ed., Addison-Wesley, 2014. <span class="lvl">VFS 与 FFS 相关章节（XNU 的 bsd/vfs 承自 BSD 的 vnode 接口），ZFS 一章可作 COW 文件系统对照</span></li>
+    <li>Maurice J. Bach, 《The Design of the UNIX Operating System》, Prentice Hall, 1986. <span class="lvl">缓冲区缓存、文件的内部表示（inode、namei）相关章节：vnode / 路径查找的 UNIX 原型</span></li>
+    <li>Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 4 章「文件系统」、第 5 章「输入 / 输出」</span></li>
+    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. II 的 XNU VFS、UBC 与 APFS 相关章节，对应概念 2–5 的 XNU 一列</span></li>
+  </ol>
+
   <nav class="pn">
     <a href="../phase-3-concurrency-and-ipc/index.html">← Phase 3 · Concurrency &amp; IPC</a>
     <a href="../phase-5-device-drivers/index.html">Phase 5 · Device Drivers →</a>
@@ -462,5 +479,6 @@ grep -rn "F_FULLFSYNC\|F_BARRIERFSYNC" bsd/kern/kern_descrip.c | head</pre>
 <script src="../../../assets/diagram.js"></script>
 <script src="../../../assets/quiz.js"></script>
 <script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
 </body>
 </html>

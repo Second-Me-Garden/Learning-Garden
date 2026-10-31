@@ -50,26 +50,53 @@
     for (const plot of plots) {
       const a = plot.closest('a');
       if (!a) continue;
-      const st = plot.classList.contains('done') ? '自测全对' : plot.classList.contains('now') ? '正在学' : '还没到';
+      const T = (k) => (window.LG ? window.LG.t(k) : k);
+      const st = plot.classList.contains('done') ? T('done') : plot.classList.contains('now') ? T('now') : T('ahead');
       a.setAttribute('aria-label', plot.dataset.title + '，' + st);
     }
     const next = root.querySelector('[data-next]');
     if (next && total) {
       const nowPlot = plots.find(p => p.classList.contains('now'));
       if (!nowPlot) {
-        next.textContent = total + ' 个阶段自测全对。回头重做任一自测即可复习。';
+        next.textContent = total + (window.LG ? window.LG.t('allDone') : ' 个阶段自测全对。回头重做任一自测即可复习。');
       } else {
         const a = document.createElement('a');
         a.href = nowPlot.dataset.href;
         a.textContent = nowPlot.dataset.title;
-        next.textContent = doneCount === 0 ? '从这里开始：' : '自测全对 ' + doneCount + ' / ' + total + '，继续：';
+        const T2 = (k) => (window.LG ? window.LG.t(k) : k);
+        next.textContent = doneCount === 0 ? T2('start') : T2('done') + ' ' + doneCount + ' / ' + total + T2('cont');
         next.appendChild(a);
       }
     }
   }
+  // Lab-environment callout: "done" is remembered per browser (lg-setup:<topic>).
+  function setupCallouts() {
+    document.querySelectorAll('.setup[data-setup]').forEach(sec => {
+      const key = 'lg-setup:' + sec.dataset.setup;
+      const box = sec.querySelector('input[data-setup-done]');
+      let done = false;
+      try { done = localStorage.getItem(key) === '1'; } catch (_) {}
+      sec.classList.toggle('done', done);
+      if (box) {
+        box.checked = done;
+        box.addEventListener('change', () => {
+          try { box.checked ? localStorage.setItem(key, '1') : localStorage.removeItem(key); } catch (_) {}
+          document.querySelectorAll('.setup[data-setup="' + sec.dataset.setup + '"]').forEach(el => {
+            el.classList.toggle('done', box.checked);
+            const b = el.querySelector('input[data-setup-done]'); if (b) b.checked = box.checked;
+          });
+        });
+      }
+    });
+  }
   function init() {
+    setupCallouts();
     const roots = document.querySelectorAll('[data-topic]');
     if (roots.length) roots.forEach(topic); else topic(document);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+  document.addEventListener('lg-lang', () => {
+    document.querySelectorAll('.done, .now').forEach(el => el.classList.remove('done', 'now'));
+    init();
+  });
 })();

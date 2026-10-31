@@ -1,23 +1,28 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 8 · XNU &amp; the Apple Track · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
 <script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
-    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
     <a class="crumb" href="../index.html">Kernel Engineering</a>
-    <span class="crumb">Phase 8</span>
+    <span class="crumb current" aria-current="page">Phase 8 · XNU &amp; the Apple Track</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
   <p class="meta">Phase 8 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>XNU &amp; the Apple Track <span class="en">编译 XNU、Darwin 内部阅读计划、作品项目（Linux module + DriverKit driver）、Apple 面试环节</span></h1>
   <p class="lede">前面七个阶段用 Linux 打底、处处对照 XNU；这一阶段把重心完全切到 Apple：亲手编译 XNU、按计划读 Darwin 源码、做出能拿得出手的作品，并为 Apple 的面试流程做准备。目标是让你能用自己做过的东西，清楚地讲出对 XNU 的理解。</p>
 
@@ -64,7 +69,7 @@
     <li><code>security/mac_base.c</code>、<code>security/mac_vfs.c</code>、<code>bsd/kern/kern_csr.c</code>：MACF 与 SIP 检查点（对照 Phase 7）。</li>
     <li><code>osfmk/kern/debug.c</code> + <code>tools/lldbmacros/</code>：panic log 怎样生成、宏怎样读内核数据结构（对照 Phase 6）。</li>
   </ol>
-  <p>节奏建议：每天 1–2 个文件；每个文件留下「入口函数、关键数据结构、加了什么锁、和 Linux 哪里对应」四行笔记。读完 14 项，你就拥有面试里讲 XNU 的全部素材。</p>
+  <p>节奏建议：每天 1–2 个文件；每个文件留下「入口函数、关键数据结构、加了什么锁、和 Linux 哪里对应」四行笔记。读完 14 项，你就拥有面试里讲 XNU 的全部素材。延伸阅读：《*OS Internals》Vol. II 可作阅读计划的总地图；《Mac OS X Internals》讲 XNU 内核的相关章节交代了 Mach / BSD / IOKit 分层的来历。</p>
 
   <h3>3. 作品集项目</h3>
   <p>作品的目的不是炫技，而是<strong>给面试官一个可以深挖的具体东西</strong>。规格：</p>
@@ -93,10 +98,11 @@
     <li><strong>调试</strong>：给一份 panic log / crash / 一段有 bug 的代码，说出你的排查顺序。带：Phase 6 的符号化流程和你在作品里定位过的真实 bug。</li>
     <li><strong>系统设计</strong>：设计一个内核子系统或驱动接口（例如一个高频日志缓冲区、一个省电的定时器合并机制），讲清取舍。带：作品的设计说明，Phase 7 的安全考量。</li>
   </ul>
+  <p>延伸阅读：《Cracking the Coding Interview》面试流程与编码题相关章节（通用软件岗视角，内核题要自己补）。</p>
 
   <h3>6. 讲述你的工作</h3>
   <p>每件作品准备一个「<strong>问题 → 做法 → 取舍 → 结果</strong>」的故事，有两分钟和十分钟两个版本。<strong>问题</strong>要具体（「我想知道一次 <code>mach_msg</code> 往返比 pipe 慢多少、慢在哪」比「我学习了 Mach IPC」好得多）；<strong>做法</strong>讲你用了哪些内核接口和工具；<strong>取舍</strong>是面试官最想听的部分（为什么用 mutex 而不是 spinlock、为什么选 B2 而不是 B1）；<strong>结果</strong>给数字和你学到的、能迁移到 Apple 工作里的东西。</p>
-  <p>两条纪律：对 XNU 内部的每个说法，都能指出源码文件（「这在 <code>osfmk/ipc/ipc_kmsg.c</code> 里」），说不准的就直说「我读到的版本是这样，新版本可能变了」；不要声称理解你没读过的东西——面试官多半就是写那段代码的人。</p>
+  <p>两条纪律：对 XNU 内部的每个说法，都能指出源码文件（「这在 <code>osfmk/ipc/ipc_kmsg.c</code> 里」），说不准的就直说「我读到的版本是这样，新版本可能变了」；不要声称理解你没读过的东西——面试官多半就是写那段代码的人。延伸阅读：《Cracking the Coding Interview》行为面试相关章节。</p>
 
   <h2 id="compare">对照表</h2>
   <div class="table-wrap">
@@ -448,6 +454,18 @@ int main(void) {
     <li><a href="https://jobs.apple.com/">Apple Jobs</a> <span class="lvl">查看内核相关岗位的职责描述，反推面试重点</span></li>
   </ul>
 
+  <h2 id="books">参考书目</h2>
+  <ol class="books">
+    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. I–III：阅读计划与作品 B1 / B2 的主参考，对应概念 2–3</span></li>
+    <li>Jonathan Levin, 《Mac OS X and iOS Internals: To the Apple's Core》, Wiley, 2012. <span class="lvl">较早的一卷本全景，Mach IPC 与 IOKit 相关章节可作概念 2 的补充</span></li>
+    <li>Amit Singh, 《Mac OS X Internals: A Systems Approach》, Addison-Wesley, 2006. <span class="lvl">XNU 分层与 Mach / BSD 来历，对应概念 2 与动画 B</span></li>
+    <li>Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, 《The Design and Implementation of the FreeBSD Operating System》, 2nd ed., Addison-Wesley, 2014. <span class="lvl">XNU BSD 层的近亲：进程、VFS、安全，对照阅读计划第 10、11、13 项</span></li>
+    <li>Maurice J. Bach, 《The Design of the UNIX Operating System》, Prentice Hall, 1986. <span class="lvl">UNIX 原始设计，理解 bsd/ 里许多名字（inode、namei、buffer cache）的出处</span></li>
+    <li>Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 17 章「设备与模块」，对应作品 A</span></li>
+    <li>Jonathan Corbet, Alessandro Rubini &amp; Greg Kroah-Hartman, 《Linux Device Drivers》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 2–3 章「构建和运行模块」「字符设备驱动」，对应作品 A 与 Lab A · 「免费在线」<a href="https://lwn.net/Kernel/LDD3/">lwn.net/Kernel/LDD3</a></span></li>
+    <li>Gayle Laakmann McDowell, 《Cracking the Coding Interview》, 6th ed., CareerCup, 2015. <span class="lvl">面试流程、行为题、编码题，对应概念 5–6；不涉及内核专题</span></li>
+  </ol>
+
   <nav class="pn">
     <a href="../phase-7-security-and-hardening/index.html">← Phase 7 · Security &amp; Hardening</a>
     <a href="../index.html">回到 Kernel Engineering →</a>
@@ -456,5 +474,6 @@ int main(void) {
 <script src="../../../assets/diagram.js"></script>
 <script src="../../../assets/quiz.js"></script>
 <script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
 </body>
 </html>

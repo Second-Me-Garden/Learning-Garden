@@ -1,23 +1,28 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 0 · Foundations · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
 <script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
-    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
     <a class="crumb" href="../index.html">Kernel Engineering</a>
-    <span class="crumb">Phase 0</span>
+    <span class="crumb current" aria-current="page">Phase 0 · Foundations</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
   <p class="meta">Phase 0 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>Foundations <span class="en">内核基础：特权级、C 系统编程、ARM64、工具链</span></h1>
   <p class="lede">在读任何一行内核代码之前，先把「内核在 CPU 上到底是怎么跑起来的」这件事搞清楚：用户态和内核态如何切换、内核代码和普通 C 程序有什么不一样、ARM64 上哪些寄存器在管这件事、以及怎么把一个 Linux 内核编出来在 QEMU 里跑。</p>
 
@@ -37,6 +42,7 @@
     <li>C：指针、结构体、函数指针、位运算；读过 CSAPP 第 1–3、7–9 章更好。</li>
     <li>知道进程、线程、虚拟内存、系统调用是什么（本阶段不展开，Phase 1–2 展开）。</li>
     <li>一台 Apple Silicon Mac + Homebrew；磁盘空余 ≥ 10 GB（Linux 源码树 + 构建产物）。</li>
+    <li>先按 <a href="../lab-setup/index.html">实验环境</a> 建好 QEMU Linux VM 和构建容器——所有实验都在客体机里做，宿主机不动。</li>
   </ul>
 
   <h2 id="concepts">核心概念</h2>
@@ -45,10 +51,11 @@
   <p>CPU 硬件把执行分成若干特权级。ARM64 叫 <strong>exception level</strong>：<code>EL0</code> 用户程序、<code>EL1</code> 操作系统内核、<code>EL2</code> hypervisor、<code>EL3</code> secure monitor（固件）。x86 对应 ring 3 / ring 0（ring 1、2 现代 OS 不用），hypervisor 另有 VMX root mode。「内核态」就是 CPU 处于 EL1（或 ring 0）的状态，此时才能执行特权指令（改页表基址、关中断、访问设备寄存器）。</p>
   <p>从 EL0 进入 EL1 <em>只有一条路</em>：触发 exception——同步的（<code>svc</code> 系统调用指令、缺页、非法指令）或异步的（IRQ/FIQ 中断、SError）。CPU 跳到 <code>VBAR_EL1</code> 指向的 <strong>exception vector table</strong>（16 个入口，每个 0x80 字节，按「来自哪个 EL × 哪类异常」排布），内核从那里接管。返回用户态也只有一条路：<code>eret</code>。</p>
   <div class="note">Apple Silicon 补充：据 Asahi Linux 的逆向文档，Apple 的 XNU 在 M 系列芯片上运行于 EL2 并启用 VHE（Virtualization Host Extensions），这样它既是内核也是 Hypervisor.framework 的宿主；用户态仍是 EL0。本阶段只区分 user / kernel 两级即可，EL2 细节放到 Phase 8。</div>
+  <p>延伸阅读：《Operating Systems: Three Easy Pieces》第 6 章「受限直接执行」；《Computer Systems: A Programmer's Perspective》第 8 章「异常控制流」。</p>
 
   <h3>2. 系统调用：一次受控的「越级」</h3>
   <p>用户程序调 <code>write()</code>，libc 把系统调用号放进约定寄存器、参数放进 <code>x0–x5</code>，执行 <code>svc</code>（Linux 用 <code>svc #0</code>，XNU 的 libsystem 用 <code>svc #0x80</code>；立即数内核不看）。CPU 自动把返回地址存入 <code>ELR_EL1</code>、处理器状态存入 <code>SPSR_EL1</code>、异常原因存入 <code>ESR_EL1</code>，切到 EL1，跳到向量表「来自 lower EL（AArch64）的同步异常」入口（<code>VBAR_EL1 + 0x400</code>）。内核入口汇编把所有通用寄存器压到内核栈，再按号查表分发到具体处理函数；返回时把结果写回 <code>x0</code>，恢复寄存器，<code>eret</code>。下面的动画一步步走这条路，Linux 和 XNU 并排。</p>
-  <p>一个细节值得记住：<strong>Linux arm64 用 <code>x8</code> 传系统调用号，XNU arm64 用 <code>x16</code></strong>；XNU 里正数是 BSD syscall（<code>sysent[]</code>），负数是 Mach trap（<code>mach_trap_table[]</code>）——这是 XNU「两个内核叠在一起」在 ABI 上的直接痕迹。</p>
+  <p>一个细节值得记住：<strong>Linux arm64 用 <code>x8</code> 传系统调用号，XNU arm64 用 <code>x16</code></strong>；XNU 里正数是 BSD syscall（<code>sysent[]</code>），负数是 Mach trap（<code>mach_trap_table[]</code>）——这是 XNU「两个内核叠在一起」在 ABI 上的直接痕迹。延伸阅读：《Linux Kernel Development》第 5 章「系统调用」；《Understanding the Linux Kernel》第 10 章「系统调用」（x86 视角，流程同构）。</p>
 
   <h3>3. 内核 C 和你写过的 C 不一样</h3>
   <div class="table-wrap">
@@ -63,6 +70,7 @@
     <tr><td>编译器</td><td>-O2 随便</td><td>大量 <code>__attribute__</code>（<code>section</code>、<code>aligned</code>、<code>noreturn</code>）、内联汇编、链接脚本决定每段代码放在哪</td></tr>
   </table>
   </div>
+  <p>延伸阅读：《Linux Kernel Development》第 2 章「从内核出发」，其中专门讲内核开发与普通 C 程序的差别。</p>
 
   <h3>4. ARM64 你现在就要认识的寄存器</h3>
   <div class="table-wrap">
@@ -253,6 +261,17 @@ grep -n "MACH_TRAP" osfmk/kern/syscall_sw.c | head       # Mach trap 表</pre></
     <li><a href="https://asahilinux.org/docs/">Asahi Linux docs</a> <span class="lvl">Apple Silicon 启动与 EL2 细节（逆向来源）</span></li>
   </ul>
 
+  <h2 id="books">参考书目</h2>
+  <ol class="books">
+    <li>Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 1–2 章（内核概览、内核 C 的约束）与第 5 章「系统调用」对应本页概念 1–3</span></li>
+    <li>Daniel P. Bovet &amp; Marco Cesati, 《Understanding the Linux Kernel》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 4 章「中断和异常」、第 10 章「系统调用」；x86 视角，用来对照本页 ARM64 的异常模型</span></li>
+    <li>Randal E. Bryant &amp; David R. O'Hallaron, 《Computer Systems: A Programmer's Perspective》, 3rd ed., Pearson, 2016. <span class="lvl">第 3 章「程序的机器级表示」与第 8 章「异常控制流」，对应概念 1–2 和寄存器表</span></li>
+    <li>Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 2 章导论、第 4–6 章（进程抽象、受限直接执行），对应概念 1–2 · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li>Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 1 章「引论」：内核态 / 用户态、系统调用的教科书式讲法；第 10 章 Linux 案例研究</span></li>
+    <li>Maurice J. Bach, 《The Design of the UNIX Operating System》, Prentice Hall, 1986. <span class="lvl">「内核导论」相关章节：Linux 与 XNU 的 BSD 层共同的 UNIX 祖先模型，对照概念 5 的源码树</span></li>
+    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. II 的 XNU 系统调用、Mach trap 与异常处理相关章节，对照概念 2 与 XNU 一列</span></li>
+  </ol>
+
   <nav class="pn">
     <a href="../index.html">← Kernel Engineering</a>
     <a href="../phase-1-boot-and-processes/index.html">Phase 1 · Boot &amp; Processes →</a>
@@ -261,5 +280,6 @@ grep -n "MACH_TRAP" osfmk/kern/syscall_sw.c | head       # Mach trap 表</pre></
 <script src="../../../assets/diagram.js"></script>
 <script src="../../../assets/quiz.js"></script>
 <script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
 </body>
 </html>

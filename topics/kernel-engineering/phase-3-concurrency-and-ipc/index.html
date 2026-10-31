@@ -1,23 +1,28 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 3 · Concurrency &amp; IPC · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
 <script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
-    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
     <a class="crumb" href="../index.html">Kernel Engineering</a>
-    <span class="crumb">Phase 3</span>
+    <span class="crumb current" aria-current="page">Phase 3 · Concurrency &amp; IPC</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
   <p class="meta">Phase 3 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>Concurrency &amp; IPC <span class="en">并发与 IPC：spinlock/mutex/RCU、内存序；Mach port 与消息</span></h1>
   <p class="lede">内核里任何共享数据都可能同时被多个 CPU 和中断处理程序访问，锁、原子操作和内存序决定了代码是否正确。XNU 又是一个以 Mach 消息为骨架的内核：launchd、XPC、IOKit 用户客户端都建立在 Mach port 之上，不懂 port 和 <code>mach_msg</code> 就读不懂 Darwin 的大半代码。</p>
 
@@ -45,7 +50,7 @@
   <p>锁分两大类：<strong>忙等</strong>（拿不到就原地转圈）和<strong>可睡眠</strong>（拿不到就把自己挂到等待队列、让出 CPU）。选择标准只有三条：当前上下文能不能睡眠（中断处理程序、持有其他 spinlock 时都不能）；临界区有多长（比两次上下文切换还短，转圈更划算）；读多写少还是读写相当。</p>
   <p><strong>Linux</strong>：<code>spinlock_t</code> 用 <code>spin_lock</code>/<code>spin_unlock</code>，持锁期间<strong>关抢占</strong>；若同一把锁也会在中断里被拿，进程上下文必须用 <code>spin_lock_irqsave</code> 同时关本地中断，否则中断打进来再拿同一把锁就自锁。arm64 上的实现是 queued spinlock（qspinlock，等待者排成 MCS 队列，避免大量 CPU 抢同一条 cache line），等待时借 <code>smp_cond_load_acquire</code> 用 <code>WFE</code> 省电。<code>struct mutex</code> 可睡眠，但在 owner 正在别的 CPU 上运行时先「乐观自旋」一会儿再睡；<code>struct rw_semaphore</code>（<code>down_read</code>/<code>down_write</code>）允许多读者并发。PREEMPT_RT 内核会把大部分 <code>spinlock_t</code> 换成基于 rt_mutex 的可睡眠锁，真正必须忙等的地方用 <code>raw_spinlock_t</code>。</p>
   <p><strong>XNU</strong>：对应物是 <code>lck_spin_t</code>（<code>lck_spin_lock</code>，关抢占）、<code>lck_mtx_t</code>（<code>lck_mtx_lock</code>）和 <code>lck_rw_t</code>（<code>lck_rw_lock_shared</code>/<code>lck_rw_lock_exclusive</code>/<code>lck_rw_done</code>）。<code>lck_mtx_t</code> 是<strong>自适应</strong>锁：owner 在运行就自旋，否则阻塞；阻塞时经由 <strong>turnstile</strong>（<code>osfmk/kern/turnstile.c</code>）把等待者的优先级「借」给 owner，即优先级继承——Linux 的普通 <code>struct mutex</code> 没有这一点，只有 rt_mutex 有。注意 <code>lck_rw_lock_shared_to_exclusive</code> 升级失败时会<strong>放掉</strong>已持有的共享锁，调用者必须重新查找状态。</p>
-  <p><strong>为什么持 spinlock 不能睡眠</strong>：持锁时抢占已关，睡眠意味着调度走——别的 CPU 在等这把锁会一直空转；若调度到的线程恰好也要这把锁就死锁。Linux 打开 <code>CONFIG_DEBUG_ATOMIC_SLEEP</code> 后 <code>might_sleep()</code> 会打印 <code>BUG: sleeping function called from invalid context</code>；XNU 在 DEVELOPMENT/DEBUG 内核里对「关抢占时阻塞」也有断言（具体报错文本随版本变化）。</p>
+  <p><strong>为什么持 spinlock 不能睡眠</strong>：持锁时抢占已关，睡眠意味着调度走——别的 CPU 在等这把锁会一直空转；若调度到的线程恰好也要这把锁就死锁。Linux 打开 <code>CONFIG_DEBUG_ATOMIC_SLEEP</code> 后 <code>might_sleep()</code> 会打印 <code>BUG: sleeping function called from invalid context</code>；XNU 在 DEVELOPMENT/DEBUG 内核里对「关抢占时阻塞」也有断言（具体报错文本随版本变化）。延伸阅读：《Linux Kernel Development》第 9–10 章「内核同步介绍」「内核同步方法」；《Understanding the Linux Kernel》第 5 章「内核同步」。</p>
 
   <h3>2. 原子操作与内存序</h3>
   <p>ARM64 是<strong>弱内存模型</strong>：没有依赖关系的两次访存，其他 CPU 观察到的顺序可以和程序顺序不同（x86 是较强的 TSO）。经典的「消息传递」模式：</p>
@@ -58,7 +63,7 @@ CPU1:  if (smp_load_acquire(&amp;ready))   BUG_ON(data != 42);   /* 有了 acqui
   <h3>3. RCU（Read-Copy-Update）</h3>
   <p>场景：一个被<strong>极频繁读、偶尔改</strong>的指针（路由表、配置、进程列表）。读者用任何锁都会让 cache line 在 CPU 间来回弹。RCU 的做法：<strong>读者完全不写共享内存</strong>——<code>rcu_read_lock()</code>，<code>p = rcu_dereference(gp)</code>，用完 <code>rcu_read_unlock()</code>；写者<strong>复制</strong>一份、在副本上修改，用 <code>rcu_assign_pointer(gp, new)</code>（本质是 store-release）一次性换指针。此后进来的读者看到新版本，而换指针之前就进来的读者可能还拿着旧版本——所以旧版本不能立即释放。</p>
   <p>等待「所有已存在的读者都离开」的这段时间叫<strong>宽限期（grace period）</strong>。写者调 <code>synchronize_rcu()</code> 阻塞等它结束再 <code>kfree(old)</code>；不能阻塞时用 <code>call_rcu(&amp;old-&gt;rcu, cb)</code> 或 <code>kfree_rcu(old, rcu)</code> 登记回调。在非抢占 RCU 里，<code>rcu_read_lock()</code> 只是关抢占，于是「每个 CPU 都至少发生过一次上下文切换、进入 idle 或回到用户态」（<strong>quiescent state</strong>）就足以证明旧读者都结束了——宽限期检测不需要读者做任何事。可抢占 RCU 则让读者在 task 里记一个嵌套计数，代价略高。实现见 <code>kernel/rcu/tree.c</code>；写者之间仍要用普通锁互斥。</p>
-  <p><strong>XNU</strong> 传统上没有 RCU，较新版本引入了 <strong>SMR（safe memory reclamation）</strong>，接口大致在 <code>osfmk/kern/smr.h</code>：读者 <code>smr_enter</code>/<code>smr_leave</code>，用 <code>smr_entered_load</code> 读指针；写者持锁用 <code>smr_serialized_store</code> 发布，<code>smr_synchronize</code> 同步等待或 <code>smr_call</code> 异步回收。机制是<strong>基于序号（epoch）</strong>的：全局写序号递增，每个 CPU 进入读区时记下当时的序号，回收者等所有 CPU 的读序号都越过目标值。思想与 RCU 相同，宽限期的「证据」从「上下文切换」换成了「每 CPU 读序号」。函数名以你检出的 <code>smr.h</code> 为准。</p>
+  <p><strong>XNU</strong> 传统上没有 RCU，较新版本引入了 <strong>SMR（safe memory reclamation）</strong>，接口大致在 <code>osfmk/kern/smr.h</code>：读者 <code>smr_enter</code>/<code>smr_leave</code>，用 <code>smr_entered_load</code> 读指针；写者持锁用 <code>smr_serialized_store</code> 发布，<code>smr_synchronize</code> 同步等待或 <code>smr_call</code> 异步回收。机制是<strong>基于序号（epoch）</strong>的：全局写序号递增，每个 CPU 进入读区时记下当时的序号，回收者等所有 CPU 的读序号都越过目标值。思想与 RCU 相同，宽限期的「证据」从「上下文切换」换成了「每 CPU 读序号」。函数名以你检出的 <code>smr.h</code> 为准。延伸阅读：《Is Parallel Programming Hard, And, If So, What Can You Do About It?》「Deferred Processing」相关章节，RCU 部分出自 RCU 作者本人。</p>
 
   <h3>4. per-CPU 数据</h3>
   <p>最好的锁是不需要锁：如果数据可以按 CPU 拆开（统计计数器、每 CPU 空闲对象缓存、运行队列），每个 CPU 只碰自己那份，就没有共享。<strong>Linux</strong> 用 <code>DEFINE_PER_CPU(type, name)</code> 定义，<code>this_cpu_inc(name)</code>、<code>this_cpu_read(name)</code> 访问本 CPU 副本，<code>per_cpu(name, cpu)</code> 访问指定 CPU 的副本，动态分配用 <code>alloc_percpu</code> + <code>per_cpu_ptr</code>。arm64 上「本 CPU 偏移」放在 <code>TPIDR_EL1</code>（VHE 下是 <code>TPIDR_EL2</code>），所以 <code>this_cpu_*</code> 只需一次寄存器读加偏移。</p>
@@ -74,6 +79,7 @@ CPU1:  if (smp_load_acquire(&amp;ready))   BUG_ON(data != 42);   /* 有了 acqui
   <p>收发只有一个系统调用：<code>mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify)</code>。<code>option</code> 含 <code>MACH_SEND_MSG</code> 则先发，含 <code>MACH_RCV_MSG</code> 则再收，两者都有就是「发请求并等回复」的一次 RPC。消息以 <code>mach_msg_header_t</code> 开头：<code>msgh_bits</code>（远端/本地端口各用什么方式传递权限）、<code>msgh_size</code>、<code>msgh_remote_port</code>（发往哪里）、<code>msgh_local_port</code>（回复端口）、<code>msgh_id</code>。<code>MACH_MSGH_BITS_COMPLEX</code> 置位时，正文里可以带<strong>描述符</strong>：port 描述符（传递权限）和 <strong>out-of-line（OOL）内存</strong>描述符——大块数据不复制，而是在内核里变成 <code>vm_map_copy</code>，接收时按 copy-on-write 映射进对方地址空间（Phase 2 的 COW 在这里派上用场）。</p>
   <p>内核里的大致路径：arm64 上 <code>svc #0x80</code>、<code>x16</code> 为负数表示 Mach trap，<code>mach_msg_trap</code> 是 −31 号；进入 <code>osfmk/ipc/mach_msg.c</code> 后，消息被拷进内核的 <code>ipc_kmsg</code>，<code>ipc_kmsg_copyin</code> 把名字翻译成 port 指针并处理权限，<code>ipc_kmsg_send</code> → <code>ipc_mqueue_send</code> 入队（或直接交给正在等待的接收者），接收侧 <code>ipc_mqueue_receive</code> 出队，<code>ipc_kmsg_copyout</code> 把指针翻译成接收方的名字，最后拷回用户缓冲区。较新的 XNU（macOS 13 起）新增了 <code>mach_msg2_trap</code>，内部函数也有重命名，以源码为准。port 的消息队列有长度上限（<code>qlimit</code>，默认值较小），满了发送方阻塞或按超时返回。</p>
   <div class="note">很多 port 背后不是用户进程，而是<strong>内核对象</strong>（kobject）：task port、thread port、host port、IOKit 的 user client。对这些 port 发消息，等于调用内核服务；接口由 MIG（Mach Interface Generator）从 <code>.defs</code> 文件生成收发桩代码。所以 <code>task_info</code>、<code>mach_vm_allocate</code> 这些「函数」其实都是 Mach 消息。</div>
+  <p>延伸阅读：《*OS Internals》Vol. I 的 Mach IPC 相关章节；《Mac OS X Internals》进程间通信相关章节。</p>
 
   <h3>7. port rights 与 XPC</h3>
   <p>权限有三种：<strong>receive right</strong>——一个 port 只有一个，持有者才能从队列取消息；<strong>send right</strong>——可以有很多，带引用计数；<strong>send-once right</strong>——只能发一条消息，发完即消失，用于回复（内核保证：要么收到回复，要么在 send-once right 被销毁时收到一条 send-once 通知，接收方不会永远等）。在 <code>msgh_bits</code> 或 port 描述符里用 <code>MACH_MSG_TYPE_MAKE_SEND</code>（由 receive right 造一个 send right）、<code>MACH_MSG_TYPE_COPY_SEND</code>（复制自己的 send right）、<code>MACH_MSG_TYPE_MOVE_SEND</code>（转交）、<code>MACH_MSG_TYPE_MAKE_SEND_ONCE</code>、<code>MACH_MSG_TYPE_MOVE_RECEIVE</code> 指定传递方式。receive right 被销毁后，其他 task 手里的 send right 变成 <strong>dead name</strong>；可以注册 <code>MACH_NOTIFY_DEAD_NAME</code>、<code>MACH_NOTIFY_NO_SENDERS</code> 通知来感知对端死亡或无人引用。</p>
@@ -567,6 +573,17 @@ grep -n "^handle_ux_exception" bsd/uxkern/ux_exception.c</pre>
     <li>Jonathan Levin, <em>*OS Internals</em> Vol. I（User Mode）IPC 章节 + Vol. II（Kernel Mode）<span class="lvl">深入，Mach IPC、launchd、XPC 最系统的讲解</span></li>
   </ul>
 
+  <h2 id="books">参考书目</h2>
+  <ol class="books">
+    <li>Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, kernel.org 在线版. <span class="lvl">锁、计数（per-CPU）、Deferred Processing（RCU）与内存序相关章节，对应概念 1–4 · 「免费在线」<a href="https://www.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">www.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html</a></span></li>
+    <li>Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 9–10 章：内核同步原语，对应概念 1–2</span></li>
+    <li>Daniel P. Bovet &amp; Marco Cesati, 《Understanding the Linux Kernel》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 5 章「内核同步」对应概念 1–4；第 19 章「进程通信」对应概念 8</span></li>
+    <li>Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 26–32 章：线程、锁、条件变量、信号量、并发 bug（锁顺序与死锁对应概念 5） · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li>Jonathan Corbet, Alessandro Rubini &amp; Greg Kroah-Hartman, 《Linux Device Drivers》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 5 章「并发与竞态」：驱动作者视角的锁用法 · 「免费在线」<a href="https://lwn.net/Kernel/LDD3/">lwn.net/Kernel/LDD3</a></span></li>
+    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. I 的 Mach IPC、launchd、XPC 相关章节与 Vol. II 的内核侧实现，对应概念 6–7</span></li>
+    <li>Amit Singh, 《Mac OS X Internals: A Systems Approach》, Addison-Wesley, 2006. <span class="lvl">进程间通信相关章节：Mach port、port right 与消息，对应概念 6–7</span></li>
+  </ol>
+
   <nav class="pn">
     <a href="../phase-2-memory/index.html">← Phase 2 · Memory</a>
     <a href="../phase-4-syscalls-vfs-filesystems/index.html">Phase 4 · Syscalls, VFS &amp; Filesystems →</a>
@@ -575,5 +592,6 @@ grep -n "^handle_ux_exception" bsd/uxkern/ux_exception.c</pre>
 <script src="../../../assets/diagram.js"></script>
 <script src="../../../assets/quiz.js"></script>
 <script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
 </body>
 </html>

@@ -1,23 +1,28 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 1 · Boot &amp; Processes · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
 <script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
-    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
     <a class="crumb" href="../index.html">Kernel Engineering</a>
-    <span class="crumb">Phase 1</span>
+    <span class="crumb current" aria-current="page">Phase 1 · Boot &amp; Processes</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
   <p class="meta">Phase 1 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>Boot &amp; Processes <span class="en">启动与进程：boot chain、进程/线程模型、上下文切换、调度</span></h1>
   <p class="lede">Phase 0 里你看着 Linux 在 QEMU 里启动到 shell。这一阶段把那段 boot log 拆开：CPU 上电后第一条内核指令在哪、内核怎么把自己变成「PID 1 + 一堆线程」、CPU 怎么从一个线程切到另一个线程，以及每次切换时「下一个是谁」由什么规则决定（CFS/EEVDF ↔ Mach scheduler / clutch）。</p>
 
@@ -62,6 +67,7 @@
     <li><code>bsd_init</code> 建立 <code>kernproc</code>（PID 0，对应 <code>kernel_task</code>），再通过 <code>bsd_utaskbootstrap()</code> → <code>load_init_program()</code> exec <code>/sbin/launchd</code>——PID 1。</li>
   </ol>
   <div class="note">同一个形状：汇编入口开 MMU → 一个大的 C 初始化函数 → 第一个内核线程 → exec 用户态 PID 1。区别在于 XNU 的 C 初始化分两层（先 Mach 的 <code>kernel_bootstrap</code>，后 BSD 的 <code>bsd_init</code>），中间还要把 IOKit 拉起来。</div>
+  <p>延伸阅读：《Understanding the Linux Kernel》附录 A「系统启动」（x86 / 2.6 时代）；XNU 一侧见《Mac OS X Internals》的启动相关章节（PowerPC / Intel 时代，形状相同）。</p>
 
   <h3>2. 进程与线程模型</h3>
   <p><strong>Linux</strong> 只有一种可调度实体：<code>struct task_struct</code>（<code>include/linux/sched.h</code>）。「进程」和「线程」的区别只在于创建时 <code>clone</code> 的 flags 共享了什么：</p>
@@ -78,6 +84,7 @@
     <li>BSD <code>proc</code>（<code>bsd/sys/proc_internal.h</code>）承载 PID、凭证、fd 表、信号；每个用户进程的 proc 与一个 task 一一对应，每个 thread 另有一个 BSD 侧的 <code>uthread</code>。</li>
     <li><code>fork()</code> 存在（<code>bsd/kern/kern_fork.c</code>），但 Apple 推荐 <code>posix_spawn()</code>（<code>bsd/kern/kern_exec.c</code>）：直接创建新 task 并装入程序，不复制父进程地址空间；而且多线程进程 fork 后子进程只剩调用线程，在 exec 之前只能调 async-signal-safe 函数，很多系统框架不是 fork-safe 的。</li>
   </ul>
+  <p>延伸阅读：《Linux Kernel Development》第 3 章「进程管理」；《Understanding the Linux Kernel》第 3 章「进程」（含进程切换）。</p>
 
   <h3>3. 上下文切换</h3>
   <p>切换总发生在<strong>内核态</strong>，并且对被切走的线程来说只是「调用了一个函数，很久以后它返回了」。因为是函数调用，按 AAPCS64 只需保存 callee-saved 寄存器（<code>x19–x28</code>、<code>fp</code>=<code>x29</code>、<code>lr</code>=<code>x30</code>、<code>sp</code>）；用户态的全部寄存器早在异常入口就存进了内核栈上的 <code>pt_regs</code> / saved state（Phase 0）。</p>
@@ -99,6 +106,7 @@
     <li><strong>clutch</strong>（<code>osfmk/kern/sched_clutch.c</code>）：实时线程走单独的 RT 队列直接优先；其余线程三层选择——先在 QoS <em>root bucket</em>（FIXPRI、FG、IN、DF、UT、BG）之间按截止时间做 EDF（高 QoS 有 warp，可以插队，但低 QoS 不会饿死），再在 bucket 内选 <em>thread group</em>（同一 app / 工作负载的线程组）对应的 clutch bucket，最后选 <code>sched_pri</code> 最高的线程。</li>
     <li><strong>AMP（P/E 核）</strong>：Apple Silicon 上用 clutch 的多 cluster 扩展 <strong>Edge</strong> 调度器：每个 cluster 有自己的运行队列层级，按 QoS、thread group 的性能推荐、负载决定放 P 核还是 E 核，并在 cluster 间迁移/偷取。被绑定到某个 CPU 的线程在该 processor 自己的 run queue 里。</li>
   </ul>
+  <p>延伸阅读：《Linux Kernel Development》第 4 章「进程调度」（CFS 时代）；《Operating Systems: Three Easy Pieces》第 7–10 章（调度入门、MLFQ、比例份额、多处理器调度）。</p>
 
   <h3>5. <code>ps</code>/<code>top</code> 看到的 vs 内核持有的</h3>
   <ul>
@@ -389,6 +397,18 @@ grep -n "TH_BUCKET_SHARE_FG\|root_bucket" osfmk/kern/sched_clutch.c | head</pre>
     <li>Robert Love, <em>Linux Kernel Development</em>（3rd ed.）第 3–4 章 <span class="lvl">入门，进程管理与调度（CFS 时代，概念仍适用）</span></li>
   </ul>
 
+  <h2 id="books">参考书目</h2>
+  <ol class="books">
+    <li>Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 3–4 章对应本页概念 2、4：进程模型与调度；写于 EEVDF 之前，概念仍适用</span></li>
+    <li>Daniel P. Bovet &amp; Marco Cesati, 《Understanding the Linux Kernel》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 3 章「进程」、第 7 章「进程调度」、附录 A「系统启动」，对应概念 1–4</span></li>
+    <li>Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 4–10 章：进程抽象、上下文切换、调度策略（MLFQ 可对照 XNU 的 timeshare 衰减） · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li>Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 2 章「进程与线程」：线程模型与调度算法的通论</span></li>
+    <li>Kaiwan N Billimoria, 《Linux Kernel Programming》, 2nd ed., Packt, 2024. <span class="lvl">进程 / 线程内部与 CPU 调度器相关章节，基于较新的 6.x 内核，补上 LKD 之后的变化</span></li>
+    <li>Maurice J. Bach, 《The Design of the UNIX Operating System》, Prentice Hall, 1986. <span class="lvl">进程结构、进程控制与进程调度相关章节：经典 UNIX 进程模型，XNU 的 BSD <code>proc</code> 由此而来</span></li>
+    <li>Amit Singh, 《Mac OS X Internals: A Systems Approach》, Addison-Wesley, 2006. <span class="lvl">启动、进程（task / thread / proc）相关章节；早于 Apple Silicon，但 Mach / BSD 双层结构一致</span></li>
+    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. II 的 XNU 启动、task / thread 与调度相关章节，对应概念 1–4 的 XNU 一列</span></li>
+  </ol>
+
   <nav class="pn">
     <a href="../phase-0-foundations/index.html">← Phase 0 · Foundations</a>
     <a href="../phase-2-memory/index.html">Phase 2 · Memory →</a>
@@ -397,5 +417,6 @@ grep -n "TH_BUCKET_SHARE_FG\|root_bucket" osfmk/kern/sched_clutch.c | head</pre>
 <script src="../../../assets/diagram.js"></script>
 <script src="../../../assets/quiz.js"></script>
 <script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
 </body>
 </html>
