@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="zh-CN" data-lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>实验环境 · Lab environment · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
@@ -20,6 +21,7 @@
   </header>
 
   <p class="meta">环境准备 · 做任何实验之前</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>实验环境 <span class="en">Lab environment: VMs, containers, snapshots</span></h1>
   <p class="lede">内核实验的常态是「把机器弄崩」：空指针、死锁、改坏页表、加载自己写的模块。这些都应该发生在一台随时可以扔掉、可以一键回滚的机器里，而不是你每天用的 Mac。本页搭三层环境：宿主 macOS 只负责编辑、编译和当调试器；QEMU 里的 Linux arm64 虚拟机做 Linux 内核实验；容器做构建；一台 macOS 客体虚拟机做 XNU、kext、关 SIP 之类的实验。</p>
 

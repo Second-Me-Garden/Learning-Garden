@@ -79,7 +79,18 @@
     render();
   }
 
-  function init() { document.querySelectorAll('.diagram').forEach(setup); }
+  // Header: once its original spot scrolls out of view, body.scrolled is set and
+  // the header shrinks into a centred pill (or docks into the rail on wide lesson pages).
+  function headerSentinel() {
+    const header = document.querySelector('header.top');
+    if (!header || !('IntersectionObserver' in window) || document.querySelector('.top-sentinel')) return;
+    const sentinel = document.createElement('div'); sentinel.className = 'top-sentinel'; sentinel.setAttribute('aria-hidden', 'true');
+    header.parentNode.insertBefore(sentinel, header);
+    new IntersectionObserver((entries) => {
+      document.body.classList.toggle('scrolled', !entries[0].isIntersecting);
+    }, { rootMargin: '-1px 0px 0px 0px', threshold: 0 }).observe(sentinel);
+  }
+  function init() { document.querySelectorAll('.diagram').forEach(setup); headerSentinel(); }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 
   // Theme toggle (optional button.theme in the header). Persists per browser.

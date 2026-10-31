@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="zh-CN" data-lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 2 · Memory · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
@@ -20,6 +21,7 @@
   </header>
 
   <p class="meta">Phase 2 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>Memory <span class="en">虚拟内存、ARM64 页表、缺页路径、分配器（buddy/slab ↔ Mach VM/zalloc）</span></h1>
   <p class="lede">进程看到的每一个地址都是「假的」：CPU 的 MMU 按页表把虚拟地址翻译成物理地址，翻不出来就触发异常交给内核补救。这一阶段把这条链从硬件走到软件：ARM64 页表长什么样、一次 <code>ldr</code> 碰到没映射的页时内核做了什么、内核自己又从哪里拿内存——Linux 和 XNU 并排对照。</p>
 

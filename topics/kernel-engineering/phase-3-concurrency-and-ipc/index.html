@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="zh-CN" data-lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 3 · Concurrency &amp; IPC · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
@@ -20,6 +21,7 @@
   </header>
 
   <p class="meta">Phase 3 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>Concurrency &amp; IPC <span class="en">并发与 IPC：spinlock/mutex/RCU、内存序；Mach port 与消息</span></h1>
   <p class="lede">内核里任何共享数据都可能同时被多个 CPU 和中断处理程序访问，锁、原子操作和内存序决定了代码是否正确。XNU 又是一个以 Mach 消息为骨架的内核：launchd、XPC、IOKit 用户客户端都建立在 Mach port 之上，不懂 port 和 <code>mach_msg</code> 就读不懂 Darwin 的大半代码。</p>
 

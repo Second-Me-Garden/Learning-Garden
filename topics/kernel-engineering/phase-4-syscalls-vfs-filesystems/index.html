@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="zh-CN" data-lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 4 · Syscalls, VFS &amp; Filesystems · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
@@ -20,6 +21,7 @@
   </header>
 
   <p class="meta">Phase 4 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>Syscalls, VFS &amp; Filesystems <span class="en">系统调用入口、VFS 层次、ext4 ↔ APFS、块 I/O</span></h1>
   <p class="lede">一次 <code>open()</code>/<code>read()</code> 会穿过系统调用入口、VFS 抽象层、页缓存、具体文件系统和块层，最终到达存储设备。Apple 的内核工程师经常要回答「数据到底什么时候落盘」「APFS 的 clone 和 snapshot 是怎么实现的」这类问题，这一阶段把整条 I/O 路径串起来。</p>
 

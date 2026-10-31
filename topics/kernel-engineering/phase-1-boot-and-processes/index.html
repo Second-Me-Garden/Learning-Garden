@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="zh-CN" data-lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 1 · Boot &amp; Processes · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
@@ -20,6 +21,7 @@
   </header>
 
   <p class="meta">Phase 1 / 9 · 约 1–2 周</p>
+  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
   <h1>Boot &amp; Processes <span class="en">启动与进程：boot chain、进程/线程模型、上下文切换、调度</span></h1>
   <p class="lede">Phase 0 里你看着 Linux 在 QEMU 里启动到 shell。这一阶段把那段 boot log 拆开：CPU 上电后第一条内核指令在哪、内核怎么把自己变成「PID 1 + 一堆线程」、CPU 怎么从一个线程切到另一个线程，以及每次切换时「下一个是谁」由什么规则决定（CFS/EEVDF ↔ Mach scheduler / clutch）。</p>
 

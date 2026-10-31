@@ -127,14 +127,7 @@
   (header ? header.parentNode : document.body).insertBefore(aside, header ? header.nextSibling : document.body.firstChild);
   document.body.classList.add('lesson');
 
-  // When the header's original spot scrolls out of view, it docks into the rail.
-  if (header && 'IntersectionObserver' in window) {
-    const sentinel = document.createElement('div'); sentinel.className = 'rail-sentinel'; sentinel.setAttribute('aria-hidden', 'true');
-    header.parentNode.insertBefore(sentinel, header);
-    new IntersectionObserver((entries) => {
-      document.body.classList.toggle('scrolled', !entries[0].isIntersecting);
-    }, { rootMargin: '-1px 0px 0px 0px', threshold: 0 }).observe(sentinel);
-  }
+  // body.scrolled (header docked) is set by the shared sentinel in diagram.js.
 
   // phase titles from the topic page, only when served over http(s)
   if (/^https?:$/.test(location.protocol) && crumb) {
@@ -160,8 +153,8 @@
   }
   build();
   document.addEventListener('lg-lang', () => {
-    document.querySelectorAll('aside.rail, .rail-sentinel').forEach(el => el.remove());
-    document.body.classList.remove('lesson', 'scrolled');
+    document.querySelectorAll('aside.rail').forEach(el => el.remove());
+    document.body.classList.remove('lesson');
     build();
   });
 })();

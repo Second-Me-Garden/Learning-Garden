@@ -34,6 +34,7 @@ for (const page of pages) {
   if (!/<script src="[./]*assets\/theme\.js"><\/script>\s*(<script src="[./]*assets\/lang\.js"><\/script>\s*)?<\/head>/.test(html)) problems.push(`${rel}: assets/theme.js not loaded in <head>`);
   if (!/<script src="[./]*assets\/lang\.js"><\/script>/.test(html)) problems.push(`${rel}: assets/lang.js not loaded`);
   if (!/<button class="lang"/.test(html)) problems.push(`${rel}: language button missing`);
+  if (!/<meta name="google" content="notranslate">/.test(html)) problems.push(`${rel}: notranslate meta missing`);
 
   // phase pages
   if (/\/phase-\d+-[^/]+\/index\.html$/.test(page)) {

@@ -103,11 +103,30 @@ img, svg { max-width: 100%; }
 /* No fixed measure: Chinese text is denser than Latin, and lists carry code blocks that need the full column. */
 
 /* Header */
+.top-sentinel { height: 0; }
 .top {
-  display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline;
-  padding: 8px 0 14px; margin-bottom: 28px;
-  font-size: 14px; color: var(--ink-2);
+  display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+  position: sticky; top: 0; z-index: 5; box-sizing: border-box;
+  width: 100%; max-width: var(--maxw); margin: 0 auto 28px;
+  padding: 11px 0; border: 1px solid transparent; border-radius: 999px;
+  font-size: 14px; color: var(--ink-2); background: transparent;
 }
+@media (prefers-reduced-motion: no-preference) {
+  .top { transition: max-width .45s cubic-bezier(.3,.7,.2,1), padding .45s cubic-bezier(.3,.7,.2,1), top .45s cubic-bezier(.3,.7,.2,1), background-color .3s ease, border-color .3s ease, box-shadow .3s ease, font-size .3s ease; }
+  .top .brand { transition: font-size .3s ease; }
+}
+/* Scrolled: a centred glass pill over the content that passes beneath it. */
+body.scrolled .top { top: 10px; max-width: 760px; padding: 7px 10px 7px 18px; font-size: 13px;
+  background: var(--glass-solid); border-color: var(--glass-rim); box-shadow: var(--glass-inner), var(--glass-shadow); }
+body.scrolled .top .brand { font-size: 15px; }
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  body.scrolled .top { background: linear-gradient(155deg, var(--glass-sheen), transparent 42%), var(--glass-fill);
+    -webkit-backdrop-filter: blur(16px) saturate(1.3); backdrop-filter: blur(16px) saturate(1.3); }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  body.scrolled .top { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+@media (max-width: 800px) { body.scrolled .top { max-width: calc(100% - 8px); } }
 .top .brand { font-family: var(--display); font-weight: 600; font-size: 17px; letter-spacing: 0.01em; color: var(--ink); text-decoration: none; }
 .top .crumb { text-decoration: none; color: var(--ink-2); }
 .top .crumb::before { content: "/"; color: var(--ink-3); margin-right: 10px; }
@@ -300,11 +319,11 @@ body.hub { min-height: 100svh; background-color: var(--bg);
   }
 }
 /* Header docks into the rail on scroll (wide screens only). */
-.rail-sentinel { height: 0; }
 @media (min-width: 1440px) {
   body.lesson { --rail-w: min(220px, calc((100vw - 960px) / 2 - 64px)); }
-  body.lesson header.top { position: sticky; top: 0; z-index: 3; transform-origin: left top; will-change: transform, opacity; }
-  body.lesson.scrolled header.top { transform: translate(calc(16px - var(--rail-w) - 36px), 28px) scale(.9); opacity: 0; visibility: hidden; pointer-events: none; }
+  body.lesson header.top { transform-origin: left top; will-change: transform, opacity; }
+  body.lesson.scrolled header.top { transform: translate(calc(16px - var(--rail-w) - 36px), 28px) scale(.9); opacity: 0; visibility: hidden; pointer-events: none;
+    top: 0; max-width: var(--maxw); padding: 11px 0; font-size: 14px; background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
   .rail-crumb { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; overflow: hidden;
     max-height: 0; opacity: 0; transform: translateY(-10px); margin-bottom: 0; }
   body.scrolled .rail-crumb { max-height: 80px; opacity: 1; transform: none; margin-bottom: 10px; }
@@ -396,3 +415,4 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .setup.done .setup-ready { display: inline; }
 .setup.done .btn { display: none; }
 @media (max-width: 600px) { .setup { grid-template-columns: 1fr; } .setup-actions { justify-items: start; } }
+.note.untranslated { margin: 6px 0 14px; border-left: 3px solid var(--ink-3); }
