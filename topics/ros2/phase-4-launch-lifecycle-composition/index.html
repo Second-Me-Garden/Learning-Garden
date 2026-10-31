@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 4 · Launch, Parameters, Lifecycle, Composition · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page">Phase 4 · Launch, Lifecycle &amp; Composition</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 4 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 4 / 8 · about 1–2 weeks</p>
+  <h1>Launch, Parameters, Lifecycle, Composition <span class="en" lang="zh-CN">Launch、参数、生命周期与组合：怎样把一堆节点按顺序、按配置、按需要的进程边界拉起来</span><span class="en" lang="en">How to bring up a set of nodes in order, with their configuration, inside the process boundaries you choose</span></h1>
+  <p class="lede" lang="zh-CN">到目前为止，每个节点都是你在一个 shell 里手动 <code>ros2 run</code> 起来的。真正的机器人有几十个节点，需要一次拉起、各自带参数、放进各自的命名空间，并且要<strong>按顺序</strong>进入工作状态：先把驱动和地图都配置好，再一起开始发布。这一阶段讲四个工具：<strong>launch 文件</strong>在运行时是一个带事件处理器的进程树；<strong>参数文件、命名空间与重映射</strong>让同一个节点不改代码就能用在不同位置；<strong>managed（lifecycle）节点</strong>把「创建」「配置」「激活」拆成外部可以驱动的状态机；<strong>组合</strong>（composition）把几个节点装进同一个进程，让消息以指针的形式在进程内传递，跳过序列化和 DDS。</p>
+  <p class="lede" lang="en">So far every node has been started by hand with <code>ros2 run</code> in its own shell. A real robot has dozens of nodes that must start together, each with its parameters and in its own namespace, and must come into service <strong>in order</strong>: configure the drivers and the map first, then start publishing all at once. This phase covers four tools: a <strong>launch file</strong> is, at run time, a process tree with event handlers; <strong>parameter files, namespaces and remapping</strong> let one node be reused in different places without code changes; <strong>managed (lifecycle) nodes</strong> split “create”, “configure” and “activate” into a state machine that something outside can drive; and <strong>composition</strong> puts several nodes into one process so that messages travel inside it as pointers, skipping serialization and DDS.</p>
+  <div class="note" lang="zh-CN"><strong>状态说明：</strong>本页的 launch 文件、C++ 代码和命令按 2026-10-31 的 Jazzy 文档与源码（launch、launch_ros、rclcpp_lifecycle、rclcpp_components 的 <code>jazzy</code> 分支）写成，<strong>没有在这台 Mac 上运行过</strong>。实验里的「预期结果」是推断，标着「请查文档」的地方是作者没有逐字核对的细节，以你的实际输出和文档为准。</div><div class="note" lang="en"><strong>Status:</strong> the launch files, C++ code and commands on this page were written against the Jazzy docs and sources (the <code>jazzy</code> branches of launch, launch_ros, rclcpp_lifecycle and rclcpp_components) on 2026-10-31, and <strong>have not been run on this Mac</strong>. The “expected results” in the labs are inference, and places marked “check the docs” are details the author did not verify word for word; your actual output and the docs win.</div>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说清 <code>ros2 launch</code> 运行时发生了什么：<code>generate_launch_description()</code> 返回的是一份描述，launch 服务逐个执行其中的动作，<code>Node</code> 动作变成一个子进程，事件处理器对子进程的退出作出反应。</li>
+      <li lang="en">Say what happens when <code>ros2 launch</code> runs: <code>generate_launch_description()</code> returns a description, the launch service executes its actions one by one, each <code>Node</code> action becomes a child process, and event handlers react to child processes exiting.</li>
+      <li lang="zh-CN">用 launch 参数、替换（substitution）、<code>IncludeLaunchDescription</code> 和 <code>OnProcessExit</code> 写一个可复用的 launch 文件。</li>
+      <li lang="en">Write a reusable launch file with launch arguments, substitutions, <code>IncludeLaunchDescription</code> and <code>OnProcessExit</code>.</li>
+      <li lang="zh-CN">预测一个话题名在命名空间和重映射之后变成什么，并写出能匹配到带命名空间节点的参数 YAML。</li>
+      <li lang="en">Predict what a topic name becomes after namespacing and remapping, and write a parameter YAML that matches a namespaced node.</li>
+      <li lang="zh-CN">画出 lifecycle 状态机的四个主状态、六个过渡状态和全部转换，说出每个回调返回 <code>SUCCESS</code>、<code>FAILURE</code>、<code>ERROR</code> 时节点落在哪里，以及这台状态机向「按顺序拉起系统」的人保证了什么。</li>
+      <li lang="en">Draw the lifecycle state machine’s four primary states, six transition states and every transition, say where the node lands when each callback returns <code>SUCCESS</code>, <code>FAILURE</code> or <code>ERROR</code>, and say what the machine guarantees to whoever brings a system up in order.</li>
+      <li lang="zh-CN">把一个节点写成 component，装进容器，打开 <code>use_intra_process_comms</code>，并从机制上解释进程内传递为什么省掉了序列化和拷贝，以及什么时候它仍然要拷贝。</li>
+      <li lang="en">Write a node as a component, load it into a container, turn on <code>use_intra_process_comms</code>, and explain from the mechanism why intra-process delivery skips serialization and copying, and when it still has to copy.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN">完成 <a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1</a>：会写 C++ 节点、会声明参数、会用 <code>--ros-args -p</code> 和 <code>--params-file</code>。本页不重复参数的声明与校验，只讲它们在 launch 和命名空间里怎么组合。</li>
+    <li lang="en">Finish <a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1</a>: you can write a C++ node, declare parameters, and use <code>--ros-args -p</code> and <code>--params-file</code>. This page does not repeat how parameters are declared and validated; it covers only how they combine with launch and namespaces.</li>
+    <li lang="zh-CN">完成 <a href="../phase-2-executors-and-timing/index.html">Phase 2</a>：执行器和 callback group。一个组件容器就是「一个进程 + 一个执行器 + 若干个节点」，Phase 2 的规则在这里原样适用。</li>
+    <li lang="en">Finish <a href="../phase-2-executors-and-timing/index.html">Phase 2</a>: executors and callback groups. A component container is “one process + one executor + several nodes”, and the rules of Phase 2 apply here unchanged.</li>
+    <li lang="zh-CN">完成 <a href="../phase-3-middleware-and-qos/index.html">Phase 3</a>：消息在进程之间要经过序列化、rmw、DDS 和内核的 socket 或共享内存。本页的组合正是绕开这一整条路。</li>
+    <li lang="en">Finish <a href="../phase-3-middleware-and-qos/index.html">Phase 3</a>: between processes a message goes through serialization, rmw, DDS and the kernel’s sockets or shared memory. Composition on this page is exactly the way around that whole path.</li>
+    <li lang="zh-CN"><a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Engineering Phase 1</a>：进程、<code>fork</code>/<code>exec</code>、信号和进程树。launch 的进程管理和 Ctrl+C 的行为都建立在这些之上。</li>
+    <li lang="en"><a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Engineering Phase 1</a>: processes, <code>fork</code>/<code>exec</code>, signals and the process tree. Launch’s process management and its Ctrl+C behaviour rest on them.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. launch 文件在运行时是什么</h3><h3 lang="en">1. What a launch file is at run time</h3>
+  <p lang="zh-CN">Python launch 文件不是「按顺序执行的启动脚本」，而是一个返回<strong>描述</strong>的函数。<code>ros2 launch</code> 加载这个文件，调用其中的 <code>generate_launch_description()</code>，拿到一个 <code>LaunchDescription</code>：一列<strong>动作</strong>（action），例如声明参数、启动节点、包含另一个 launch 文件、注册事件处理器。然后一个 launch 服务（<code>launch.LaunchService</code>）在一个 asyncio 事件循环里逐个「访问」这些动作：</p>
+  <p lang="en">A Python launch file is not “a start-up script that runs in order”; it is a function that returns a <strong>description</strong>. <code>ros2 launch</code> loads the file, calls its <code>generate_launch_description()</code>, and gets a <code>LaunchDescription</code>: a list of <strong>actions</strong> such as declaring an argument, starting a node, including another launch file, or registering an event handler. A launch service (<code>launch.LaunchService</code>) then “visits” those actions one by one in an asyncio event loop:</p>
+  <ul>
+    <li lang="zh-CN"><strong>替换在访问时求值。</strong><code>LaunchConfiguration('ns')</code> 这类替换（substitution）在写文件时只是一个占位对象，launch 服务访问到用它的动作时才从当时的上下文里取值。所以你不能在 <code>generate_launch_description()</code> 里用 Python 的 <code>if</code> 去判断一个 launch 参数的值；要条件执行，用动作的 <code>condition=IfCondition(...)</code>，或者 <code>OpaqueFunction</code> 在运行时拿到上下文（后者请查文档）。</li>
+    <li lang="en"><strong>Substitutions are evaluated on visit.</strong> A substitution such as <code>LaunchConfiguration('ns')</code> is only a placeholder object when the file is written; the launch service takes its value from the context of that moment, when it visits the action using it. So you cannot use a Python <code>if</code> inside <code>generate_launch_description()</code> to test a launch argument’s value; for conditional actions use <code>condition=IfCondition(...)</code> on the action, or an <code>OpaqueFunction</code> that receives the context at run time (check the docs for the latter).</li>
+    <li lang="zh-CN"><strong><code>Node</code> 动作就是启动一个进程。</strong><code>launch_ros.actions.Node</code> 是 <code>ExecuteProcess</code> 的特化：它把包名和可执行文件名解析成 <code>install/&lt;pkg&gt;/lib/&lt;pkg&gt;/&lt;exe&gt;</code> 这类路径（大致路径），把 <code>name</code>、<code>namespace</code>、<code>remappings</code>、<code>parameters</code> 翻译成 <code>--ros-args -r __node:=… -r __ns:=… -r a:=b --params-file …</code> 追加到命令行，然后由 launch 服务派生一个子进程去执行它。节点<em>不</em>在 launch 进程里运行。</li>
+    <li lang="en"><strong>A <code>Node</code> action starts a process.</strong> <code>launch_ros.actions.Node</code> is a specialisation of <code>ExecuteProcess</code>: it resolves the package and executable name to a path like <code>install/&lt;pkg&gt;/lib/&lt;pkg&gt;/&lt;exe&gt;</code> (approximate path), translates <code>name</code>, <code>namespace</code>, <code>remappings</code> and <code>parameters</code> into <code>--ros-args -r __node:=… -r __ns:=… -r a:=b --params-file …</code> appended to the command line, and the launch service spawns a child process to run it. The node does <em>not</em> run inside the launch process.</li>
+    <li lang="zh-CN"><strong>结果是一棵进程树。</strong>运行中的系统在内核看来是：一个 <code>ros2 launch</code> 的 Python 进程，下面挂着每个节点一个子进程。launch 进程一直活着，用 asyncio 等待子进程的输出和退出，把它们变成事件（<code>ProcessStarted</code>、<code>ProcessIO</code>、<code>ProcessExited</code>），再分发给注册过的事件处理器。</li>
+    <li lang="en"><strong>The result is a process tree.</strong> To the kernel, the running system is one Python process for <code>ros2 launch</code> with one child process per node under it. The launch process stays alive, waits with asyncio for the children’s output and exit, turns them into events (<code>ProcessStarted</code>, <code>ProcessIO</code>, <code>ProcessExited</code>), and dispatches them to the registered event handlers.</li>
+    <li lang="zh-CN"><strong>关闭是信号的升级。</strong>你在 launch 的终端按 Ctrl+C，launch 收到 <code>SIGINT</code>，发出一个 <code>Shutdown</code> 事件，再给仍在运行的子进程发 <code>SIGINT</code>；子进程超时不退，再升级为 <code>SIGTERM</code>，最后 <code>SIGKILL</code>。两段超时可以配置，默认值请查文档。这就是 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a> 里父进程管理子进程的那一套。</li>
+    <li lang="en"><strong>Shutdown is an escalation of signals.</strong> When you press Ctrl+C in the launch terminal, launch receives <code>SIGINT</code>, emits a <code>Shutdown</code> event, and sends <code>SIGINT</code> to the children still running; a child that does not exit within a timeout gets <code>SIGTERM</code>, and finally <code>SIGKILL</code>. Both timeouts are configurable; check the docs for their defaults. This is the parent-manages-children pattern of <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>.</li>
+  </ul>
+  <div class="note" lang="zh-CN">launch 文件还可以写成 XML 或 YAML，它们被解析成同一套动作，能力略少。本课程只用 Python 格式，因为事件处理器和组合容器在 Python 里写最直接。按 launch 的设计文章，launch 系统的职责是「启动、监视、关闭一组进程，并对它们的状态变化作出反应」，而不是一个通用构建或部署工具。</div>
+  <div class="note" lang="en">Launch files can also be written in XML or YAML, which are parsed into the same actions with slightly fewer capabilities. This course uses only the Python format, because event handlers and composable containers are most direct to write in Python. Per the launch design article, the job of the launch system is “to start, monitor and shut down a set of processes, and to react to changes in their state”, not to be a general build or deployment tool.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲 launch 文件的章节；设计文章 <a href="https://design.ros2.org/articles/roslaunch.html">ROS 2 Launch System</a>；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Launch-Main.html">Launch 教程</a>。</p>
+  <p lang="en">Further reading: the chapters of Renard, <em>ROS 2 From Scratch</em>, on launch files; the design article <a href="https://design.ros2.org/articles/roslaunch.html">ROS 2 Launch System</a>; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Launch-Main.html">Launch tutorials</a>.</p>
+
+  <h3 lang="zh-CN">2. launch 参数、替换、包含与事件</h3><h3 lang="en">2. Launch arguments, substitutions, includes and events</h3>
+  <ul>
+    <li lang="zh-CN"><strong>launch 参数</strong>：<code>DeclareLaunchArgument('ns', default_value='robot1', description='…')</code> 声明一个可以从命令行覆盖的值，<code>LaunchConfiguration('ns')</code> 读取它。命令行写法是 <code>ros2 launch pkg file.launch.py ns:=robot2</code>；<code>ros2 launch pkg file.launch.py --show-args</code> 列出文件声明的全部参数和默认值。launch 参数和节点参数是两回事：前者只活在 launch 进程里，后者属于每个节点。</li>
+    <li lang="en"><strong>Launch arguments</strong>: <code>DeclareLaunchArgument('ns', default_value='robot1', description='…')</code> declares a value that can be overridden from the command line, and <code>LaunchConfiguration('ns')</code> reads it. On the command line it is <code>ros2 launch pkg file.launch.py ns:=robot2</code>; <code>ros2 launch pkg file.launch.py --show-args</code> lists every argument the file declares, with defaults. Launch arguments and node parameters are different things: the former live only in the launch process, the latter belong to each node.</li>
+    <li lang="zh-CN"><strong>常用替换</strong>：<code>LaunchConfiguration</code>（launch 参数）、<code>PathJoinSubstitution</code>（拼路径）、<code>ThisLaunchFileDir</code>（当前 launch 文件所在目录）、<code>launch_ros.substitutions.FindPackageShare</code>（一个包的 <code>share</code> 目录）。它们都可以出现在动作的参数里，直到访问时才变成字符串。</li>
+    <li lang="en"><strong>Common substitutions</strong>: <code>LaunchConfiguration</code> (a launch argument), <code>PathJoinSubstitution</code> (join a path), <code>ThisLaunchFileDir</code> (the directory of the current launch file), <code>launch_ros.substitutions.FindPackageShare</code> (a package’s <code>share</code> directory). All of them can appear in action arguments and become strings only on visit.</li>
+    <li lang="zh-CN"><strong>包含</strong>：<code>IncludeLaunchDescription(PythonLaunchDescriptionSource(path), launch_arguments={'ns': 'robot2'}.items())</code> 把另一个 launch 文件的动作接进来，并给它的 launch 参数传值。大系统就是这样分层的：一个总文件包含驱动、感知、导航各自的 launch 文件。</li>
+    <li lang="en"><strong>Includes</strong>: <code>IncludeLaunchDescription(PythonLaunchDescriptionSource(path), launch_arguments={'ns': 'robot2'}.items())</code> splices in another launch file’s actions and passes values to its launch arguments. Large systems are layered this way: one top file includes the launch files of the drivers, perception and navigation.</li>
+    <li lang="zh-CN"><strong>事件处理器</strong>：<code>RegisterEventHandler(OnProcessExit(target_action=talker, on_exit=[…]))</code> 在 <code>talker</code> 这个进程退出时执行一列动作，例如 <code>LogInfo</code>、启动另一个节点，或 <code>EmitEvent(event=Shutdown(reason='…'))</code> 关掉整个系统。<code>OnProcessStart</code>、<code>OnProcessIO</code> 和 <code>OnShutdown</code> 用法相同。简单场景还有快捷方式：<code>Node(..., on_exit=Shutdown())</code>，以及让进程退出后重启的 <code>respawn=True</code>。</li>
+    <li lang="en"><strong>Event handlers</strong>: <code>RegisterEventHandler(OnProcessExit(target_action=talker, on_exit=[…]))</code> runs a list of actions when the <code>talker</code> process exits, for example <code>LogInfo</code>, starting another node, or <code>EmitEvent(event=Shutdown(reason='…'))</code> to bring the whole system down. <code>OnProcessStart</code>, <code>OnProcessIO</code> and <code>OnShutdown</code> work the same way. Simple cases have shortcuts: <code>Node(..., on_exit=Shutdown())</code>, and <code>respawn=True</code> to restart a process after it exits.</li>
+  </ul>
+  <div class="note" lang="zh-CN">注意 <code>OnProcessStart</code> 只说明进程<em>已经 exec</em>，不说明节点已经建好发布者、完成了配置。launch 只看得见进程，看不见节点内部的状态。「等 A 准备好再启动 B」用进程事件做不可靠，这正是概念 4 的 lifecycle 节点要解决的问题。</div>
+  <div class="note" lang="en">Note that <code>OnProcessStart</code> only says the process <em>has exec’d</em>, not that the node has created its publishers or finished configuring. Launch sees processes, not the state inside a node. “Start B once A is ready” cannot be done reliably with process events, which is exactly the problem the lifecycle nodes of concept 4 solve.</div>
+  <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲 launch 与参数文件的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Using-Substitutions.html">Using substitutions</a> 与 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Using-Event-Handlers.html">Using event handlers</a>。</p>
+  <p lang="en">Further reading: the chapters of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on launch and parameter files; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Using-Substitutions.html">Using substitutions</a> and <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Using-Event-Handlers.html">Using event handlers</a>.</p>
+
+  <h3 lang="zh-CN">3. 命名空间、重映射与参数 YAML</h3><h3 lang="en">3. Namespaces, remapping and parameter YAML</h3>
+  <p lang="zh-CN">同一个 talker 要给两台机器人用，代码不该改，改的是<strong>名字</strong>。名字的解析规则（设计文章 <em>Topic and Service name mapping</em>）是：</p>
+  <p lang="en">To use the same talker for two robots, the code should not change; the <strong>names</strong> do. The resolution rules (design article <em>Topic and Service name mapping</em>) are:</p>
+  <ul>
+    <li lang="zh-CN"><strong>相对名</strong> <code>chatter</code> 接在节点的命名空间后面：命名空间是 <code>/robot1</code> 时，它解析为 <code>/robot1/chatter</code>。<strong>绝对名</strong> <code>/chatter</code> 不受命名空间影响。<strong>私有名</strong> <code>~/status</code> 接在节点的全名后面：<code>/robot1/talker/status</code>。</li>
+    <li lang="en">A <strong>relative name</strong> <code>chatter</code> is appended to the node’s namespace: with namespace <code>/robot1</code> it resolves to <code>/robot1/chatter</code>. An <strong>absolute name</strong> <code>/chatter</code> ignores the namespace. A <strong>private name</strong> <code>~/status</code> is appended to the node’s full name: <code>/robot1/talker/status</code>.</li>
+    <li lang="zh-CN"><strong>重映射</strong> <code>-r chatter:=speech</code>（launch 里是 <code>remappings=[('chatter', 'speech')]</code>）在解析之前替换名字：代码里写的 <code>chatter</code> 变成 <code>speech</code>，再接上命名空间，得到 <code>/robot1/speech</code>。<code>__ns:=</code> 和 <code>__node:=</code> 两条特殊规则改的是命名空间和节点名本身。规则前加节点名（<code>talker:chatter:=speech</code>）只对那个节点生效，适合一个进程里有多个节点时（概念 5）。</li>
+    <li lang="en"><strong>Remapping</strong> <code>-r chatter:=speech</code> (in launch, <code>remappings=[('chatter', 'speech')]</code>) replaces a name before resolution: the <code>chatter</code> in the code becomes <code>speech</code>, then the namespace is prepended, giving <code>/robot1/speech</code>. The two special rules <code>__ns:=</code> and <code>__node:=</code> change the namespace and the node name themselves. Prefixing a rule with a node name (<code>talker:chatter:=speech</code>) applies it to that node only, which matters when one process holds several nodes (concept 5).</li>
+    <li lang="zh-CN"><strong>参数 YAML 按节点全名匹配</strong>。顶层键是节点的全名，下一层固定是 <code>ros__parameters</code>。<code>/robot1/talker:</code> 只匹配命名空间 <code>/robot1</code> 下名为 <code>talker</code> 的节点；<code>/**:</code> 匹配所有节点，适合 <code>use_sim_time</code> 这类全局设置。把命名空间从 <code>robot1</code> 改成 <code>robot2</code> 后，<code>/robot1/talker:</code> 那一段就悄悄不生效了：不报错，节点只是拿到默认值。Lab A 会故意制造这个现象。</li>
+    <li lang="en"><strong>Parameter YAML matches by full node name.</strong> The top-level key is the node’s full name, and the next level is always <code>ros__parameters</code>. <code>/robot1/talker:</code> matches only the node named <code>talker</code> in namespace <code>/robot1</code>; <code>/**:</code> matches every node, which suits global settings such as <code>use_sim_time</code>. After changing the namespace from <code>robot1</code> to <code>robot2</code>, the <code>/robot1/talker:</code> section silently stops applying: no error, the node just gets its defaults. Lab A provokes this on purpose.</li>
+    <li lang="zh-CN"><strong>多个来源的先后</strong>：launch 的 <code>parameters=[file.yaml, {'k': v}]</code> 按列表顺序变成多个 <code>--params-file</code> 和 <code>-p</code>，后面的覆盖前面的（请查文档确认你的发行版仍是这个顺序）。和 Phase 1 一样，这些只是<em>覆盖值</em>，在节点声明参数的那一刻才生效；节点没声明的参数默认会被忽略。</li>
+    <li lang="en"><strong>Order of several sources</strong>: launch’s <code>parameters=[file.yaml, {'k': v}]</code> becomes several <code>--params-file</code> and <code>-p</code> arguments in list order, and later ones override earlier ones (check the docs that your distribution keeps this order). As in Phase 1, these are only <em>overrides</em>, applied at the moment the node declares the parameter; parameters the node never declares are ignored by default.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲参数与 launch 文件的章节；设计文章 <a href="https://design.ros2.org/articles/topic_and_service_names.html">Topic and Service name mapping to DDS</a>；官方 <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Node-arguments.html">Passing ROS arguments to nodes via the command-line</a>。</p>
+  <p lang="en">Further reading: the chapters of Renard, <em>ROS 2 From Scratch</em>, on parameters and launch files; the design article <a href="https://design.ros2.org/articles/topic_and_service_names.html">Topic and Service name mapping to DDS</a>; the official <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Node-arguments.html">Passing ROS arguments to nodes via the command-line</a>.</p>
+
+  <h3 lang="zh-CN">4. managed（lifecycle）节点：状态机与它的保证</h3><h3 lang="en">4. Managed (lifecycle) nodes: the state machine and its guarantees</h3>
+  <p lang="zh-CN">普通节点在构造函数里就建好发布者并开始工作，外面的人只能看到「进程起来了」。<code>rclcpp_lifecycle::LifecycleNode</code> 把这一过程拆成一台标准状态机（设计文章 <em>Managed nodes</em>），由外部通过服务驱动：</p>
+  <p lang="en">An ordinary node creates its publishers in its constructor and starts working, and the outside world sees only “the process is up”. <code>rclcpp_lifecycle::LifecycleNode</code> splits that into a standard state machine (design article <em>Managed nodes</em>) that is driven from outside through services:</p>
+  <ul>
+    <li lang="zh-CN"><strong>四个主状态</strong>：<strong>Unconfigured</strong>（节点对象刚建好，什么资源都没有）、<strong>Inactive</strong>（已配置：读了参数、建了发布者和定时器，但不对外产生数据）、<strong>Active</strong>（正常工作）、<strong>Finalized</strong>（终态，只等对象被销毁）。</li>
+    <li lang="en"><strong>Four primary states</strong>: <strong>Unconfigured</strong> (the node object exists and holds no resources), <strong>Inactive</strong> (configured: parameters read, publishers and timers created, but no data goes out), <strong>Active</strong> (working normally) and <strong>Finalized</strong> (terminal; it only waits for the object to be destroyed).</li>
+    <li lang="zh-CN"><strong>转换与回调</strong>：<code>configure</code>（Unconfigured → Inactive，调用 <code>on_configure</code>）、<code>activate</code>（Inactive → Active，<code>on_activate</code>）、<code>deactivate</code>（Active → Inactive，<code>on_deactivate</code>）、<code>cleanup</code>（Inactive → Unconfigured，<code>on_cleanup</code>）、<code>shutdown</code>（从三个非终态都可以 → Finalized，<code>on_shutdown</code>）。每个转换执行期间节点处在对应的<strong>过渡状态</strong>：Configuring、Activating、Deactivating、CleaningUp、ShuttingDown，以及出错时的 ErrorProcessing。</li>
+    <li lang="en"><strong>Transitions and callbacks</strong>: <code>configure</code> (Unconfigured → Inactive, calls <code>on_configure</code>), <code>activate</code> (Inactive → Active, <code>on_activate</code>), <code>deactivate</code> (Active → Inactive, <code>on_deactivate</code>), <code>cleanup</code> (Inactive → Unconfigured, <code>on_cleanup</code>) and <code>shutdown</code> (from any of the three non-terminal states → Finalized, <code>on_shutdown</code>). While a transition runs, the node is in the matching <strong>transition state</strong>: Configuring, Activating, Deactivating, CleaningUp, ShuttingDown, plus ErrorProcessing on errors.</li>
+    <li lang="zh-CN"><strong>返回值决定落点</strong>：回调返回 <code>CallbackReturn::SUCCESS</code>，到达目标状态；返回 <code>FAILURE</code>，回到出发的主状态（例如配置失败仍是 Unconfigured，可以改参数再试）；返回 <code>ERROR</code> 或抛出异常，进入 ErrorProcessing 并调用 <code>on_error</code>：它返回 <code>SUCCESS</code> 则回到 Unconfigured，否则进入 Finalized。</li>
+    <li lang="en"><strong>The return value decides where it lands</strong>: if a callback returns <code>CallbackReturn::SUCCESS</code> the node reaches the goal state; with <code>FAILURE</code> it goes back to the primary state it started from (a failed configure stays Unconfigured, so you can fix a parameter and try again); with <code>ERROR</code>, or an exception, it enters ErrorProcessing and <code>on_error</code> is called: if that returns <code>SUCCESS</code> the node goes back to Unconfigured, otherwise to Finalized.</li>
+    <li lang="zh-CN"><strong>外部接口</strong>：每个 lifecycle 节点自动提供 <code>~/change_state</code>、<code>~/get_state</code>、<code>~/get_available_states</code>、<code>~/get_available_transitions</code> 等服务（类型在 <code>lifecycle_msgs</code> 包），并在 <code>~/transition_event</code> 话题上发布每次转换。<code>ros2 lifecycle nodes</code>、<code>list</code>、<code>get</code>、<code>set /node configure</code> 就是这些服务的客户端。</li>
+    <li lang="en"><strong>External interface</strong>: every lifecycle node automatically offers services such as <code>~/change_state</code>, <code>~/get_state</code>, <code>~/get_available_states</code> and <code>~/get_available_transitions</code> (types in the <code>lifecycle_msgs</code> package), and publishes each transition on the <code>~/transition_event</code> topic. <code>ros2 lifecycle nodes</code>, <code>list</code>, <code>get</code> and <code>set /node configure</code> are clients of these services.</li>
+    <li lang="zh-CN"><strong><code>LifecyclePublisher</code></strong>：<code>create_publisher</code> 在 lifecycle 节点上返回的是 <code>rclcpp_lifecycle::LifecyclePublisher</code>。它在 Inactive 时也存在、也能被订阅端发现，但 <code>publish()</code> 不会发出任何东西（并打印一条警告）；只有被激活后才真正发布。安全的写法是在 <code>on_activate</code> 里显式调用 <code>pub_-&gt;on_activate()</code>，在 <code>on_deactivate</code> 里调用 <code>pub_-&gt;on_deactivate()</code>。较新版本的基类 <code>LifecycleNode::on_activate</code> 可能会自动激活所管理的实体，请查文档。</li>
+    <li lang="en"><strong><code>LifecyclePublisher</code></strong>: on a lifecycle node, <code>create_publisher</code> returns an <code>rclcpp_lifecycle::LifecyclePublisher</code>. It exists while Inactive and subscribers can discover it, but <code>publish()</code> sends nothing (and logs a warning); it really publishes only once activated. The safe pattern is to call <code>pub_-&gt;on_activate()</code> explicitly in <code>on_activate</code> and <code>pub_-&gt;on_deactivate()</code> in <code>on_deactivate</code>. In newer versions the base class <code>LifecycleNode::on_activate</code> may activate the managed entities automatically; check the docs.</li>
+  </ul>
+  <p lang="zh-CN"><strong>它向系统保证了什么。</strong>设想一个导航栈：地图服务、定位、规划器、控制器。拉起它的「管理者」（Nav2 的 lifecycle manager 就是一个，Phase 6）要的是：</p>
+  <p lang="en"><strong>What it guarantees to the system.</strong> Picture a navigation stack: a map server, localisation, a planner and a controller. The “manager” bringing it up (Nav2’s lifecycle manager is one, Phase 6) needs:</p>
+  <ol>
+    <li lang="zh-CN"><strong>可观察的就绪</strong>：状态由节点自己通过 <code>~/get_state</code> 报告，不靠猜「进程起来几秒了」。概念 2 的进程事件给不了这个。</li>
+    <li lang="en"><strong>Observable readiness</strong>: the node itself reports its state through <code>~/get_state</code>, with no guessing from “the process has been up for a few seconds”. The process events of concept 2 cannot give this.</li>
+    <li lang="zh-CN"><strong>两阶段启动</strong>：先把所有节点 <code>configure</code>（分配内存、打开设备、加载地图、建发布者），全部成功后再一起 <code>activate</code>。于是没有哪个节点会在它的上游还没准备好时就开始发布，也不会有订阅者先收到半个系统的数据。慢而且可能失败的事集中在 configure，激活本身应该又快又不失败。</li>
+    <li lang="en"><strong>Two-phase start-up</strong>: first <code>configure</code> every node (allocate memory, open devices, load the map, create publishers), and only when all succeed <code>activate</code> them together. So no node starts publishing while its upstream is not ready, and no subscriber sees data from half a system. The slow, failure-prone work is gathered into configure, and activation itself should be quick and not fail.</li>
+    <li lang="zh-CN"><strong>可恢复的失败</strong>：配置失败是一个明确的返回值，节点停在 Unconfigured，管理者可以报错、改参数后重试，不必杀进程。<code>deactivate</code> 让一个节点暂停而不丢掉已配置的资源，例如在重新定位时暂停控制器。</li>
+    <li lang="en"><strong>Recoverable failure</strong>: a failed configure is an explicit return value, the node stays Unconfigured, and the manager can report it, change parameters and retry without killing a process. <code>deactivate</code> pauses a node without dropping its configured resources, for example pausing the controller during relocalisation.</li>
+  </ol>
+  <div class="note" lang="zh-CN">这些保证是<em>约定</em>，不是强制：状态机只保证回调按规则被调用、状态按规则转换。如果你在构造函数里就建定时器并发布，或者在 <code>on_activate</code> 里做耗时几秒的事，状态机不会拦你，但「Inactive 不产生数据」「激活很快」就不再成立。launch 里也可以用 <code>launch_ros.actions.LifecycleNode</code> 和状态转换事件自动驱动它（请查文档）；本页实验用 CLI 手动驱动，看得最清楚。</div>
+  <div class="note" lang="en">These guarantees are a <em>convention</em>, not enforcement: the state machine guarantees only that callbacks are called and states change by the rules. If you create a timer and publish from the constructor, or do several seconds of work in <code>on_activate</code>, the machine will not stop you, but “Inactive produces no data” and “activation is quick” stop being true. Launch can also drive it automatically with <code>launch_ros.actions.LifecycleNode</code> and state-transition events (check the docs); the lab on this page drives it by hand with the CLI, which shows it most clearly.</div>
+  <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲 lifecycle 节点的章节；设计文章 <a href="https://design.ros2.org/articles/node_lifecycle.html">Managed nodes</a>；官方 demo <a href="https://github.com/ros2/demos/tree/jazzy/lifecycle">ros2/demos/lifecycle（jazzy 分支）</a>。</p>
+  <p lang="en">Further reading: the chapters of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on lifecycle nodes; the design article <a href="https://design.ros2.org/articles/node_lifecycle.html">Managed nodes</a>; the official demo <a href="https://github.com/ros2/demos/tree/jazzy/lifecycle">ros2/demos/lifecycle (jazzy branch)</a>.</p>
+
+  <h3 lang="zh-CN">5. 组合：component 与组件容器</h3><h3 lang="en">5. Composition: components and the component container</h3>
+  <p lang="zh-CN">「一个节点一个进程」隔离好、调试简单，但每个进程都有自己的 DDS participant、自己的发现流量、自己的线程，进程之间的每条消息都要序列化、穿过内核、再反序列化。<strong>组合</strong>让你在<em>部署时</em>而不是写代码时决定进程边界：</p>
+  <p lang="en">“One node per process” isolates well and is easy to debug, but every process has its own DDS participant, its own discovery traffic and its own threads, and every message between processes is serialized, crosses the kernel and is deserialized. <strong>Composition</strong> lets you decide process boundaries at <em>deployment time</em> rather than when writing the code:</p>
+  <ul>
+    <li lang="zh-CN"><strong>component</strong>：一个继承 <code>rclcpp::Node</code>、构造函数只接受 <code>const rclcpp::NodeOptions &amp;</code> 的类，编译进一个<strong>共享库</strong>，在源文件末尾用 <code>RCLCPP_COMPONENTS_REGISTER_NODE(ns::Class)</code> 注册。CMake 里的 <code>rclcpp_components_register_node(target PLUGIN "ns::Class" EXECUTABLE name)</code> 把它登记进 ament 资源索引，并顺便生成一个同名的独立可执行文件，所以同一个类既能单独运行，也能被装进容器。</li>
+    <li lang="en"><strong>A component</strong> is a class deriving from <code>rclcpp::Node</code> whose constructor takes only <code>const rclcpp::NodeOptions &amp;</code>, compiled into a <strong>shared library</strong> and registered at the end of its source file with <code>RCLCPP_COMPONENTS_REGISTER_NODE(ns::Class)</code>. In CMake, <code>rclcpp_components_register_node(target PLUGIN "ns::Class" EXECUTABLE name)</code> records it in the ament resource index and also generates a standalone executable of that name, so the same class can run on its own or be loaded into a container.</li>
+    <li lang="zh-CN"><strong>组件容器</strong>：<code>ros2 run rclcpp_components component_container</code> 启动一个进程，里面有一个名为 <code>/ComponentManager</code> 的节点和一个执行器。它提供 <code>~/_container/load_node</code>、<code>unload_node</code>、<code>list_nodes</code> 服务（类型在 <code>composition_interfaces</code>）。<code>ros2 component load /ComponentManager pkg ns::Class</code> 调用 load_node：容器从资源索引找到库，用 <code>dlopen</code> 把它映射进<em>自己的地址空间</em>，通过 class_loader 构造这个类，再把新节点加进自己的执行器。<code>ros2 component list</code> 和 <code>ros2 component unload</code> 分别列出和卸载。</li>
+    <li lang="en"><strong>The component container</strong>: <code>ros2 run rclcpp_components component_container</code> starts a process holding one node named <code>/ComponentManager</code> and one executor. It offers the <code>~/_container/load_node</code>, <code>unload_node</code> and <code>list_nodes</code> services (types in <code>composition_interfaces</code>). <code>ros2 component load /ComponentManager pkg ns::Class</code> calls load_node: the container finds the library in the resource index, maps it into <em>its own address space</em> with <code>dlopen</code>, constructs the class through class_loader, and adds the new node to its executor. <code>ros2 component list</code> and <code>ros2 component unload</code> list and unload.</li>
+    <li lang="zh-CN"><strong>容器的变体</strong>：<code>component_container</code> 用单线程执行器；<code>component_container_mt</code> 用多线程执行器；<code>component_container_isolated</code> 给每个组件一个独立的执行器。三者的线程模型和参数请查文档。无论哪种，Phase 2 的规则都成立：同一个容器里的所有回调共享这些执行器线程，一个慢回调会拖住同线程的其他节点。</li>
+    <li lang="en"><strong>Container variants</strong>: <code>component_container</code> uses a single-threaded executor; <code>component_container_mt</code> uses a multithreaded executor; <code>component_container_isolated</code> gives each component its own executor. Check the docs for their thread models and options. Whichever you use, the rules of Phase 2 hold: every callback in a container shares those executor threads, and one slow callback holds up the other nodes on the same thread.</li>
+    <li lang="zh-CN"><strong>在 launch 里组合</strong>：<code>ComposableNodeContainer(name=…, namespace=…, package='rclcpp_components', executable='component_container', composable_node_descriptions=[ComposableNode(package=…, plugin='ns::Class', name=…, extra_arguments=[{'use_intra_process_comms': True}])])</code>。每个 <code>ComposableNode</code> 也接受 <code>parameters</code>、<code>remappings</code> 和 <code>namespace</code>，与 <code>Node</code> 动作相同。</li>
+    <li lang="en"><strong>Composing in launch</strong>: <code>ComposableNodeContainer(name=…, namespace=…, package='rclcpp_components', executable='component_container', composable_node_descriptions=[ComposableNode(package=…, plugin='ns::Class', name=…, extra_arguments=[{'use_intra_process_comms': True}])])</code>. Each <code>ComposableNode</code> also takes <code>parameters</code>, <code>remappings</code> and <code>namespace</code>, as the <code>Node</code> action does.</li>
+  </ul>
+  <div class="note" lang="zh-CN">和 Kernel Engineering 的连接：组合把三个进程变成一个进程里的三组线程，<code>/proc/PID/maps</code> 里能看到三个组件的 <code>.so</code> 都映射在同一个地址空间。代价是隔离：一个组件段错误，整个容器连同其他组件一起死掉；一个组件写坏了内存，别的组件也会受影响。这是进程隔离（<a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>）和共享地址空间之间的老权衡。</div>
+  <div class="note" lang="en">The connection to Kernel Engineering: composition turns three processes into three sets of threads in one process, and <code>/proc/PID/maps</code> shows all three components’ <code>.so</code> files mapped into the same address space. The price is isolation: if one component segfaults, the whole container dies with every other component in it; if one corrupts memory, the others are affected too. It is the old trade-off between process isolation (<a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>) and a shared address space.</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ROS 2 高级特性、组件与 lifecycle 的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Composition.html">Composition</a> 概念页与 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Composition.html">Composing multiple nodes in a single process</a> 教程。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on advanced ROS 2 features, components and lifecycle; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Composition.html">Composition</a> concept page and the <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Composition.html">Composing multiple nodes in a single process</a> tutorial.</p>
+
+  <h3 lang="zh-CN">6. 进程内通信：为什么能省掉序列化，什么时候仍要拷贝</h3><h3 lang="en">6. Intra-process communication: why it skips serialization, and when it still copies</h3>
+  <p lang="zh-CN">只把节点装进同一个进程，消息默认<em>仍然</em>走 rmw 和 DDS：发布者序列化成 CDR 字节，DDS 投递给同一 participant 里的 reader，订阅端再反序列化。DDS 实现可能在进程内走捷径，但序列化这一步省不掉，因为 DDS 只认识字节（Phase 3）。<strong>进程内通信</strong>（intra-process communication）是 rclcpp 在 DDS <em>之上</em>加的一条旁路：</p>
+  <p lang="en">Merely loading nodes into one process does <em>not</em> change the default: messages still go through rmw and DDS. The publisher serializes to CDR bytes, DDS delivers them to a reader in the same participant, and the subscriber deserializes. A DDS implementation may take a shortcut inside the process, but serialization cannot be skipped, because DDS only knows bytes (Phase 3). <strong>Intra-process communication</strong> is a bypass that rclcpp adds <em>above</em> DDS:</p>
+  <ol>
+    <li lang="zh-CN">两个节点都用 <code>rclcpp::NodeOptions().use_intra_process_comms(true)</code> 创建（容器里是 <code>extra_arguments</code> 或 <code>ros2 component load … -e use_intra_process_comms:=true</code>）。同一个 context 里有一个 intra-process manager，记录哪些发布者和订阅者在同一个进程、同一个话题上，并且都开了这个选项。</li>
+    <li lang="en">Both nodes are created with <code>rclcpp::NodeOptions().use_intra_process_comms(true)</code> (in a container, via <code>extra_arguments</code> or <code>ros2 component load … -e use_intra_process_comms:=true</code>). One intra-process manager per context records which publishers and subscriptions are in the same process, on the same topic, with the option enabled.</li>
+    <li lang="zh-CN">发布时，rclcpp 把<strong>消息对象本身</strong>（一个 C++ 指针）交给 manager，manager 把它放进每个进程内订阅者自己的缓冲区，再触发一个 guard condition 叫醒执行器（Phase 2）。订阅回调拿到的是同一块内存。没有 CDR 编码，没有 socket，没有内核里的拷贝。</li>
+    <li lang="en">On publish, rclcpp hands <strong>the message object itself</strong> (a C++ pointer) to the manager, which puts it into each intra-process subscription’s own buffer and triggers a guard condition to wake the executor (Phase 2). The subscription callback receives the same memory. No CDR encoding, no socket, no copy in the kernel.</li>
+    <li lang="zh-CN">如果这个话题在<em>其他进程</em>里也有订阅者，rclcpp 仍会照常经 DDS 发一份序列化的副本给它们；进程内旁路只服务本进程的订阅者。</li>
+    <li lang="en">If the topic also has subscribers in <em>other processes</em>, rclcpp still sends them a serialized copy through DDS as usual; the intra-process bypass serves only subscribers in this process.</li>
+  </ol>
+  <p lang="zh-CN"><strong>零拷贝的条件</strong>（以 Jazzy 的 rclcpp 文档和源码为准，作者没有逐条核对，请查文档）：用 <code>publish(std::unique_ptr&lt;Msg&gt;)</code> 交出所有权，并且只有一个订阅者、它的回调接收 <code>std::unique_ptr</code>，所有权直接移交，零拷贝；订阅者都接收 <code>const</code> 的 shared 指针时，大家共享同一份；既有要所有权的订阅者又有别的订阅者时，manager 必须为前者拷贝；用 <code>publish(const Msg &amp;)</code> 发布时，rclcpp 先拷贝一份才能交出去。另外，进程内通信对 QoS 有限制（例如 history 必须是 keep last，durability 的支持情况请查文档），而且这是 rclcpp 的特性，rclpy 没有对应的旁路。</p>
+  <p lang="en"><strong>Conditions for zero copy</strong> (per Jazzy’s rclcpp docs and source; the author did not verify each case, so check the docs): publishing with <code>publish(std::unique_ptr&lt;Msg&gt;)</code> hands over ownership, and with exactly one subscriber whose callback takes a <code>std::unique_ptr</code>, ownership moves straight across with zero copies; when all subscribers take a <code>const</code> shared pointer, they share one copy; when a subscriber that wants ownership coexists with others, the manager must copy for it; and publishing with <code>publish(const Msg &amp;)</code> makes rclcpp copy once before it can hand anything over. Intra-process communication also restricts QoS (history must be keep last, for example; check the docs for durability support), and it is an rclcpp feature: rclpy has no matching bypass.</p>
+  <div class="note" lang="zh-CN">为什么这能显著降低延迟：一张 1 MB 的图像走 DDS，要做一次序列化（遍历并拷贝 1 MB）、一次或多次穿过内核（UDP 回环要分片，共享内存传输也有拷贝和通知）、一次反序列化（再拷贝 1 MB 并分配内存），还要唤醒 DDS 的接收线程。进程内只传一个指针，代价与消息大小基本无关。消息越大，差别越大；对几个字节的消息，差别主要来自省掉的线程切换。Lab B 用 1 MB 消息量这个差别。</div>
+  <div class="note" lang="en">Why this cuts latency so much: a 1 MB image over DDS needs one serialization (walk and copy 1 MB), one or more trips through the kernel (UDP loopback fragments it, and shared-memory transport also copies and notifies), one deserialization (copy 1 MB again and allocate), and a wake-up of the DDS receive thread. Intra-process passes one pointer, at a cost that hardly depends on message size. The larger the message, the larger the gap; for a message of a few bytes the gap comes mostly from the thread switches saved. Lab B measures this gap with 1 MB messages.</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲组件与进程内通信的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Intra-Process-Communication.html">Intra-Process Communication</a> demo；设计文章 <a href="https://design.ros2.org/articles/intraprocess_communications.html">Intra-process Communications in ROS 2</a>。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on components and intra-process communication; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Intra-Process-Communication.html">Intra-Process Communication</a> demo; the design article <a href="https://design.ros2.org/articles/intraprocess_communications.html">Intra-process Communications in ROS 2</a>.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：一个节点一个进程 ↔ 组合在一个进程里</h2><h2 id="compare-en" lang="en">Comparison: one process per node ↔ composed nodes</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th class="ros"><span lang="zh-CN">一个节点一个进程</span><span lang="en">One process per node</span></th><th class="gz"><span lang="zh-CN">组合（一个容器）</span><span lang="en">Composed (one container)</span></th></tr>
+    <tr><td><span lang="zh-CN">怎么启动</span><span lang="en">How it starts</span></td><td><span lang="zh-CN"><code>ros2 run</code> 或 launch 的 <code>Node</code> 动作，每个节点一个子进程</span><span lang="en"><code>ros2 run</code> or launch’s <code>Node</code> action, one child process per node</span></td><td><span lang="zh-CN"><code>component_container</code> + <code>ros2 component load</code>，或 launch 的 <code>ComposableNodeContainer</code></span><span lang="en"><code>component_container</code> + <code>ros2 component load</code>, or launch’s <code>ComposableNodeContainer</code></span></td></tr>
+    <tr><td><span lang="zh-CN">代码形态</span><span lang="en">Code shape</span></td><td><span lang="zh-CN">节点类 + 自己的 <code>main()</code></span><span lang="en">a node class + its own <code>main()</code></span></td><td><span lang="zh-CN">构造函数接受 <code>NodeOptions</code> 的类，编进共享库并注册；同一个类也能单独运行</span><span lang="en">a class whose constructor takes <code>NodeOptions</code>, built into a shared library and registered; the same class can still run alone</span></td></tr>
+    <tr><td><span lang="zh-CN">DDS participant 与发现</span><span lang="en">DDS participants and discovery</span></td><td><span lang="zh-CN">每个进程一个 participant，各自参与发现</span><span lang="en">one participant per process, each taking part in discovery</span></td><td><span lang="zh-CN">整个容器一个 context，共用一个 participant（Jazzy 的默认做法，请查文档）</span><span lang="en">one context for the whole container, sharing one participant (Jazzy’s default; check the docs)</span></td></tr>
+    <tr><td><span lang="zh-CN">节点之间的消息</span><span lang="en">Messages between nodes</span></td><td><span lang="zh-CN">序列化 → rmw/DDS → 内核（UDP 或共享内存）→ 反序列化</span><span lang="en">serialize → rmw/DDS → kernel (UDP or shared memory) → deserialize</span></td><td><span lang="zh-CN">默认仍走 DDS；开启 <code>use_intra_process_comms</code> 后在 rclcpp 里传指针</span><span lang="en">still DDS by default; with <code>use_intra_process_comms</code>, a pointer passed inside rclcpp</span></td></tr>
+    <tr><td><span lang="zh-CN">拷贝与延迟</span><span lang="en">Copies and latency</span></td><td><span lang="zh-CN">至少两次全量拷贝，延迟随消息大小增长</span><span lang="en">at least two full copies; latency grows with message size</span></td><td><span lang="zh-CN"><code>unique_ptr</code> 一对一时零拷贝，延迟基本与大小无关</span><span lang="en">zero copies for one-to-one <code>unique_ptr</code>; latency barely depends on size</span></td></tr>
+    <tr><td><span lang="zh-CN">线程与调度</span><span lang="en">Threads and scheduling</span></td><td><span lang="zh-CN">每个进程自己的执行器和 DDS 线程，可以分别设 <code>chrt</code>、CPU 亲和性</span><span lang="en">each process has its own executor and DDS threads, with its own <code>chrt</code> and CPU affinity</span></td><td><span lang="zh-CN">共享容器的执行器线程；慢回调会拖住同线程的其他节点（Phase 2）</span><span lang="en">shares the container’s executor threads; a slow callback holds up other nodes on that thread (Phase 2)</span></td></tr>
+    <tr><td><span lang="zh-CN">故障隔离</span><span lang="en">Fault isolation</span></td><td><span lang="zh-CN">一个节点崩溃只死一个进程，launch 可以 <code>respawn</code></span><span lang="en">a crashing node kills only its own process, and launch can <code>respawn</code> it</span></td><td><span lang="zh-CN">一个组件崩溃，整个容器和其中所有组件一起死</span><span lang="en">a crashing component takes the whole container and every component in it down</span></td></tr>
+    <tr><td><span lang="zh-CN">观察与调试</span><span lang="en">Observing and debugging</span></td><td><span lang="zh-CN"><code>top</code>、<code>ps</code>、<code>gdb</code> 按节点分开看</span><span lang="en"><code>top</code>, <code>ps</code> and <code>gdb</code> per node</span></td><td><span lang="zh-CN">一个 PID 里混着所有节点的线程，要按线程名区分</span><span lang="en">one PID mixes every node’s threads; tell them apart by thread name</span></td></tr>
+    <tr><td><span lang="zh-CN">适合</span><span lang="en">Suits</span></td><td><span lang="zh-CN">开发期、互不信任或可能崩溃的节点、Python 节点</span><span lang="en">development, nodes that may crash or that you do not trust, Python nodes</span></td><td><span lang="zh-CN">大消息的流水线（相机、点云）、资源受限的部署、稳定的 C++ 节点</span><span lang="en">pipelines with large messages (camera, point clouds), constrained deployments, stable C++ nodes</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) lifecycle 状态机：四个主状态、六个过渡状态和全部转换</h3><h3 lang="en">(a) The lifecycle state machine: four primary states, six transition states and every transition</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
+         data-captions='["全图：实线方框是四个主状态，虚线方框是过渡状态，过渡状态里运行对应的 on_ 回调。上排是向上走的 configure 与 activate，中排是往回走的 cleanup 与 deactivate，下排是 shutdown 和出错处理。按「播放」一条一条看。",
+           "第 1 步，create：节点对象被构造出来，处在 Unconfigured。它没有发布者、没有定时器，也没读参数；外部只能看到它的 lifecycle 服务，例如 ros2 lifecycle get 返回 unconfigured。",
+           "第 2 步，configure：外部请求 configure，节点进入过渡状态 Configuring，调用 on_configure。返回 SUCCESS 则到达 Inactive，资源已经建好但不对外发布；返回 FAILURE 则回到 Unconfigured，可以改参数后重试。",
+           "第 3 步，activate：Inactive 经 Activating 调用 on_activate，到达 Active，LifecyclePublisher 被激活，开始真正发布。返回 FAILURE 则留在 Inactive。激活应该又快又不失败，慢的事情放在 configure 里。",
+           "第 4 步，deactivate：Active 经 Deactivating 调用 on_deactivate，回到 Inactive。发布停止，但已配置的资源保留，之后可以直接再次 activate。返回 FAILURE 则留在 Active。",
+           "第 5 步，cleanup：Inactive 经 CleaningUp 调用 on_cleanup，回到 Unconfigured，释放 configure 建立的资源。之后可以用新的参数重新 configure。返回 FAILURE 则留在 Inactive。",
+           "第 6 步，shutdown：从 Unconfigured、Inactive、Active 三个状态都可以请求 shutdown，经 ShuttingDown 调用 on_shutdown，到达终态 Finalized。Finalized 不能再转换，只等 destroy 把节点对象销毁。",
+           "第 7 步，出错：任何过渡回调返回 ERROR 或抛出异常，节点进入 ErrorProcessing 并调用 on_error。on_error 返回 SUCCESS 则回到 Unconfigured，可以重新开始；否则进入 Finalized。"]'
+         data-captions-en='["The whole picture: solid boxes are the four primary states and dashed boxes are transition states, in which the matching on_ callback runs. The top row holds configure and activate going forward, the middle row cleanup and deactivate going back, and the bottom row shutdown and error handling. Press Play to take them one at a time.",
+           "Step 1, create: the node object is constructed and sits in Unconfigured. It has no publishers, no timers and has read no parameters; from outside only its lifecycle services are visible, and ros2 lifecycle get returns unconfigured.",
+           "Step 2, configure: something outside requests configure, the node enters the transition state Configuring and on_configure runs. On SUCCESS it reaches Inactive, with its resources created but publishing nothing; on FAILURE it goes back to Unconfigured, and you can fix a parameter and retry.",
+           "Step 3, activate: from Inactive, through Activating, on_activate runs and the node reaches Active; the LifecyclePublisher is activated and really publishes. On FAILURE it stays Inactive. Activation should be quick and should not fail; slow work belongs in configure.",
+           "Step 4, deactivate: from Active, through Deactivating, on_deactivate runs and the node returns to Inactive. Publishing stops but the configured resources stay, so it can be activated again directly. On FAILURE it stays Active.",
+           "Step 5, cleanup: from Inactive, through CleaningUp, on_cleanup runs and the node returns to Unconfigured, releasing what configure created. It can then be configured again with new parameters. On FAILURE it stays Inactive.",
+           "Step 6, shutdown: shutdown may be requested from Unconfigured, Inactive or Active; through ShuttingDown, on_shutdown runs and the node reaches the terminal state Finalized. Finalized allows no further transition and only waits for destroy to free the node object.",
+           "Step 7, errors: if any transition callback returns ERROR or throws, the node enters ErrorProcessing and on_error runs. If on_error returns SUCCESS the node goes back to Unconfigured and can start over; otherwise it goes to Finalized."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="580" y="22" class="small" lang="zh-CN">回调返回 FAILURE：回到出发的主状态</text><text x="580" y="22" class="small" lang="en">FAILURE: back to the starting state</text>
+
+      <g data-step="1 2 5 7"><rect class="box ros" x="40" y="120" width="170" height="56"/>
+        <text x="55" y="144" class="mono">Unconfigured</text>
+        <text x="55" y="164" class="small" lang="zh-CN">没有任何资源</text><text x="55" y="164" class="small" lang="en">no resources</text></g>
+      <g data-step="1"><text x="40" y="108" class="small" style="fill: var(--ros)" lang="zh-CN">1. create（起点）</text><text x="40" y="108" class="small" style="fill: var(--ros)" lang="en">1. create (start)</text></g>
+
+      <g data-step="2 3 4 5"><rect class="box ros" x="365" y="120" width="170" height="56"/>
+        <text x="380" y="144" class="mono">Inactive</text>
+        <text x="380" y="164" class="small" lang="zh-CN">已配置，不发布</text><text x="380" y="164" class="small" lang="en">configured, silent</text></g>
+
+      <g data-step="3 4"><rect class="box ros" x="690" y="120" width="170" height="56"/>
+        <text x="705" y="144" class="mono">Active</text>
+        <text x="705" y="164" class="small" lang="zh-CN">正常工作，发布</text><text x="705" y="164" class="small" lang="en">working, publishing</text></g>
+
+      <g data-step="2"><rect class="box" x="222" y="36" width="130" height="44" style="stroke-dasharray: 5 4"/>
+        <text x="232" y="55" class="mono">Configuring</text>
+        <text x="232" y="72" class="small">on_configure</text>
+        <path class="arrow" d="M170 118 L170 58 L220 58"/>
+        <path class="arrow" d="M354 58 L440 58 L440 118"/>
+        <text x="110" y="48" class="small" lang="zh-CN">2. configure</text><text x="110" y="48" class="small" lang="en">2. configure</text>
+        <path class="arrow" d="M262 82 L208 118" style="stroke-dasharray: 4 4"/>
+        <text x="246" y="108" class="small">FAILURE</text></g>
+
+      <g data-step="3"><rect class="box" x="547" y="36" width="130" height="44" style="stroke-dasharray: 5 4"/>
+        <text x="557" y="55" class="mono">Activating</text>
+        <text x="557" y="72" class="small">on_activate</text>
+        <path class="arrow" d="M500 118 L500 58 L545 58"/>
+        <path class="arrow" d="M679 58 L765 58 L765 118"/>
+        <text x="452" y="48" class="small" lang="zh-CN">3. activate</text><text x="452" y="48" class="small" lang="en">3. activate</text>
+        <path class="arrow" d="M590 82 L537 118" style="stroke-dasharray: 4 4"/>
+        <text x="574" y="108" class="small">FAILURE</text></g>
+
+      <g data-step="4"><rect class="box" x="547" y="212" width="130" height="44" style="stroke-dasharray: 5 4"/>
+        <text x="557" y="231" class="mono">Deactivating</text>
+        <text x="557" y="248" class="small">on_deactivate</text>
+        <path class="arrow" d="M765 178 L765 234 L679 234"/>
+        <path class="arrow" d="M545 234 L500 234 L500 178"/>
+        <text x="682" y="204" class="small" lang="zh-CN">4. deactivate</text><text x="682" y="204" class="small" lang="en">4. deactivate</text></g>
+
+      <g data-step="5"><rect class="box" x="222" y="212" width="130" height="44" style="stroke-dasharray: 5 4"/>
+        <text x="232" y="231" class="mono">CleaningUp</text>
+        <text x="232" y="248" class="small">on_cleanup</text>
+        <path class="arrow" d="M440 178 L440 234 L354 234"/>
+        <path class="arrow" d="M220 234 L170 234 L170 178"/>
+        <text x="362" y="204" class="small" lang="zh-CN">5. cleanup</text><text x="362" y="204" class="small" lang="en">5. cleanup</text></g>
+
+      <g data-step="6"><rect class="box" x="395" y="300" width="170" height="44" style="stroke-dasharray: 5 4"/>
+        <text x="410" y="319" class="mono">ShuttingDown</text>
+        <text x="410" y="336" class="small">on_shutdown</text>
+        <path class="arrow" d="M130 178 L130 322 L393 322"/>
+        <path class="arrow" d="M470 178 L470 298"/>
+        <path class="arrow" d="M820 178 L820 322 L567 322"/>
+        <text x="138" y="290" class="small" lang="zh-CN">6. shutdown</text><text x="138" y="290" class="small" lang="en">6. shutdown</text>
+        <text x="478" y="284" class="small">shutdown</text>
+        <text x="828" y="290" class="small">shutdown</text>
+        <path class="arrow" d="M480 346 L480 360"/></g>
+
+      <g data-step="6 7"><rect class="box ros" x="395" y="362" width="170" height="46"/>
+        <text x="410" y="382" class="mono">Finalized</text>
+        <text x="410" y="400" class="small" lang="zh-CN">终态，等 destroy</text><text x="410" y="400" class="small" lang="en">terminal, awaits destroy</text></g>
+
+      <g data-step="7"><rect class="box linux" x="30" y="356" width="210" height="52" style="stroke-dasharray: 5 4"/>
+        <text x="42" y="376" class="mono">ErrorProcessing</text>
+        <text x="42" y="396" class="small" lang="zh-CN">on_error，因任一 ERROR</text><text x="42" y="396" class="small" lang="en">on_error, after any ERROR</text>
+        <path class="arrow" d="M50 354 L50 178"/>
+        <text x="56" y="262" class="small" lang="zh-CN">SUCCESS</text><text x="56" y="262" class="small" lang="en">SUCCESS</text>
+        <path class="arrow" d="M242 386 L393 386"/>
+        <text x="262" y="378" class="small" lang="zh-CN">7. 否则</text><text x="262" y="378" class="small" lang="en">7. otherwise</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 三个节点：组合在一个进程里、走进程内通信 ↔ 三个进程、经 DDS</h3><h3 lang="en">(b) Three nodes: composed in one process with intra-process delivery ↔ three processes over DDS</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
+         data-captions='["全图：同一条三节点流水线 camera → filter → detector 的两种部署。左边三个组件装在一个容器进程里并开启进程内通信，右边每个节点是一个独立进程，消息经 rmw 和 DDS 穿过内核。按「播放」先看左边，再看右边。",
+           "第 1 步，一个进程：component_container 启动后用 dlopen 把三个组件的共享库映射进同一个地址空间，构造三个节点，加进同一个执行器。三个节点共用一个 context，因此共用一个 DDS participant。",
+           "第 2 步，进程内传递：camera 用 publish 交出一个 unique_ptr，rclcpp 的 intra-process manager 把这个指针放进 filter 订阅的缓冲区，再触发 guard condition 叫醒执行器。filter 拿到的是同一块内存：没有 CDR 序列化，没有 socket，没有内核拷贝。",
+           "第 3 步，仍会拷贝的情况：同一话题上有多个要所有权的订阅者，或者用 const 引用发布时，manager 必须拷贝。别的进程里的订阅者仍然经 rmw 和 DDS 收到一份序列化的副本，进程内旁路只服务本进程。",
+           "第 4 步，三个进程：每个节点一个进程，各有自己的 rmw、DDS participant、发现流量和线程。它们可以分别重启、分别设置调度优先级，一个崩溃不影响其他。",
+           "第 5 步，经 DDS 的一跳：camera 把消息序列化成 CDR 字节，DDS 通过内核的 UDP 回环或共享内存送出，filter 一侧的 DDS 线程收下、唤醒执行器，再反序列化成新的对象。filter 到 detector 再来一次。",
+           "第 6 步，对比：左边每跳传一个指针，延迟基本与消息大小无关，但一个组件崩溃会带走整个容器；右边每跳至少两次全量拷贝加线程唤醒，延迟随消息变大而增长，换来的是进程隔离。Lab B 用 1 MB 的消息量这个差别。"]'
+         data-captions-en='["The whole picture: two deployments of the same three-node pipeline camera → filter → detector. On the left the three components sit in one container process with intra-process communication on; on the right each node is its own process and messages cross the kernel through rmw and DDS. Press Play for the left side first, then the right.",
+           "Step 1, one process: component_container starts and uses dlopen to map the three components shared libraries into one address space, constructs the three nodes and adds them to one executor. The three nodes share one context and therefore one DDS participant.",
+           "Step 2, intra-process delivery: camera publishes by handing over a unique_ptr, and the rclcpp intra-process manager puts that pointer into the buffer of the filter subscription, then triggers a guard condition to wake the executor. filter receives the same memory: no CDR serialization, no socket, no kernel copy.",
+           "Step 3, cases that still copy: when several subscribers on the topic want ownership, or when publishing by const reference, the manager has to copy. Subscribers in other processes still receive a serialized copy through rmw and DDS; the intra-process bypass serves only this process.",
+           "Step 4, three processes: one process per node, each with its own rmw, DDS participant, discovery traffic and threads. They can be restarted separately and given scheduling priorities separately, and one crashing leaves the others running.",
+           "Step 5, one hop over DDS: camera serializes the message to CDR bytes, DDS sends them through UDP loopback or shared memory in the kernel, a DDS thread on the filter side receives them and wakes the executor, and they are deserialized into a new object. filter to detector does it all again.",
+           "Step 6, comparison: on the left each hop passes one pointer and latency hardly depends on message size, but one crashing component takes the whole container down; on the right each hop costs at least two full copies plus thread wake-ups and latency grows with message size, in exchange for process isolation. Lab B measures this gap with 1 MB messages."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">左：组合，一个进程，进程内通信</text><text x="20" y="26" class="small" style="fill: var(--ros)" lang="en">left: composed, one process, intra-process</text>
+      <text x="470" y="26" class="small" style="fill: var(--gz)" lang="zh-CN">右：三个进程，经 DDS</text><text x="470" y="26" class="small" style="fill: var(--gz)" lang="en">right: three processes over DDS</text>
+      <line x1="450" y1="40" x2="450" y2="410" class="lane"/>
+
+      <g data-step="1"><rect class="box ros" x="20" y="40" width="410" height="250"/>
+        <text x="32" y="62" class="mono">component_container</text>
+        <text x="32" y="82" class="small" lang="zh-CN">一个进程 · 一个地址空间 · dlopen 三个 .so</text><text x="32" y="82" class="small" lang="en">one process · one address space · 3 .so via dlopen</text>
+        <rect class="box" x="40" y="100" width="110" height="50"/><text x="52" y="130" class="mono">camera</text>
+        <rect class="box" x="170" y="100" width="110" height="50"/><text x="182" y="130" class="mono">filter</text>
+        <rect class="box" x="300" y="100" width="110" height="50"/><text x="312" y="130" class="mono">detector</text></g>
+
+      <g data-step="2"><rect class="box ros" x="40" y="190" width="370" height="40"/>
+        <text x="52" y="215" class="mono">intra-process manager</text>
+        <text x="250" y="215" class="small" lang="zh-CN">只移交 unique_ptr 指针</text><text x="250" y="215" class="small" lang="en">moves a unique_ptr only</text>
+        <path class="arrow flow" d="M95 152 L95 188"/>
+        <path class="arrow flow" d="M225 188 L225 152"/>
+        <path class="arrow flow" d="M355 188 L355 152"/>
+        <text x="40" y="250" class="small" lang="zh-CN">无 CDR 序列化 · 无 socket · 无内核拷贝</text><text x="40" y="250" class="small" lang="en">no CDR · no socket · no kernel copy</text></g>
+
+      <g data-step="3"><text x="40" y="274" class="small" lang="zh-CN">多个要所有权的订阅者，或 const 引用发布：拷贝</text><text x="40" y="274" class="small" lang="en">several owners, or publish by const ref: copies</text>
+        <path class="arrow" d="M225 292 L225 308" style="stroke-dasharray: 4 4"/>
+        <rect class="box" x="20" y="310" width="410" height="44"/>
+        <text x="32" y="330" class="mono">rmw / DDS</text>
+        <text x="32" y="347" class="small" lang="zh-CN">进程外的订阅者仍收到序列化副本</text><text x="32" y="347" class="small" lang="en">subscribers elsewhere still get a serialized copy</text></g>
+
+      <g data-step="4"><rect class="box gz" x="470" y="60" width="125" height="86"/>
+        <text x="482" y="84" class="mono">camera</text>
+        <text x="482" y="106" class="small" lang="zh-CN">独立进程</text><text x="482" y="106" class="small" lang="en">own process</text>
+        <text x="482" y="128" class="small">rmw + DDS</text>
+        <rect class="box gz" x="612" y="60" width="125" height="86"/>
+        <text x="624" y="84" class="mono">filter</text>
+        <text x="624" y="106" class="small" lang="zh-CN">独立进程</text><text x="624" y="106" class="small" lang="en">own process</text>
+        <text x="624" y="128" class="small">rmw + DDS</text>
+        <rect class="box gz" x="755" y="60" width="125" height="86"/>
+        <text x="767" y="84" class="mono">detector</text>
+        <text x="767" y="106" class="small" lang="zh-CN">独立进程</text><text x="767" y="106" class="small" lang="en">own process</text>
+        <text x="767" y="128" class="small">rmw + DDS</text></g>
+
+      <g data-step="5"><rect class="box linux" x="470" y="250" width="410" height="50"/>
+        <text x="482" y="271" class="mono" lang="zh-CN">内核：UDP 回环或共享内存</text><text x="482" y="271" class="mono" lang="en">kernel: UDP loopback or shm</text>
+        <text x="482" y="290" class="small" lang="zh-CN">socket 缓冲区里的拷贝</text><text x="482" y="290" class="small" lang="en">copies in socket buffers</text>
+        <path class="arrow flow" d="M520 148 L520 248"/>
+        <path class="arrow flow" d="M650 248 L650 148"/>
+        <path class="arrow flow" d="M690 148 L690 248"/>
+        <path class="arrow flow" d="M800 248 L800 148"/>
+        <text x="528" y="180" class="small" lang="zh-CN">序列化</text><text x="528" y="180" class="small" lang="en">serialize</text>
+        <text x="566" y="226" class="small" lang="zh-CN">反序列化</text><text x="566" y="226" class="small" lang="en">deserialize</text>
+        <text x="698" y="180" class="small" lang="zh-CN">序列化</text><text x="698" y="180" class="small" lang="en">serialize</text>
+        <text x="716" y="226" class="small" lang="zh-CN">反序列化</text><text x="716" y="226" class="small" lang="en">deserialize</text>
+        <text x="470" y="326" class="small" lang="zh-CN">每跳：序列化、内核拷贝、反序列化、线程唤醒</text><text x="470" y="326" class="small" lang="en">per hop: serialize, kernel copy, deserialize, wake</text></g>
+
+      <g data-step="6"><text x="20" y="386" class="small" style="fill: var(--ros)" lang="zh-CN">延迟几乎不随大小增长；一个崩溃，全部陪葬</text><text x="20" y="386" class="small" style="fill: var(--ros)" lang="en">latency barely grows with size; one crash kills all</text>
+        <text x="470" y="386" class="small" style="fill: var(--gz)" lang="zh-CN">延迟随大小增长；崩溃只影响一个进程</text><text x="470" y="386" class="small" style="fill: var(--gz)" lang="en">latency grows with size; a crash stays contained</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 带重映射和参数文件的 launch，再把节点改成 lifecycle 节点并手动驱动</h3><h3 lang="en">Lab A · A launch file with remaps and a parameter file, then a node converted to a lifecycle node and driven by hand</h3>
+    <ol>
+      <li><span lang="zh-CN">进入容器（<code>./lab.sh up</code>、<code>./lab.sh shell</code>），建一个放 launch 文件的目录，写参数文件。<code>parameter_blackboard</code> 是 <code>demo_nodes_cpp</code> 里一个接受任意参数的节点（用 <code>ros2 pkg executables demo_nodes_cpp</code> 确认你的安装里有它）：</span><span lang="en">Enter the container (<code>./lab.sh up</code>, <code>./lab.sh shell</code>), create a directory for the launch file, and write the parameter file. <code>parameter_blackboard</code> is a node in <code>demo_nodes_cpp</code> that accepts any parameter (confirm your install has it with <code>ros2 pkg executables demo_nodes_cpp</code>):</span><pre data-lang="sh">source /opt/ros/jazzy/setup.bash
+mkdir -p ~/ws/launch_lab &amp;&amp; cd ~/ws/launch_lab
+ros2 pkg executables demo_nodes_cpp | grep -E 'talker|listener|parameter_blackboard'</pre><pre data-lang="yaml" data-file="params.yaml">/**:
+  ros__parameters:
+    use_sim_time: false
+
+/robot1/blackboard:
+  ros__parameters:
+    robot_name: "unit-7"
+    max_speed: 0.8
+    sensors: ["lidar", "imu"]</pre></li>
+      <li><span lang="zh-CN">写 launch 文件。三个节点放进同一个命名空间，talker 和 listener 的 <code>chatter</code> 都重映射成 <code>speech</code>，talker 退出时关掉整个系统：</span><span lang="en">Write the launch file. The three nodes share one namespace, the <code>chatter</code> of both talker and listener is remapped to <code>speech</code>, and the whole system shuts down when talker exits:</span><pre data-lang="py" data-file="talk_listen.launch.py">from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, EmitEvent, LogInfo, RegisterEventHandler
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, ThisLaunchFileDir
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    ns = LaunchConfiguration('ns')                       # 访问时才求值
+    params = PathJoinSubstitution([ThisLaunchFileDir(), 'params.yaml'])
+
+    talker = Node(package='demo_nodes_cpp', executable='talker', name='talker',
+                  namespace=ns, remappings=[('chatter', 'speech')])
+    listener = Node(package='demo_nodes_cpp', executable='listener', name='listener',
+                    namespace=ns, remappings=[('chatter', 'speech')], output='screen')
+    board = Node(package='demo_nodes_cpp', executable='parameter_blackboard', name='blackboard',
+                 namespace=ns, parameters=[params])
+
+    return LaunchDescription([
+        DeclareLaunchArgument('ns', default_value='robot1',
+                              description='namespace for all three nodes'),
+        talker, listener, board,
+        RegisterEventHandler(OnProcessExit(
+            target_action=talker,
+            on_exit=[LogInfo(msg='talker exited, shutting the system down'),
+                     EmitEvent(event=Shutdown(reason='talker exited'))])),
+    ])</pre></li>
+      <li><span lang="zh-CN">运行，在另一个 shell 里看名字、参数和进程树。预期（推断）：节点是 <code>/robot1/talker</code>、<code>/robot1/listener</code>、<code>/robot1/blackboard</code>，话题是 <code>/robot1/speech</code> 而没有 <code>/chatter</code>，<code>ps</code> 的森林视图里三个节点进程都挂在 <code>ros2 launch</code> 的 Python 进程下面：</span><span lang="en">Run it, and in another shell look at the names, the parameters and the process tree. Expected (inference): the nodes are <code>/robot1/talker</code>, <code>/robot1/listener</code> and <code>/robot1/blackboard</code>, the topic is <code>/robot1/speech</code> with no <code>/chatter</code>, and the forest view of <code>ps</code> shows all three node processes under the Python process of <code>ros2 launch</code>:</span><pre data-lang="sh"># shell 1
+ros2 launch ~/ws/launch_lab/talk_listen.launch.py --show-args
+ros2 launch ~/ws/launch_lab/talk_listen.launch.py
+# shell 2
+ros2 node list
+ros2 topic list
+ros2 param get /robot1/blackboard max_speed
+ros2 param dump /robot1/blackboard
+ps -ef --forest | grep -E 'ros2 launch|talker|listener|parameter_blackboard' | grep -v grep</pre></li>
+      <li><span lang="zh-CN">换命名空间，看参数文件悄悄失效。预期（推断）：<code>/robot2/blackboard</code> 只剩 <code>use_sim_time</code> 这类每个节点都有的参数，没有 <code>max_speed</code>，也没有任何报错。修法之一是把 YAML 的键改成不含命名空间的通配写法 <code>/**/blackboard:</code>（通配规则请查文档），或者在 launch 里用 <code>LaunchConfiguration</code> 拼出键名：</span><span lang="en">Change the namespace and watch the parameter file stop applying silently. Expected (inference): <code>/robot2/blackboard</code> has only the parameters every node has, such as <code>use_sim_time</code>, no <code>max_speed</code>, and no error anywhere. One fix is to change the YAML key to the namespace-free wildcard form <code>/**/blackboard:</code> (check the docs for the wildcard rules), or to build the key in launch with <code>LaunchConfiguration</code>:</span><pre data-lang="sh">ros2 launch ~/ws/launch_lab/talk_listen.launch.py ns:=robot2
+# shell 2
+ros2 param list /robot2/blackboard</pre></li>
+      <li><span lang="zh-CN">触发事件处理器：杀掉 talker 进程。预期（推断）：launch 打印 talker 退出的信息和 <code>LogInfo</code> 那一行，然后给 listener 和 blackboard 发 <code>SIGINT</code>，整个 launch 退出：</span><span lang="en">Trigger the event handler by killing the talker process. Expected (inference): launch prints that talker exited and the <code>LogInfo</code> line, then sends <code>SIGINT</code> to listener and blackboard, and the whole launch exits:</span><pre data-lang="sh">pkill -x talker
+ps -ef --forest | grep -E 'listener|parameter_blackboard' | grep -v grep   # 应该已经没有了</pre></li>
+      <li><span lang="zh-CN">建一个 C++ 包，写一个 lifecycle 版的 talker。资源在 <code>on_configure</code> 里建立，发布者在 <code>on_activate</code> 里激活；<code>period_ms</code> 不合法时 <code>on_configure</code> 返回 <code>FAILURE</code>：</span><span lang="en">Create a C++ package and write a lifecycle version of talker. Resources are created in <code>on_configure</code> and the publisher is activated in <code>on_activate</code>; when <code>period_ms</code> is invalid, <code>on_configure</code> returns <code>FAILURE</code>:</span><pre data-lang="sh">cd ~/ws/src
+ros2 pkg create --build-type ament_cmake --license Apache-2.0 lifecycle_lab --dependencies rclcpp rclcpp_lifecycle std_msgs</pre><pre data-lang="cpp" data-file="lifecycle_lab/src/managed_talker.cpp">#include &lt;chrono&gt;
+#include &lt;memory&gt;
+#include &lt;string&gt;
+
+#include "rclcpp/rclcpp.hpp"
+#include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "std_msgs/msg/string.hpp"
+
+using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
+
+class ManagedTalker : public rclcpp_lifecycle::LifecycleNode
+{
+public:
+  ManagedTalker()
+  : LifecycleNode("managed_talker")
+  {
+    declare_parameter("period_ms", 500);   // 构造函数里只声明，不建资源
+  }
+
+  CallbackReturn on_configure(const rclcpp_lifecycle::State &) override
+  {
+    const auto period_ms = get_parameter("period_ms").as_int();
+    if (period_ms &lt;= 0) {
+      RCLCPP_ERROR(get_logger(), "period_ms must be positive, got %ld", period_ms);
+      return CallbackReturn::FAILURE;      // 回到 Unconfigured
+    }
+    pub_ = create_publisher&lt;std_msgs::msg::String&gt;("chatter", 10);
+    timer_ = create_wall_timer(std::chrono::milliseconds(period_ms), [this]() {tick();});
+    RCLCPP_INFO(get_logger(), "configured: publisher and timer exist, nothing goes out yet");
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn on_activate(const rclcpp_lifecycle::State &) override
+  {
+    pub_-&gt;on_activate();
+    RCLCPP_INFO(get_logger(), "activated");
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn on_deactivate(const rclcpp_lifecycle::State &) override
+  {
+    pub_-&gt;on_deactivate();
+    RCLCPP_INFO(get_logger(), "deactivated");
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn on_cleanup(const rclcpp_lifecycle::State &) override
+  {
+    timer_.reset();
+    pub_.reset();
+    count_ = 0;
+    RCLCPP_INFO(get_logger(), "cleaned up");
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn on_shutdown(const rclcpp_lifecycle::State & state) override
+  {
+    timer_.reset();
+    pub_.reset();
+    RCLCPP_INFO(get_logger(), "shut down from %s", state.label().c_str());
+    return CallbackReturn::SUCCESS;
+  }
+
+private:
+  void tick()
+  {
+    auto msg = std::make_unique&lt;std_msgs::msg::String&gt;();
+    msg-&gt;data = "managed hello " + std::to_string(count_++);
+    pub_-&gt;publish(std::move(msg));     // Inactive 时不发出，只打印警告
+  }
+
+  rclcpp_lifecycle::LifecyclePublisher&lt;std_msgs::msg::String&gt;::SharedPtr pub_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  size_t count_ = 0;
+};
+
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared&lt;ManagedTalker&gt;();
+  rclcpp::spin(node-&gt;get_node_base_interface());   // lifecycle 节点用基础接口 spin
+  rclcpp::shutdown();
+  return 0;
+}</pre></li>
+      <li><span lang="zh-CN">在 <code>lifecycle_lab/CMakeLists.txt</code> 的 <code>ament_package()</code> 之前加三行，然后构建：</span><span lang="en">Add three lines before <code>ament_package()</code> in <code>lifecycle_lab/CMakeLists.txt</code>, then build:</span><pre data-lang="cmake" data-file="CMakeLists.txt">add_executable(managed_talker src/managed_talker.cpp)
+ament_target_dependencies(managed_talker rclcpp rclcpp_lifecycle std_msgs)
+install(TARGETS managed_talker DESTINATION lib/${PROJECT_NAME})</pre><pre data-lang="sh">cd ~/ws &amp;&amp; colcon build --packages-select lifecycle_lab &amp;&amp; source install/setup.bash</pre></li>
+      <li><span lang="zh-CN">四个 shell：一个跑节点，一个看转换事件，一个看 <code>/chatter</code>，一个发命令。每一步都对照动画 (a)。预期（推断）：configure 之后 <code>ros2 topic info /chatter</code> 已经看得到一个发布者，但 echo 一直没有输出，节点终端里是「未激活」的警告；activate 之后消息才出现：</span><span lang="en">Four shells: one runs the node, one watches transition events, one watches <code>/chatter</code>, and one sends commands. Check every step against diagram (a). Expected (inference): after configure, <code>ros2 topic info /chatter</code> already shows one publisher, but echo stays silent and the node’s terminal shows “not activated” warnings; messages appear only after activate:</span><pre data-lang="sh"># shell 1
+ros2 run lifecycle_lab managed_talker
+# shell 2
+ros2 topic echo /managed_talker/transition_event
+# shell 3
+ros2 topic echo /chatter
+# shell 4
+ros2 lifecycle nodes
+ros2 lifecycle get /managed_talker          # unconfigured
+ros2 lifecycle list /managed_talker         # 当前可用的转换
+ros2 lifecycle set /managed_talker configure
+ros2 topic info /chatter                    # 有发布者，但 shell 3 没有输出
+ros2 lifecycle set /managed_talker activate # shell 3 开始出现消息
+ros2 lifecycle set /managed_talker deactivate
+ros2 lifecycle set /managed_talker cleanup</pre></li>
+      <li><span lang="zh-CN">走一次失败路径，再走到终态。预期（推断）：<code>period_ms</code> 为 0 时 configure 报告转换失败（CLI 的原话请以输出为准），状态仍是 <code>unconfigured</code>；改成 200 后 configure 成功；shutdown 之后状态是 <code>finalized</code>，<code>list</code> 不再列出任何转换：</span><span lang="en">Take the failure path once, then go to the terminal state. Expected (inference): with <code>period_ms</code> at 0, configure reports that the transition failed (the CLI’s exact wording is whatever it prints), and the state stays <code>unconfigured</code>; after changing it to 200, configure succeeds; after shutdown the state is <code>finalized</code> and <code>list</code> shows no transitions:</span><pre data-lang="sh">ros2 param set /managed_talker period_ms 0
+ros2 lifecycle set /managed_talker configure   # FAILURE
+ros2 lifecycle get /managed_talker             # 仍是 unconfigured
+ros2 param set /managed_talker period_ms 200
+ros2 lifecycle set /managed_talker configure
+ros2 lifecycle set /managed_talker activate
+ros2 lifecycle set /managed_talker shutdown
+ros2 lifecycle get /managed_talker             # finalized
+ros2 lifecycle list /managed_talker</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 两个组件装进一个容器，打开 use_intra_process_comms，量延迟差</h3><h3 lang="en">Lab B · Two components in one container, use_intra_process_comms on, and the latency difference measured</h3>
+    <ol>
+      <li><span lang="zh-CN">建一个 C++ 包，写两个组件：<code>Stamper</code> 每 50 ms 发一张 1 MB 的 <code>sensor_msgs/msg/Image</code>，最后一刻打上时间戳，用 <code>unique_ptr</code> 交出；<code>Probe</code> 用接收 <code>unique_ptr</code> 的回调收下，算「现在 − 时间戳」，每 100 条打印一次均值和最大值。两边都在序号为 100 的倍数时打印数据缓冲区的地址，用来看有没有拷贝：</span><span lang="en">Create a C++ package and write two components: <code>Stamper</code> publishes a 1 MB <code>sensor_msgs/msg/Image</code> every 50 ms, stamps it at the last moment and hands it over as a <code>unique_ptr</code>; <code>Probe</code> receives it with a callback that takes a <code>unique_ptr</code>, computes “now − stamp”, and prints the mean and maximum every 100 messages. Both print the address of the data buffer when the sequence number is a multiple of 100, to show whether a copy happened:</span><pre data-lang="sh">cd ~/ws/src
+ros2 pkg create --build-type ament_cmake --license Apache-2.0 latency_lab --dependencies rclcpp rclcpp_components sensor_msgs</pre><pre data-lang="cpp" data-file="latency_lab/src/stamper.cpp">#include &lt;chrono&gt;
+#include &lt;memory&gt;
+#include &lt;string&gt;
+
+#include "rclcpp/rclcpp.hpp"
+#include "rclcpp_components/register_node_macro.hpp"
+#include "sensor_msgs/msg/image.hpp"
+
+using namespace std::chrono_literals;
+
+namespace latency_lab
+{
+class Stamper : public rclcpp::Node
+{
+public:
+  explicit Stamper(const rclcpp::NodeOptions &amp; options)   // component 的构造函数只接受 NodeOptions
+  : Node("stamper", options)
+  {
+    bytes_ = declare_parameter("bytes", 1000000);
+    pub_ = create_publisher&lt;sensor_msgs::msg::Image&gt;("image", 10);
+    timer_ = create_wall_timer(50ms, [this]() {publish_one();});
+    RCLCPP_INFO(get_logger(), "intra-process %s, %d bytes per message",
+      get_node_options().use_intra_process_comms() ? "on" : "off", bytes_);
+  }
+
+private:
+  void publish_one()
+  {
+    auto msg = std::make_unique&lt;sensor_msgs::msg::Image&gt;();
+    msg-&gt;height = 1;
+    msg-&gt;width = static_cast&lt;uint32_t&gt;(bytes_);
+    msg-&gt;step = msg-&gt;width;
+    msg-&gt;encoding = "mono8";
+    msg-&gt;data.resize(static_cast&lt;size_t&gt;(bytes_));   // 热路径上分配：实验里可以接受
+    msg-&gt;header.frame_id = std::to_string(seq_);      // 借 frame_id 带序号
+    if (seq_ % 100 == 0) {
+      RCLCPP_INFO(get_logger(), "seq %zu data at %p", seq_, static_cast&lt;void *&gt;(msg-&gt;data.data()));
+    }
+    ++seq_;
+    msg-&gt;header.stamp = now();                        // 最后一刻打时间戳
+    pub_-&gt;publish(std::move(msg));                    // 交出所有权
+  }
+
+  int bytes_ = 0;
+  size_t seq_ = 0;
+  rclcpp::Publisher&lt;sensor_msgs::msg::Image&gt;::SharedPtr pub_;
+  rclcpp::TimerBase::SharedPtr timer_;
+};
+}  // namespace latency_lab
+
+RCLCPP_COMPONENTS_REGISTER_NODE(latency_lab::Stamper)</pre><pre data-lang="cpp" data-file="latency_lab/src/probe.cpp">#include &lt;algorithm&gt;
+#include &lt;memory&gt;
+#include &lt;string&gt;
+
+#include "rclcpp/rclcpp.hpp"
+#include "rclcpp_components/register_node_macro.hpp"
+#include "sensor_msgs/msg/image.hpp"
+
+namespace latency_lab
+{
+class Probe : public rclcpp::Node
+{
+public:
+  explicit Probe(const rclcpp::NodeOptions &amp; options)
+  : Node("probe", options)
+  {
+    sub_ = create_subscription&lt;sensor_msgs::msg::Image&gt;(
+      "image", 10, [this](sensor_msgs::msg::Image::UniquePtr msg) {on_image(std::move(msg));});
+  }
+
+private:
+  void on_image(sensor_msgs::msg::Image::UniquePtr msg)
+  {
+    const double us = (now() - rclcpp::Time(msg-&gt;header.stamp)).seconds() * 1e6;
+    sum_us_ += us;
+    max_us_ = std::max(max_us_, us);
+    const auto seq = std::stoul(msg-&gt;header.frame_id);
+    if (seq % 100 == 0) {
+      RCLCPP_INFO(get_logger(), "seq %lu data at %p", seq, static_cast&lt;void *&gt;(msg-&gt;data.data()));
+    }
+    if (++n_ == 100) {
+      RCLCPP_INFO(get_logger(), "100 msgs: mean %.0f us, max %.0f us", sum_us_ / n_, max_us_);
+      n_ = 0;
+      sum_us_ = 0.0;
+      max_us_ = 0.0;
+    }
+  }
+
+  rclcpp::Subscription&lt;sensor_msgs::msg::Image&gt;::SharedPtr sub_;
+  int n_ = 0;
+  double sum_us_ = 0.0;
+  double max_us_ = 0.0;
+};
+}  // namespace latency_lab
+
+RCLCPP_COMPONENTS_REGISTER_NODE(latency_lab::Probe)</pre></li>
+      <li><span lang="zh-CN">在 <code>latency_lab/CMakeLists.txt</code> 的 <code>ament_package()</code> 之前加上共享库、两次注册和安装规则，然后构建，并确认两个组件出现在资源索引里：</span><span lang="en">Before <code>ament_package()</code> in <code>latency_lab/CMakeLists.txt</code>, add the shared library, the two registrations and the install rule, then build and confirm that both components appear in the resource index:</span><pre data-lang="cmake" data-file="CMakeLists.txt">add_library(latency_components SHARED src/stamper.cpp src/probe.cpp)
+ament_target_dependencies(latency_components rclcpp rclcpp_components sensor_msgs)
+rclcpp_components_register_node(latency_components PLUGIN "latency_lab::Stamper" EXECUTABLE stamper)
+rclcpp_components_register_node(latency_components PLUGIN "latency_lab::Probe" EXECUTABLE probe)
+install(TARGETS latency_components
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)</pre><pre data-lang="sh">cd ~/ws &amp;&amp; colcon build --packages-select latency_lab &amp;&amp; source install/setup.bash
+ros2 component types | grep -A2 latency_lab</pre></li>
+      <li><span lang="zh-CN">模式 1，两个进程：用 CMake 生成的两个独立可执行文件。记下两三行 <code>mean</code> / <code>max</code>，并注意两边打印的地址不同：</span><span lang="en">Mode 1, two processes: use the two standalone executables CMake generated. Note two or three <code>mean</code> / <code>max</code> lines, and notice that the two sides print different addresses:</span><pre data-lang="sh"># shell 1
+ros2 run latency_lab stamper
+# shell 2
+ros2 run latency_lab probe</pre></li>
+      <li><span lang="zh-CN">模式 2，一个容器、不开进程内通信。两个组件进了同一个进程，但消息仍走 rmw 和 DDS，地址仍然不同：</span><span lang="en">Mode 2, one container without intra-process communication. Both components are in one process, but messages still go through rmw and DDS, and the addresses still differ:</span><pre data-lang="sh"># shell 1
+ros2 run rclcpp_components component_container
+# shell 2
+ros2 component load /ComponentManager latency_lab latency_lab::Stamper
+ros2 component load /ComponentManager latency_lab latency_lab::Probe
+ros2 component list</pre></li>
+      <li><span lang="zh-CN">模式 3，一个容器、打开进程内通信。先 Ctrl+C 停掉模式 2 的容器，重新启动，加载时带 <code>-e</code>（选项写法以 <code>ros2 component load -h</code> 为准）。预期（推断）：<code>Stamper</code> 和 <code>Probe</code> 对同一个序号打印<strong>相同的地址</strong>（所有权一对一移交，零拷贝），延迟比模式 1、2 低很多；具体数字取决于 VM：</span><span lang="en">Mode 3, one container with intra-process communication. Stop the mode 2 container with Ctrl+C, start it again, and load with <code>-e</code> (the exact option syntax is whatever <code>ros2 component load -h</code> shows). Expected (inference): <code>Stamper</code> and <code>Probe</code> print <strong>the same address</strong> for the same sequence number (ownership moved one to one, zero copies), and latency is much lower than in modes 1 and 2; the exact numbers depend on the VM:</span><pre data-lang="sh"># shell 1
+ros2 run rclcpp_components component_container
+# shell 2
+ros2 component load /ComponentManager latency_lab latency_lab::Stamper -e use_intra_process_comms:=true
+ros2 component load /ComponentManager latency_lab latency_lab::Probe -e use_intra_process_comms:=true</pre></li>
+      <li><span lang="zh-CN">和内核课程交叉：模式 3 运行时，看容器进程的线程和它的内存映射。两个组件的共享库只映射一次，所有节点的线程都在这一个 PID 下；再和模式 1 的两个 PID 的线程数比一比：</span><span lang="en">Crossover with the kernel course: while mode 3 runs, look at the container process’s threads and memory map. The components’ shared library is mapped once, and every node’s threads live under this one PID; then compare with the thread counts of the two PIDs in mode 1:</span><pre data-lang="sh">PID=$(pgrep -f component_container | head -n1)
+ps -T -p "$PID" -o spid,comm
+grep latency_components /proc/$PID/maps
+# 模式 1 时
+for p in $(pgrep -x stamper) $(pgrep -x probe); do echo "$p $(ls /proc/$p/task | wc -l) threads"; done</pre></li>
+      <li><span lang="zh-CN">（可选）把模式 3 写成 launch 文件，<code>ros2 launch ~/ws/launch_lab/composed.launch.py</code> 运行，结果应与手动加载相同：</span><span lang="en">(Optional) Write mode 3 as a launch file and run it with <code>ros2 launch ~/ws/launch_lab/composed.launch.py</code>; the result should match loading by hand:</span><pre data-lang="py" data-file="composed.launch.py">from launch import LaunchDescription
+from launch_ros.actions import ComposableNodeContainer
+from launch_ros.descriptions import ComposableNode
+
+
+def generate_launch_description():
+    ipc = [{'use_intra_process_comms': True}]
+    container = ComposableNodeContainer(
+        name='latency_container', namespace='',
+        package='rclcpp_components', executable='component_container',
+        composable_node_descriptions=[
+            ComposableNode(package='latency_lab', plugin='latency_lab::Stamper',
+                           name='stamper', extra_arguments=ipc),
+            ComposableNode(package='latency_lab', plugin='latency_lab::Probe',
+                           name='probe', extra_arguments=ipc),
+        ],
+        output='screen')
+    return LaunchDescription([container])</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 里 <code>ros2 node list</code>、<code>ros2 topic list</code> 和 <code>ps -ef --forest</code> 的输出、<code>ns:=robot2</code> 时缺失参数的证据、杀掉 talker 后 launch 的日志，以及 <code>managed_talker</code> 从 configure 到 finalized 的 <code>transition_event</code> 记录（含一次 FAILURE）；Lab B 里三种模式各两行 <code>mean</code> / <code>max</code> 和对应的地址行，以及你用自己的话写的「模式 2 为什么没有比模式 1 快多少，模式 3 省掉的是哪几步」（10 行以内）。</div>
+    <div class="note" lang="en">Deliverables: from Lab A, the output of <code>ros2 node list</code>, <code>ros2 topic list</code> and <code>ps -ef --forest</code>, the evidence of missing parameters with <code>ns:=robot2</code>, launch’s log after talker is killed, and the <code>transition_event</code> record of <code>managed_talker</code> from configure to finalized (including one FAILURE); from Lab B, two <code>mean</code> / <code>max</code> lines and the matching address lines for each of the three modes, and your own explanation of “why mode 2 is not much faster than mode 1, and which steps mode 3 removes” (10 lines or fewer).</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/phase-4">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 参数文件的键是 <code>/robot1/blackboard:</code>，launch 时用了 <code>ns:=robot2</code>。会发生什么？</p>
+      <p lang="en">1. The parameter file’s key is <code>/robot1/blackboard:</code>, and the system is launched with <code>ns:=robot2</code>. What happens?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">launch 报错退出，因为参数文件里的节点不存在</span><span lang="en">Launch fails with an error, because the node in the parameter file does not exist</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">节点正常启动，但那一段参数不匹配它的全名，节点拿到默认值，没有任何报错</span><span lang="en">The node starts normally, but that section does not match its full name, so it gets its defaults with no error at all</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">参数照样生效，因为匹配只看节点名 <code>blackboard</code></span><span lang="en">The parameters apply anyway, because matching looks only at the node name <code>blackboard</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">YAML 顶层键按节点<em>全名</em>（命名空间 + 节点名）匹配，不匹配的段落被静默忽略。a 错：launch 不校验参数文件里的节点是否存在；c 错：匹配包括命名空间，要跨命名空间得用通配写法。</span><span lang="en">Top-level YAML keys match the node’s <em>full</em> name (namespace + node name), and sections that do not match are silently ignored. a is wrong: launch does not check whether the nodes in a parameter file exist; c is wrong: matching includes the namespace, and crossing namespaces needs a wildcard form.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 一个 lifecycle 节点的 <code>on_configure</code> 因为参数不合法返回了 <code>CallbackReturn::FAILURE</code>。节点现在在哪个状态？</p>
+      <p lang="en">2. A lifecycle node’s <code>on_configure</code> returns <code>CallbackReturn::FAILURE</code> because a parameter is invalid. Which state is the node in now?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">Finalized，失败的节点必须重启进程</span><span lang="en">Finalized; a failed node needs its process restarted</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">ErrorProcessing，等 <code>on_error</code> 决定去向</span><span lang="en">ErrorProcessing, waiting for <code>on_error</code> to decide</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">Unconfigured，可以改参数后再次 configure</span><span lang="en">Unconfigured; you can fix the parameter and configure again</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>FAILURE</code> 表示「这次转换没做成」，节点回到出发的主状态。b 错：进入 ErrorProcessing 的是 <code>ERROR</code> 或异常，不是 <code>FAILURE</code>；a 错：只有 shutdown 或 <code>on_error</code> 失败才会到 Finalized。</span><span lang="en"><code>FAILURE</code> means “this transition did not happen”, and the node returns to the primary state it started from. b is wrong: <code>ERROR</code> or an exception leads to ErrorProcessing, not <code>FAILURE</code>; a is wrong: only shutdown or a failing <code>on_error</code> leads to Finalized.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 两个 component 被装进同一个 <code>component_container</code>，加载时没有设置 <code>use_intra_process_comms</code>。一张 1 MB 的图像从一个传到另一个，走的是哪条路？</p>
+      <p lang="en">3. Two components are loaded into the same <code>component_container</code> without setting <code>use_intra_process_comms</code>. Which path does a 1 MB image take from one to the other?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">自动以指针传递，因为它们在同一个地址空间里</span><span lang="en">It is passed as a pointer automatically, because they share an address space</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">仍然序列化后经 rmw 和 DDS 投递，再反序列化</span><span lang="en">It is still serialized, delivered through rmw and DDS, and deserialized</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">根本收不到，同一进程里的节点之间必须开进程内通信才能通信</span><span lang="en">It never arrives; nodes in one process can only talk with intra-process communication on</span></label>
+      <div class="why" hidden><span lang="zh-CN">进程内旁路是 rclcpp 的可选特性，两端都要开启；不开时消息照常走 DDS，DDS 只认识字节，所以序列化省不掉。a 错：同一地址空间只是让旁路<em>可能</em>，不会自动启用；c 错：DDS 路径在同一进程里同样能用，Lab B 的模式 2 就是这样。</span><span lang="en">The intra-process bypass is an optional rclcpp feature that both ends must enable; without it messages go through DDS as usual, and DDS only knows bytes, so serialization cannot be skipped. a is wrong: sharing an address space only makes the bypass <em>possible</em>; it is not turned on automatically; c is wrong: the DDS path works within one process too, which is mode 2 of Lab B.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. 一个 launch 文件用 <code>OnProcessStart</code> 在地图服务进程启动后再启动规划器，可规划器有时一开始拿不到地图。最根本的原因是什么？</p>
+      <p lang="en">4. A launch file uses <code>OnProcessStart</code> to start the planner after the map server process starts, yet the planner sometimes gets no map at first. What is the root cause?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN"><code>OnProcessStart</code> 只说明进程已经 exec，不说明节点已经加载完地图、建好发布者；应改用 lifecycle 节点，配置完成后再激活</span><span lang="en"><code>OnProcessStart</code> only says the process has exec’d, not that the node has loaded the map and created its publishers; use lifecycle nodes and activate after configuration</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">launch 总是并行启动所有进程，事件处理器里的动作会被忽略</span><span lang="en">Launch always starts every process in parallel and ignores actions in event handlers</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN"><code>OnProcessStart</code> 只对 Python 节点有效，对 C++ 节点不触发</span><span lang="en"><code>OnProcessStart</code> only works for Python nodes and never fires for C++ nodes</span></label>
+      <div class="why" hidden><span lang="zh-CN">launch 看得见进程，看不见节点内部的状态，所以「进程起来了」不等于「准备好了」。b 错：事件处理器里的动作会执行，这正是 Lab A 里关机的机制；c 错：进程事件与节点用什么语言写无关，它们来自 launch 对子进程的监视。</span><span lang="en">Launch sees processes, not the state inside a node, so “the process is up” does not mean “ready”. b is wrong: actions in event handlers do run, which is how Lab A shuts down; c is wrong: process events have nothing to do with the node’s language; they come from launch watching its child processes.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://design.ros2.org/articles/roslaunch.html">ROS 2 Launch System</a> · <a href="https://design.ros2.org/articles/node_lifecycle.html">Managed nodes</a> · <a href="https://design.ros2.org/articles/intraprocess_communications.html">Intra-process Communications in ROS 2</a> <span class="lvl" lang="zh-CN">设计文章，概念 1、4、6 与动画 (a)：launch 的职责、lifecycle 状态机的完整定义、进程内通信的设计</span><span class="lvl" lang="en">Design articles, concepts 1, 4 and 6 and diagram (a): what launch is for, the full definition of the lifecycle state machine, the design of intra-process communication</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Launch-Main.html">Launch tutorials</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Using-Substitutions.html">Using substitutions</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Launch/Using-Event-Handlers.html">Using event handlers</a> <span class="lvl" lang="zh-CN">官方教程，入门到中级，概念 1、2 与 Lab A：launch 参数、替换、事件处理器</span><span class="lvl" lang="en">Official tutorials, beginner to intermediate, concepts 1 and 2 and Lab A: launch arguments, substitutions, event handlers</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/How-To-Guides/Node-arguments.html">Passing ROS arguments to nodes</a> · <a href="https://design.ros2.org/articles/topic_and_service_names.html">Topic and Service name mapping</a> <span class="lvl" lang="zh-CN">官方与设计文章，概念 3：<code>--ros-args</code>、重映射、命名空间与参数文件</span><span class="lvl" lang="en">Official and design article, concept 3: <code>--ros-args</code>, remapping, namespaces and parameter files</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Composition.html">About Composition</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Composition.html">Composing multiple nodes in a single process</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Intra-Process-Communication.html">Intra-Process Communication demo</a> <span class="lvl" lang="zh-CN">官方，中级，概念 5、6、动画 (b) 与 Lab B：组件、容器、<code>ros2 component</code>、进程内通信</span><span class="lvl" lang="en">Official, intermediate, concepts 5 and 6, diagram (b) and Lab B: components, containers, <code>ros2 component</code>, intra-process communication</span></li>
+    <li><a href="https://github.com/ros2/demos/tree/jazzy/lifecycle">ros2/demos lifecycle (jazzy)</a> · <a href="https://github.com/ros2/rclcpp/tree/jazzy/rclcpp_lifecycle">rclcpp_lifecycle</a> · <a href="https://github.com/ros2/rclcpp/tree/jazzy/rclcpp_components">rclcpp_components</a> <span class="lvl" lang="zh-CN">源码与官方 demo，进阶：<code>LifecyclePublisher</code> 的激活逻辑、组件容器怎样加载库</span><span class="lvl" lang="en">Source and official demo, advanced: how <code>LifecyclePublisher</code> activation works, how the component container loads libraries</span></li>
+    <li><a href="https://github.com/ros2/launch">ros2/launch</a> · <a href="https://github.com/ros2/launch_ros">ros2/launch_ros</a> <span class="lvl" lang="zh-CN">源码，进阶：<code>LaunchService</code>、<code>ExecuteProcess</code> 的信号升级、<code>Node</code> 与 <code>ComposableNodeContainer</code> 动作</span><span class="lvl" lang="en">Source, advanced: <code>LaunchService</code>, the signal escalation in <code>ExecuteProcess</code>, the <code>Node</code> and <code>ComposableNodeContainer</code> actions</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024（11 月）, ISBN 9781835881408. <span class="lvl">讲参数和 launch 文件的章节，对应概念 1、2、3 与 Lab A 的前半；基于 Jazzy</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024 (November), ISBN 9781835881408. <span class="lvl">The chapters on parameters and launch files; match concepts 1, 2 and 3 and the first half of Lab A; based on Jazzy</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025（6 月）, ISBN 9781032851501（第 1 版 2022, ISBN 9781032267203）. <span class="lvl">讲 launch、参数文件与 lifecycle 节点的章节，对应概念 2、4 与 Lab A 的后半</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025 (June), ISBN 9781032851501 (1st ed. 2022, ISBN 9781032267203). <span class="lvl">The chapters on launch, parameter files and lifecycle nodes; match concepts 2 and 4 and the second half of Lab A</span></li>
+    <li lang="zh-CN">Lentin Joseph &amp; Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025（7 月）. <span class="lvl">讲 ROS 2 高级特性（组件、进程内通信、lifecycle）的章节，对应概念 4、5、6 与 Lab B；基于 Jazzy</span></li>
+    <li lang="en">Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025 (July). <span class="lvl">The chapters on advanced ROS 2 features (components, intra-process communication, lifecycle); match concepts 4, 5 and 6 and Lab B; based on Jazzy</span></li>
+    <li lang="zh-CN">Morgan Quigley, Brian Gerkey &amp; William D. Smart, 《Programming Robots with ROS》, O'Reilly, 2015. <span class="lvl">讲 roslaunch、命名空间与重映射的部分，对应概念 3 的背景；全书基于 ROS 1，名字解析与重映射的思路仍然适用，但 ROS 1 的 XML roslaunch 与 nodelet 不同于本页的 Python launch、lifecycle 和组件</span></li>
+    <li lang="en">Morgan Quigley, Brian Gerkey &amp; William D. Smart, <em>Programming Robots with ROS</em>, O'Reilly, 2015. <span class="lvl">The parts on roslaunch, namespaces and remapping; background for concept 3; the whole book is ROS 1, so the ideas of name resolution and remapping still apply, but ROS 1’s XML roslaunch and nodelets differ from the Python launch, lifecycle nodes and components on this page</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-3-middleware-and-qos/index.html">← Phase 3 · Middleware &amp; QoS</a>
+    <a href="../phase-5-tf2-urdf-simulation/index.html">Phase 5 · TF2, URDF &amp; Simulation →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
