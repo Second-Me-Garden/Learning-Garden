@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 2 · Executors, Callbacks, Timing · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page">Phase 2 · Executors, Callbacks, Timing</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 2 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 2 / 8 · about 1–2 weeks</p>
+  <h1>Executors, Callbacks, Timing <span class="en" lang="zh-CN">执行器、回调与时序：spin 循环、wait set、callback group、定时器抖动与实时基础</span><span class="en" lang="en">The spin loop, wait sets, callback groups, timer jitter and real-time basics</span></h1>
+  <p class="lede" lang="zh-CN">Phase 1 里你写的每个回调都「自己跑了起来」，这一阶段拆开是谁在跑它们：<strong>执行器</strong>（executor）在一个或几个 Linux 线程里循环，睡在 wait set 上，醒来后按固定规则一个个调用就绪的回调。弄清这个循环，就能解释三件常见的怪事：为什么在回调里同步调用服务会永远卡住，为什么一个慢回调会让 100 Hz 的定时器时快时慢，以及为什么换成多线程执行器有时仍然没用。最后把回调线程当成内核里的普通任务来看：用 <code>chrt -f 80</code> 把它放进 <code>SCHED_FIFO</code>，对比抖动，并说清在容器里这一招能修好什么、修不好什么。</p>
+  <p class="lede" lang="en">Every callback you wrote in Phase 1 “just ran”; this phase opens up who runs them. An <strong>executor</strong> loops in one or several Linux threads, sleeps on a wait set, and on waking calls the ready callbacks one by one according to fixed rules. Once that loop is clear, three common puzzles explain themselves: why calling a service synchronously inside a callback hangs forever, why one slow callback makes a 100 Hz timer speed up and slow down, and why switching to a multithreaded executor sometimes still does not help. Finally the callback thread is treated as an ordinary kernel task: you put it into <code>SCHED_FIFO</code> with <code>chrt -f 80</code>, compare the jitter, and pin down what that fixes inside a container and what it cannot.</p>
+  <div class="note" lang="zh-CN"><strong>状态说明：</strong>本页的 C++ 和 Python 实验代码按 2026-10-31 的 Jazzy 源码（rclcpp、rclpy、rcl 的 <code>jazzy</code> 分支）和官方文档写成，<strong>没有在这台 Mac 上编译或运行过</strong>。实验里的「预期结果」是推断，以你的实际输出为准。</div><div class="note" lang="en"><strong>Status:</strong> the C++ and Python lab code on this page was written against the Jazzy sources (the <code>jazzy</code> branches of rclcpp, rclpy and rcl) and the official docs on 2026-10-31, and <strong>has not been compiled or run on this Mac</strong>. The “expected results” in the labs are inference; your actual output wins.</div>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">画出执行器的一轮循环：收集实体 → wait set → <code>rmw_wait</code> 睡眠 → 唤醒 → 就绪实体 → 逐个执行回调，并说出 wait set 里到底装了什么。</li>
+      <li lang="en">Draw one round of the executor loop — collect entities → wait set → sleep in <code>rmw_wait</code> → wake → ready entities → run callbacks one by one — and say what a wait set actually holds.</li>
+      <li lang="zh-CN">说清 SingleThreaded、MultiThreaded、StaticSingleThreaded 和 Events 执行器的区别，以及哪些在 Jazzy 上需要查文档确认状态。</li>
+      <li lang="en">Explain how the SingleThreaded, MultiThreaded, StaticSingleThreaded and Events executors differ, and which of them need a docs check for their status on Jazzy.</li>
+      <li lang="zh-CN">用 MutuallyExclusive 和 Reentrant 两种 callback group 预测两个回调能不能同时跑，并解释为什么「多线程执行器 + 默认 group」仍然是串行的。</li>
+      <li lang="en">Use the MutuallyExclusive and Reentrant callback groups to predict whether two callbacks can run at the same time, and explain why “multithreaded executor + default group” is still serial.</li>
+      <li lang="zh-CN">从机制上解释在回调里同步调用服务为什么会死锁，并给出两种修法。</li>
+      <li lang="en">Explain from the mechanism why a synchronous service call inside a callback deadlocks, and give two fixes.</li>
+      <li lang="zh-CN">把回调抖动拆成定时器、执行器队列、调度器、内存分配四个来源，用 <code>SCHED_FIFO</code> 消掉其中一个，并说出在 Docker Desktop 的容器里剩下的那些为什么消不掉。</li>
+      <li lang="en">Split callback jitter into four sources — the timer, the executor queue, the scheduler and memory allocation — remove one of them with <code>SCHED_FIFO</code>, and say why the ones left over cannot be removed in a Docker Desktop container.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN">完成 <a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1</a>：会写发布者、订阅者、服务端和客户端，会用 colcon 构建一个 C++ 包。</li>
+    <li lang="en">Finish <a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1</a>: you can write a publisher, a subscriber, a service server and a client, and build a C++ package with colcon.</li>
+    <li lang="zh-CN">按 <a href="../lab-setup/index.html">实验环境</a> 建好的容器：它的 <code>compose.yaml</code> 里有 <code>cap_add: [SYS_NICE]</code> 和 <code>ulimits: rtprio: 99</code>，Lab B 的 <code>chrt -f 80</code> 靠这两项；发现范围默认是 <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>，本页实验不需要改它。</li>
+    <li lang="en">The container built following <a href="../lab-setup/index.html">Lab environment</a>: its <code>compose.yaml</code> has <code>cap_add: [SYS_NICE]</code> and <code>ulimits: rtprio: 99</code>, which Lab B’s <code>chrt -f 80</code> depends on; discovery defaults to <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>, and the labs on this page do not need to change it.</li>
+    <li lang="zh-CN"><a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Engineering Phase 1</a>：线程就是一个 task，睡眠、唤醒、EEVDF 怎样决定下一个谁上 CPU。本页会在它之上加一层：<code>SCHED_FIFO</code> 这个比普通（fair）调度类更高的实时类。</li>
+    <li lang="en"><a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Engineering Phase 1</a>: a thread is a task; sleeping, waking, and how EEVDF decides who gets the CPU next. This page adds one level on top: <code>SCHED_FIFO</code>, a real-time class that sits above the ordinary (fair) class.</li>
+    <li lang="zh-CN"><a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Engineering Phase 3</a>：mutex、futex 和优先级继承。执行器线程靠 futex 睡眠和唤醒，Reentrant 回调之间共享数据要靠 mutex，实时线程等一把被低优先级线程持有的锁就是优先级反转。</li>
+    <li lang="en"><a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Engineering Phase 3</a>: mutexes, futexes and priority inheritance. Executor threads sleep and wake through futexes, data shared between Reentrant callbacks needs a mutex, and a real-time thread waiting on a lock held by a low-priority thread is priority inversion.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. spin、执行器循环与 wait set</h3><h3 lang="en">1. spin, the executor loop and the wait set</h3>
+  <p lang="zh-CN">节点自己不会调用任何回调。你创建的 subscription、timer、service、client 只是登记在节点上的<strong>实体</strong>（entity）；真正调用回调的是<strong>执行器</strong>。<code>rclcpp::spin(node)</code> 就是：建一个 <code>rclcpp::executors::SingleThreadedExecutor</code>，<code>executor.add_node(node)</code>，再在当前线程里 <code>executor.spin()</code>——一个直到关闭（例如 Ctrl+C）才返回的循环。每一轮做三件事：</p>
+  <p lang="en">A node never calls any callback by itself. The subscriptions, timers, services and clients you create are only <strong>entities</strong> registered on the node; what actually calls the callbacks is the <strong>executor</strong>. <code>rclcpp::spin(node)</code> means: create an <code>rclcpp::executors::SingleThreadedExecutor</code>, <code>executor.add_node(node)</code>, then <code>executor.spin()</code> in the current thread — a loop that returns only at shutdown (for example on Ctrl+C). Each round does three things:</p>
+  <ol>
+    <li lang="zh-CN"><strong>收集</strong>：把加入执行器的所有节点上、按 callback group 组织的实体放进一个 <strong>wait set</strong>。</li>
+    <li lang="en"><strong>Collect</strong>: put the entities of every node added to the executor, organised by callback group, into a <strong>wait set</strong>.</li>
+    <li lang="zh-CN"><strong>等待</strong>：调用 <code>rcl_wait()</code>，它再调用 rmw 实现的 <code>rmw_wait()</code>。线程在这里睡眠，直到 wait set 里至少一项就绪或超时；超时设为最近一个定时器的到期时刻。</li>
+    <li lang="en"><strong>Wait</strong>: call <code>rcl_wait()</code>, which calls the rmw implementation’s <code>rmw_wait()</code>. The thread sleeps here until at least one entry in the wait set is ready or the timeout passes; the timeout is set to the nearest timer expiry.</li>
+    <li lang="zh-CN"><strong>执行</strong>：醒来后，wait set 里没就绪的项被置空，执行器逐个取出就绪项：对 subscription 先 <code>rcl_take</code> 取出一条消息，对 timer 先 <code>rcl_timer_call</code>，然后调用你的回调。处理完回到第 1 步。</li>
+    <li lang="en"><strong>Execute</strong>: on waking, the entries that are not ready are cleared from the wait set, and the executor takes the ready ones one by one: for a subscription it first takes one message with <code>rcl_take</code>, for a timer it first calls <code>rcl_timer_call</code>, and then it calls your callback. When done it goes back to step 1.</li>
+  </ol>
+  <p lang="zh-CN"><strong>wait set 是什么</strong>：rcl 里的 <code>rcl_wait_set_t</code>，是几个指针数组——subscriptions、guard_conditions、timers、clients、services、events，每类一个。<code>rmw_wait()</code> 拿着它睡眠，返回时把没就绪的项改成空指针。官方文档的说法是「每个队列一个二值标志」：它只告诉执行器某个话题<em>有没有</em>消息，不告诉有几条、哪条先到。<strong>guard condition</strong> 是别的线程可以手动触发的标志，用来叫醒正在睡的执行器，例如添加节点或关闭时。</p>
+  <p lang="en"><strong>What a wait set is</strong>: in rcl it is an <code>rcl_wait_set_t</code>, a few arrays of pointers — subscriptions, guard_conditions, timers, clients, services and events, one per kind. <code>rmw_wait()</code> sleeps holding it, and on return sets the entries that are not ready to null. The official docs describe it as “one binary flag per queue”: it tells the executor only <em>whether</em> a topic has messages, not how many or which arrived first. A <strong>guard condition</strong> is a flag another thread can trigger by hand to wake an executor that is asleep, for example when a node is added or at shutdown.</p>
+  <p lang="zh-CN">由此得出三个后果，后面几节都会用到：</p>
+  <p lang="en">Three consequences follow, and the following sections use all of them:</p>
+  <ul>
+    <li lang="zh-CN"><strong>不是先来先服务。</strong>Jazzy 的 rclcpp（<code>executor.cpp</code> 的 <code>get_next_ready_executable</code>）在就绪集合里按类型扫描：timer、subscription、service、client、waitable。文档把整体效果描述为轮转（round-robin）而非 FIFO：回调来得及处理时近似 FIFO，处理不过来时消息堆在下层队列里，顺序就不再是到达顺序。</li>
+    <li lang="en"><strong>Not first come, first served.</strong> Jazzy’s rclcpp (<code>get_next_ready_executable</code> in <code>executor.cpp</code>) scans the ready set by kind: timers, subscriptions, services, clients, waitables. The docs describe the overall effect as round-robin, not FIFO: while callbacks keep up it is roughly FIFO, but when they fall behind, messages pile up in the lower-layer queues and the order is no longer arrival order.</li>
+    <li lang="zh-CN"><strong>执行期间到的东西要等下一轮。</strong>正在执行回调时新到的消息，要等这一轮结束、下一次 <code>rmw_wait</code> 才被看见。</li>
+    <li lang="en"><strong>Arrivals during execution wait for the next round.</strong> A message that arrives while callbacks are running is only seen when this round ends and the next <code>rmw_wait</code> happens.</li>
+    <li lang="zh-CN"><strong>一个线程一次只做一件事。</strong>单线程执行器里，一个跑了 30 ms 的回调会把其他所有回调都推迟 30 ms。</li>
+    <li lang="en"><strong>One thread does one thing at a time.</strong> In a single-threaded executor, a callback that runs for 30 ms delays every other callback by 30 ms.</li>
+  </ul>
+  <div class="note" lang="zh-CN">和 Kernel Engineering 的连接：执行器线程睡在 <code>rmw_wait</code> 里时，在内核看来就是一个状态为 <code>S</code> 的 task，大致是在一个条件变量上做 futex 等待（Fast DDS 的 rmw 实现大致如此，以源码为准）。DDS 的接收线程从 <code>recvmsg()</code> 返回、把数据放进队列后通知这个条件变量，内核把执行器线程放回运行队列；它<em>什么时候</em>真正上 CPU，由 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a> 的调度器决定（概念 4，EEVDF），futex 本身见 <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a> 的概念 8。</div>
+  <div class="note" lang="en">The connection to Kernel Engineering: while an executor thread sleeps in <code>rmw_wait</code>, the kernel sees a task in state <code>S</code>, approximately doing a futex wait on a condition variable (roughly how the Fast DDS rmw implementation does it; the source is authoritative). When a DDS receive thread returns from <code>recvmsg()</code> and puts the data in a queue, it notifies that condition variable and the kernel puts the executor thread back on a run queue; <em>when</em> it actually gets the CPU is decided by the scheduler from <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a> (concept 4, EEVDF), and the futex itself is concept 8 of <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a>.</div>
+  <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲第一批节点、<code>spin</code> 与执行器的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Executors.html">Executors</a> 概念页（含调度语义一节）。</p>
+  <p lang="en">Further reading: the chapters of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on first nodes, <code>spin</code> and executors; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Executors.html">Executors</a> concept page (including its section on scheduling semantics).</p>
+
+  <h3 lang="zh-CN">2. 执行器的种类</h3><h3 lang="en">2. Kinds of executor</h3>
+  <ul>
+    <li lang="zh-CN"><strong><code>rclcpp::executors::SingleThreadedExecutor</code></strong>：只有一个线程，就是调用 <code>spin()</code> 的那个。所有回调串行，不需要考虑回调之间的并发；<code>rclcpp::spin(node)</code> 用的就是它。</li>
+    <li lang="en"><strong><code>rclcpp::executors::SingleThreadedExecutor</code></strong>: one thread only, the one that calls <code>spin()</code>. Every callback runs serially, so there is no concurrency between callbacks to think about; <code>rclcpp::spin(node)</code> uses this one.</li>
+    <li lang="zh-CN"><strong><code>rclcpp::executors::MultiThreadedExecutor</code></strong>：一个线程池。Jazzy 头文件写明线程数参数默认 0，表示「CPU 核数，至少 2」。线程轮流持有一把等待锁去 <code>rmw_wait</code> 并取出一个就绪项，放开锁之后再去执行它，所以多个回调可以同时跑——前提是 callback group 允许（概念 3）。</li>
+    <li lang="en"><strong><code>rclcpp::executors::MultiThreadedExecutor</code></strong>: a thread pool. The Jazzy header states that the thread-count parameter defaults to 0, meaning “the number of CPU cores, at least 2”. Threads take turns holding a wait lock to call <code>rmw_wait</code> and take one ready item, then release the lock before executing it, so several callbacks can run at once — provided the callback groups allow it (concept 3).</li>
+    <li lang="zh-CN"><strong><code>StaticSingleThreadedExecutor</code></strong>：按官方文档，它不在每一轮重新扫描节点结构，因此开销更小，只适合在初始化时就建好全部实体的节点。Jazzy 的头文件里它没有标为弃用，但它在后续发行版中的状态有变化——<strong>请查你所用发行版的文档</strong>。</li>
+    <li lang="en"><strong><code>StaticSingleThreadedExecutor</code></strong>: per the official docs, it does not rescan the node structure on every round, so its overhead is lower, and it suits only nodes that create all their entities at initialisation. Jazzy’s header does not mark it deprecated, but its status changes in later distributions — <strong>check the docs for your distribution</strong>.</li>
+    <li lang="zh-CN"><strong>Events executor</strong>：不再每轮把实体塞进 wait set 去轮询，而是让中间件在有事件时把事件推进一个队列，执行器按到达顺序处理；定时器由单独的机制管理。Jazzy 的 rclcpp 源码里有 <code>rclcpp::experimental::executors::EventsExecutor</code>（在 experimental 命名空间下）；它在各发行版、各客户端库（例如 rclpy）上的可用性和成熟度<strong>请查文档</strong>。</li>
+    <li lang="en"><strong>Events executor</strong>: instead of putting entities into a wait set and polling every round, the middleware pushes an event into a queue when something happens, and the executor handles events in arrival order; timers are managed by a separate mechanism. Jazzy’s rclcpp source contains <code>rclcpp::experimental::executors::EventsExecutor</code> (in the experimental namespace); for its availability and maturity on each distribution and client library (for example rclpy), <strong>check the docs</strong>.</li>
+  </ul>
+  <p lang="zh-CN">rclpy 有对应的 <code>rclpy.executors.SingleThreadedExecutor</code> 和 <code>MultiThreadedExecutor</code>（Jazzy 源码里线程数默认取 <code>os.cpu_count()</code>）。但 Python 3.12 有 GIL：同一时刻只有一个线程在执行 Python 字节码。所以 rclpy 的多线程执行器带来的是<em>并发</em>（一个回调在等服务响应或做 I/O 时，别的回调能跑），而不是 CPU 上的并行。</p>
+  <p lang="en">rclpy has matching <code>rclpy.executors.SingleThreadedExecutor</code> and <code>MultiThreadedExecutor</code> (in the Jazzy source the thread count defaults to <code>os.cpu_count()</code>). But Python 3.12 has the GIL: only one thread executes Python bytecode at any moment. So what rclpy’s multithreaded executor gives you is <em>concurrency</em> (while one callback waits for a service response or does I/O, others can run), not parallelism on the CPU.</p>
+  <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲执行器与多节点进程的章节；rclcpp 源码 <a href="https://github.com/ros2/rclcpp/tree/jazzy/rclcpp/include/rclcpp/executors">rclcpp/executors（jazzy 分支）</a>。</p>
+  <p lang="en">Further reading: the chapters of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on executors and processes holding several nodes; the rclcpp source <a href="https://github.com/ros2/rclcpp/tree/jazzy/rclcpp/include/rclcpp/executors">rclcpp/executors (jazzy branch)</a>.</p>
+
+  <h3 lang="zh-CN">3. callback group：MutuallyExclusive 与 Reentrant</h3><h3 lang="en">3. Callback groups: MutuallyExclusive and Reentrant</h3>
+  <p lang="zh-CN">执行器线程有几个，决定的是<em>最多</em>能同时跑几个回调；callback group 决定的是<em>允许</em>哪些回调同时跑。规则只有四条：</p>
+  <p lang="en">The number of executor threads decides how many callbacks <em>at most</em> can run at once; callback groups decide which callbacks are <em>allowed</em> to run at once. There are only four rules:</p>
+  <ul>
+    <li lang="zh-CN"><strong>MutuallyExclusive</strong>（<code>rclcpp::CallbackGroupType::MutuallyExclusive</code>）：同一组里任何时刻最多一个回调在跑。</li>
+    <li lang="en"><strong>MutuallyExclusive</strong> (<code>rclcpp::CallbackGroupType::MutuallyExclusive</code>): at most one callback of the group runs at any moment.</li>
+    <li lang="zh-CN"><strong>Reentrant</strong>（<code>rclcpp::CallbackGroupType::Reentrant</code>）：组内回调可以任意并行，官方文档特别说明<em>同一个回调的不同实例</em>也可以同时跑。</li>
+    <li lang="en"><strong>Reentrant</strong> (<code>rclcpp::CallbackGroupType::Reentrant</code>): callbacks of the group may run in parallel without restriction; the official docs point out that <em>different instances of the same callback</em> may also run at the same time.</li>
+    <li lang="zh-CN"><strong>不同组之间</strong>总是可以并行。</li>
+    <li lang="en"><strong>Different groups</strong> may always run in parallel.</li>
+    <li lang="zh-CN"><strong>默认组</strong>：创建实体时不指定 group，它就进节点的默认组，而默认组是 MutuallyExclusive。所以只把执行器换成多线程、不建新组，一个节点里的回调仍然一个接一个跑。</li>
+    <li lang="en"><strong>The default group</strong>: an entity created without a group goes into the node’s default group, and the default group is MutuallyExclusive. So switching only the executor to multithreaded, without creating new groups, still runs the callbacks of one node one after another.</li>
+  </ul>
+<pre data-lang="cpp" data-file="groups.cpp">// 在节点构造函数里：控制环一组，传感器输入一组
+auto control = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+auto io = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+
+timer_ = create_wall_timer(10ms, [this]() {control_step();}, control);
+
+rclcpp::SubscriptionOptions opts;
+opts.callback_group = io;
+sub_ = create_subscription&lt;sensor_msgs::msg::LaserScan&gt;(
+  "scan", 10, [this](sensor_msgs::msg::LaserScan::ConstSharedPtr m) {on_scan(m);}, opts);
+
+// main()：只有多线程执行器才会真的并行
+rclcpp::executors::MultiThreadedExecutor executor;
+executor.add_node(node);
+executor.spin();</pre>
+<pre data-lang="py" data-file="groups.py">from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+
+# 在节点 __init__ 里
+control = MutuallyExclusiveCallbackGroup()
+io = ReentrantCallbackGroup()
+self.timer = self.create_timer(0.01, self.control_step, callback_group=control)
+self.sub = self.create_subscription(LaserScan, 'scan', self.on_scan, 10, callback_group=io)
+
+# main()
+executor = MultiThreadedExecutor()
+executor.add_node(node)
+executor.spin()</pre>
+  <div class="note" lang="zh-CN">Reentrant 只是「允许并行」，并不让你的代码变得线程安全。两个同时运行的 <code>on_scan</code> 要写同一个成员变量，仍然得自己加 <code>std::mutex</code> 或 <code>threading.Lock</code>——这就是 <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a> 里的竞态，只是换到了用户态。在单线程执行器上，group 怎么设都不会产生并行。</div>
+  <div class="note" lang="en">Reentrant only “allows parallelism”; it does not make your code thread-safe. Two <code>on_scan</code> calls running at once that write the same member still need your own <code>std::mutex</code> or <code>threading.Lock</code> — the races of <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a>, moved to user space. On a single-threaded executor, no group setting ever produces parallelism.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲节点、回调与多线程的章节；官方 <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Using-callback-groups.html">Using Callback Groups</a>。</p>
+  <p lang="en">Further reading: the chapters of Renard, <em>ROS 2 From Scratch</em>, on nodes, callbacks and multithreading; the official <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Using-callback-groups.html">Using Callback Groups</a>.</p>
+
+  <h3 lang="zh-CN">4. 定时器</h3><h3 lang="en">4. Timers</h3>
+  <p lang="zh-CN"><code>create_wall_timer(period, callback, group)</code> 用 steady 时钟，不受系统时间调整影响，也不跟随仿真时间；<code>create_timer</code> 用节点的时钟，<code>use_sim_time</code> 为真时跟着 <code>/clock</code> 走（Phase 5）。一个定时器在 rcl 里就是一个 <code>rcl_timer_t</code>，记着下一次到期时刻 <code>next_call_time</code>：</p>
+  <p lang="en"><code>create_wall_timer(period, callback, group)</code> uses the steady clock, which is unaffected by system time changes and does not follow simulated time; <code>create_timer</code> uses the node’s clock, which follows <code>/clock</code> when <code>use_sim_time</code> is true (Phase 5). In rcl a timer is an <code>rcl_timer_t</code> that remembers its next expiry, <code>next_call_time</code>:</p>
+  <ol>
+    <li lang="zh-CN">执行器把「离最近一个 <code>next_call_time</code> 还有多久」当作 <code>rmw_wait</code> 的超时。</li>
+    <li lang="en">The executor uses “time left until the nearest <code>next_call_time</code>” as the timeout for <code>rmw_wait</code>.</li>
+    <li lang="zh-CN">醒来后发现定时器到期，执行器调用 <code>rcl_timer_call</code>，再调用你的回调。所以回调只会<em>晚于</em>到期时刻开始，晚多少就是这一轮的延迟。</li>
+    <li lang="en">On waking, the executor finds the timer has expired, calls <code>rcl_timer_call</code>, then your callback. So the callback can only start <em>after</em> the expiry, and how much later is this round’s latency.</li>
+    <li lang="zh-CN">下一次到期从<em>计划时刻</em>算起，加一个周期，而不是从回调实际开始的时刻算起，所以迟到不会累积。如果已经错过了不止一个周期，Jazzy 的 <code>rcl/src/rcl/timer.c</code> 会把到期时刻一次往后推若干个周期：错过的那几次直接跳过，不会连发补上。</li>
+    <li lang="en">The next expiry is computed from the <em>scheduled</em> time plus one period, not from when the callback actually started, so lateness does not accumulate. If more than one period has been missed, Jazzy’s <code>rcl/src/rcl/timer.c</code> moves the expiry forward by as many periods as needed in one step: the missed calls are skipped, not fired back to back.</li>
+  </ol>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲在节点里用定时器的章节；rcl 源码 <a href="https://github.com/ros2/rcl/blob/jazzy/rcl/src/rcl/timer.c">timer.c（jazzy 分支）</a> 里的 <code>rcl_timer_call</code>。</p>
+  <p lang="en">Further reading: the chapters of Renard, <em>ROS 2 From Scratch</em>, on using timers in nodes; <code>rcl_timer_call</code> in the rcl source <a href="https://github.com/ros2/rcl/blob/jazzy/rcl/src/rcl/timer.c">timer.c (jazzy branch)</a>.</p>
+
+  <h3 lang="zh-CN">5. 在回调里调用服务为什么会死锁</h3><h3 lang="en">5. Why calling a service inside a callback deadlocks</h3>
+  <p lang="zh-CN">场景：一个定时器回调里调用服务，然后<em>阻塞等待</em>响应——rclpy 里是 <code>client.call(req)</code>，rclcpp 里是 <code>async_send_request</code> 之后对 future 调用 <code>get()</code> 或 <code>wait()</code>。在单线程执行器上它永远不返回。按执行器循环一步步看：</p>
+  <p lang="en">The scenario: a timer callback calls a service and then <em>blocks waiting</em> for the response — <code>client.call(req)</code> in rclpy, or <code>async_send_request</code> followed by <code>get()</code> or <code>wait()</code> on the future in rclcpp. On a single-threaded executor it never returns. Follow the executor loop step by step:</p>
+  <ol>
+    <li lang="zh-CN">执行器唯一的线程在执行你的定时器回调。请求发出去了，服务端很快回了响应。</li>
+    <li lang="en">The executor’s only thread is executing your timer callback. The request goes out, and the server answers quickly.</li>
+    <li lang="zh-CN">响应到了 DDS 的 reader 队列，对应的 client 实体在 wait set 里会变成就绪——但只有执行器线程再次 <code>rmw_wait</code>、取出这个 client、调用 take response 之后，future 才会被置为完成（rclpy 里是触发 <code>call()</code> 在等的那个事件）。</li>
+    <li lang="en">The response reaches the DDS reader queue, and the matching client entity would become ready in the wait set — but the future is only completed after the executor thread does <code>rmw_wait</code> again, takes that client and takes its response (in rclpy, this is what sets the event <code>call()</code> is waiting on).</li>
+    <li lang="zh-CN">执行器唯一的线程正阻塞在你的回调里等这个 future。等的人和要完成它的人是同一个线程：谁也不动，这就是死锁。</li>
+    <li lang="en">The executor’s only thread is blocked inside your callback waiting for that future. The one waiting and the one who would complete it are the same thread: neither moves, and that is the deadlock.</li>
+  </ol>
+  <p lang="zh-CN">换成多线程执行器也不一定够：如果 client 和发起调用的定时器都在默认组（MutuallyExclusive）里，处理响应的那一步要等这个组空出来，而组被正在等响应的回调占着——还是死锁。在回调里调用 <code>rclcpp::spin_until_future_complete(node, future)</code> 也不行：节点已经属于一个执行器，rclcpp 会抛异常拒绝再把它加进另一个。</p>
+  <p lang="en">Switching to a multithreaded executor is not necessarily enough: if the client and the timer making the call are both in the default (MutuallyExclusive) group, the step that handles the response must wait for that group to be free, and the group is held by the callback that is waiting for the response — still a deadlock. Calling <code>rclcpp::spin_until_future_complete(node, future)</code> inside a callback does not work either: the node already belongs to an executor, and rclcpp throws rather than add it to another one.</p>
+  <ul>
+    <li lang="zh-CN"><strong>修法 1，不阻塞</strong>：rclcpp 用 <code>async_send_request(req, callback)</code>，在响应回调里继续处理；rclpy 用 <code>call_async(req)</code> 加 <code>future.add_done_callback(...)</code>。回调立刻返回，执行器线程空出来处理响应。</li>
+    <li lang="en"><strong>Fix 1, do not block</strong>: in rclcpp use <code>async_send_request(req, callback)</code> and continue in the response callback; in rclpy use <code>call_async(req)</code> plus <code>future.add_done_callback(...)</code>. The callback returns at once, and the executor thread is free to handle the response.</li>
+    <li lang="zh-CN"><strong>修法 2，分组 + 多线程</strong>：把 client 放进另一个 callback group，用 <code>MultiThreadedExecutor</code>。这时阻塞等待的是一个线程，处理响应的是另一个线程，而且它们不在同一组。最好用带超时的等待（例如 <code>wait_for</code>），服务端不在时不至于永远卡住。</li>
+    <li lang="en"><strong>Fix 2, separate group + multithreaded</strong>: put the client in another callback group and use <code>MultiThreadedExecutor</code>. Now one thread blocks waiting and another thread handles the response, and they are not in the same group. Prefer a wait with a timeout (for example <code>wait_for</code>), so that a missing server does not hang you forever.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲服务与客户端的章节；官方 <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Sync-Vs-Async.html">Synchronous vs. asynchronous service clients</a>（「Sync deadlock」一节）。</p>
+  <p lang="en">Further reading: the chapters of Renard, <em>ROS 2 From Scratch</em>, on services and clients; the official <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Sync-Vs-Async.html">Synchronous vs. asynchronous service clients</a> (the “Sync deadlock” section).</p>
+
+  <h3 lang="zh-CN">6. 回调延迟与抖动：从哪里来、怎么量</h3><h3 lang="en">6. Callback latency and jitter: where they come from and how to measure them</h3>
+  <p lang="zh-CN"><strong>延迟</strong>是事件（定时器到期、消息到达）到回调开始的时间；<strong>抖动</strong>是这个延迟（或相邻两次回调的间隔）的变化量。对一个 100 Hz 定时器，理想间隔是 10 000 µs，抖动就是实际间隔偏离它多少。来源可以拆成四类：</p>
+  <p lang="en"><strong>Latency</strong> is the time from an event (a timer expiring, a message arriving) to the start of the callback; <strong>jitter</strong> is how much that latency (or the interval between consecutive callbacks) varies. For a 100 Hz timer the ideal interval is 10 000 µs, and jitter is how far the actual interval strays from it. The sources fall into four kinds:</p>
+  <ol>
+    <li lang="zh-CN"><strong>定时器本身</strong>：<code>rmw_wait</code> 的超时最终是内核里一个高精度定时器加一次唤醒。普通调度策略的线程有 <strong>timer slack</strong>，默认 50 µs，内核可以把到期推迟最多这么多，好把几次唤醒合并；实时策略的线程不加 slack（见 <code>prctl(PR_SET_TIMERSLACK)</code> 的手册）。在虚拟机里，客体内核的时钟中断还要经过宿主的虚拟化层。</li>
+    <li lang="en"><strong>The timer itself</strong>: the timeout of <code>rmw_wait</code> ends up as a high-resolution timer in the kernel plus a wake-up. Threads under the normal scheduling policies have <strong>timer slack</strong>, 50 µs by default, by which the kernel may delay an expiry so as to merge several wake-ups; threads under real-time policies get no slack (see the <code>prctl(PR_SET_TIMERSLACK)</code> man page). In a VM, the guest kernel’s timer interrupts also pass through the host’s virtualisation layer.</li>
+    <li lang="zh-CN"><strong>执行器队列</strong>：同一线程里排在前面的回调，或同一 MutuallyExclusive 组里正在跑的回调（概念 1、3）。这一项和内核无关，是你的程序结构决定的，往往也是最大的一项。</li>
+    <li lang="en"><strong>The executor queue</strong>: callbacks ahead of yours in the same thread, or a callback already running in the same MutuallyExclusive group (concepts 1 and 3). This one has nothing to do with the kernel; your program’s structure decides it, and it is often the largest.</li>
+    <li lang="zh-CN"><strong>调度器</strong>：线程被唤醒只是变成可运行，还得等 CPU。在普通（fair）类里它和所有其他普通任务一起由 EEVDF 排队；CPU 都忙时，排队时间可能达到毫秒级。Docker Desktop 里还多一层：Linux VM 的每个 vCPU 本身是 macOS 上的一个线程，由 XNU 调度，macOS 把它停下时，Linux 里的一切都停了，而 Linux 看不到原因。</li>
+    <li lang="en"><strong>The scheduler</strong>: being woken only makes a thread runnable; it still has to wait for a CPU. In the ordinary (fair) class it queues under EEVDF with every other ordinary task; when all CPUs are busy, that wait can reach milliseconds. Docker Desktop adds one more layer: each vCPU of the Linux VM is itself a thread on macOS, scheduled by XNU, and when macOS stops it, everything in Linux stops, for a reason Linux cannot see.</li>
+    <li lang="zh-CN"><strong>内存分配与缺页</strong>：<code>new</code> / <code>malloc</code> 可能要拿分配器的锁、调用 <code>brk</code> 或 <code>mmap</code>；第一次写一个新页会触发缺页异常。<code>std::vector</code> 扩容、<code>std::string</code> 拼接、每条消息一次 <code>make_shared</code>、日志宏格式化，都可能在热路径上分配。Python 里几乎每个操作都分配内存，还有 GIL 和垃圾回收。</li>
+    <li lang="en"><strong>Memory allocation and page faults</strong>: <code>new</code> / <code>malloc</code> may take the allocator’s lock and call <code>brk</code> or <code>mmap</code>; the first write to a new page triggers a page fault. Growing a <code>std::vector</code>, concatenating a <code>std::string</code>, one <code>make_shared</code> per message, formatting in a logging macro — all of these can allocate on the hot path. In Python almost every operation allocates, and there are also the GIL and garbage collection.</li>
+  </ol>
+  <p lang="zh-CN">对消息还要再加上中间件那段：序列化、DDS 线程、内核的 socket 或共享内存（Phase 3）。<strong>怎么量</strong>：</p>
+  <p lang="en">For messages, add the middleware part on top: serialization, the DDS threads, and the kernel’s sockets or shared memory (Phase 3). <strong>How to measure</strong>:</p>
+  <ul>
+    <li lang="zh-CN"><code>ros2 topic hz /tick</code>：打印平均频率、min、max、std dev 和窗口大小（<code>-w</code> 改窗口）。注意 Jazzy 的源码里 min 和 max 只打印到毫秒（<code>%.3f</code> 秒），std dev 到 10 µs，而且它测的是 CLI 进程<em>收到</em>消息的间隔，本身就带着 Python 订阅端的抖动。</li>
+    <li lang="en"><code>ros2 topic hz /tick</code>: prints the average rate, min, max, std dev and window size (<code>-w</code> changes the window). Note that in the Jazzy source min and max are printed only to the millisecond (<code>%.3f</code> seconds) and std dev to 10 µs, and it measures the interval at which the CLI process <em>receives</em> messages, so it carries the jitter of a Python subscriber itself.</li>
+    <li lang="zh-CN"><code>ros2 topic delay /tick</code>：用「现在」减去消息的 <code>header.stamp</code>，所以消息类型必须带 header（Lab A 用 <code>geometry_msgs/msg/PointStamped</code>）。测的是发布到 CLI 收到的整段延迟。</li>
+    <li lang="en"><code>ros2 topic delay /tick</code>: subtracts the message’s <code>header.stamp</code> from “now”, so the message type must have a header (Lab A uses <code>geometry_msgs/msg/PointStamped</code>). It measures the whole delay from publishing to the CLI receiving it.</li>
+    <li lang="zh-CN"><strong>节点自己记时间戳</strong>：在回调开头读 <code>std::chrono::steady_clock</code>，存进预先分配好的数组，攒够一批再算统计。这是唯一能看到微秒级、只属于回调本身的数字的办法，Lab A 就这么做。</li>
+    <li lang="en"><strong>Timestamps recorded by the node itself</strong>: read <code>std::chrono::steady_clock</code> at the start of the callback, store it in a preallocated array, and compute statistics once a batch is full. This is the only way to see microsecond-level numbers that belong to the callback alone, and Lab A does exactly this.</li>
+    <li lang="zh-CN"><strong>ros2_tracing（可选）</strong>：rclcpp、rcl、rmw 里编进了 tracepoint，例如 <code>ros2:callback_start</code> 和 <code>ros2:callback_end</code>，用 LTTng 的用户态追踪记下每个回调的开始和时长。按 ros2_tracing 的 README，Iron 起 LTTng 用户态追踪器是 ROS 2 的依赖；<code>ros2 trace</code> 命令要装可选包 <code>ros-jazzy-ros2trace</code>，launch 里用的 <code>Trace</code> 动作在 <code>ros-jazzy-tracetools-launch</code>。追踪内核要另装 LTTng 内核模块，在容器里做不到（容器不能给 Docker 的 VM 内核装模块）。完整的追踪实验在 Phase 7。</li>
+    <li lang="en"><strong>ros2_tracing (optional)</strong>: rclcpp, rcl and rmw are built with tracepoints such as <code>ros2:callback_start</code> and <code>ros2:callback_end</code>, and LTTng userspace tracing records the start and duration of every callback. Per the ros2_tracing README, the LTTng userspace tracer has been a ROS 2 dependency since Iron; the <code>ros2 trace</code> command needs the optional package <code>ros-jazzy-ros2trace</code>, and the <code>Trace</code> action for launch files is in <code>ros-jazzy-tracetools-launch</code>. Tracing the kernel needs the LTTng kernel modules installed separately, which is not possible in the container (a container cannot load modules into Docker’s VM kernel). The full tracing lab is in Phase 7.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ros2_control 的章节（控制环为什么要固定周期、抖动对控制器意味着什么）；<a href="https://github.com/ros2/ros2_tracing">ros2_tracing</a> 的 README。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on ros2_control (why a control loop needs a fixed period, and what jitter means for a controller); the README of <a href="https://github.com/ros2/ros2_tracing">ros2_tracing</a>.</p>
+
+  <h3 lang="zh-CN">7. ROS 2 的实时基础：SCHED_FIFO、内存、PREEMPT_RT</h3><h3 lang="en">7. Real-time basics for ROS 2: SCHED_FIFO, memory, PREEMPT_RT</h3>
+  <p lang="zh-CN">实时的意思不是「快」，而是<strong>最坏情况有界</strong>：控制环每一次都要在截止时间之前跑完。ROS 2 本身不会让程序变成实时的；它的设计是<em>允许</em>你在实时线程里用 rclcpp，剩下的靠内核和你自己的写法。按上面的四个来源逐个处理：</p>
+  <p lang="en">Real-time does not mean “fast”; it means a <strong>bounded worst case</strong>: the control loop finishes before its deadline every single time. ROS 2 does not make a program real-time by itself; it is designed to <em>allow</em> rclcpp to be used from a real-time thread, and the rest depends on the kernel and on how you write code. Take the four sources above one at a time:</p>
+  <ul>
+    <li lang="zh-CN"><strong>调度：<code>SCHED_FIFO</code></strong>。Linux 的调度类有先后：实时类（<code>SCHED_FIFO</code>、<code>SCHED_RR</code>）排在普通 fair 类（EEVDF）之上。一个 CPU 上只要有可运行的 FIFO 任务，任何普通任务都不会被选中。FIFO 任务之间按优先级 1–99 比较，高的先跑；同优先级的 FIFO 任务没有时间片，一直跑到它自己阻塞或让出（<code>SCHED_RR</code> 才加时间片）。<code>chrt -f 80 命令</code> 用 FIFO 80 启动一个程序，<code>chrt -p PID</code> 查看。需要 <code>CAP_SYS_NICE</code> 或足够的 <code>RLIMIT_RTPRIO</code>，实验容器两样都给了。</li>
+    <li lang="en"><strong>Scheduling: <code>SCHED_FIFO</code></strong>. Linux scheduling classes are ordered: the real-time class (<code>SCHED_FIFO</code>, <code>SCHED_RR</code>) sits above the ordinary fair class (EEVDF). As long as a CPU has a runnable FIFO task, no ordinary task is picked there. FIFO tasks compare by priority 1–99, higher first; a FIFO task has no time slice against equal-priority peers and runs until it blocks or yields (<code>SCHED_RR</code> adds a slice). <code>chrt -f 80 command</code> starts a program at FIFO 80, and <code>chrt -p PID</code> shows it. This needs <code>CAP_SYS_NICE</code> or a sufficient <code>RLIMIT_RTPRIO</code>, and the lab container grants both.</li>
+    <li lang="zh-CN"><strong>安全网：实时节流</strong>。内核文档 <code>sched-rt-group</code> 给出的默认值是 <code>sched_rt_runtime_us</code> = 950000、<code>sched_rt_period_us</code> = 1000000：实时任务每秒最多用 0.95 秒，留 5% 给普通任务。一个写错了、在 FIFO 下死循环的线程不会让机器完全卡死，但它会被周期性地停下，这本身又是抖动。具体机制随内核版本变化，以 <code>/proc/sys/kernel/sched_rt_runtime_us</code> 和你内核的文档为准。</li>
+    <li lang="en"><strong>The safety net: real-time throttling</strong>. The kernel document <code>sched-rt-group</code> gives the defaults <code>sched_rt_runtime_us</code> = 950000 and <code>sched_rt_period_us</code> = 1000000: real-time tasks may use at most 0.95 s of every second, leaving 5% for ordinary tasks. A buggy thread spinning under FIFO will not freeze the machine completely, but it is stopped periodically, which is jitter in its own right. The exact mechanism changes between kernel versions; go by <code>/proc/sys/kernel/sched_rt_runtime_us</code> and your kernel’s documentation.</li>
+    <li lang="zh-CN"><strong>内存：<code>mlockall</code> 与不在热路径上分配</strong>。<code>mlockall(MCL_CURRENT | MCL_FUTURE)</code> 把进程现有和以后的页都锁在内存里，不会被换出；需要 <code>CAP_IPC_LOCK</code> 或足够大的 <code>RLIMIT_MEMLOCK</code>——实验容器的 compose 没有放宽 memlock，所以 Lab B 里它很可能失败，这本身就是一个观察点。热路径里预先分配（<code>reserve</code>）、重复使用同一个消息对象、不在控制环里打日志。</li>
+    <li lang="en"><strong>Memory: <code>mlockall</code> and no allocation on the hot path</strong>. <code>mlockall(MCL_CURRENT | MCL_FUTURE)</code> locks the process’s current and future pages in memory so they are never swapped out; it needs <code>CAP_IPC_LOCK</code> or a large enough <code>RLIMIT_MEMLOCK</code> — the lab compose file does not raise memlock, so it will most likely fail in Lab B, which is itself something to observe. On the hot path, preallocate (<code>reserve</code>), reuse one message object, and do not log inside the control loop.</li>
+    <li lang="zh-CN"><strong>锁：优先级反转</strong>。实时线程去拿一把被普通线程持有的 mutex，而这个普通线程又被别的任务抢走了 CPU，实时线程就被间接拖住。办法是优先级继承的 mutex（pthread 的 <code>PTHREAD_PRIO_INHERIT</code>，内核里落到 PI futex 和 rt_mutex），机制见 <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a> 概念 1 和 8。注意 DDS 的内部线程和你的执行器线程共享队列和锁，它们不一定是同一个优先级。</li>
+    <li lang="en"><strong>Locks: priority inversion</strong>. A real-time thread takes a mutex held by an ordinary thread, and that ordinary thread has lost the CPU to some other task, so the real-time thread is held up indirectly. The remedy is a priority-inheritance mutex (pthread’s <code>PTHREAD_PRIO_INHERIT</code>, which becomes PI futexes and rt_mutex in the kernel); the mechanism is in concepts 1 and 8 of <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a>. Note that the DDS internal threads share queues and locks with your executor threads, and they are not necessarily at the same priority.</li>
+    <li lang="zh-CN"><strong>内核：<code>PREEMPT_RT</code></strong>。普通内核里有不少不可抢占的区段，实时线程被唤醒后也得等它们结束。<code>PREEMPT_RT</code> 把大部分 spinlock 换成可睡眠的 rt_mutex、把中断处理放进内核线程，让几乎所有内核代码都可被抢占；它在 Linux 6.12 进入主线，但仍需要一个用这个选项编译的内核，运行中的内核在 <code>uname -v</code> 里会显示 <code>PREEMPT_RT</code>。在实验容器里做不到：容器共用 Docker Desktop VM 的内核，见实验环境页概念 5。</li>
+    <li lang="en"><strong>The kernel: <code>PREEMPT_RT</code></strong>. An ordinary kernel has many non-preemptible sections, and a woken real-time thread must wait for them to finish. <code>PREEMPT_RT</code> turns most spinlocks into sleeping rt_mutexes and moves interrupt handling into kernel threads, so almost all kernel code becomes preemptible; it entered mainline in Linux 6.12, but it still needs a kernel built with that option, and a running one shows <code>PREEMPT_RT</code> in <code>uname -v</code>. It is not possible in the lab container: a container shares the kernel of Docker Desktop’s VM, see concept 5 of the lab environment page.</li>
+  </ul>
+  <div class="note" lang="zh-CN"><strong><code>chrt</code> 在容器里能修什么、修不了什么。</strong>能修：同一个 Linux VM 里普通任务和你抢 CPU 造成的排队（第 3 类来源的 Linux 部分），以及 timer slack。修不了：执行器队列（第 2 类，那是你的代码结构）；内存分配与缺页（第 4 类）；Docker VM 内核里不可抢占的区段（没有 <code>PREEMPT_RT</code>）；macOS 暂停 VM 的 vCPU 线程（Linux 根本看不到，FIFO 99 也一样）；以及优先级更高的实时任务或中断。所以 Lab B 能演示「有优先级」和「没有优先级」的区别，但测不出一个可以写进规格的最坏延迟。</div>
+  <div class="note" lang="en"><strong>What <code>chrt</code> can and cannot fix in a container.</strong> It can fix the queueing caused by ordinary tasks competing for the CPU inside the same Linux VM (the Linux part of source 3), and the timer slack. It cannot fix the executor queue (source 2, which is your code’s structure); memory allocation and page faults (source 4); non-preemptible sections of the Docker VM kernel (there is no <code>PREEMPT_RT</code>); macOS pausing the VM’s vCPU thread (Linux cannot see it at all, even at FIFO 99); or higher-priority real-time tasks and interrupts. So Lab B can show the difference between “with priority” and “without priority”, but cannot measure a worst-case latency you could write into a specification.</div>
+  <p lang="zh-CN">官方的 rclcpp 实时写法指南是 Jazzy 文档的 <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Real-Time-Programming.html">Understanding real-time programming</a>（pendulum 演示：锁内存、预分配、设优先级）；背景知识是设计文章 <a href="https://design.ros2.org/articles/realtime_background.html">Introduction to Real-time Systems</a>。</p>
+  <p lang="en">The official rclcpp real-time guidance is the Jazzy docs page <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Real-Time-Programming.html">Understanding real-time programming</a> (the pendulum demo: locking memory, preallocating, setting priorities); the background is the design article <a href="https://design.ros2.org/articles/realtime_background.html">Introduction to Real-time Systems</a>.</p>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ros2_control 实时更新循环的章节；<a href="https://man7.org/linux/man-pages/man7/sched.7.html">sched(7)</a> 手册（调度策略、优先级、<code>RLIMIT_RTPRIO</code>）。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on the real-time update loop of ros2_control; the <a href="https://man7.org/linux/man-pages/man7/sched.7.html">sched(7)</a> man page (scheduling policies, priorities, <code>RLIMIT_RTPRIO</code>).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：执行器类型</h2><h2 id="compare-en" lang="en">Comparison: executor types</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th class="ros">SingleThreadedExecutor</th><th class="gz">MultiThreadedExecutor</th><th>StaticSingleThreadedExecutor</th><th>EventsExecutor</th></tr>
+    <tr><td><span lang="zh-CN">线程</span><span lang="en">Threads</span></td><td><span lang="zh-CN">1 个，调用 <code>spin()</code> 的那个</span><span lang="en">1, the one calling <code>spin()</code></span></td><td><span lang="zh-CN">线程池，默认 CPU 核数，至少 2</span><span lang="en">a pool, CPU cores by default, at least 2</span></td><td><span lang="zh-CN">1 个</span><span lang="en">1</span></td><td><span lang="zh-CN">1 个执行线程，定时器另有机制（以文档为准）</span><span lang="en">1 executing thread, timers handled separately (check the docs)</span></td></tr>
+    <tr><td><span lang="zh-CN">怎样发现有活干</span><span lang="en">How it finds work</span></td><td><span lang="zh-CN">每轮 wait set + <code>rmw_wait</code></span><span lang="en">wait set + <code>rmw_wait</code> every round</span></td><td><span lang="zh-CN">同左，线程轮流持锁去等</span><span lang="en">same, threads take turns holding the wait lock</span></td><td><span lang="zh-CN">wait set，但不每轮重扫节点结构</span><span lang="en">wait set, without rescanning node structure every round</span></td><td><span lang="zh-CN">中间件把事件推进队列，不轮询</span><span lang="en">middleware pushes events into a queue, no polling</span></td></tr>
+    <tr><td><span lang="zh-CN">执行顺序</span><span lang="en">Order</span></td><td><span lang="zh-CN">按类型扫描就绪集合；整体是轮转，不是 FIFO</span><span lang="en">ready set scanned by kind; round-robin overall, not FIFO</span></td><td><span lang="zh-CN">同左，再加上并行</span><span lang="en">same, plus parallelism</span></td><td><span lang="zh-CN">同 SingleThreaded</span><span lang="en">same as SingleThreaded</span></td><td><span lang="zh-CN">按事件到达顺序</span><span lang="en">event arrival order</span></td></tr>
+    <tr><td><span lang="zh-CN">callback group 的作用</span><span lang="en">Effect of callback groups</span></td><td><span lang="zh-CN">不产生并行</span><span lang="en">no parallelism</span></td><td><span lang="zh-CN">决定哪些回调能同时跑</span><span lang="en">decides which callbacks may run together</span></td><td><span lang="zh-CN">不产生并行</span><span lang="en">no parallelism</span></td><td><span lang="zh-CN">不产生并行（单线程时）</span><span lang="en">no parallelism (when single-threaded)</span></td></tr>
+    <tr><td><span lang="zh-CN">开销</span><span lang="en">Overhead</span></td><td><span lang="zh-CN">中</span><span lang="en">medium</span></td><td><span lang="zh-CN">较高：锁和线程切换</span><span lang="en">higher: locking and thread switches</span></td><td><span lang="zh-CN">较低（官方文档）</span><span lang="en">lower (official docs)</span></td><td><span lang="zh-CN">设计目标是更低（以文档为准）</span><span lang="en">designed to be lower (check the docs)</span></td></tr>
+    <tr><td><span lang="zh-CN">Jazzy 上的状态</span><span lang="en">Status on Jazzy</span></td><td><span lang="zh-CN">稳定，<code>rclcpp::spin</code> 默认用它</span><span lang="en">stable, used by <code>rclcpp::spin</code></span></td><td><span lang="zh-CN">稳定</span><span lang="en">stable</span></td><td><span lang="zh-CN">Jazzy 头文件未标弃用；后续发行版的状态请查文档</span><span lang="en">not marked deprecated in the Jazzy header; check the docs for later distributions</span></td><td><span lang="zh-CN">rclcpp 的 experimental 命名空间；rclpy 等的可用性请查文档</span><span lang="en">in rclcpp’s experimental namespace; check the docs for rclpy and others</span></td></tr>
+    <tr><td><span lang="zh-CN">什么时候用</span><span lang="en">When to use</span></td><td><span lang="zh-CN">默认选择；回调都很短、不需要并行</span><span lang="en">the default; callbacks are short and need no parallelism</span></td><td><span lang="zh-CN">有阻塞调用、长回调或要隔离控制环</span><span lang="en">blocking calls, long callbacks, or a control loop to isolate</span></td><td><span lang="zh-CN">实体全在初始化时建好、在意开销</span><span lang="en">all entities created at init and overhead matters</span></td><td><span lang="zh-CN">需要按到达顺序处理、事件很多</span><span lang="en">many events that should be handled in arrival order</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 执行器循环：wait set → 就绪实体 → 按顺序执行回调</h3><h3 lang="en">(a) The executor loop: wait set → ready entities → callbacks in order</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：单线程执行器 spin 的一轮。上排是节点上的实体、wait set 和睡眠中的 rmw_wait，右下是内核和 DDS 线程把它叫醒，下排是就绪集合和逐个执行的回调，左边的箭头回到下一轮。按「播放」一步步走。",
+           "第 1 步，收集：节点上登记的 timer、subscription、service、client 和 guard condition，按 callback group 收集进 rcl_wait_set_t。wait set 每类实体一个数组，每项只是一个就绪与否的标志。",
+           "第 2 步，等待：执行器线程调用 rcl_wait，再到 rmw_wait，在这里睡眠。超时设为最近一个定时器的到期时刻。在内核看来，这个线程是一个状态为 S 的 task，大致是在 futex 上等待，不占 CPU。",
+           "第 3 步，唤醒：DDS 的接收线程从 recvmsg 返回，把数据放进 reader 队列并通知 rmw；或者定时器到期、guard condition 被触发。futex 唤醒让执行器线程重新可运行，什么时候上 CPU 由调度器决定，见 Kernel Phase 1。",
+           "第 4 步，就绪集合：rmw_wait 返回，没就绪的项被置空。这里 10 ms 的 timer 和 /cmd 订阅就绪，service 和 client 没有。Jazzy 的 rclcpp 按类型扫描：timer、subscription、service、client、waitable。",
+           "第 5 步，执行：在 spin 的这一个线程里一次一个地跑。timer 先 rcl_timer_call 再调用回调，订阅先 rcl_take 取一条消息再调用回调。执行期间新到的消息要等下一轮；一个慢回调会推迟后面所有回调。",
+           "第 6 步，回到第 1 步，再次进入 rmw_wait。整个循环一直跑到关闭。多线程执行器是几个线程轮流执行这个循环的等待部分，再各自去执行取到的回调。"]'
+         data-captions-en='["The whole picture: one round of a single-threaded executor spin. The top row holds the node entities, the wait set and rmw_wait asleep; bottom right, the kernel and a DDS thread wake it; the bottom row holds the ready set and the callbacks run one by one, and the arrow on the left goes back to the next round. Press Play to step through.",
+           "Step 1, collect: the timers, subscriptions, services, clients and guard conditions registered on the node are collected, by callback group, into an rcl_wait_set_t. The wait set has one array per kind of entity, and each entry is just a ready or not ready flag.",
+           "Step 2, wait: the executor thread calls rcl_wait, which calls rmw_wait, and sleeps there. The timeout is set to the nearest timer expiry. To the kernel this thread is a task in state S, approximately waiting on a futex, using no CPU.",
+           "Step 3, wake: a DDS receive thread returns from recvmsg, puts the data into the reader queue and notifies rmw; or a timer expires, or a guard condition is triggered. The futex wake makes the executor thread runnable again, and when it gets the CPU is up to the scheduler, see Kernel Phase 1.",
+           "Step 4, the ready set: rmw_wait returns and the entries that are not ready are cleared. Here the 10 ms timer and the /cmd subscription are ready, the service and the client are not. Jazzy rclcpp scans by kind: timers, subscriptions, services, clients, waitables.",
+           "Step 5, execute: one at a time, in this one spin thread. A timer gets rcl_timer_call and then its callback; a subscription gets rcl_take for one message and then its callback. Messages arriving meanwhile wait for the next round, and one slow callback delays every callback after it.",
+           "Step 6, back to step 1 and into rmw_wait again. The loop runs until shutdown. A multithreaded executor has several threads take turns at the waiting part of this loop, and each then runs the callback it took."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+
+      <g data-step="1"><rect class="box ros" x="25" y="40" width="260" height="175"/>
+        <text x="40" y="62" class="mono" lang="zh-CN">1. 节点上的实体</text><text x="40" y="62" class="mono" lang="en">1. node entities</text>
+        <text x="40" y="90" class="mono">timer 10 ms</text>
+        <text x="40" y="112" class="mono">subscription /cmd</text>
+        <text x="40" y="134" class="mono">service /reset</text>
+        <text x="40" y="156" class="mono">client /map</text>
+        <text x="40" y="178" class="mono">guard condition</text>
+        <text x="40" y="202" class="small" lang="zh-CN">按 callback group 收集</text><text x="40" y="202" class="small" lang="en">collected per callback group</text>
+        <path class="arrow" d="M287 128 L321 128"/>
+        <rect class="box ros" x="325" y="40" width="260" height="175"/>
+        <text x="340" y="62" class="mono">rcl_wait_set_t</text>
+        <text x="340" y="90" class="mono">subscriptions[]</text>
+        <text x="340" y="112" class="mono">timers[]  clients[]</text>
+        <text x="340" y="134" class="mono">services[]</text>
+        <text x="340" y="156" class="mono">guard_conditions[]</text>
+        <text x="340" y="178" class="mono">events[]</text>
+        <text x="340" y="202" class="small" lang="zh-CN">每类一个数组，每项一个就绪标志</text><text x="340" y="202" class="small" lang="en">one array per kind, a flag per entry</text></g>
+
+      <g data-step="2"><path class="arrow" d="M587 128 L621 128"/>
+        <rect class="box ros" x="625" y="40" width="255" height="175"/>
+        <text x="640" y="62" class="mono" lang="zh-CN">2. rmw_wait() 睡眠</text><text x="640" y="62" class="mono" lang="en">2. rmw_wait() sleeps</text>
+        <text x="640" y="90" class="small" lang="zh-CN">执行器线程停在这里</text><text x="640" y="90" class="small" lang="en">the executor thread stops here</text>
+        <text x="640" y="114" class="small" lang="zh-CN">超时 = 最近的定时器到期</text><text x="640" y="114" class="small" lang="en">timeout = nearest timer expiry</text>
+        <text x="640" y="138" class="small" lang="zh-CN">内核里：futex 等待（大致）</text><text x="640" y="138" class="small" lang="en">in the kernel: a futex wait (approx.)</text>
+        <text x="640" y="162" class="small" lang="zh-CN">task 状态 S，不占 CPU</text><text x="640" y="162" class="small" lang="en">task state S, using no CPU</text></g>
+
+      <g data-step="3"><rect class="box linux" x="625" y="245" width="255" height="155"/>
+        <text x="640" y="268" class="mono" lang="zh-CN">3. 唤醒</text><text x="640" y="268" class="mono" lang="en">3. wake-up</text>
+        <text x="640" y="294" class="small" lang="zh-CN">DDS 接收线程：recvmsg 返回</text><text x="640" y="294" class="small" lang="en">DDS receive thread: recvmsg returns</text>
+        <text x="640" y="316" class="small" lang="zh-CN">数据入队，通知 rmw</text><text x="640" y="316" class="small" lang="en">queues the data, notifies rmw</text>
+        <text x="640" y="338" class="small" lang="zh-CN">或：定时器到期、guard 被触发</text><text x="640" y="338" class="small" lang="en">or: a timer expires, a guard fires</text>
+        <text x="640" y="360" class="small" lang="zh-CN">futex 唤醒 → 调度器让它上 CPU</text><text x="640" y="360" class="small" lang="en">futex wake → the scheduler runs it</text>
+        <text x="640" y="382" class="small" lang="zh-CN">（Kernel Phase 1：EEVDF）</text><text x="640" y="382" class="small" lang="en">(Kernel Phase 1: EEVDF)</text>
+        <path class="arrow flow" d="M752 243 L752 219"/></g>
+
+      <g data-step="4"><path class="arrow" d="M650 219 L560 243"/>
+        <rect class="box ros" x="325" y="245" width="260" height="155"/>
+        <text x="340" y="268" class="mono" lang="zh-CN">4. 就绪的实体</text><text x="340" y="268" class="mono" lang="en">4. ready entities</text>
+        <text x="340" y="294" class="mono">timer 10 ms: ready</text>
+        <text x="340" y="316" class="mono">sub /cmd: ready</text>
+        <text x="340" y="338" class="mono">service /reset: not ready</text>
+        <text x="340" y="360" class="mono">client /map: not ready</text>
+        <text x="340" y="386" class="small" lang="zh-CN">顺序：timer、sub、service、client</text><text x="340" y="386" class="small" lang="en">order: timers, subs, services, clients</text></g>
+
+      <g data-step="5"><path class="arrow" d="M323 322 L289 322"/>
+        <rect class="box ros" x="25" y="245" width="260" height="155"/>
+        <text x="40" y="268" class="mono" lang="zh-CN">5. 逐个执行回调</text><text x="40" y="268" class="mono" lang="en">5. run callbacks</text>
+        <text x="40" y="294" class="mono">rcl_timer_call → cb</text>
+        <text x="40" y="316" class="mono">rcl_take → sub cb</text>
+        <text x="40" y="342" class="small" lang="zh-CN">在 spin 线程里，一次一个</text><text x="40" y="342" class="small" lang="en">one at a time, on the spin thread</text>
+        <text x="40" y="364" class="small" lang="zh-CN">执行中新到的消息等下一轮</text><text x="40" y="364" class="small" lang="en">new arrivals wait for the next round</text>
+        <text x="40" y="386" class="small" lang="zh-CN">一个慢回调推迟后面所有回调</text><text x="40" y="386" class="small" lang="en">one slow callback delays the rest</text></g>
+
+      <g data-step="6"><path class="arrow flow" d="M150 243 L150 219"/>
+        <text x="162" y="236" class="small" style="fill: var(--ros)" lang="zh-CN">6. 回到第 1 步，再等</text><text x="162" y="236" class="small" style="fill: var(--ros)" lang="en">6. back to step 1, wait again</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 多线程执行器上的两个 callback group：时间线</h3><h3 lang="en">(b) Two callback groups on a multithreaded executor: a timeline</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
+         data-captions='["全图：一个三线程的 MultiThreadedExecutor。组 A 是 MutuallyExclusive，里面有定时器回调 A1 和订阅回调 A2；组 R 是 Reentrant，里面只有一个服务回调 R。横轴是时间（示意），每一行是一个执行器线程。按「播放」看谁能和谁同时跑。",
+           "第 1 步，t = 0：A1 就绪，线程 1 取到它开始执行，一直跑到 t = 3。从这一刻起组 A 被占用。",
+           "第 2 步，t = 1：一个服务请求到达，R 就绪。R 在另一个组，线程 2 立刻执行它，与 A1 并行。不同组之间总是可以并行。",
+           "第 3 步，t = 2：A2 的消息到了，此时线程 3 空闲，但 A2 不能开始：它和正在运行的 A1 同在 MutuallyExclusive 组 A。A2 只能等。",
+           "第 4 步，t = 3：A1 结束，组 A 空出来，A2 才开始执行，跑到 t = 5。由哪个空闲线程执行它不重要，这里画在线程 1 上。A1 与 A2 在时间上从不重叠。",
+           "第 5 步，t = 4：又一个服务请求到达，第一次 R 还没跑完。R 所在的组是 Reentrant，线程 3 立刻执行第二个 R，同一个回调的两个实例同时运行。它们共享的数据要自己加锁。",
+           "第 6 步，小结：同一个 MutuallyExclusive 组里的回调从不重叠，哪怕有空闲线程；Reentrant 组里连同一个回调都可以与自己重叠；不同组之间可以并行；能同时跑几个，最终受线程数限制。"]'
+         data-captions-en='["The whole picture: a MultiThreadedExecutor with three threads. Group A is MutuallyExclusive and holds the timer callback A1 and the subscription callback A2; group R is Reentrant and holds one service callback, R. The horizontal axis is time (schematic), and each row is one executor thread. Press Play to see who may run alongside whom.",
+           "Step 1, t = 0: A1 is ready, thread 1 takes it and runs it until t = 3. From this moment group A is occupied.",
+           "Step 2, t = 1: a service request arrives and R is ready. R is in another group, so thread 2 runs it at once, in parallel with A1. Different groups may always run in parallel.",
+           "Step 3, t = 2: a message for A2 arrives. Thread 3 is idle, but A2 cannot start: it is in the MutuallyExclusive group A together with the running A1. A2 has to wait.",
+           "Step 4, t = 3: A1 finishes, group A becomes free, and only now does A2 start, running until t = 5. Which idle thread runs it does not matter; here it is drawn on thread 1. A1 and A2 never overlap in time.",
+           "Step 5, t = 4: another service request arrives while the first R is still running. Group R is Reentrant, so thread 3 runs a second R at once: two instances of the same callback run at the same time. Data they share needs your own lock.",
+           "Step 6, summary: callbacks in one MutuallyExclusive group never overlap, even with idle threads; in a Reentrant group even the same callback may overlap itself; different groups may run in parallel; and how many run at once is capped by the number of threads."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">组 A：MutuallyExclusive（定时器 A1、订阅 A2）</text><text x="20" y="26" class="small" style="fill: var(--ros)" lang="en">group A: MutuallyExclusive (timer A1, sub A2)</text>
+      <text x="500" y="26" class="small" style="fill: var(--gz)" lang="zh-CN">组 R：Reentrant（服务回调 R）</text><text x="500" y="26" class="small" style="fill: var(--gz)" lang="en">group R: Reentrant (service callback R)</text>
+
+      <text x="20" y="127" class="mono" lang="zh-CN">线程 1</text><text x="20" y="127" class="mono" lang="en">thread 1</text>
+      <text x="20" y="207" class="mono" lang="zh-CN">线程 2</text><text x="20" y="207" class="mono" lang="en">thread 2</text>
+      <text x="20" y="287" class="mono" lang="zh-CN">线程 3</text><text x="20" y="287" class="mono" lang="en">thread 3</text>
+      <line x1="20" y1="160" x2="880" y2="160" class="lane"/>
+      <line x1="20" y1="240" x2="880" y2="240" class="lane"/>
+      <line x1="20" y1="320" x2="880" y2="320" class="lane"/>
+      <path class="arrow" d="M130 340 L885 340"/>
+      <text x="126" y="360" class="small">0</text><text x="211" y="360" class="small">1</text><text x="296" y="360" class="small">2</text><text x="381" y="360" class="small">3</text><text x="466" y="360" class="small">4</text><text x="551" y="360" class="small">5</text><text x="636" y="360" class="small">6</text><text x="721" y="360" class="small">7</text><text x="806" y="360" class="small">8</text>
+      <text x="740" y="384" class="small" lang="zh-CN">时间（示意）</text><text x="740" y="384" class="small" lang="en">time (schematic)</text>
+
+      <g data-step="1"><rect class="box ros" x="130" y="100" width="255" height="44"/>
+        <text x="142" y="127" class="mono" style="fill: var(--ros)" lang="zh-CN">A1 定时器</text><text x="142" y="127" class="mono" style="fill: var(--ros)" lang="en">A1 timer</text></g>
+
+      <g data-step="2"><rect class="box gz" x="215" y="180" width="425" height="44"/>
+        <text x="227" y="207" class="mono" style="fill: var(--gz)" lang="zh-CN">R 第 1 次</text><text x="227" y="207" class="mono" style="fill: var(--gz)" lang="en">R call 1</text>
+        <text x="330" y="207" class="small" lang="zh-CN">另一个组：与 A1 并行</text><text x="330" y="207" class="small" lang="en">other group: parallel with A1</text></g>
+
+      <g data-step="3"><rect class="box" x="300" y="56" width="85" height="32" style="stroke-dasharray: 5 4"/>
+        <text x="308" y="77" class="small" lang="zh-CN">A2 等待</text><text x="308" y="77" class="small" lang="en">A2 waits</text>
+        <text x="394" y="77" class="small" lang="zh-CN">组 A 被 A1 占用，线程 3 空闲也不行</text><text x="394" y="77" class="small" lang="en">group A held by A1; idle thread 3 cannot help</text></g>
+
+      <g data-step="4"><rect class="box ros" x="385" y="100" width="170" height="44"/>
+        <text x="397" y="127" class="mono" style="fill: var(--ros)" lang="zh-CN">A2 订阅</text><text x="397" y="127" class="mono" style="fill: var(--ros)" lang="en">A2 sub</text></g>
+
+      <g data-step="5"><rect class="box gz" x="470" y="260" width="255" height="44"/>
+        <text x="482" y="287" class="mono" style="fill: var(--gz)" lang="zh-CN">R 第 2 次</text><text x="482" y="287" class="mono" style="fill: var(--gz)" lang="en">R call 2</text>
+        <text x="580" y="287" class="small" lang="zh-CN">Reentrant：与自己重叠</text><text x="580" y="287" class="small" lang="en">Reentrant: overlaps itself</text></g>
+
+      <g data-step="6"><text x="130" y="404" class="small" style="fill: var(--ros)" lang="zh-CN">A1 与 A2 从不重叠；R 可以与自己重叠；并行度受线程数限制</text><text x="130" y="404" class="small" style="fill: var(--ros)" lang="en">A1 and A2 never overlap; R may overlap itself; threads cap parallelism</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 100 Hz 定时器的抖动，再用多线程执行器和 callback group 修好它</h3><h3 lang="en">Lab A · Jitter of a 100 Hz timer, then fixing it with a multithreaded executor and callback groups</h3>
+    <ol>
+      <li><span lang="zh-CN">进入容器（<code>./lab.sh up</code>、<code>./lab.sh shell</code>），在工作空间里建一个 C++ 包：</span><span lang="en">Enter the container (<code>./lab.sh up</code>, <code>./lab.sh shell</code>) and create a C++ package in the workspace:</span><pre data-lang="sh">source /opt/ros/jazzy/setup.bash
+cd ~/ws/src
+ros2 pkg create timing_lab --build-type ament_cmake --dependencies rclcpp geometry_msgs</pre></li>
+      <li><span lang="zh-CN">写 <code>timing_lab/src/jitter_node.cpp</code>。一个 100 Hz 定时器记录每次实际间隔，一个可选的 5 Hz 定时器每次忙等 30 ms 冒充重活；第一个参数选执行器和分组：<code>alone</code>（只有快定时器，单线程）、<code>single</code>（加慢定时器，单线程）、<code>same</code>（多线程，两个定时器都在默认组）、<code>split</code>（多线程，各自一个组）。第二个参数 <code>lock</code> 在 Lab B 里用：</span><span lang="en">Write <code>timing_lab/src/jitter_node.cpp</code>. A 100 Hz timer records each actual interval, and an optional 5 Hz timer busy-waits 30 ms each time to stand in for heavy work; the first argument selects the executor and grouping: <code>alone</code> (fast timer only, single-threaded), <code>single</code> (plus the slow timer, single-threaded), <code>same</code> (multithreaded, both timers in the default group), <code>split</code> (multithreaded, one group each). The second argument, <code>lock</code>, is used in Lab B:</span><pre data-lang="cpp" data-file="jitter_node.cpp">// jitter_node.cpp: a 100 Hz timer, an optional slow timer, four executor setups
+#include &lt;sys/mman.h&gt;
+
+#include &lt;algorithm&gt;
+#include &lt;chrono&gt;
+#include &lt;cmath&gt;
+#include &lt;cstdio&gt;
+#include &lt;memory&gt;
+#include &lt;string&gt;
+#include &lt;vector&gt;
+
+#include "geometry_msgs/msg/point_stamped.hpp"
+#include "rclcpp/rclcpp.hpp"
+
+using namespace std::chrono_literals;
+using Clock = std::chrono::steady_clock;
+
+class JitterNode : public rclcpp::Node
+{
+public:
+  JitterNode(bool with_slow, bool split_groups)
+  : Node("jitter_node")
+  {
+    rclcpp::CallbackGroup::SharedPtr fast_group;  // nullptr: the default group
+    rclcpp::CallbackGroup::SharedPtr slow_group;
+    if (split_groups) {
+      fast_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+      slow_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    }
+    pub_ = create_publisher&lt;geometry_msgs::msg::PointStamped&gt;("tick", 10);
+    periods_us_.reserve(kWindow);  // 只分配一次，不在热路径上分配
+    fast_ = create_wall_timer(10ms, [this]() {on_fast();}, fast_group);
+    if (with_slow) {
+      slow_ = create_wall_timer(200ms, [this]() {on_slow();}, slow_group);
+    }
+  }
+
+private:
+  static constexpr size_t kWindow = 1000;  // 1000 个间隔 = 10 s
+
+  void on_fast()
+  {
+    const auto t = Clock::now();
+    if (started_) {
+      periods_us_.push_back(std::chrono::duration&lt;double, std::micro&gt;(t - last_).count());
+    }
+    last_ = t;
+    started_ = true;
+
+    msg_.header.stamp = now();  // 给 ros2 topic delay 用
+    pub_-&gt;publish(msg_);        // 中间件内部仍可能分配内存
+
+    if (periods_us_.size() == kWindow) {
+      report();
+      periods_us_.clear();      // 保留容量
+    }
+  }
+
+  void on_slow()
+  {
+    const auto until = Clock::now() + 30ms;
+    while (Clock::now() &lt; until) {}  // 30 ms 的假工作
+  }
+
+  void report()
+  {
+    auto &amp; v = periods_us_;
+    const auto [lo, hi] = std::minmax_element(v.begin(), v.end());
+    const double pmin = *lo;
+    const double pmax = *hi;
+    for (auto &amp; p : v) {p = std::abs(p - 10000.0);}  // 与 10 ms 的偏差
+    std::sort(v.begin(), v.end());
+    RCLCPP_INFO(
+      get_logger(), "period min %.0f us max %.0f us | dev p50 %.0f p99 %.0f max %.0f us",
+      pmin, pmax, v[v.size() / 2], v[v.size() * 99 / 100], v.back());
+  }
+
+  rclcpp::Publisher&lt;geometry_msgs::msg::PointStamped&gt;::SharedPtr pub_;
+  rclcpp::TimerBase::SharedPtr fast_;
+  rclcpp::TimerBase::SharedPtr slow_;
+  geometry_msgs::msg::PointStamped msg_;
+  std::vector&lt;double&gt; periods_us_;
+  Clock::time_point last_;
+  bool started_ = false;
+};
+
+int main(int argc, char ** argv)
+{
+  const auto args = rclcpp::init_and_remove_ros_arguments(argc, argv);
+  const std::string mode = args.size() &gt; 1 ? args[1] : "alone";
+  if (args.size() &gt; 2 &amp;&amp; args[2] == "lock") {
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+      std::perror("mlockall");  // 实验容器没有放宽 memlock 时会失败
+    }
+  }
+  auto node = std::make_shared&lt;JitterNode&gt;(mode != "alone", mode == "split");
+  if (mode == "same" || mode == "split") {
+    rclcpp::executors::MultiThreadedExecutor exec;  // 线程数 = CPU 核数，至少 2
+    exec.add_node(node);
+    exec.spin();
+  } else {
+    rclcpp::executors::SingleThreadedExecutor exec;
+    exec.add_node(node);
+    exec.spin();
+  }
+  rclcpp::shutdown();
+  return 0;
+}</pre></li>
+      <li><span lang="zh-CN">在生成的 <code>timing_lab/CMakeLists.txt</code> 里、<code>ament_package()</code> 之前加三行（<code>find_package</code> 两行 <code>ros2 pkg create</code> 已经按 <code>--dependencies</code> 生成），然后构建：</span><span lang="en">In the generated <code>timing_lab/CMakeLists.txt</code>, add three lines before <code>ament_package()</code> (the two <code>find_package</code> lines were already generated by <code>ros2 pkg create</code> from <code>--dependencies</code>), then build:</span><pre data-lang="cmake" data-file="CMakeLists.txt">add_executable(jitter_node src/jitter_node.cpp)
+ament_target_dependencies(jitter_node rclcpp geometry_msgs)
+install(TARGETS jitter_node DESTINATION lib/${PROJECT_NAME})</pre><pre data-lang="sh">cd ~/ws
+colcon build --packages-select timing_lab
+# 按 Phase 0 的规则，另开一个 ./lab.sh shell 再 source overlay
+source /opt/ros/jazzy/setup.bash
+source ~/ws/install/setup.bash</pre></li>
+      <li><span lang="zh-CN">基线：只有快定时器。每 10 秒节点打印一行统计；另开两个 shell 看 CLI 怎么说。对比节点自己的微秒数字和 <code>ros2 topic hz</code> 只到毫秒的 min / max：</span><span lang="en">Baseline: the fast timer alone. The node prints one line of statistics every 10 seconds; open two more shells to see what the CLI says. Compare the node’s own microsecond figures with the millisecond-only min / max of <code>ros2 topic hz</code>:</span><pre data-lang="sh">ros2 run timing_lab jitter_node alone
+# shell 2
+ros2 topic hz /tick
+# shell 3
+ros2 topic delay /tick</pre></li>
+      <li><span lang="zh-CN">加入慢定时器，单线程。预期（推断）：每 200 ms 有一个间隔被拉长到约 30–40 ms，紧接着的一个间隔变短；没有连发补回错过的几次，因为 rcl 会跳过错过的周期（概念 4）。<code>ros2 topic hz</code> 的 max 应该跳到约 0.03–0.04 s：</span><span lang="en">Add the slow timer, single-threaded. Expected (inference): every 200 ms one interval stretches to about 30–40 ms and the one after it is shorter; there is no burst making up the missed calls, because rcl skips missed periods (concept 4). The max from <code>ros2 topic hz</code> should jump to about 0.03–0.04 s:</span><pre data-lang="sh">ros2 run timing_lab jitter_node single</pre></li>
+      <li><span lang="zh-CN">换成多线程执行器，但不建新组。预期和上一步差不多：两个定时器都在节点的默认组里，而默认组是 MutuallyExclusive，多出来的线程只能空等。这就是动画 (b) 第 3 步：</span><span lang="en">Switch to the multithreaded executor without new groups. Expect about the same as the previous step: both timers are in the node’s default group, which is MutuallyExclusive, so the extra threads can only sit idle. This is step 3 of diagram (b):</span><pre data-lang="sh">ros2 run timing_lab jitter_node same</pre></li>
+      <li><span lang="zh-CN">多线程执行器 + 每个定时器一个组。预期（推断）：统计回到接近基线，因为慢回调在另一个线程上跑。这一步要求 Docker Desktop 给 VM 至少 2 个 CPU（实验环境页建议 4 个）。顺便用 <code>ps -T</code> 数线程，和 <code>alone</code> 模式比一比多出来的执行器线程：</span><span lang="en">Multithreaded executor + one group per timer. Expected (inference): the statistics come back close to the baseline, because the slow callback runs on another thread. This step needs Docker Desktop to give the VM at least 2 CPUs (the lab environment page recommends 4). Also count threads with <code>ps -T</code>, and compare the extra executor threads with <code>alone</code> mode:</span><pre data-lang="sh">ros2 run timing_lab jitter_node split
+# 另一个 shell
+nproc
+ps -T -p "$(pgrep -x jitter_node)" -o spid,comm,stat</pre></li>
+      <li><span lang="zh-CN">死锁演示。把下面的脚本存成 <code>~/ws/deadlock_demo.py</code>，先在一个 shell 里起服务端，再分别用三种模式运行：<code>single</code> 只打印一次 <code>calling...</code> 就永远停住；<code>mt</code>（多线程执行器，client 仍在默认组）同样停住；<code>fix</code>（多线程 + client 单独一组）每秒打印 <code>sum = 5</code>。用 Ctrl+C 结束：</span><span lang="en">The deadlock demo. Save the script below as <code>~/ws/deadlock_demo.py</code>, start the server in one shell, then run it in three modes: <code>single</code> prints <code>calling...</code> once and stops forever; <code>mt</code> (multithreaded executor, client still in the default group) stops the same way; <code>fix</code> (multithreaded + the client in its own group) prints <code>sum = 5</code> every second. End each with Ctrl+C:</span><pre data-lang="py" data-file="deadlock_demo.py"># deadlock_demo.py: a synchronous service call inside a timer callback
+import sys
+
+import rclpy
+from example_interfaces.srv import AddTwoInts
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import ExternalShutdownException
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
+from rclpy.node import Node
+
+
+class Caller(Node):
+
+    def __init__(self, own_group):
+        super().__init__('caller')
+        group = MutuallyExclusiveCallbackGroup() if own_group else None  # None: default group
+        self.cli = self.create_client(AddTwoInts, 'add_two_ints', callback_group=group)
+        self.timer = self.create_timer(1.0, self.on_timer)  # default group
+
+    def on_timer(self):
+        self.get_logger().info('calling...')
+        res = self.cli.call(AddTwoInts.Request(a=2, b=3))  # 阻塞本线程，直到响应被处理
+        self.get_logger().info(f'sum = {res.sum}')
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) &gt; 1 else 'single'
+    rclpy.init()
+    node = Caller(own_group=(mode == 'fix'))
+    node.cli.wait_for_service()
+    executor = SingleThreadedExecutor() if mode == 'single' else MultiThreadedExecutor()
+    executor.add_node(node)
+    try:
+        executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+
+
+if __name__ == '__main__':
+    main()</pre><pre data-lang="sh"># shell 1：服务端
+ros2 run demo_nodes_cpp add_two_ints_server
+# shell 2：三种模式
+python3 ~/ws/deadlock_demo.py single
+python3 ~/ws/deadlock_demo.py mt
+python3 ~/ws/deadlock_demo.py fix</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 用 chrt -f 80 跑节点，对比抖动，看 /proc 和 ps -T（与内核课程的交叉）</h3><h3 lang="en">Lab B · Run the node under chrt -f 80, compare jitter, read /proc and ps -T (crossover with the kernel course)</h3>
+    <ol>
+      <li><span lang="zh-CN">确认容器拿到了实时调度的权限。<code>ulimit -r</code> 应该是 99（来自 compose 的 <code>ulimits: rtprio: 99</code>），<code>chrt -f 80 true</code> 应该成功（<code>CAP_SYS_NICE</code>）。如果失败，回实验环境页检查 <code>compose.yaml</code>，然后 <code>./lab.sh down</code> 和 <code>./lab.sh up</code>：</span><span lang="en">Confirm the container has permission for real-time scheduling. <code>ulimit -r</code> should be 99 (from <code>ulimits: rtprio: 99</code> in compose), and <code>chrt -f 80 true</code> should succeed (<code>CAP_SYS_NICE</code>). If it fails, check <code>compose.yaml</code> on the lab environment page, then <code>./lab.sh down</code> and <code>./lab.sh up</code>:</span><pre data-lang="sh">ulimit -r
+chrt -f 80 true &amp;&amp; echo "SCHED_FIFO ok"
+chrt -m                                     # 各策略允许的优先级范围</pre></li>
+      <li><span lang="zh-CN">看清你在什么内核上：这是 Docker Desktop VM 的内核，预期 <code>uname -v</code> 里没有 <code>PREEMPT_RT</code>。再看实时节流的设置和 CPU 数：</span><span lang="en">See which kernel you are on: it is the Docker Desktop VM’s kernel, and <code>uname -v</code> is expected not to contain <code>PREEMPT_RT</code>. Then look at the real-time throttling setting and the CPU count:</span><pre data-lang="sh">uname -r; uname -v
+cat /proc/sys/kernel/sched_rt_period_us /proc/sys/kernel/sched_rt_runtime_us
+nproc</pre></li>
+      <li><span lang="zh-CN">制造 CPU 竞争：每个 CPU 一个普通优先级的死循环。<strong>这些死循环绝不能用 <code>chrt</code> 启动</strong>，否则它们会压住整个容器：</span><span lang="en">Create CPU contention: one ordinary-priority busy loop per CPU. <strong>Never start these loops with <code>chrt</code></strong>, or they will starve the whole container:</span><pre data-lang="sh">for i in $(seq "$(nproc)"); do sh -c 'while :; do :; done' &amp; done
+jobs</pre></li>
+      <li><span lang="zh-CN">在负载下先用普通策略跑 30 秒，记下两三行统计；再用 <code>chrt -f 80</code> 跑 30 秒。直接运行安装好的可执行文件，不经 <code>ros2 run</code> 的 Python 启动器。预期（推断）：普通策略下 max 和 p99 明显变大，FIFO 80 下回到接近无负载时的水平；具体数字取决于 VM：</span><span lang="en">Under load, first run 30 seconds with the normal policy and note two or three lines of statistics; then 30 seconds under <code>chrt -f 80</code>. Run the installed executable directly, not through the Python launcher of <code>ros2 run</code>. Expected (inference): under the normal policy max and p99 grow clearly, and at FIFO 80 they come back close to the no-load level; the exact numbers depend on the VM:</span><pre data-lang="sh">BIN=~/ws/install/timing_lab/lib/timing_lab/jitter_node
+"$BIN" alone                  # 普通策略（SCHED_OTHER），30 s 后 Ctrl+C
+chrt -f 80 "$BIN" alone       # SCHED_FIFO 80</pre></li>
+      <li><span lang="zh-CN">FIFO 版本运行时，在另一个 shell 里看内核怎么记账。<code>cls</code> 列 <code>FF</code> 是 FIFO、<code>TS</code> 是普通；<code>chrt</code> 是在 exec 之前设置的策略，之后创建的线程默认继承，所以执行器线程和 DDS 线程大多也是 FF 80（以输出为准）。<code>/proc/PID/sched</code> 里看 <code>policy</code>（1 是 <code>SCHED_FIFO</code>）、<code>prio</code> 和主动、被动切换次数；这个文件依赖内核的调度调试选项，没有的话用 <code>/proc/PID/status</code> 里的 <code>ctxt_switches</code> 两行：</span><span lang="en">While the FIFO version runs, look at the kernel’s bookkeeping from another shell. In the <code>cls</code> column <code>FF</code> is FIFO and <code>TS</code> is normal; <code>chrt</code> sets the policy before exec, and threads created afterwards inherit it by default, so the executor and DDS threads are mostly FF 80 as well (the output wins). In <code>/proc/PID/sched</code> look at <code>policy</code> (1 is <code>SCHED_FIFO</code>), <code>prio</code>, and the voluntary and involuntary switch counts; that file depends on the kernel’s scheduler-debug option, and if it is missing use the two <code>ctxt_switches</code> lines in <code>/proc/PID/status</code>:</span><pre data-lang="sh">PID=$(pgrep -x jitter_node)
+chrt -p "$PID"
+ps -T -p "$PID" -o spid,comm,cls,rtprio,stat
+grep -E 'policy|prio|nr_switches|nr_voluntary_switches|nr_involuntary_switches' /proc/$PID/sched
+grep ctxt_switches /proc/$PID/status
+for t in /proc/$PID/task/*; do echo "$(cat $t/comm) $(grep -E '^policy' $t/sched 2&gt;/dev/null)"; done  # 每个线程的策略</pre>
+        <span lang="zh-CN">对照 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>：每个 <code>spid</code> 是一个 task；那些死循环在 fair 类里由 EEVDF 轮流调度，而 FF 80 的定时器线程一被唤醒就排在它们所有人前面。被动切换次数（被抢占）在普通策略下应该比 FIFO 下多得多（推断）。</span><span lang="en">Compare with <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>: each <code>spid</code> is a task; the busy loops take turns under EEVDF in the fair class, while the FF 80 timer thread goes ahead of all of them as soon as it wakes. The involuntary switch count (being preempted) should be much higher under the normal policy than under FIFO (inference).</span></li>
+      <li><span lang="zh-CN">内存锁定：带上 <code>lock</code> 参数再跑一次。实验容器的 compose 没有放宽 memlock，预期会打印 <code>mlockall: ...</code> 的错误（多半是内存不足或权限不够之类）；如果成功了，<code>VmLck</code> 会接近 <code>VmRSS</code>。这一步的目的是看到：锁内存要单独的权限，<code>CAP_SYS_NICE</code> 不包括它：</span><span lang="en">Memory locking: run once more with the <code>lock</code> argument. The lab compose file does not raise memlock, so an <code>mlockall: ...</code> error is expected (most likely out of memory or not permitted); if it succeeds, <code>VmLck</code> will be close to <code>VmRSS</code>. The point of this step is to see that locking memory needs its own permission, which <code>CAP_SYS_NICE</code> does not include:</span><pre data-lang="sh">chrt -f 80 "$BIN" alone lock
+# 另一个 shell
+grep -E 'VmLck|VmRSS' /proc/$(pgrep -x jitter_node)/status
+ulimit -l</pre></li>
+      <li><span lang="zh-CN">再用 <code>split</code> 模式在 FIFO 80 下跑一次，看慢定时器的忙等是否影响快定时器（它们在不同线程，但都是 FF 80；CPU 数不够时两者会争同一个 CPU，推断）。最后停掉所有负载：</span><span lang="en">Run <code>split</code> mode once under FIFO 80 and see whether the slow timer’s busy-wait affects the fast timer (they are on different threads, but both at FF 80; with too few CPUs they compete for the same CPU, inference). Finally stop all the load:</span><pre data-lang="sh">chrt -f 80 "$BIN" split       # 30 s 后 Ctrl+C
+kill $(jobs -p)
+jobs</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 里 <code>alone</code>、<code>single</code>、<code>same</code>、<code>split</code> 四种模式各一行统计 + <code>deadlock_demo.py</code> 三种模式的现象；Lab B 里负载下普通策略与 FIFO 80 的统计对比、<code>ps -T</code> 的 <code>cls</code> / <code>rtprio</code> 输出和切换次数，以及你用自己的话写的「这次改善来自四类抖动里的哪一类，剩下的为什么在容器里修不了」（10 行以内）。</div>
+    <div class="note" lang="en">Deliverables: from Lab A, one statistics line for each of the four modes <code>alone</code>, <code>single</code>, <code>same</code> and <code>split</code>, plus what <code>deadlock_demo.py</code> did in its three modes; from Lab B, the normal-policy versus FIFO 80 statistics under load, the <code>cls</code> / <code>rtprio</code> output of <code>ps -T</code> and the switch counts, and your own explanation of “which of the four jitter sources this improvement came from, and why the rest cannot be fixed in the container” (10 lines or fewer).</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/phase-2">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 一个用 <code>rclcpp::spin(node)</code> 运行的节点，在定时器回调里 <code>async_send_request</code> 之后对 future 调用 <code>get()</code>，服务端明明在线，回调却再也不返回。为什么？</p>
+      <p lang="en">1. A node run with <code>rclcpp::spin(node)</code> calls <code>async_send_request</code> in a timer callback and then <code>get()</code> on the future; the server is definitely up, yet the callback never returns. Why?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">DDS 在回调执行期间丢弃收到的响应，必须重发请求</span><span lang="en">DDS discards responses that arrive while a callback is running, so the request must be resent</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">执行器唯一的线程阻塞在这个回调里，而完成 future 需要这个线程再次 <code>rmw_wait</code> 并处理 client，于是互相等待</span><span lang="en">The executor’s only thread is blocked in this callback, and completing the future needs that same thread to <code>rmw_wait</code> again and handle the client, so each waits on the other</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">默认 QoS 下服务响应只在下一个定时器周期才会被发送</span><span lang="en">With default QoS, the service response is only sent on the next timer period</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>rclcpp::spin</code> 用的是单线程执行器，响应虽然到了 reader 队列，但只有执行器线程取出 client 才能完成 future，而这个线程正在等 future。a 错：响应留在下层队列里，没有丢；c 错：服务响应和定时器周期无关，由服务端处理完立即发送。</span><span lang="en"><code>rclcpp::spin</code> uses a single-threaded executor; the response does reach the reader queue, but only the executor thread taking the client can complete the future, and that thread is waiting on the future. a is wrong: the response stays in the lower-layer queue and is not dropped; c is wrong: service responses have nothing to do with timer periods and are sent as soon as the server finishes.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 节点里有定时器 A 和订阅 B，创建时都没指定 callback group，节点由 4 线程的 <code>MultiThreadedExecutor</code> 运行。A 正在执行时 B 的消息到了，还有线程空闲。会发生什么？</p>
+      <p lang="en">2. A node has a timer A and a subscription B, both created without a callback group, and is run by a 4-thread <code>MultiThreadedExecutor</code>. While A is running a message for B arrives, and threads are idle. What happens?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">B 立刻在空闲线程上执行，多线程执行器就是为此而设</span><span lang="en">B runs at once on an idle thread; that is what the multithreaded executor is for</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">B 的消息被丢弃，因为订阅在回调执行期间不接收数据</span><span lang="en">B’s message is dropped, because a subscription does not accept data while a callback runs</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">B 等 A 结束才开始，因为两者都在节点的默认组里，而默认组是 MutuallyExclusive</span><span lang="en">B starts only after A finishes, because both are in the node’s default group, which is MutuallyExclusive</span></label>
+      <div class="why" hidden><span lang="zh-CN">线程数只决定上限，callback group 决定是否允许并行；默认组是 MutuallyExclusive。a 忽略了组的规则（要并行，得把 B 放进另一个组）；b 错：消息留在 reader 队列里，等组空出来再处理。</span><span lang="en">The thread count sets only the ceiling; callback groups decide whether parallelism is allowed, and the default group is MutuallyExclusive. a ignores the group rule (to run in parallel, B must go into another group); b is wrong: the message stays in the reader queue and is handled once the group is free.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 在实验容器里用 <code>chrt -f 80</code> 跑定时器节点后，下面哪个抖动来源<em>仍然</em>存在？</p>
+      <p lang="en">3. After running the timer node under <code>chrt -f 80</code> in the lab container, which jitter source is <em>still</em> there?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">macOS 暂停 Docker Desktop VM 的 vCPU 线程</span><span lang="en">macOS pausing a vCPU thread of the Docker Desktop VM</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">同一个 CPU 上普通优先级的死循环先被调度</span><span lang="en">An ordinary-priority busy loop on the same CPU being scheduled first</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">普通线程默认的 50 µs timer slack</span><span lang="en">The default 50 µs timer slack of ordinary threads</span></label>
+      <div class="why" hidden><span lang="zh-CN">vCPU 是 macOS 上由 XNU 调度的线程，它被停下时 Linux 里所有任务都停，Linux 的调度策略管不到。b 错：只要有可运行的 FIFO 任务，fair 类的任务就不会被选中；c 错：实时策略的线程不加 timer slack。</span><span lang="en">A vCPU is a thread on macOS scheduled by XNU; when it is stopped every task in Linux stops, and no Linux scheduling policy reaches it. b is wrong: while a FIFO task is runnable, no fair-class task is picked; c is wrong: threads under real-time policies get no timer slack.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 一个 10 ms 的 wall timer，因为同一线程里另一个回调跑了 35 ms，错过了几次到期。按 Jazzy 的 rcl，接下来会怎样？</p>
+      <p lang="en">4. A 10 ms wall timer misses a few expiries because another callback in the same thread ran for 35 ms. Per Jazzy’s rcl, what happens next?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">定时器连续触发三次，把错过的补回来</span><span lang="en">The timer fires three times in a row to make up the missed calls</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">它迟到地触发一次，下一次到期推到下一个 10 ms 整周期，错过的周期被跳过</span><span lang="en">It fires once, late, and the next expiry moves to the next 10 ms boundary; the missed periods are skipped</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">从这次实际触发的时刻重新计时，之后的相位永久偏移</span><span lang="en">Timing restarts from the moment it actually fired, so its phase shifts permanently</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>rcl_timer_call</code> 把下一次到期设为计划时刻加一个周期，若仍已过去，就一次向后推足够多的周期。所以没有连发补偿（a 错），而且到期时刻始终落在原来的 10 ms 网格上，相位不变（c 错）。</span><span lang="en"><code>rcl_timer_call</code> sets the next expiry to the scheduled time plus one period and, if that is still in the past, moves it forward by enough periods in one step. So there is no catch-up burst (a is wrong), and expiries stay on the original 10 ms grid, so the phase is unchanged (c is wrong).</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Executors.html">ROS 2 Docs (Jazzy) — Executors</a> <span class="lvl" lang="zh-CN">官方，概念 1、2 与动画 (a)：执行器、wait set、调度语义（轮转而非 FIFO）</span><span class="lvl" lang="en">Official, concepts 1 and 2 and diagram (a): executors, the wait set, scheduling semantics (round-robin, not FIFO)</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/How-To-Guides/Using-callback-groups.html">Using Callback Groups</a> · <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Sync-Vs-Async.html">Synchronous vs. asynchronous service clients</a> <span class="lvl" lang="zh-CN">官方，概念 3、5、动画 (b) 与 Lab A 的死锁演示</span><span class="lvl" lang="en">Official, concepts 3 and 5, diagram (b) and the deadlock demo in Lab A</span></li>
+    <li><a href="https://github.com/ros2/rclcpp/tree/jazzy/rclcpp/include/rclcpp/executors">rclcpp executors (jazzy)</a> · <a href="https://github.com/ros2/rclcpp/blob/jazzy/rclcpp/include/rclcpp/experimental/executors/events_executor/events_executor.hpp">events_executor.hpp</a> · <a href="https://github.com/ros2/rcl/blob/jazzy/rcl/src/rcl/timer.c">rcl timer.c</a> <span class="lvl" lang="zh-CN">源码，进阶：执行器种类、线程数默认值、跳过错过周期的逻辑</span><span class="lvl" lang="en">Source, advanced: the executor kinds, the default thread count, the logic that skips missed periods</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Real-Time-Programming.html">Understanding real-time programming</a> · <a href="https://design.ros2.org/articles/realtime_background.html">Introduction to Real-time Systems</a> · <a href="https://ros-realtime.github.io/">ROS 2 Real-Time Working Group</a> <span class="lvl" lang="zh-CN">官方与工作组，概念 7：rclcpp 实时写法、锁内存、优先级</span><span class="lvl" lang="en">Official and working group, concept 7: rclcpp real-time practice, memory locking, priorities</span></li>
+    <li><a href="https://man7.org/linux/man-pages/man7/sched.7.html">sched(7)</a> · <a href="https://man7.org/linux/man-pages/man1/chrt.1.html">chrt(1)</a> · <a href="https://docs.kernel.org/scheduler/sched-rt-group.html">Real-Time group scheduling</a> <span class="lvl" lang="zh-CN">Linux 手册与内核文档，概念 7 与 Lab B：调度策略、优先级、<code>RLIMIT_RTPRIO</code>、实时节流</span><span class="lvl" lang="en">Linux man pages and kernel docs, concept 7 and Lab B: policies, priorities, <code>RLIMIT_RTPRIO</code>, real-time throttling</span></li>
+    <li><a href="https://github.com/ros2/ros2_tracing">ros2_tracing</a> <span class="lvl" lang="zh-CN">源码与 README，概念 6：tracepoint、LTTng、<code>ros2 trace</code>（可选，Phase 7 展开）</span><span class="lvl" lang="en">Source and README, concept 6: tracepoints, LTTng, <code>ros2 trace</code> (optional; Phase 7 goes further)</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024（11 月）, ISBN 9781835881408. <span class="lvl">讲节点与定时器回调、服务与客户端的章节，对应概念 3、4、5；基于 Jazzy</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024 (November), ISBN 9781835881408. <span class="lvl">The chapters on nodes and timer callbacks, and on services and clients; match concepts 3, 4 and 5; based on Jazzy</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025（6 月）, ISBN 9781032851501（第 1 版 2022, ISBN 9781032267203）. <span class="lvl">讲第一批节点、<code>spin</code> 与执行器的章节，对应概念 1、2</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025 (June), ISBN 9781032851501 (1st ed. 2022, ISBN 9781032267203). <span class="lvl">The chapters on first nodes, <code>spin</code> and executors; match concepts 1 and 2</span></li>
+    <li lang="zh-CN">Lentin Joseph &amp; Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025（7 月）. <span class="lvl">讲 ros2_control 及其实时更新循环的章节，对应概念 6、7；基于 Jazzy</span></li>
+    <li lang="en">Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025 (July). <span class="lvl">The chapters on ros2_control and its real-time update loop; match concepts 6 and 7; based on Jazzy</span></li>
+    <li lang="zh-CN">Morgan Quigley, Brian Gerkey &amp; William D. Smart, 《Programming Robots with ROS》, O'Reilly, 2015. <span class="lvl">前几章里回调与 <code>spin</code> 第一次出现的部分，对应概念 1 的背景；全书基于 ROS 1，回调的概念仍然适用，但 ROS 1 没有本页讲的执行器与 callback group</span></li>
+    <li lang="en">Morgan Quigley, Brian Gerkey &amp; William D. Smart, <em>Programming Robots with ROS</em>, O'Reilly, 2015. <span class="lvl">The parts of the early chapters where callbacks and <code>spin</code> first appear; background for concept 1; the whole book is ROS 1, so the callback idea still applies, but ROS 1 has none of the executors and callback groups on this page</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-1-nodes-topics-services-actions/index.html">← Phase 1 · Nodes, Topics, Services &amp; Actions</a>
+    <a href="../phase-3-middleware-and-qos/index.html">Phase 3 · Middleware &amp; QoS →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
