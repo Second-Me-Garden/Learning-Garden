@@ -111,7 +111,7 @@ img, svg { max-width: 100%; }
   display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
   position: sticky; top: 0; z-index: 5; box-sizing: border-box;
   width: 100%; max-width: var(--maxw); margin: 0 auto 28px;
-  padding: 11px 2px; border: 1px solid transparent; border-bottom-color: var(--bar-edge); border-radius: 0;
+  padding: 11px 2px; border: 1px solid transparent; border-radius: 0;
   font-size: 15px; color: var(--ink-2); background: transparent;
 }
 .top .brand { font-size: 19px; }
@@ -158,7 +158,7 @@ h1 {
 h1 .en { display: block; font-family: var(--sans); font-weight: 400; font-size: 17px; letter-spacing: 0; color: var(--ink-2); margin-top: 10px; line-height: 1.5; }
 h2 { font-family: var(--display); font-weight: 600; font-size: 26px; line-height: 1.15; margin: 48px 0 12px; }
 h3 { font-size: 17px; font-weight: 600; margin: 26px 0 8px; }
-.lede { color: var(--ink-2); font-size: 17.5px; line-height: 1.6; margin: 0 0 22px; max-width: 46em; }
+.lede { color: var(--ink-2); font-size: 17.5px; line-height: 1.6; margin: 0 0 22px; }
 .meta { color: var(--ink-3); font-size: 13.5px; margin: 0 0 4px; }
 .en { color: var(--ink-3); font-weight: 400; font-size: 0.9em; }
 
@@ -427,8 +427,11 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 
 /* ---------- Hub wordmark ---------- */
 h1.wordmark { font-size: clamp(64px, 9.5vw, 112px); line-height: .92; letter-spacing: -0.025em; margin: 18px 0 14px; }
-h1.wordmark .en { font-size: 18px; margin-top: 18px; max-width: 46em; }
+h1.wordmark .en { font-size: 18px; margin-top: 18px; }
 h1.wordmark .bed-mark { display: block; position: relative; width: 120px; height: 10px; margin-top: 22px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 14%, transparent); }
 h1.wordmark .bed-mark::before { content: ""; position: absolute; left: 0; top: 0; height: 10px; width: 34px; border-radius: 999px; background: var(--accent); }
 h1.wordmark .bed-mark i { position: absolute; left: 30px; top: -4px; width: 18px; height: 18px; border-radius: 50%; background: var(--surface); border: 3px solid var(--accent); box-sizing: border-box; }
 @media (max-width: 600px) { h1.wordmark { font-size: clamp(48px, 15vw, 64px); } }
+/* keep the legend state fills last so nothing overrides them */
+.legend i.done { background: var(--accent) !important; border-color: var(--accent) !important; }
+.legend i.now { border-color: var(--accent) !important; }
