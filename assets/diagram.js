@@ -79,21 +79,25 @@
     render();
   }
 
-  // Header: at rest it scrolls away with the page. Past SHOW px a pill (already in its
-  // final shape) slides in from the top; back above HIDE px it slides out. The gap between
-  // the two thresholds stops it flickering at the boundary. A spacer keeps the header's
-  // layout height while the pill is fixed.
+  // Header: at rest it scrolls away with the page. Once half of it has scrolled off, it
+  // becomes fixed and morphs from where it is into the centred pill; scrolling back past
+  // the same line morphs it out again into the bar at that same spot. A few px of
+  // hysteresis stops flicker at the line. A spacer keeps the layout height meanwhile.
   function headerDock() {
     const header = document.querySelector('header.top');
     if (!header || document.querySelector('.top-spacer')) return;
-    const SHOW = 220, HIDE = 100, OUT_MS = 260;
+    let SHOW = 60, HIDE = 48; const OUT_MS = 380, GAP = 6;
     const spacer = document.createElement('div'); spacer.className = 'top-spacer'; spacer.setAttribute('aria-hidden', 'true');
     header.parentNode.insertBefore(spacer, header);
-    let on = false, leaving = null, ticking = false;
+    let on = false, leaving = null;
     const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    function measure() { if (!on) document.documentElement.style.setProperty('--top-h', header.offsetHeight + 'px'); }
+    function measure() {
+      if (on) return;
+      const h = header.offsetHeight, top = header.getBoundingClientRect().top + window.scrollY;
+      document.documentElement.style.setProperty('--top-h', h + 'px');
+      SHOW = top + h / 2 + GAP; HIDE = top + h / 2 - GAP;
+    }
     function update() {
-      ticking = false;
       const y = window.scrollY;
       if (!on && y > SHOW) {
         on = true; if (leaving) { clearTimeout(leaving); leaving = null; }
@@ -104,7 +108,7 @@
         leaving = setTimeout(() => { leaving = null; on = false; document.body.classList.remove('scrolled', 'leaving'); }, OUT_MS);
       }
     }
-    function onScroll() { if (!ticking) { ticking = true; requestAnimationFrame(update); } }
+    function onScroll() { update(); }
     measure();
     window.addEventListener('resize', measure);
     window.addEventListener('scroll', onScroll, { passive: true });
