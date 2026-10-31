@@ -480,3 +480,17 @@ h1.wordmark .bed-mark i { position: absolute; left: 30px; top: -4px; width: 18px
 .about .meta { font-size: 13px; }
 .about { grid-template-columns: 300px 1fr; gap: 36px; }
 @media (max-width: 700px) { .about { grid-template-columns: 1fr; } .about .seal img { width: 240px; height: 240px; } }
+
+/* ---------- Related topics (assets/related.js) ---------- */
+.related { margin-top: 48px; }
+.related-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+.related-list li { padding: 14px 0; border-top: 1px solid var(--line); }
+.related-list li:last-child { border-bottom: 1px solid var(--line); }
+.rel-title { font-weight: 600; font-size: 17px; }
+.rel-title a { text-decoration: none; }
+.rel-title .planned { color: var(--ink-3); }
+.rel-title .planned small { font-weight: 400; font-size: 13px; }
+.rel-why { margin: 4px 0 0; color: var(--ink-2); font-size: 15px; }
+.card-related { margin: 12px 0 0; font-size: 13.5px; color: var(--ink-2); }
+.card-related a { text-decoration: none; font-weight: 600; }
+.card-related .planned { color: var(--ink-3); }
