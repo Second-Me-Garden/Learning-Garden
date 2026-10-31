@@ -54,11 +54,15 @@
   panel.className = 'rail-panel';
   aside.appendChild(panel);
 
-  if (crumb) {
-    const t = document.createElement('a');
-    t.className = 'rail-topic'; t.href = crumb.getAttribute('href'); t.textContent = crumb.textContent.trim();
-    panel.appendChild(t);
-  }
+  // Breadcrumb that the page header merges into once it scrolls away.
+  const headerEl = document.querySelector('header.top');
+  const brand = headerEl && headerEl.querySelector('.brand[href]');
+  const themeBtn = headerEl && headerEl.querySelector('button.theme');
+  const rc = document.createElement('div'); rc.className = 'rail-crumb';
+  if (brand) { const b = document.createElement('a'); b.className = 'rail-brand'; b.href = brand.getAttribute('href'); b.textContent = brand.textContent.trim(); rc.appendChild(b); }
+  if (crumb) { const t = document.createElement('a'); t.className = 'rail-topic'; t.href = crumb.getAttribute('href'); t.textContent = crumb.textContent.trim(); rc.appendChild(t); }
+  if (themeBtn) { const b = themeBtn.cloneNode(true); b.classList.add('rail-theme'); rc.appendChild(b); }
+  panel.appendChild(rc);
   if (meta) {
     const p = document.createElement('p'); p.className = 'rail-meta'; p.textContent = meta.textContent.trim();
     panel.appendChild(p);
@@ -114,9 +118,18 @@
     }
   }
 
-  const header = document.querySelector('header.top');
+  const header = headerEl;
   (header ? header.parentNode : document.body).insertBefore(aside, header ? header.nextSibling : document.body.firstChild);
   document.body.classList.add('lesson');
+
+  // When the header's original spot scrolls out of view, it docks into the rail.
+  if (header && 'IntersectionObserver' in window) {
+    const sentinel = document.createElement('div'); sentinel.className = 'rail-sentinel'; sentinel.setAttribute('aria-hidden', 'true');
+    header.parentNode.insertBefore(sentinel, header);
+    new IntersectionObserver((entries) => {
+      document.body.classList.toggle('scrolled', !entries[0].isIntersecting);
+    }, { rootMargin: '-1px 0px 0px 0px', threshold: 0 }).observe(sentinel);
+  }
 
   // phase titles from the topic page, only when served over http(s)
   if (/^https?:$/.test(location.protocol) && crumb) {
