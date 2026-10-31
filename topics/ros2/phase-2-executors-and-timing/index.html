@@ -326,7 +326,7 @@ executor.spin()</pre>
         <text x="40" y="386" class="small" lang="zh-CN">一个慢回调推迟后面所有回调</text><text x="40" y="386" class="small" lang="en">one slow callback delays the rest</text></g>
 
       <g data-step="6"><path class="arrow flow" d="M150 243 L150 219"/>
-        <text x="162" y="236" class="small" style="fill: var(--ros)" lang="zh-CN">6. 回到第 1 步，再等</text><text x="162" y="236" class="small" style="fill: var(--ros)" lang="en">6. back to step 1, wait again</text></g>
+        <text x="162" y="236" class="small" lang="zh-CN">6. 回到第 1 步，再等</text><text x="162" y="236" class="small" lang="en">6. back to step 1, wait again</text></g>
     </svg>
   </div>
 
@@ -352,8 +352,8 @@ executor.spin()</pre>
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="20" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">组 A：MutuallyExclusive（定时器 A1、订阅 A2）</text><text x="20" y="26" class="small" style="fill: var(--ros)" lang="en">group A: MutuallyExclusive (timer A1, sub A2)</text>
-      <text x="500" y="26" class="small" style="fill: var(--gz)" lang="zh-CN">组 R：Reentrant（服务回调 R）</text><text x="500" y="26" class="small" style="fill: var(--gz)" lang="en">group R: Reentrant (service callback R)</text>
+      <text x="20" y="26" class="small" lang="zh-CN">组 A：MutuallyExclusive（定时器 A1、订阅 A2）</text><text x="20" y="26" class="small" lang="en">group A: MutuallyExclusive (timer A1, sub A2)</text>
+      <text x="500" y="26" class="small" lang="zh-CN">组 R：Reentrant（服务回调 R）</text><text x="500" y="26" class="small" lang="en">group R: Reentrant (service callback R)</text>
 
       <text x="20" y="127" class="mono" lang="zh-CN">线程 1</text><text x="20" y="127" class="mono" lang="en">thread 1</text>
       <text x="20" y="207" class="mono" lang="zh-CN">线程 2</text><text x="20" y="207" class="mono" lang="en">thread 2</text>
@@ -368,8 +368,8 @@ executor.spin()</pre>
       <g data-step="1"><rect class="box ros" x="130" y="100" width="255" height="44"/>
         <text x="142" y="127" class="mono" style="fill: var(--ros)" lang="zh-CN">A1 定时器</text><text x="142" y="127" class="mono" style="fill: var(--ros)" lang="en">A1 timer</text></g>
 
-      <g data-step="2"><rect class="box gz" x="215" y="180" width="425" height="44"/>
-        <text x="227" y="207" class="mono" style="fill: var(--gz)" lang="zh-CN">R 第 1 次</text><text x="227" y="207" class="mono" style="fill: var(--gz)" lang="en">R call 1</text>
+      <g data-step="2"><rect class="box ros" x="215" y="180" width="425" height="44"/>
+        <text x="227" y="207" class="mono" style="fill: var(--ros)" lang="zh-CN">R 第 1 次</text><text x="227" y="207" class="mono" style="fill: var(--ros)" lang="en">R call 1</text>
         <text x="330" y="207" class="small" lang="zh-CN">另一个组：与 A1 并行</text><text x="330" y="207" class="small" lang="en">other group: parallel with A1</text></g>
 
       <g data-step="3"><rect class="box" x="300" y="56" width="85" height="32" style="stroke-dasharray: 5 4"/>
@@ -379,11 +379,11 @@ executor.spin()</pre>
       <g data-step="4"><rect class="box ros" x="385" y="100" width="170" height="44"/>
         <text x="397" y="127" class="mono" style="fill: var(--ros)" lang="zh-CN">A2 订阅</text><text x="397" y="127" class="mono" style="fill: var(--ros)" lang="en">A2 sub</text></g>
 
-      <g data-step="5"><rect class="box gz" x="470" y="260" width="255" height="44"/>
-        <text x="482" y="287" class="mono" style="fill: var(--gz)" lang="zh-CN">R 第 2 次</text><text x="482" y="287" class="mono" style="fill: var(--gz)" lang="en">R call 2</text>
+      <g data-step="5"><rect class="box ros" x="470" y="260" width="255" height="44"/>
+        <text x="482" y="287" class="mono" style="fill: var(--ros)" lang="zh-CN">R 第 2 次</text><text x="482" y="287" class="mono" style="fill: var(--ros)" lang="en">R call 2</text>
         <text x="580" y="287" class="small" lang="zh-CN">Reentrant：与自己重叠</text><text x="580" y="287" class="small" lang="en">Reentrant: overlaps itself</text></g>
 
-      <g data-step="6"><text x="130" y="404" class="small" style="fill: var(--ros)" lang="zh-CN">A1 与 A2 从不重叠；R 可以与自己重叠；并行度受线程数限制</text><text x="130" y="404" class="small" style="fill: var(--ros)" lang="en">A1 and A2 never overlap; R may overlap itself; threads cap parallelism</text></g>
+      <g data-step="6"><text x="130" y="404" class="small" lang="zh-CN">A1 与 A2 从不重叠；R 可以与自己重叠；并行度受线程数限制</text><text x="130" y="404" class="small" lang="en">A1 and A2 never overlap; R may overlap itself; threads cap parallelism</text></g>
     </svg>
   </div>
 

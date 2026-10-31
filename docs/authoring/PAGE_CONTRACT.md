@@ -61,7 +61,7 @@ The five Chinese headings 目标, 核心概念, 动画图解, 资料, 参考书�
 10. 参考书目 / Bibliography: `ol.books`, paired `li` with `span.lvl` chapter mapping.
 11. `nav.pn` with the previous and next lesson links.
 
-The lab-setup page keeps the same skeleton but replaces 前置 with 为什么要隔离 / Why isolate and has one diagram.
+The lab-setup page keeps the same skeleton but replaces 前置 with 为什么要隔离 / Why isolate and has one diagram. The closing phase of a topic may add two sections after the bibliography and before `nav.pn`: 作品项目 / Capstone and 接下来 / What comes next (the kernel topic's Phase 8 and ROS 2's Phase 7 do this), so the topic ends on the project and the pointers to related topics.
 
 ## Bilingual pairing
 

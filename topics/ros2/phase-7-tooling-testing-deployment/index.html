@@ -162,8 +162,8 @@ jobs:
   <h3 lang="zh-CN">7. 追踪：ros2_tracing 与 LTTng</h3><h3 lang="en">7. Tracing: ros2_tracing and LTTng</h3>
   <p lang="zh-CN">日志告诉你「发生了什么」，追踪告诉你「什么时候、花了多久」。Phase 2 讲过：rclcpp、rcl 和 rmw 里编进了 tracepoint，例如 <code>ros2:callback_start</code> 和 <code>ros2:callback_end</code>；按 ros2_tracing 的 README，Iron 起 LTTng 是 ROS 2 的依赖，二进制安装开箱即可追踪，<code>ros2 run tracetools status</code> 应打印 <code>Tracing enabled</code>。</p>
   <p lang="en">Logs tell you “what happened”; tracing tells you “when, and how long it took”. As Phase 2 explained, rclcpp, rcl and rmw are built with tracepoints such as <code>ros2:callback_start</code> and <code>ros2:callback_end</code>; per the ros2_tracing README, LTTng has been a ROS 2 dependency since Iron, a binary install can be traced out of the box, and <code>ros2 run tracetools status</code> should print <code>Tracing enabled</code>.</p>
-  <p lang="zh-CN"><strong>一个 tracepoint 花多少</strong>：没有追踪会话时，tracepoint 只是一次「这个事件开着吗」的判断，README 的说法是对执行几乎没有影响。会话开着时，LTTng-UST 在你的线程里把事件字段写进按 CPU 划分的共享内存环形缓冲区，然后立即返回；README 列出的特性是完全在用户态实现、可重入、不阻塞、<strong>快路径上没有系统调用</strong>、不复制追踪数据。把缓冲区搬到磁盘的是另一个 consumer 守护进程，不在你的线程上。README 引用的一篇综述给出 LTTng-UST 平均每个 tracepoint 约 158 ns 的延迟开销；具体数字随 CPU 和事件字段而变，在你的机器上要自己量（Lab B 第 7 步）。代价是真实存在的：每秒上万个回调就是每秒上万次写入，缓冲区写满时会丢事件。</p>
-  <p lang="en"><strong>What one tracepoint costs</strong>: with no tracing session, a tracepoint is just a check of “is this event enabled”, which the README describes as having virtually no impact on execution. With a session active, LTTng-UST writes the event fields into a per-CPU ring buffer in shared memory from your own thread and returns immediately; the README lists its properties as implemented entirely in user space, reentrant, non-blocking, <strong>no system calls in the fast path</strong>, and no copies of the trace data. Moving buffers to disk is done by a separate consumer daemon, not on your thread. A survey cited in the README gives LTTng-UST an average latency overhead of about 158 ns per tracepoint; the real number varies with the CPU and the event fields, so measure it on your machine (Lab B step 7). The cost is real: ten thousand callbacks a second means ten thousand writes a second, and events are lost when the buffers fill up.</p>
+  <p lang="zh-CN"><strong>一个 tracepoint 花多少</strong>：没有追踪会话时，tracepoint 只是一次「这个事件开着吗」的判断，README 的说法是对执行几乎没有影响。会话开着时，LTTng-UST 在你的线程里把事件字段写进按 CPU 划分的共享内存环形缓冲区，然后立即返回；README 列出的特性是完全在用户态实现、可重入、不阻塞、<strong>快路径上没有系统调用</strong>、不复制追踪数据。把缓冲区搬到磁盘的是另一个 consumer 守护进程，不在你的线程上。README 引用的一篇综述给出 LTTng-UST 平均每个 tracepoint 约 158 ns 的延迟开销；具体数字随 CPU 和事件字段而变，在你的机器上要自己量（Lab B 第 8 步）。代价是真实存在的：每秒上万个回调就是每秒上万次写入，缓冲区写满时会丢事件。</p>
+  <p lang="en"><strong>What one tracepoint costs</strong>: with no tracing session, a tracepoint is just a check of “is this event enabled”, which the README describes as having virtually no impact on execution. With a session active, LTTng-UST writes the event fields into a per-CPU ring buffer in shared memory from your own thread and returns immediately; the README lists its properties as implemented entirely in user space, reentrant, non-blocking, <strong>no system calls in the fast path</strong>, and no copies of the trace data. Moving buffers to disk is done by a separate consumer daemon, not on your thread. A survey cited in the README gives LTTng-UST an average latency overhead of about 158 ns per tracepoint; the real number varies with the CPU and the event fields, so measure it on your machine (Lab B step 8). The cost is real: ten thousand callbacks a second means ten thousand writes a second, and events are lost when the buffers fill up.</p>
   <p lang="zh-CN"><strong>它能看到什么</strong>：每个回调的开始和结束时间（于是有了耗时分布，而不是日志里的一个平均值）、回调属于哪个定时器或订阅、发布和对应回调之间隔了多久、执行器何时取到了哪个实体。要看线程何时被调度、何时在等锁，还得加内核事件（<code>ros2 trace -k …</code>），那需要另装 LTTng 内核模块，在容器里做不到。</p>
   <p lang="en"><strong>What it reveals</strong>: the start and end time of every callback (so you get a distribution of durations rather than an average in a log line), which timer or subscription a callback belongs to, how long passes between a publish and the matching callback, and when the executor picked up which entity. To see when a thread was scheduled or waited on a lock you also need kernel events (<code>ros2 trace -k …</code>), which require the LTTng kernel modules installed separately and are not possible in the container.</p>
   <div class="note" lang="zh-CN">README 里的硬规则：<strong>追踪必须在应用启动之前开始</strong>。节点初始化时会记录元数据（哪个回调地址属于哪个定时器、哪个节点），后面的事件要靠它解读；先启动节点再开追踪，得到的数据可能无法使用。所以 Lab B 先 <code>ros2 trace start</code>，再运行节点；launch 文件里的 <code>Trace</code> 动作（<code>tracetools_launch</code>）会自动保证这个顺序。追踪数据默认写到 <code>~/.ros/tracing/</code> 下。</div>
@@ -220,14 +220,14 @@ jobs:
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="55" y="28" class="small" style="fill: var(--ros)" lang="zh-CN">越往上：越少、越慢、越接近真实</text><text x="55" y="28" class="small" style="fill: var(--ros)" lang="en">higher up: fewer, slower, closer to real</text>
-      <text x="520" y="28" class="small" style="fill: var(--ros)" lang="zh-CN">这一层回答的问题</text><text x="520" y="28" class="small" style="fill: var(--ros)" lang="en">the question this layer answers</text>
+      <text x="55" y="28" class="small" lang="zh-CN">越往上：越少、越慢、越接近真实</text><text x="55" y="28" class="small" lang="en">higher up: fewer, slower, closer to real</text>
+      <text x="520" y="28" class="small" lang="zh-CN">这一层回答的问题</text><text x="520" y="28" class="small" lang="en">the question this layer answers</text>
 
-      <g data-step="3"><rect class="box gz" x="175" y="40" width="190" height="66"/>
+      <g data-step="3"><rect class="box ros" x="175" y="40" width="190" height="66"/>
         <text x="190" y="62" lang="zh-CN">系统测试</text><text x="190" y="62" lang="en">System test</text>
         <text x="190" y="81" class="mono">ros2 bag play --clock</text>
         <text x="190" y="97" class="small" lang="zh-CN">少、慢、最像真机</text><text x="190" y="97" class="small" lang="en">few, slow, closest to real</text>
-        <rect class="box gz" x="520" y="40" width="360" height="66"/>
+        <rect class="box" x="520" y="40" width="360" height="66"/>
         <text x="535" y="66" lang="zh-CN">整条链路在录制的数据上，</text><text x="535" y="66" lang="en">On recorded data, does the whole</text>
         <text x="535" y="88" lang="zh-CN">还给出和上次一样的输出吗？</text><text x="535" y="88" lang="en">chain still give the same output?</text></g>
 
@@ -235,7 +235,7 @@ jobs:
         <text x="130" y="140" lang="zh-CN">集成测试</text><text x="130" y="140" lang="en">Integration test</text>
         <text x="130" y="159" class="mono">launch_testing · ReadyToTest</text>
         <text x="130" y="175" class="small" lang="zh-CN">多进程、真实 DDS、退出码</text><text x="130" y="175" class="small" lang="en">several processes, real DDS, exit codes</text>
-        <rect class="box ros" x="520" y="118" width="360" height="66"/>
+        <rect class="box" x="520" y="118" width="360" height="66"/>
         <text x="535" y="144" lang="zh-CN">节点真的连上、收到了吗？</text><text x="535" y="144" lang="en">Do the nodes really connect and receive?</text>
         <text x="535" y="166" lang="zh-CN">被 SIGINT 结束时干净退出吗？</text><text x="535" y="166" lang="en">Do they exit cleanly on SIGINT?</text></g>
 
@@ -243,7 +243,7 @@ jobs:
         <text x="70" y="218" lang="zh-CN">单元测试</text><text x="70" y="218" lang="en">Unit test</text>
         <text x="70" y="237" class="mono">pytest · ament_add_gtest · ament_add_pytest_test</text>
         <text x="70" y="253" class="small" lang="zh-CN">多、快、不起 ROS 图</text><text x="70" y="253" class="small" lang="en">many, fast, no ROS graph</text>
-        <rect class="box ros" x="520" y="196" width="360" height="66"/>
+        <rect class="box" x="520" y="196" width="360" height="66"/>
         <text x="535" y="222" lang="zh-CN">这个函数、这个类，</text><text x="535" y="222" lang="en">Is this function or this class</text>
         <text x="535" y="244" lang="zh-CN">在给定输入下对吗？</text><text x="535" y="244" lang="en">correct for a given input?</text></g>
 
@@ -262,7 +262,7 @@ jobs:
         <text x="710" y="304" class="mono">colcon test-result</text>
         <text x="710" y="324" class="small" lang="zh-CN">有失败才返回 1</text><text x="710" y="324" class="small" lang="en">returns 1 only on failures</text></g>
 
-      <g data-step="5"><rect class="box gz" x="55" y="352" width="825" height="54"/>
+      <g data-step="5"><rect class="box" x="55" y="352" width="825" height="54"/>
         <text x="70" y="375" class="mono">GitHub Actions: setup-ros@v0.7 → action-ros-ci@v0.4</text>
         <text x="70" y="395" class="small" lang="zh-CN">每次 push：在干净的 ubuntu:noble 容器里 rosdep install、colcon build、colcon test，结果决定能否合并</text><text x="70" y="395" class="small" lang="en">on every push: rosdep install, colcon build, colcon test in a clean ubuntu:noble container; the results gate the merge</text></g>
     </svg>
@@ -294,9 +294,9 @@ jobs:
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="30" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">1. 录制</text><text x="30" y="26" class="small" style="fill: var(--ros)" lang="en">1. Record</text>
-      <text x="320" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">2. 回放</text><text x="320" y="26" class="small" style="fill: var(--ros)" lang="en">2. Replay</text>
-      <text x="630" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">3. 分析</text><text x="630" y="26" class="small" style="fill: var(--ros)" lang="en">3. Analysis</text>
+      <text x="30" y="26" class="small" lang="zh-CN">1. 录制</text><text x="30" y="26" class="small" lang="en">1. Record</text>
+      <text x="320" y="26" class="small" lang="zh-CN">2. 回放</text><text x="320" y="26" class="small" lang="en">2. Replay</text>
+      <text x="630" y="26" class="small" lang="zh-CN">3. 分析</text><text x="630" y="26" class="small" lang="en">3. Analysis</text>
       <path class="lane" d="M303 36 L303 410"/>
       <path class="lane" d="M613 36 L613 410"/>
 
@@ -309,7 +309,7 @@ jobs:
         <text x="44" y="179" class="mono">/scan /odom /tf</text></g>
 
       <g data-step="2"><path class="arrow" d="M157 194 L157 226"/>
-        <rect class="box ros" x="30" y="228" width="255" height="92"/>
+        <rect class="box" x="30" y="228" width="255" height="92"/>
         <text x="44" y="251" class="mono">run1/metadata.yaml</text>
         <text x="44" y="270" class="mono">run1/run1_0.mcap</text>
         <text x="44" y="290" class="small" lang="zh-CN">每条消息带录制时的时间戳</text><text x="44" y="290" class="small" lang="en">each message keeps its record time</text>
@@ -327,7 +327,7 @@ jobs:
         <text x="548" y="146" class="mono">/clock</text>
         <text x="548" y="163" class="small">40 Hz</text></g>
 
-      <g data-step="5"><rect class="box gz" x="320" y="198" width="270" height="72"/>
+      <g data-step="5"><rect class="box ros" x="320" y="198" width="270" height="72"/>
         <text x="334" y="220" lang="zh-CN">被测节点</text><text x="334" y="220" lang="en">Node under test</text>
         <text x="334" y="240" class="mono">use_sim_time:=true</text>
         <text x="334" y="259" class="small" lang="zh-CN">now() 与定时器跟着 /clock 走</text><text x="334" y="259" class="small" lang="en">now() and timers follow /clock</text></g>
@@ -350,7 +350,7 @@ jobs:
 
       <g data-step="8"><path class="arrow" d="M755 272 L755 294"/>
         <path class="arrow" d="M882 74 C 896 74, 896 340, 882 340"/>
-        <rect class="box gz" x="630" y="296" width="250" height="110"/>
+        <rect class="box" x="630" y="296" width="250" height="110"/>
         <text x="644" y="318" class="mono">compare.py</text>
         <text x="644" y="338" class="small" lang="zh-CN">用 rosbag2_py 读 out1 与 golden</text><text x="644" y="338" class="small" lang="en">reads out1 and golden with rosbag2_py</text>
         <text x="644" y="355" class="small" lang="zh-CN">按仿真时间对齐，带容差比较</text><text x="644" y="355" class="small" lang="en">aligned on sim time, with tolerance</text>

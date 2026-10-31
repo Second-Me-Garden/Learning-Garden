@@ -247,9 +247,9 @@
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="30" y="24" class="small" style="fill: var(--ros)" lang="zh-CN">发布端</text><text x="30" y="24" class="small" style="fill: var(--ros)" lang="en">Publisher side</text>
-      <text x="330" y="24" class="small" style="fill: var(--ros)" lang="zh-CN">发现与匹配</text><text x="330" y="24" class="small" style="fill: var(--ros)" lang="en">Discovery and matching</text>
-      <text x="625" y="24" class="small" style="fill: var(--ros)" lang="zh-CN">订阅端</text><text x="625" y="24" class="small" style="fill: var(--ros)" lang="en">Subscriber side</text>
+      <text x="30" y="24" class="small" lang="zh-CN">发布端</text><text x="30" y="24" class="small" lang="en">Publisher side</text>
+      <text x="330" y="24" class="small" lang="zh-CN">发现与匹配</text><text x="330" y="24" class="small" lang="en">Discovery and matching</text>
+      <text x="625" y="24" class="small" lang="zh-CN">订阅端</text><text x="625" y="24" class="small" lang="en">Subscriber side</text>
       <line x1="290" y1="30" x2="290" y2="340" class="lane"/>
       <line x1="610" y1="30" x2="610" y2="340" class="lane"/>
 
@@ -263,12 +263,12 @@
       <text x="633" y="86" class="mono">DataReader rt/scan</text>
       <text x="633" y="110" class="small" lang="zh-CN">请求 BEST_EFFORT · VOLATILE</text><text x="633" y="110" class="small" lang="en">requests BEST_EFFORT · VOLATILE</text>
 
-      <rect class="box gz" x="25" y="245" width="255" height="90"/>
+      <rect class="box ros" x="25" y="245" width="255" height="90"/>
       <text x="38" y="267" class="mono" lang="zh-CN">进程 C · participant</text><text x="38" y="267" class="mono" lang="en">Process C · participant</text>
       <text x="38" y="291" class="mono">DataWriter rt/scan</text>
       <text x="38" y="315" class="small" lang="zh-CN">提供 BEST_EFFORT · VOLATILE</text><text x="38" y="315" class="small" lang="en">offers BEST_EFFORT · VOLATILE</text>
 
-      <rect class="box gz" x="620" y="245" width="255" height="90"/>
+      <rect class="box ros" x="620" y="245" width="255" height="90"/>
       <text x="633" y="267" class="mono" lang="zh-CN">进程 D · participant</text><text x="633" y="267" class="mono" lang="en">Process D · participant</text>
       <text x="633" y="291" class="mono">DataReader rt/scan</text>
       <text x="633" y="315" class="small" lang="zh-CN">请求 RELIABLE · VOLATILE</text><text x="633" y="315" class="small" lang="en">requests RELIABLE · VOLATILE</text>
@@ -290,12 +290,12 @@
         <path class="arrow" d="M595 218 L700 243"/></g>
 
       <g data-step="3"><path class="arrow flow" d="M282 92 L616 92"/>
-        <text x="305" y="80" class="small" style="fill: var(--ros)" lang="zh-CN">提供 ≥ 请求：匹配，按 best effort 交付</text><text x="305" y="80" class="small" style="fill: var(--ros)" lang="en">offered ≥ requested: match, best effort</text>
+        <text x="305" y="80" class="small" lang="zh-CN">提供 ≥ 请求：匹配，按 best effort 交付</text><text x="305" y="80" class="small" lang="en">offered ≥ requested: match, best effort</text>
         <text x="305" y="112" class="small" lang="zh-CN">订阅者不回 ACKNACK</text><text x="305" y="112" class="small" lang="en">the subscriber sends no ACKNACK</text></g>
 
-      <g data-step="4"><path d="M282 290 L440 290 M460 290 L616 290" style="stroke: var(--gz); stroke-width: 1.8; stroke-dasharray: 5 5; fill: none"/>
-        <text x="443" y="295" class="mono" style="fill: var(--gz)">✕</text>
-        <text x="305" y="278" class="small" style="fill: var(--gz)" lang="zh-CN">提供 &lt; 请求：永不匹配，无数据</text><text x="305" y="278" class="small" style="fill: var(--gz)" lang="en">offered &lt; requested: never matches</text>
+      <g data-step="4"><path d="M282 290 L440 290 M460 290 L616 290" style="stroke: var(--ink-2); stroke-width: 1.8; stroke-dasharray: 5 5; fill: none"/>
+        <text x="443" y="295" class="mono" style="fill: var(--ink-2)">✕</text>
+        <text x="305" y="278" class="small" style="fill: var(--ink-2)" lang="zh-CN">提供 &lt; 请求：永不匹配，无数据</text><text x="305" y="278" class="small" style="fill: var(--ink-2)" lang="en">offered &lt; requested: never matches</text>
         <text x="305" y="312" class="small" lang="zh-CN">两端各收到 incompatible QoS 事件</text><text x="305" y="312" class="small" lang="en">both sides get an incompatible QoS event</text></g>
 
       <g data-step="5"><rect class="box ros" x="25" y="352" width="850" height="60"/>
@@ -344,14 +344,14 @@
         <text x="38" y="236" class="small" lang="zh-CN">同机：/dev/shm 共享内存</text><text x="38" y="236" class="small" lang="en">same host: /dev/shm shared memory</text>
         <text x="38" y="252" class="small" lang="zh-CN">可用 discovery server</text><text x="38" y="252" class="small" lang="en">discovery server available</text></g>
 
-      <g data-step="4"><rect class="box" x="315" y="152" width="270" height="110"/>
+      <g data-step="4"><rect class="box ros" x="315" y="152" width="270" height="110"/>
         <text x="328" y="174" class="mono">rmw_cyclonedds_cpp</text>
         <text x="328" y="194" class="small">ros-jazzy-rmw-cyclonedds-cpp</text>
         <text x="328" y="216" class="mono">Cyclone DDS</text>
         <text x="328" y="236" class="small" lang="zh-CN">同样是 RTPS</text><text x="328" y="236" class="small" lang="en">also RTPS</text>
         <text x="328" y="252" class="small" lang="zh-CN">端口公式同 Phase 0</text><text x="328" y="252" class="small" lang="en">port formula as in Phase 0</text></g>
 
-      <g data-step="5"><rect class="box gz" x="605" y="152" width="270" height="110"/>
+      <g data-step="5"><rect class="box ros" x="605" y="152" width="270" height="110"/>
         <text x="618" y="174" class="mono">rmw_zenoh_cpp</text>
         <text x="618" y="194" class="small">ros-jazzy-rmw-zenoh-cpp</text>
         <text x="618" y="216" class="mono">Zenoh</text>
@@ -364,11 +364,11 @@
         <rect class="box" x="315" y="276" width="270" height="50"/>
         <text x="328" y="297" class="mono">RTPS / UDP</text>
         <text x="328" y="316" class="small" lang="zh-CN">与左列同协议，互通不保证</text><text x="328" y="316" class="small" lang="en">same protocol as left; interop not guaranteed</text>
-        <rect class="box gz" x="605" y="276" width="270" height="50"/>
+        <rect class="box" x="605" y="276" width="270" height="50"/>
         <text x="618" y="297" class="mono" lang="zh-CN">Zenoh 协议</text><text x="618" y="297" class="mono" lang="en">Zenoh protocol</text>
         <text x="618" y="316" class="small" lang="zh-CN">与 DDS 节点不互通；传输查文档</text><text x="618" y="316" class="small" lang="en">no traffic with DDS nodes; transport: see docs</text>
-        <path d="M296 301 L314 301" style="stroke: var(--ros); stroke-width: 2; fill: none"/>
-        <text x="590" y="306" class="mono" style="fill: var(--gz)">✕</text>
+        <path d="M296 301 L314 301" style="stroke: var(--ink-3); stroke-width: 2; fill: none"/>
+        <text x="590" y="306" class="mono" style="fill: var(--ink-2)">✕</text>
         <rect class="box linux" x="25" y="340" width="850" height="68"/>
         <text x="38" y="362" class="mono" lang="zh-CN">Linux 内核</text><text x="38" y="362" class="mono" lang="en">Linux kernel</text>
         <text x="38" y="382" class="small" lang="zh-CN">UDP 与 TCP socket、IP 多播、/dev/shm 共享内存段、DDS 和 Zenoh 的后台线程</text><text x="38" y="382" class="small" lang="en">UDP and TCP sockets, IP multicast, /dev/shm segments, DDS and Zenoh background threads</text>

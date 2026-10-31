@@ -22,7 +22,7 @@
   </header>
 
   <p class="meta" lang="zh-CN">环境准备 · 做任何实验之前</p><p class="meta" lang="en">Environment setup · before any lab</p>
-  <h1><span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span> <span class="en" lang="zh-CN">Lab environment: arm64 container, browser desktop, VM fallback</span><span class="en" lang="en">arm64 container, browser desktop, VM fallback</span></h1>
+  <h1><span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span> <span class="en" lang="zh-CN">实验环境：arm64 容器、浏览器桌面、虚拟机备选</span><span class="en" lang="en">arm64 container, browser desktop, VM fallback</span></h1>
   <p class="lede" lang="zh-CN">ROS 2 的实验不会像内核实验那样把机器弄崩，但它会往系统里加一个 apt 源和几百个包，会在局域网上用 UDP 多播找同伴，而且 macOS 本身不是 Jazzy 的正式支持平台。所以本课程的实验全部跑在 Apple Silicon Mac 上的一个 Linux 客体里：首选一个 arm64 Docker 容器，里面装 ROS 2 Jazzy、Gazebo Harmonic 和一个从浏览器打开的轻量桌面；备选一台 UTM 里的 Ubuntu 24.04 虚拟机，或者一台带 GPU 的云主机。宿主 Mac 只负责编辑文件和开浏览器。</p>
   <p class="lede" lang="en">ROS 2 labs will not crash the machine the way kernel labs do, but ROS 2 adds an apt repository and hundreds of packages to the system, finds its peers by UDP multicast on the local network, and macOS itself is not an officially supported platform for Jazzy. So every lab in this course runs in a Linux guest on the Apple Silicon Mac: first choice is an arm64 Docker container holding ROS 2 Jazzy, Gazebo Harmonic and a lightweight desktop opened from the browser; the fallbacks are an Ubuntu 24.04 VM in UTM or a cloud machine with a GPU. The host Mac only edits files and opens a browser.</p>
   <div class="note" lang="zh-CN"><strong>状态说明：</strong>本页的 Dockerfile、<code>compose.yaml</code>、<code>lab.sh</code> 和所有命令是 2026-10-31 依据官方文档拼装的，<strong>没有在这台 Mac 上实际执行过</strong>。包名已在当天的 ROS 2 Jazzy arm64 apt 索引里逐个查到；构建或运行时若报错，以报错信息和官方文档为准调整。</div><div class="note" lang="en"><strong>Status:</strong> the Dockerfile, <code>compose.yaml</code>, <code>lab.sh</code> and every command on this page were assembled from the official docs on 2026-10-31 and <strong>have not been executed on this Mac</strong>. Each package name was looked up in the ROS 2 Jazzy arm64 apt index on that day; if a build or run fails, adjust by the error message and the official docs.</div>
@@ -285,7 +285,7 @@ esac</pre>
         <text x="58" y="134" lang="zh-CN">Docker Desktop 的 Linux VM · 所有容器共用一个内核</text><text x="58" y="134" lang="en">Docker Desktop Linux VM · one kernel for every container</text></g>
 
       <!-- step 3: container + ROS graph -->
-      <g data-step="3"><rect class="box ros" x="58" y="148" width="600" height="210"/>
+      <g data-step="3"><rect class="box" x="58" y="148" width="600" height="210"/>
         <text x="74" y="172" lang="zh-CN">容器 ros2-lab · ros:jazzy-ros-base</text><text x="74" y="172" lang="en">Container ros2-lab · ros:jazzy-ros-base</text>
         <rect class="box ros" x="74" y="184" width="180" height="92"/>
         <text x="88" y="206" style="fill: var(--ros)" lang="zh-CN">ROS 2 图</text><text x="88" y="206" style="fill: var(--ros)" lang="en">ROS 2 graph</text>

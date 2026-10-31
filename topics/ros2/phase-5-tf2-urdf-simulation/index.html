@@ -228,8 +228,8 @@
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="30" y="22" class="small" style="fill: var(--ros)" lang="zh-CN">tf 树（父 → 子）</text><text x="30" y="22" class="small" style="fill: var(--ros)" lang="en">tf tree (parent → child)</text>
-      <text x="370" y="22" class="small" style="fill: var(--ros)" lang="zh-CN">tf2 Buffer：每条边一串带时间戳的样本</text><text x="370" y="22" class="small" style="fill: var(--ros)" lang="en">tf2 Buffer: a series of stamped samples per link</text>
+      <text x="30" y="22" class="small" lang="zh-CN">tf 树（父 → 子）</text><text x="30" y="22" class="small" lang="en">tf tree (parent → child)</text>
+      <text x="370" y="22" class="small" lang="zh-CN">tf2 Buffer：每条边一串带时间戳的样本</text><text x="370" y="22" class="small" lang="en">tf2 Buffer: a series of stamped samples per link</text>
       <line x1="345" y1="30" x2="345" y2="410" class="lane"/>
 
       <rect class="box ros" x="30" y="36" width="200" height="36"/>
@@ -284,9 +284,10 @@
         <text x="370" y="342" class="small" lang="zh-CN">每条边在 t 两侧的样本之间插值：平移线性，旋转 slerp</text><text x="370" y="342" class="small" lang="en">each link interpolates between the samples either side of t: lerp and slerp</text>
         <text x="370" y="358" class="small" lang="zh-CN">结果 = 三条边在同一个 t 上依次组合</text><text x="370" y="358" class="small" lang="en">result = the three links composed at the same t</text></g>
 
-      <g data-step="6"><path d="M820 56 L820 300" style="stroke: var(--gz); stroke-width: 1.8; stroke-dasharray: 5 4; fill: none"/>
-        <text x="826" y="46" class="small" style="fill: var(--gz)">12.45</text>
-        <text x="370" y="386" class="small" style="fill: var(--gz)" lang="zh-CN">t = 12.45 晚于最新样本 12.38：extrapolation into the future</text><text x="370" y="386" class="small" style="fill: var(--gz)" lang="en">t = 12.45 is past the newest sample (12.38): extrapolation into the future</text>
+      <g data-step="6"><path d="M820 56 L820 300" style="stroke: var(--ink-2); stroke-width: 1.8; stroke-dasharray: 5 4; fill: none"/>
+        <text x="826" y="46" class="small" style="fill: var(--ink-2)">12.45</text>
+        <text x="370" y="386" class="small" style="fill: var(--ink-2)" lang="zh-CN">t = 12.45 晚于最新样本 12.38：extrapolation into the future</text><text x="370" y="386" class="small" style="fill: var(--ink-2)" lang="en">t = 12.45 is past the newest sample (12.38): extrapolation into the future</text>
+        <text x="356" y="386" class="small" style="fill: var(--ink-2)">✕</text>
         <text x="370" y="402" class="small" lang="zh-CN">t = 0 表示最新可用：取各边共同的最晚时刻 12.38</text><text x="370" y="402" class="small" lang="en">t = 0 means latest available: the latest common time, 12.38</text></g>
     </svg>
   </div>
@@ -299,7 +300,7 @@
            "第 2 步，Sensors 系统按 update_rate 用渲染引擎从雷达位置朝每个角度看一次场景，得到距离，发成 gz.msgs.LaserScan。容器里这一步用 llvmpipe 在 CPU 上做，最耗时。",
            "第 3 步，桥把 gz.msgs.LaserScan 逐字段转成 sensor_msgs/msg/LaserScan，发到 ROS 的 /scan。时间戳是仿真时间，frame_id 原样保留，所以要在 SDF 里用 gz_frame_id 设成 URDF 里的 lidar。",
            "第 4 步，DiffDrive 从轮子实际转角积分出里程计，发 Odometry 和一条 odom → base_link 变换；JointStatePublisher 发轮子关节角。桥把它们转成 /odom、/tf 和 /joint_states，robot_state_publisher 再算出轮子的 tf。",
-           "第 5 步，控制器在 ROS 一侧发布 /cmd_vel。本页是 teleop_twist_keyboard，默认发 geometry_msgs/msg/Twist。Phase 6 换成 Nav2 时，要再核对它发的是 Twist 还是 TwistStamped。",
+           "第 5 步，控制器在 ROS 一侧发布 /cmd_vel。本页是 teleop_twist_keyboard，默认发 geometry_msgs/msg/Twist，与桥声明的类型一致。Phase 6 换成 Jazzy 的 diff_drive_controller 后只收 TwistStamped：teleop 要加 stamped:=true，Nav2 要打开 enable_stamped_cmd_vel。",
            "第 6 步，桥按 ] 方向把 Twist 转成 gz.msgs.Twist 送进 Gazebo。DiffDrive 换算出左右轮速度交给物理引擎，下一步物理推进时机器人动起来，环路闭合。",
            "第 7 步，消费者：RViz2 和你的 tf2 listener 都要设 use_sim_time:=true，按 /clock 计时，按消息时间戳查 tf。桥只转换声明过的类型对，任何一侧类型对不上，结果都是不报错、没数据。"]'
          data-captions-en='["The whole picture: on the left the systems inside the Gazebo server, in the middle ros_gz_bridge, on the right the ROS 2 topics and nodes. Press Play to go once round the loop: physics steps, a sensor produces data, it crosses the bridge, a controller sends a command, and that crosses back to the wheels.",
@@ -307,7 +308,7 @@
            "Step 2, at its update_rate the Sensors system uses the rendering engine to look at the scene from the lidar at each angle, gets the distances and publishes a gz.msgs.LaserScan. In the container this runs on the CPU through llvmpipe and is the most expensive step.",
            "Step 3, the bridge copies gz.msgs.LaserScan field by field into sensor_msgs/msg/LaserScan and publishes it on ROS /scan. The stamp is simulation time and the frame_id is kept as is, so set it in SDF with gz_frame_id to the URDF link lidar.",
            "Step 4, DiffDrive integrates odometry from the actual wheel angles and publishes Odometry plus an odom → base_link transform; JointStatePublisher publishes the wheel joint angles. The bridge turns them into /odom, /tf and /joint_states, and robot_state_publisher computes the wheel tf.",
-           "Step 5, a controller on the ROS side publishes /cmd_vel. On this page it is teleop_twist_keyboard, which publishes geometry_msgs/msg/Twist by default. When Phase 6 switches to Nav2, check again whether it publishes Twist or TwistStamped.",
+           "Step 5, a controller on the ROS side publishes /cmd_vel. On this page it is teleop_twist_keyboard, which publishes geometry_msgs/msg/Twist by default, matching the bridge. In Phase 6 the Jazzy diff_drive_controller accepts only TwistStamped, so teleop needs stamped:=true and Nav2 needs enable_stamped_cmd_vel.",
            "Step 6, the bridge, in the ] direction, turns Twist into gz.msgs.Twist and sends it into Gazebo. DiffDrive converts it into left and right wheel speeds for the physics engine; on the next physics step the robot moves, and the loop is closed.",
            "Step 7, the consumers: RViz2 and your tf2 listener both need use_sim_time:=true, keep time by /clock and look up tf by message stamp. The bridge converts only the declared type pairs; a type mismatch on either side means no error and no data."]'>
       <defs>
@@ -315,9 +316,9 @@
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="20" y="24" class="small" style="fill: var(--gz)" lang="zh-CN">Gazebo 服务器（gz-transport）</text><text x="20" y="24" class="small" style="fill: var(--gz)" lang="en">Gazebo server (gz-transport)</text>
+      <text x="20" y="24" class="small" lang="zh-CN">Gazebo 服务器（gz-transport）</text><text x="20" y="24" class="small" lang="en">Gazebo server (gz-transport)</text>
       <text x="320" y="24" class="small">ros_gz_bridge · parameter_bridge</text>
-      <text x="575" y="24" class="small" style="fill: var(--ros)" lang="zh-CN">ROS 2 图（DDS）</text><text x="575" y="24" class="small" style="fill: var(--ros)" lang="en">ROS 2 graph (DDS)</text>
+      <text x="575" y="24" class="small" lang="zh-CN">ROS 2 图（DDS）</text><text x="575" y="24" class="small" lang="en">ROS 2 graph (DDS)</text>
       <rect class="box gz" x="20" y="34" width="280" height="376"/>
       <rect class="box" x="320" y="34" width="210" height="376"/>
 
@@ -550,7 +551,7 @@ if __name__ == '__main__':
 
     <h3 lang="zh-CN">Lab B · 放进 Gazebo Harmonic：差速驱动、激光雷达、桥、键盘遥控</h3><h3 lang="en">Lab B · Into Gazebo Harmonic: differential drive, lidar, bridge, keyboard teleoperation</h3>
     <ol>
-      <li><span lang="zh-CN">停掉 Lab A 的所有节点。把下面这段插进 <code>bot.urdf.xacro</code> 里那行注释的位置（<code>&lt;/robot&gt;</code> 之前）。它只在 <code>sim:=true</code> 时展开，所以 Lab A 的用法不变。插件与传感器的名字和元素取自 2026-10-31 的 Harmonic 教程和 gz-sim8、gz-sensors8 源码，查文档；万向球的 <code>mu1</code>、<code>mu2</code> 写法尤其要核对：</span><span lang="en">Stop every node from Lab A. Insert the block below into <code>bot.urdf.xacro</code> where the comment is (before <code>&lt;/robot&gt;</code>). It expands only with <code>sim:=true</code>, so Lab A keeps working as before. The plugin and sensor names and elements come from the Harmonic tutorials and the gz-sim8 and gz-sensors8 sources as of 2026-10-31: check the docs, and check the caster’s <code>mu1</code> and <code>mu2</code> syntax in particular:</span><pre data-lang="xml" data-file="bot.urdf.xacro（插入）">  &lt;!-- 只在 xacro bot.urdf.xacro sim:=true 时展开 --&gt;
+      <li><span lang="zh-CN">停掉 Lab A 的所有节点。把下面这段插进 <code>bot.urdf.xacro</code> 里那行注释的位置（<code>&lt;/robot&gt;</code> 之前）。它只在 <code>sim:=true</code> 时展开，所以 Lab A 的用法不变。插件与传感器的名字和元素取自 2026-10-31 的 Harmonic 教程和 gz-sim8、gz-sensors8 源码，查文档；万向球的 <code>mu1</code>、<code>mu2</code> 写法尤其要核对：</span><span lang="en">Stop every node from Lab A. Insert the block below into <code>bot.urdf.xacro</code> where the comment is (before <code>&lt;/robot&gt;</code>). It expands only with <code>sim:=true</code>, so Lab A keeps working as before. The plugin and sensor names and elements come from the Harmonic tutorials and the gz-sim8 and gz-sensors8 sources as of 2026-10-31: check the docs, and check the caster’s <code>mu1</code> and <code>mu2</code> syntax in particular:</span><pre data-lang="xml" data-file="bot.urdf.xacro">  &lt;!-- 只在 xacro bot.urdf.xacro sim:=true 时展开 --&gt;
   &lt;xacro:if value="$(arg sim)"&gt;
     &lt;gazebo&gt;
       &lt;plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive"&gt;

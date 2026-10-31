@@ -220,7 +220,7 @@
       <g data-step="1 2 5 7"><rect class="box ros" x="40" y="120" width="170" height="56"/>
         <text x="55" y="144" class="mono">Unconfigured</text>
         <text x="55" y="164" class="small" lang="zh-CN">没有任何资源</text><text x="55" y="164" class="small" lang="en">no resources</text></g>
-      <g data-step="1"><text x="40" y="108" class="small" style="fill: var(--ros)" lang="zh-CN">1. create（起点）</text><text x="40" y="108" class="small" style="fill: var(--ros)" lang="en">1. create (start)</text></g>
+      <g data-step="1"><text x="40" y="108" class="small" lang="zh-CN">1. create（起点）</text><text x="40" y="108" class="small" lang="en">1. create (start)</text></g>
 
       <g data-step="2 3 4 5"><rect class="box ros" x="365" y="120" width="170" height="56"/>
         <text x="380" y="144" class="mono">Inactive</text>
@@ -277,9 +277,10 @@
         <text x="410" y="382" class="mono">Finalized</text>
         <text x="410" y="400" class="small" lang="zh-CN">终态，等 destroy</text><text x="410" y="400" class="small" lang="en">terminal, awaits destroy</text></g>
 
-      <g data-step="7"><rect class="box linux" x="30" y="356" width="210" height="52" style="stroke-dasharray: 5 4"/>
+      <g data-step="7"><rect class="box" x="30" y="356" width="210" height="52" style="stroke-dasharray: 5 4"/>
         <text x="42" y="376" class="mono">ErrorProcessing</text>
         <text x="42" y="396" class="small" lang="zh-CN">on_error，因任一 ERROR</text><text x="42" y="396" class="small" lang="en">on_error, after any ERROR</text>
+        <text x="222" y="377" class="mono" style="fill: var(--ink-2)">!</text>
         <path class="arrow" d="M50 354 L50 178"/>
         <text x="56" y="262" class="small" lang="zh-CN">SUCCESS</text><text x="56" y="262" class="small" lang="en">SUCCESS</text>
         <path class="arrow" d="M242 386 L393 386"/>
@@ -309,8 +310,8 @@
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="20" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">左：组合，一个进程，进程内通信</text><text x="20" y="26" class="small" style="fill: var(--ros)" lang="en">left: composed, one process, intra-process</text>
-      <text x="470" y="26" class="small" style="fill: var(--gz)" lang="zh-CN">右：三个进程，经 DDS</text><text x="470" y="26" class="small" style="fill: var(--gz)" lang="en">right: three processes over DDS</text>
+      <text x="20" y="26" class="small" lang="zh-CN">左：组合，一个进程，进程内通信</text><text x="20" y="26" class="small" lang="en">left: composed, one process, intra-process</text>
+      <text x="470" y="26" class="small" lang="zh-CN">右：三个进程，经 DDS</text><text x="470" y="26" class="small" lang="en">right: three processes over DDS</text>
       <line x1="450" y1="40" x2="450" y2="410" class="lane"/>
 
       <g data-step="1"><rect class="box ros" x="20" y="40" width="410" height="250"/>
@@ -334,15 +335,15 @@
         <text x="32" y="330" class="mono">rmw / DDS</text>
         <text x="32" y="347" class="small" lang="zh-CN">进程外的订阅者仍收到序列化副本</text><text x="32" y="347" class="small" lang="en">subscribers elsewhere still get a serialized copy</text></g>
 
-      <g data-step="4"><rect class="box gz" x="470" y="60" width="125" height="86"/>
+      <g data-step="4"><rect class="box ros" x="470" y="60" width="125" height="86"/>
         <text x="482" y="84" class="mono">camera</text>
         <text x="482" y="106" class="small" lang="zh-CN">独立进程</text><text x="482" y="106" class="small" lang="en">own process</text>
         <text x="482" y="128" class="small">rmw + DDS</text>
-        <rect class="box gz" x="612" y="60" width="125" height="86"/>
+        <rect class="box ros" x="612" y="60" width="125" height="86"/>
         <text x="624" y="84" class="mono">filter</text>
         <text x="624" y="106" class="small" lang="zh-CN">独立进程</text><text x="624" y="106" class="small" lang="en">own process</text>
         <text x="624" y="128" class="small">rmw + DDS</text>
-        <rect class="box gz" x="755" y="60" width="125" height="86"/>
+        <rect class="box ros" x="755" y="60" width="125" height="86"/>
         <text x="767" y="84" class="mono">detector</text>
         <text x="767" y="106" class="small" lang="zh-CN">独立进程</text><text x="767" y="106" class="small" lang="en">own process</text>
         <text x="767" y="128" class="small">rmw + DDS</text></g>
@@ -360,8 +361,8 @@
         <text x="716" y="226" class="small" lang="zh-CN">反序列化</text><text x="716" y="226" class="small" lang="en">deserialize</text>
         <text x="470" y="326" class="small" lang="zh-CN">每跳：序列化、内核拷贝、反序列化、线程唤醒</text><text x="470" y="326" class="small" lang="en">per hop: serialize, kernel copy, deserialize, wake</text></g>
 
-      <g data-step="6"><text x="20" y="386" class="small" style="fill: var(--ros)" lang="zh-CN">延迟几乎不随大小增长；一个崩溃，全部陪葬</text><text x="20" y="386" class="small" style="fill: var(--ros)" lang="en">latency barely grows with size; one crash kills all</text>
-        <text x="470" y="386" class="small" style="fill: var(--gz)" lang="zh-CN">延迟随大小增长；崩溃只影响一个进程</text><text x="470" y="386" class="small" style="fill: var(--gz)" lang="en">latency grows with size; a crash stays contained</text></g>
+      <g data-step="6"><text x="20" y="386" class="small" lang="zh-CN">延迟几乎不随大小增长；一个崩溃，全部陪葬</text><text x="20" y="386" class="small" lang="en">latency barely grows with size; one crash kills all</text>
+        <text x="470" y="386" class="small" lang="zh-CN">延迟随大小增长；崩溃只影响一个进程</text><text x="470" y="386" class="small" lang="en">latency grows with size; a crash stays contained</text></g>
     </svg>
   </div>
 
