@@ -41,6 +41,7 @@ for (const page of pages) {
       if (!/data-captions=/.test(d[0])) problems.push(`${rel}: diagram without data-captions`);
     }
     if (!/assets\/diagram\.js/.test(html)) problems.push(`${rel}: diagram.js not loaded`);
+    if (!/assets\/rail\.js/.test(html)) problems.push(`${rel}: rail.js not loaded`);
     if (/<form class="quiz"/.test(html) && !/assets\/quiz\.js/.test(html)) problems.push(`${rel}: quiz present but quiz.js not loaded`);
     for (const h of ['目标', '核心概念', '动画图解', '资料']) {
       if (!html.includes(h)) problems.push(`${rel}: section "${h}" missing`);
