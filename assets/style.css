@@ -97,7 +97,7 @@ img, svg { max-width: 100%; }
 [hidden] { display: none !important; }
 
 .wrap { max-width: var(--maxw); margin: 0 auto; padding-block: 20px 72px; }
-p, li { max-width: var(--measure); }
+/* No fixed measure: Chinese text is denser than Latin, and lists carry code blocks that need the full column. */
 
 /* Header */
 .top {
@@ -123,7 +123,7 @@ h1 {
 h1 .en { display: block; font-family: var(--sans); font-weight: 400; font-size: 17px; letter-spacing: 0; color: var(--ink-2); margin-top: 10px; line-height: 1.5; }
 h2 { font-family: var(--display); font-weight: 600; font-size: 26px; line-height: 1.15; margin: 48px 0 12px; }
 h3 { font-size: 17px; font-weight: 600; margin: 26px 0 8px; }
-.lede { color: var(--ink-2); font-size: 17.5px; line-height: 1.6; margin: 0 0 22px; }
+.lede { color: var(--ink-2); font-size: 17.5px; line-height: 1.6; margin: 0 0 22px; max-width: 46em; }
 .meta { color: var(--ink-3); font-size: 13.5px; margin: 0 0 4px; }
 .en { color: var(--ink-3); font-weight: 400; font-size: 0.9em; }
 
