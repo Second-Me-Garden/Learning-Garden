@@ -1,14 +1,15 @@
 # Brand assets
 
-Selected A / Fraunces baseline (2026-10-31), from the handoff package `tmp/learning-garden-selected-a-2026-10-31/` (untracked). Primary marks are copied unchanged:
+Current baseline: **GOLD HIGHLIGHTS ONLY** final vectors (2026-10-31), from `tmp/learning-garden-final-vectors-2026-10-31/` (untracked). Copied byte-identical:
 
-- `symbol.svg` — tree and thick ring, champagne gold, transparent (use on dark surfaces)
-- `seal.svg` — full seal with lettering, transparent (use on dark surfaces)
-- `seal-navy.svg` — full seal on the fixed navy `#203044`
+- `learning-garden-logo-transparent.svg` — complete logo (tree, thick ring, Fraunces lettering), no background; for dark or haloed surfaces
+- `learning-garden-logo-navy.svg` — the same on the fixed navy `#203044`
 
-Derived here for the site (not replacements for the primary marks):
+Derived here for the site (never replacements for the two files above):
 
-- `symbol-disc.svg` — the symbol on a navy disc, for small placements on light surfaces
-- `favicon.svg` — the symbol on a navy disc with a slightly heavier ring, for 16–32 px
+- `symbol.svg` — the transparent logo with the two lettering groups removed (tree + ring only)
+- `favicon.svg` — the symbol over a radial navy halo (no hard disc) with a slightly heavier ring, for 16–32 px
 
-Identity text: **Learning Garden** · **Deep Roots. Fresh Ideas.** · logo font Fraunces (OFL, `fonts/`). Fraunces is used for the brand wordmark only, not for body or heading text.
+Halo treatment (`.logo-halo` for the full logo and `.mark` for the header symbol, in `assets/style.css`): the transparent logo sits on a separate radial-gradient layer — strongest at the centre, fading to fully transparent with no visible edge, tinted from the brand navy toward the current surface so it follows the light/dark theme; the fade extends well beyond the ring so the outer lettering stays readable.
+
+Identity text: **Learning Garden** · **Deep Roots. Fresh Ideas.** · logo font Fraunces (OFL, `fonts/`), used for the brand wordmark only. Canonical copy: `tmp/learning-garden-selected-a-2026-10-31/BRAND-COPY.md`.
