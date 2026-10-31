@@ -63,12 +63,12 @@
   const rc = document.createElement('div'); rc.className = 'rail-crumb';
   if (brand) { const b = document.createElement('a'); b.className = 'rail-brand'; b.href = brand.getAttribute('href'); b.textContent = brand.textContent.trim(); rc.appendChild(b); }
   if (crumb) { const t = document.createElement('a'); t.className = 'rail-topic'; t.href = crumb.getAttribute('href'); t.textContent = crumb.textContent.trim(); rc.appendChild(t); }
+  panel.appendChild(rc);
+  // Language and theme controls live at the foot of the rail (shown while the header is docked).
   const tools = document.createElement('div'); tools.className = 'rail-tools';
   const langBtn = headerEl && headerEl.querySelector('button.lang');
   if (langBtn) { const b = langBtn.cloneNode(true); b.classList.add('rail-lang'); tools.appendChild(b); }
   if (themeBtn) { const b = themeBtn.cloneNode(true); b.classList.add('rail-theme'); tools.appendChild(b); }
-  if (tools.childNodes.length) rc.appendChild(tools);
-  panel.appendChild(rc);
   if (meta) {
     const p = document.createElement('p'); p.className = 'rail-meta'; p.textContent = meta.textContent.trim();
     panel.appendChild(p);
@@ -113,6 +113,9 @@
       li.appendChild(a); toc.appendChild(li);
     });
     nav.appendChild(toc); panel.appendChild(nav);
+  }
+  if (tools.childNodes.length) panel.appendChild(tools);
+  if (false) {
     if ('IntersectionObserver' in window) {
       const map = new Map(h2s.map((h, i) => [h, toc.children[i].firstChild]));
       let current = null;

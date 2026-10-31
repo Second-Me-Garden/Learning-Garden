@@ -344,7 +344,8 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 }
 .rail-crumb .rail-brand { font-family: var(--display); font-weight: 600; font-size: 16px; color: var(--ink); text-decoration: none; }
 .rail-crumb .rail-topic { font-weight: 600; color: var(--ink-2); text-decoration: none; }
-.rail-crumb .rail-tools { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.rail-tools { display: none; gap: 8px; align-items: center; margin-top: 14px; padding-top: 12px; border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent); }
+body.scrolled .rail-tools { display: flex; }
 .rail-crumb .rail-theme, .rail-crumb .rail-lang { background: transparent; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); color: var(--ink-2); border-radius: 999px; width: 30px; height: 30px; font: inherit; cursor: pointer; line-height: 1; }
 .rail-crumb .rail-lang { width: auto; padding: 0 9px; font-size: 12px; font-weight: 600; }
 .rail-crumb .rail-theme:hover, .rail-crumb .rail-lang:hover { border-color: var(--ink-3); color: var(--ink); }
