@@ -2,11 +2,13 @@
 
 分阶段的学习路径 + 动画图解。每个 **topic** 是一项技能或职业目标，拆成有序的 **phase**；每个 phase 是一页静态 HTML：中文讲解、英文术语、Linux ↔ XNU 对照、至少一张可逐步播放的 SVG 动画、动手实验、自测题和资料清单。
 
-无构建、无依赖。直接打开：
+无构建、无依赖。线上：https://second-me-garden.github.io/Learning-Garden/ ；本地直接打开：
 
 ```
 open index.html
 ```
+
+`main` 只接受 PR，且 CI（`site integrity`）必须通过才能合并；Pages 由 `.github/workflows/pages.yml` 在检查通过后部署，只发布 `index.html`、`assets/`、`topics/`。
 
 ## Topics
 

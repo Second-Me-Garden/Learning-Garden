@@ -20,7 +20,7 @@ First topic: **Kernel Engineering — becoming a kernel engineer at Apple.** Fun
 ## Non-Goals
 
 - No server, accounts, comments, analytics or external fetches.
-- No GitHub Pages while the repo is private on the free org plan.
+- No analytics or accounts on the public site; `docs/` and `scripts/` are never published.
 - Not a general course platform; one learner, curated topics.
 
 ## Success Criteria
@@ -37,7 +37,7 @@ First topic: **Kernel Engineering — becoming a kernel engineer at Apple.** Fun
 
 ## Links
 
-- GitHub: `Second-Me-Garden/Learning-Garden` (private)
+- GitHub: `Second-Me-Garden/Learning-Garden` (public since 2026-10-30; Pages: https://second-me-garden.github.io/Learning-Garden/ ; `main` is PR-only with the `site integrity` check required)
 - Local clone: registered in the Shadow portfolio (`LEARNING-GARDEN`)
 - [[DASHBOARD]]
 - [[TASK_BOARD]]
