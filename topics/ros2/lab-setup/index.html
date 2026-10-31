@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>实验环境 · Lab environment · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page" lang="zh-CN">实验环境</span><span class="crumb current" aria-current="page" lang="en">Lab environment</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">环境准备 · 做任何实验之前</p><p class="meta" lang="en">Environment setup · before any lab</p>
+  <h1><span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span> <span class="en" lang="zh-CN">Lab environment: arm64 container, browser desktop, VM fallback</span><span class="en" lang="en">arm64 container, browser desktop, VM fallback</span></h1>
+  <p class="lede" lang="zh-CN">ROS 2 的实验不会像内核实验那样把机器弄崩，但它会往系统里加一个 apt 源和几百个包，会在局域网上用 UDP 多播找同伴，而且 macOS 本身不是 Jazzy 的正式支持平台。所以本课程的实验全部跑在 Apple Silicon Mac 上的一个 Linux 客体里：首选一个 arm64 Docker 容器，里面装 ROS 2 Jazzy、Gazebo Harmonic 和一个从浏览器打开的轻量桌面；备选一台 UTM 里的 Ubuntu 24.04 虚拟机，或者一台带 GPU 的云主机。宿主 Mac 只负责编辑文件和开浏览器。</p>
+  <p class="lede" lang="en">ROS 2 labs will not crash the machine the way kernel labs do, but ROS 2 adds an apt repository and hundreds of packages to the system, finds its peers by UDP multicast on the local network, and macOS itself is not an officially supported platform for Jazzy. So every lab in this course runs in a Linux guest on the Apple Silicon Mac: first choice is an arm64 Docker container holding ROS 2 Jazzy, Gazebo Harmonic and a lightweight desktop opened from the browser; the fallbacks are an Ubuntu 24.04 VM in UTM or a cloud machine with a GPU. The host Mac only edits files and opens a browser.</p>
+  <div class="note" lang="zh-CN"><strong>状态说明：</strong>本页的 Dockerfile、<code>compose.yaml</code>、<code>lab.sh</code> 和所有命令是 2026-10-31 依据官方文档拼装的，<strong>没有在这台 Mac 上实际执行过</strong>。包名已在当天的 ROS 2 Jazzy arm64 apt 索引里逐个查到；构建或运行时若报错，以报错信息和官方文档为准调整。</div><div class="note" lang="en"><strong>Status:</strong> the Dockerfile, <code>compose.yaml</code>, <code>lab.sh</code> and every command on this page were assembled from the official docs on 2026-10-31 and <strong>have not been executed on this Mac</strong>. Each package name was looked up in the ROS 2 Jazzy arm64 apt index on that day; if a build or run fails, adjust by the error message and the official docs.</div>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说清三种实验环境（arm64 容器、UTM 虚拟机、云主机）各自适合什么，以及为什么首选容器。</li>
+      <li lang="en">Say what each of the three lab environments (arm64 container, UTM VM, cloud machine) is good for, and why the container is the first choice.</li>
+      <li lang="zh-CN">用一条 <code>./lab.sh build</code> 构建镜像、<code>./lab.sh up</code> 启动容器，并在两个 shell 里跑通 talker 和 listener。</li>
+      <li lang="en">Build the image with one <code>./lab.sh build</code>, start the container with <code>./lab.sh up</code>, and get talker and listener talking in two shells.</li>
+      <li lang="zh-CN">从 Mac 的浏览器打开 noVNC 桌面，在里面启动 <code>rviz2</code> 和 <code>gz sim shapes.sdf</code>，并确认它们用的是软件渲染。</li>
+      <li lang="en">Open the noVNC desktop from the Mac’s browser, start <code>rviz2</code> and <code>gz sim shapes.sdf</code> in it, and confirm they use software rendering.</li>
+      <li lang="zh-CN">解释 <code>ROS_DOMAIN_ID</code>、<code>ROS_AUTOMATIC_DISCOVERY_RANGE</code>、<code>shm_size</code>、<code>CAP_SYS_NICE</code> 各自管什么，以及容器为什么换不了内核。</li>
+      <li lang="en">Explain what <code>ROS_DOMAIN_ID</code>, <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code>, <code>shm_size</code> and <code>CAP_SYS_NICE</code> each control, and why a container cannot change its kernel.</li>
+    </ul>
+  </div>
+
+  <h2 id="why" lang="zh-CN">为什么要隔离</h2><h2 id="why-en" lang="en">Why isolate</h2>
+  <ul>
+    <li lang="zh-CN"><strong>安装面很大。</strong>一次 <code>ros-jazzy-desktop</code> 加 Gazebo、Nav2、ros2_control 会装进一个第三方 apt 源和几百个包，还会在 <code>/opt/ros/jazzy</code> 下放一整套环境脚本。放在容器里，删掉镜像就干净了；放在你每天用的系统里，就很难再说清哪些文件是谁装的。</li>
+    <li lang="en"><strong>The install surface is large.</strong> One <code>ros-jazzy-desktop</code> plus Gazebo, Nav2 and ros2_control brings in a third-party apt repository and hundreds of packages, and drops a whole set of environment scripts under <code>/opt/ros/jazzy</code>. In a container, deleting the image leaves nothing behind; on the system you use every day, it soon becomes hard to say which files came from where.</li>
+    <li lang="zh-CN"><strong>发现流量是局域网多播。</strong>ROS 2 默认的 DDS 中间件用 UDP 多播做节点发现：同一网段里、<code>ROS_DOMAIN_ID</code> 相同的每一台 ROS 2 机器都会看到你的节点和话题，你也会收到它们的数据。在公司、学校或共享 Wi-Fi 上，这既会串数据，也会把你的话题暴露给别人。实验环境默认只在本机内发现（见概念 4）。</li>
+    <li lang="en"><strong>Discovery traffic is LAN multicast.</strong> ROS 2’s default DDS middleware discovers nodes by UDP multicast: every ROS 2 machine on the same subnet with the same <code>ROS_DOMAIN_ID</code> sees your nodes and topics, and you receive their data. On an office, campus or shared Wi-Fi network this mixes up data and exposes your topics to others. The lab environment discovers only within the machine by default (see concept 4).</li>
+    <li lang="zh-CN"><strong>macOS 不是 Jazzy 的正式平台。</strong>REP 2000 给 Jazzy 列的 Tier 1 平台是 Ubuntu 24.04（Noble）的 amd64 和 arm64，以及 Windows 10；macOS 只列为 Tier 3（amd64、源码编译），Apple Silicon 上的 macOS 不在表里。Linux 客体里的 Ubuntu 24.04 arm64 正好是 Tier 1。</li>
+    <li lang="en"><strong>macOS is not an official Jazzy platform.</strong> REP 2000 lists Jazzy’s Tier 1 platforms as Ubuntu 24.04 (Noble) on amd64 and arm64, plus Windows 10; macOS appears only as Tier 3 (amd64, built from source), and macOS on Apple Silicon is not in the table. Ubuntu 24.04 arm64 in a Linux guest is exactly a Tier 1 platform.</li>
+    <li lang="zh-CN"><strong>可重来。</strong>镜像就是一份可重建的环境说明：<code>./lab.sh build</code> 在任何一台 Apple Silicon Mac 上得到同样的东西，<code>./lab.sh snapshot</code> 存一个可以回退的点。</li>
+    <li lang="en"><strong>Repeatable.</strong> The image is an environment description you can rebuild: <code>./lab.sh build</code> gives the same result on any Apple Silicon Mac, and <code>./lab.sh snapshot</code> saves a point you can go back to.</li>
+  </ul>
+  <div class="note" lang="zh-CN">一条规则：<strong>宿主 Mac 不装 ROS 2、不加 ROS apt 源、不跑 ROS 节点。</strong>宿主上只做三件事：用编辑器改 <code>share/</code> 下的文件、跑 <code>./lab.sh</code>、在浏览器里开 <code>http://localhost:6080/vnc.html</code>。</div><div class="note" lang="en">One rule: <strong>the host Mac gets no ROS 2 install, no ROS apt repository and no ROS nodes.</strong> The host does three things only: edit files under <code>share/</code>, run <code>./lab.sh</code>, and open <code>http://localhost:6080/vnc.html</code> in the browser.</div>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 三个选项，首选容器</h3><h3 lang="en">1. Three options, container first</h3>
+  <p lang="zh-CN">本课程固定在 <strong>ROS 2 Jazzy Jalisco</strong>（LTS，2024-05-23 发布，2029 年 5 月停止支持）、<strong>Ubuntu 24.04 arm64</strong> 和 <strong>Gazebo Harmonic</strong>（Jazzy 推荐的仿真器）上，2026-10-31 核对。三种环境按推荐顺序：</p><p lang="en">This course is pinned to <strong>ROS 2 Jazzy Jalisco</strong> (LTS, released 2024-05-23, end of life May 2029), <strong>Ubuntu 24.04 arm64</strong> and <strong>Gazebo Harmonic</strong> (the recommended simulator for Jazzy), checked on 2026-10-31. The three environments, in order of recommendation:</p>
+  <ul>
+    <li lang="zh-CN"><strong>arm64 Docker 容器（首选）</strong>：基础镜像 <code>ros:jazzy-ros-base</code> 来自 Docker Official Library，官方发布了 arm64v8 版本（Docker Hub 上该标签列有 amd64 和 arm64/v8）。<code>osrf/ros</code> 的 desktop 镜像只列 amd64，所以桌面相关的包在 ros-base 之上自己装。启动快、可重建、和 Mac 共享一个目录。</li>
+    <li lang="en"><strong>arm64 Docker container (first choice)</strong>: the base image <code>ros:jazzy-ros-base</code> comes from the Docker Official Library, which publishes an arm64v8 build (the tag on Docker Hub lists amd64 and arm64/v8). The <code>osrf/ros</code> desktop images list amd64 only, so the desktop packages are installed on top of ros-base. Fast to start, rebuildable, and shares one directory with the Mac.</li>
+    <li lang="zh-CN"><strong>UTM 虚拟机</strong>：Ubuntu 24.04 arm64 桌面版，原生 apt 安装 ROS 2。有完整桌面，但 Gazebo 的图形界面在 UTM 不完整的 OpenGL 上已知会失败（见概念 6）。</li>
+    <li lang="en"><strong>UTM virtual machine</strong>: Ubuntu 24.04 arm64 desktop with the native ROS 2 apt install. A full desktop, but Gazebo’s GUI is known to fail on UTM’s partial OpenGL (see concept 6).</li>
+    <li lang="zh-CN"><strong>云主机或 x86 Linux 机器（可选）</strong>：带 GPU，跑重仿真（Phase 5、Phase 6 的大场景），用 SSH 加远程桌面访问。要花钱，用完即关。</li>
+    <li lang="en"><strong>Cloud or x86 Linux machine (optional)</strong>: has a GPU and runs heavy simulation (the large scenes in Phase 5 and Phase 6), reached over SSH plus a remote desktop. It costs money; shut it down when done.</li>
+  </ul>
+  <div class="note" lang="zh-CN"><strong>换到 Lyrical Luth：</strong>最新的 LTS 是 Lyrical Luth（2026-05-22 发布，2031 年 5 月停止支持，基于 Ubuntu 26.04，配 Gazebo Jetty）。把本页所有命令里的 <code>jazzy</code> 换成 <code>lyrical</code>（镜像标签 <code>ros:lyrical-ros-base</code> 在 Docker Hub 上同样列有 arm64/v8，2026-10-31 查过），整门课就迁到 Lyrical。个别包名在新发行版里可能改名或尚未发布，以 apt 报错为准。Kilted Kaiju 不是 LTS，2026 年 12 月停止支持，不建议用。</div><div class="note" lang="en"><strong>Moving to Lyrical Luth:</strong> the newest LTS is Lyrical Luth (released 2026-05-22, end of life May 2031, on Ubuntu 26.04, paired with Gazebo Jetty). Replace <code>jazzy</code> with <code>lyrical</code> in every command on this page (the image tag <code>ros:lyrical-ros-base</code> also lists arm64/v8 on Docker Hub, checked 2026-10-31) and the whole course moves to Lyrical. A few package names may be renamed or not yet released in the new distribution; go by what apt reports. Kilted Kaiju is not an LTS and ends in December 2026; it is not recommended.</div>
+  <p lang="zh-CN">延伸阅读：《ROS 2 From Scratch》开头讲安装和搭建开发环境的章节。</p><p lang="en">Further reading: the opening chapters of <em>ROS 2 From Scratch</em> on installing ROS 2 and setting up the development environment.</p>
+
+  <h3 lang="zh-CN">2. 镜像：ros-base 之上装桌面</h3><h3 lang="en">2. The image: a desktop on top of ros-base</h3>
+  <p lang="zh-CN">建一个实验目录 <code>~/ros2-lab</code>，下面四个文件都放在里面。Dockerfile 分三层：ROS 2 包、浏览器桌面、启动脚本。基础镜像已经配好了 ROS 的 apt 源，所以直接 <code>apt-get install</code>。</p><p lang="en">Create a lab directory <code>~/ros2-lab</code> and put the four files below in it. The Dockerfile has three layers: ROS 2 packages, the browser desktop, and the start script. The base image already has the ROS apt repository configured, so it can <code>apt-get install</code> directly.</p>
+<pre data-lang="sh" data-file="Dockerfile"># Dockerfile: ROS 2 Jazzy lab for Apple Silicon (linux/arm64)
+FROM ros:jazzy-ros-base
+ENV DEBIAN_FRONTEND=noninteractive
+# discover only within this container (Jazzy variable; see concept 4)
+ENV ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+
+# 1. ROS 2 packages (names checked in the Jazzy arm64 apt index, 2026-10-31)
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+      ros-jazzy-desktop \
+      ros-jazzy-ros-gz \
+      ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
+      ros-jazzy-slam-toolbox \
+      ros-jazzy-ros2-control ros-jazzy-ros2-controllers ros-jazzy-gz-ros2-control \
+      ros-jazzy-rqt ros-jazzy-rqt-common-plugins \
+    &amp;&amp; rm -rf /var/lib/apt/lists/*
+
+# Optional, for the tracing lab (Phase 7): the ros2 trace command
+# RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+#       ros-jazzy-ros2trace ros-jazzy-tracetools-launch &amp;&amp; rm -rf /var/lib/apt/lists/*
+
+# 2. Browser desktop: XFCE + TigerVNC + noVNC, plus glxinfo
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+      xfce4 xfce4-terminal dbus-x11 \
+      tigervnc-standalone-server novnc websockify \
+      mesa-utils \
+    &amp;&amp; rm -rf /var/lib/apt/lists/*
+
+# 3. Start script and shell setup
+COPY start-desktop.sh /usr/local/bin/start-desktop.sh
+RUN chmod +x /usr/local/bin/start-desktop.sh \
+ &amp;&amp; echo 'source /opt/ros/jazzy/setup.bash' &gt;&gt; /root/.bashrc \
+ &amp;&amp; mkdir -p /root/ws/src
+WORKDIR /root/ws
+EXPOSE 6080
+CMD ["/usr/local/bin/start-desktop.sh"]</pre>
+  <p lang="zh-CN">启动脚本先开一个虚拟 X 显示 <code>:1</code>（TigerVNC 的 <code>Xtigervnc</code>，VNC 端口 5901，只接受容器内的连接），在上面跑 XFCE，最后用 <code>websockify</code> 把 VNC 转成浏览器能连的 WebSocket，并在 6080 端口提供 noVNC 网页（Ubuntu 的 <code>novnc</code> 包把网页放在 <code>/usr/share/novnc</code>）。</p><p lang="en">The start script first opens a virtual X display <code>:1</code> (TigerVNC’s <code>Xtigervnc</code>, VNC port 5901, accepting connections from inside the container only), runs XFCE on it, and finally uses <code>websockify</code> to turn VNC into a WebSocket the browser can reach, serving the noVNC web page on port 6080 (Ubuntu’s <code>novnc</code> package puts the page in <code>/usr/share/novnc</code>).</p>
+<pre data-lang="sh" data-file="start-desktop.sh">#!/bin/sh
+# start-desktop.sh: X display :1 + XFCE + noVNC on port 6080
+set -eu
+Xtigervnc :1 -rfbport 5901 -geometry 1600x900 -depth 24 -localhost -SecurityTypes None &amp;
+sleep 2
+DISPLAY=:1 dbus-launch startxfce4 &gt;/tmp/xfce.log 2&gt;&amp;1 &amp;
+exec websockify --web /usr/share/novnc 6080 localhost:5901</pre>
+  <div class="note" lang="zh-CN">VNC 没有设密码（<code>-SecurityTypes None</code>）。这只在两层限制同时成立时才安全：<code>Xtigervnc</code> 只听容器内的回环地址，<code>compose.yaml</code> 只把 6080 发布到 Mac 的 <code>127.0.0.1</code>。不要把端口改成 <code>"6080:6080"</code>，那样同一网络里的人都能打开你的桌面。</div><div class="note" lang="en">VNC has no password (<code>-SecurityTypes None</code>). This is safe only while two limits both hold: <code>Xtigervnc</code> listens only on the container’s loopback, and <code>compose.yaml</code> publishes 6080 only on the Mac’s <code>127.0.0.1</code>. Do not change the port to <code>"6080:6080"</code>; anyone on the same network could then open your desktop.</div>
+  <p lang="zh-CN">延伸阅读：《Mastering ROS 2 for Robotics Programming》讲 ROS 2 安装与开发环境、以及用 Gazebo 仿真的章节。</p><p lang="en">Further reading: the chapters of <em>Mastering ROS 2 for Robotics Programming</em> on installing ROS 2 and the development environment, and on simulating with Gazebo.</p>
+
+  <h3 lang="zh-CN">3. compose.yaml 逐项</h3><h3 lang="en">3. compose.yaml item by item</h3>
+<pre data-lang="yaml" data-file="compose.yaml">name: ros2-lab
+services:
+  ros:
+    build: .
+    image: ros2-lab:jazzy
+    container_name: ros2-lab
+    hostname: ros2-lab
+    platform: linux/arm64
+    shm_size: "4g"
+    environment:
+      DISPLAY: ":1"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      QT_X11_NO_MITSHM: "1"
+      ROS_DOMAIN_ID: "42"
+      ROS_AUTOMATIC_DISCOVERY_RANGE: "LOCALHOST"
+    ports:
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - ws:/root/ws
+      - ./share:/share
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+volumes:
+  ws:</pre>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">设置</span><span lang="en">Setting</span></th><th><span lang="zh-CN">作用</span><span lang="en">Purpose</span></th><th><span lang="zh-CN">说明</span><span lang="en">Notes</span></th></tr>
+    <tr><td><code>platform: linux/arm64</code></td><td><span lang="zh-CN">原生 arm64，不走模拟</span><span lang="en">Native arm64, no emulation</span></td><td><span lang="zh-CN">Apple Silicon 上默认就是 arm64；写明是为了防止误拉 amd64 镜像后在 Rosetta 或 QEMU 模拟下慢跑。</span><span lang="en">arm64 is already the default on Apple Silicon; spelling it out guards against pulling an amd64 image by mistake and running it slowly under Rosetta or QEMU emulation.</span></td></tr>
+    <tr><td><code>shm_size: "4g"</code></td><td><span lang="zh-CN"><code>/dev/shm</code> 的大小</span><span lang="en">Size of <code>/dev/shm</code></span></td><td><span lang="zh-CN">Docker 默认只给 64 MB。Fast DDS（Jazzy 默认中间件 <code>rmw_fastrtps_cpp</code>）在同一台机器的进程之间用共享内存传数据，图像和点云很快会把 64 MB 用完。</span><span lang="en">Docker gives only 64 MB by default. Fast DDS (Jazzy’s default middleware, <code>rmw_fastrtps_cpp</code>) moves data between processes on one machine through shared memory, and images and point clouds use up 64 MB quickly.</span></td></tr>
+    <tr><td><code>LIBGL_ALWAYS_SOFTWARE=1</code></td><td><span lang="zh-CN">强制软件 OpenGL</span><span lang="en">Force software OpenGL</span></td><td><span lang="zh-CN">macOS 上的 Docker 没有 GPU 直通，RViz2 和 Gazebo 用 Mesa 的 llvmpipe 在 CPU 上渲染。能用，但大场景会慢。</span><span lang="en">Docker on macOS has no GPU passthrough, so RViz2 and Gazebo render on the CPU with Mesa’s llvmpipe. It works, but large scenes are slow.</span></td></tr>
+    <tr><td><code>QT_X11_NO_MITSHM=1</code></td><td><span lang="zh-CN">Qt 不用 X 的 MIT-SHM 扩展</span><span lang="en">Qt skips the X MIT-SHM extension</span></td><td><span lang="zh-CN">RViz2 和 rqt 是 Qt 程序；容器里常见的 MIT-SHM 报错和黑窗口靠它避开。</span><span lang="en">RViz2 and rqt are Qt programs; this avoids the MIT-SHM errors and black windows often seen in containers.</span></td></tr>
+    <tr><td><code>ROS_DOMAIN_ID</code></td><td><span lang="zh-CN">把 ROS 图分成互不相见的组</span><span lang="en">Splits ROS graphs into groups that cannot see each other</span></td><td><span lang="zh-CN">见概念 4。官方文档建议取 0 到 101（含）之间的数。</span><span lang="en">See concept 4. The official docs recommend a number from 0 to 101 inclusive.</span></td></tr>
+    <tr><td><code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code></td><td><span lang="zh-CN">只在本机内发现</span><span lang="en">Discover within the machine only</span></td><td><span lang="zh-CN">见概念 4。Dockerfile 里也设了同一个值，不经 compose 启动时同样生效。</span><span lang="en">See concept 4. The Dockerfile sets the same value, so it also applies when the container is started without compose.</span></td></tr>
+    <tr><td><code>127.0.0.1:6080:6080</code></td><td><span lang="zh-CN">noVNC 端口只发布到 Mac 本机</span><span lang="en">The noVNC port is published on the Mac only</span></td><td><span lang="zh-CN">浏览器开 <code>http://localhost:6080/vnc.html</code>。</span><span lang="en">Open <code>http://localhost:6080/vnc.html</code> in the browser.</span></td></tr>
+    <tr><td><code>ws:/root/ws</code></td><td><span lang="zh-CN">命名卷存放 colcon 工作区</span><span lang="en">A named volume holds the colcon workspace</span></td><td><span lang="zh-CN">命名卷在 Docker 的 Linux VM 里，大小写敏感、构建快；容器删了它还在。第一次挂载时会带上镜像里的 <code>/root/ws/src</code>。</span><span lang="en">The named volume lives in Docker’s Linux VM, is case-sensitive and builds fast; it survives deleting the container. On first mount it picks up <code>/root/ws/src</code> from the image.</span></td></tr>
+    <tr><td><code>./share:/share</code></td><td><span lang="zh-CN">和 Mac 共享的目录</span><span lang="en">A directory shared with the Mac</span></td><td><span lang="zh-CN">放 launch 文件、截图、日志这类要在 Mac 上看的东西。macOS 默认文件系统大小写不敏感，整个工作区不要放这里。</span><span lang="en">For launch files, screenshots, logs and anything else you want to see on the Mac. The default macOS filesystem is case-insensitive, so do not put the whole workspace here.</span></td></tr>
+    <tr><td><code>cap_add: [SYS_NICE]</code><br><code>ulimits: rtprio: 99</code></td><td><span lang="zh-CN">允许实时调度</span><span lang="en">Allows real-time scheduling</span></td><td><span lang="zh-CN">Phase 2 的实时实验要用 <code>SCHED_FIFO</code>。见概念 5。</span><span lang="en">The Phase 2 real-time lab uses <code>SCHED_FIFO</code>. See concept 5.</span></td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">延伸阅读：《A Concise Introduction to Robot Programming with ROS2》讲 ROS 2 架构与中间件的章节（DDS、共享内存传输放在整个系统里看）。</p><p lang="en">Further reading: the chapters of <em>A Concise Introduction to Robot Programming with ROS2</em> on the ROS 2 architecture and middleware (DDS and shared-memory transport in the context of the whole system).</p>
+
+  <h3 lang="zh-CN">4. 网络：发现、ROS_DOMAIN_ID 与 ROS_AUTOMATIC_DISCOVERY_RANGE</h3><h3 lang="en">4. Networking: discovery, ROS_DOMAIN_ID and ROS_AUTOMATIC_DISCOVERY_RANGE</h3>
+  <p lang="zh-CN">ROS 2 没有中心的 master。每个节点启动时，DDS 向网络发 UDP 多播的「我在这里」消息，收到的节点再直接建立连接。端口号由 <code>ROS_DOMAIN_ID</code> 算出：ID 不同，端口不同，两组节点就互相看不见。这就是为什么一个网络里的每个人或每台机器人应该用自己的 ID。</p><p lang="en">ROS 2 has no central master. When each node starts, DDS sends UDP multicast “I am here” messages to the network, and the nodes that receive them connect directly. Port numbers are computed from <code>ROS_DOMAIN_ID</code>: different IDs give different ports, so the two groups of nodes cannot see each other. That is why each person or robot on a network should use its own ID.</p>
+  <p lang="zh-CN"><code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> 更进一步：节点只在本机内发现和通信，不往网卡发多播。在容器里，「本机」是容器的网络命名空间，所以同一容器里的多个 shell 照常互通（两个 <code>./lab.sh shell</code> 进的是同一个容器），别的机器则完全看不到你。本页默认打开它，原因就是上面那条：发现流量是局域网多播，而你不知道同一网络里还有谁在跑 ROS 2。</p><p lang="en"><code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> goes further: nodes discover and talk only within the machine, and send no multicast out of the network card. In the container, “the machine” is the container’s network namespace, so several shells in the same container talk as usual (two <code>./lab.sh shell</code> sessions enter the same container), while other machines cannot see you at all. This page turns it on by default for the reason above: discovery traffic is LAN multicast, and you do not know who else on the network is running ROS 2.</p>
+  <div class="note" lang="zh-CN"><code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> 是 Iron 引入、Jazzy 文档使用的变量，取值有 <code>SUBNET</code>（默认，发现多播能到达的所有节点）、<code>LOCALHOST</code>、<code>OFF</code>、<code>SYSTEM_DEFAULT</code>。旧教程里常见的 <code>ROS_LOCALHOST_ONLY=1</code> 是它的<strong>弃用旧名</strong>：从 Iron 起弃用，Jazzy 仍然照办，但每个节点启动时打印一行 <code>ROS_LOCALHOST_ONLY is deprecated but still honored</code> 警告，而且一旦设为 1，会压过 <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> 和 <code>ROS_STATIC_PEERS</code>。迁到 Lyrical 时旧名可能被移除（以 Lyrical 文档为准），所以本页不用它。</div><div class="note" lang="en"><code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> was introduced in Iron and is the variable the Jazzy docs use; its values are <code>SUBNET</code> (the default: every node reachable by multicast), <code>LOCALHOST</code>, <code>OFF</code> and <code>SYSTEM_DEFAULT</code>. The <code>ROS_LOCALHOST_ONLY=1</code> common in older tutorials is its <strong>deprecated old name</strong>: deprecated since Iron, still honoured on Jazzy, but it prints a <code>ROS_LOCALHOST_ONLY is deprecated but still honored</code> warning each time a node starts, and once set to 1 it overrides <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> and <code>ROS_STATIC_PEERS</code>. The old name may be removed by the time you move to Lyrical (check the Lyrical docs), so this page does not use it.</div>
+  <p lang="zh-CN">以后要让容器和一台真机器人或另一台电脑通信时（Phase 6 之后），才把它关掉，并且两边约定同一个 <code>ROS_DOMAIN_ID</code>。Docker Desktop 默认的 bridge 网络下，多播能不能走出那台 Linux VM 到达局域网，随 Docker Desktop 版本和网络设置变化（推断，以 Docker 文档为准）；跨机通信更稳的做法是 UTM 虚拟机的桥接网络或 <code>ROS_STATIC_PEERS</code>。</p><p lang="en">Only later, when the container must talk to a real robot or another computer (after Phase 6), do you turn it off, and then both sides agree on the same <code>ROS_DOMAIN_ID</code>. On Docker Desktop’s default bridge network, whether multicast can leave that Linux VM and reach the LAN varies with the Docker Desktop version and network settings (inference; the Docker docs are authoritative); for cross-machine traffic, a UTM VM on a bridged network or <code>ROS_STATIC_PEERS</code> is more dependable.</p>
+  <p lang="zh-CN">延伸阅读：《A Concise Introduction to Robot Programming with ROS2》讲 ROS 2 计算图与 DDS 发现的章节；ROS 1 时代的图概念可对照《Programming Robots with ROS》开头讲 ROS 图的章节（ROS 1 有 master，ROS 2 没有，这是主要区别）。</p><p lang="en">Further reading: the chapters of <em>A Concise Introduction to Robot Programming with ROS2</em> on the ROS 2 computation graph and DDS discovery; for the graph idea in the ROS 1 era, compare the opening chapters of <em>Programming Robots with ROS</em> on the ROS graph (ROS 1 has a master and ROS 2 does not; that is the main difference).</p>
+
+  <h3 lang="zh-CN">5. 内核交叉点：容器共享一个内核</h3><h3 lang="en">5. Kernel crossover: containers share one kernel</h3>
+  <p lang="zh-CN">做过 Kernel Engineering 专题的话，这一节是两门课的接口。容器不是虚拟机：它只是一组命名空间和 cgroup，所有容器共用 Docker Desktop 那台 Linux VM 的内核。对 ROS 2 来说这没问题，因为 ROS 2 全在用户态：节点是普通进程，执行器是线程，DDS 用的是普通的 UDP 套接字和共享内存。</p><p lang="en">If you have done the Kernel Engineering topic, this section is the interface between the two courses. A container is not a VM: it is just a set of namespaces and cgroups, and every container shares the kernel of Docker Desktop’s Linux VM. That is fine for ROS 2, because ROS 2 lives entirely in user space: nodes are ordinary processes, executors are threads, and DDS uses ordinary UDP sockets and shared memory.</p>
+  <ul>
+    <li lang="zh-CN"><strong><code>SCHED_FIFO</code> 需要权限。</strong>把一个线程设成实时 FIFO 调度要 <code>CAP_SYS_NICE</code> 能力，或者 <code>RLIMIT_RTPRIO</code> 允许的优先级。<code>cap_add: [SYS_NICE]</code> 和 <code>ulimits: rtprio: 99</code> 两样都给，Phase 2 的 <code>chrt -f 80</code> 和 rclcpp 里设线程优先级才会成功。</li>
+    <li lang="en"><strong><code>SCHED_FIFO</code> needs privilege.</strong> Putting a thread under real-time FIFO scheduling needs the <code>CAP_SYS_NICE</code> capability, or a priority allowed by <code>RLIMIT_RTPRIO</code>. Give both, <code>cap_add: [SYS_NICE]</code> and <code>ulimits: rtprio: 99</code>, and the Phase 2 <code>chrt -f 80</code> and setting thread priorities in rclcpp will succeed.</li>
+    <li lang="zh-CN"><strong><code>PREEMPT_RT</code> 在这里做不到。</strong>实时补丁内核是内核本身的属性，要换的是 Docker Desktop 那台 VM 的内核，而它由 Docker Desktop 管理，你换不了。在容器里 <code>apt install</code> 一个 RT 内核包也没用：容器根本不引导内核。所以这里的实时实验只能演示「有优先级」和「没有优先级」的区别，测不出真正的实时延迟上限。要做 <code>PREEMPT_RT</code>，得用一台能装自己内核的 Linux 机器（UTM 虚拟机可以试，但虚拟化本身会带来延迟抖动，推断）。</li>
+    <li lang="en"><strong><code>PREEMPT_RT</code> is not possible here.</strong> A real-time patched kernel is a property of the kernel itself; what would have to change is the kernel of Docker Desktop’s VM, which Docker Desktop manages and you cannot replace. Running <code>apt install</code> for an RT kernel package inside the container does nothing either: a container never boots a kernel. So the real-time labs here can only show the difference between “with priority” and “without priority”; they cannot measure a true real-time latency bound. For <code>PREEMPT_RT</code> you need a Linux machine that can install its own kernel (a UTM VM is worth a try, but virtualisation itself adds latency jitter; inference).</li>
+    <li lang="zh-CN"><strong>不要用 <code>--privileged</code> 代替。</strong>它给的权限远多于 <code>SYS_NICE</code>，包括往那台共享 VM 的内核里装模块。只加需要的那一项能力。</li>
+    <li lang="en"><strong>Do not use <code>--privileged</code> instead.</strong> It grants far more than <code>SYS_NICE</code>, including loading modules into the shared VM’s kernel. Add only the one capability you need.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：《ROS 2 From Scratch》讲执行器与回调的章节（线程是从哪里来的）；调度与 <code>SCHED_FIFO</code> 本身见 Kernel Engineering 专题参考书目里讲进程调度的章节。</p><p lang="en">Further reading: the chapters of <em>ROS 2 From Scratch</em> on executors and callbacks (where the threads come from); for scheduling and <code>SCHED_FIFO</code> themselves, see the process-scheduling chapters in the Kernel Engineering topic’s bibliography.</p>
+
+  <h3 lang="zh-CN">6. 备选：UTM 虚拟机与云主机</h3><h3 lang="en">6. Fallbacks: the UTM VM and a cloud machine</h3>
+  <p lang="zh-CN"><strong>UTM 虚拟机。</strong>从 cdimage.ubuntu.com 下载 Ubuntu 24.04 的 <code>desktop-arm64.iso</code>，在 UTM 里 新建 → Virtualize → Linux，给 4 核、8 GB 内存、64 GB 磁盘（大致，够装 desktop 加 Gazebo 和 Nav2）。装好后按官方 Jazzy Ubuntu 安装页配置 apt 源，再装同一组包：</p><p lang="en"><strong>The UTM VM.</strong> Download Ubuntu 24.04’s <code>desktop-arm64.iso</code> from cdimage.ubuntu.com, then in UTM choose New → Virtualize → Linux, with 4 cores, 8 GB of memory and a 64 GB disk (approximate; enough for desktop plus Gazebo and Nav2). After installing, set up the apt repository following the official Jazzy Ubuntu install page, then install the same set of packages:</p>
+<pre data-lang="sh"># Ubuntu 24.04 arm64 guest; apt source steps copied from docs.ros.org/en/jazzy (2026-10-31)
+sudo apt install software-properties-common
+sudo add-apt-repository universe
+sudo apt update &amp;&amp; sudo apt install curl -y
+export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F'"' '{print $4}')
+curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release &amp;&amp; echo ${UBUNTU_CODENAME:-${VERSION_CODENAME}})_all.deb"
+sudo dpkg -i /tmp/ros2-apt-source.deb
+sudo apt update &amp;&amp; sudo apt install -y ros-jazzy-desktop ros-jazzy-ros-gz \
+  ros-jazzy-navigation2 ros-jazzy-nav2-bringup ros-jazzy-slam-toolbox \
+  ros-jazzy-ros2-control ros-jazzy-ros2-controllers ros-jazzy-gz-ros2-control
+echo 'source /opt/ros/jazzy/setup.bash' &gt;&gt; ~/.bashrc
+echo 'export ROS_DOMAIN_ID=42 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST' &gt;&gt; ~/.bashrc</pre>
+  <p lang="zh-CN">已知问题：UTM 给 Linux 客体的 OpenGL 支持不完整，Gazebo 的图形界面（基于 OGRE 2，需要较新的 OpenGL）在上面已知会黑屏或崩溃。RViz2、rqt 和其他所有东西照常用。Gazebo 改成只跑服务端：</p><p lang="en">Known problem: UTM’s OpenGL support for Linux guests is partial, and Gazebo’s GUI (built on OGRE 2, which needs a recent OpenGL) is known to show a black window or crash on it. RViz2, rqt and everything else work as usual. Run Gazebo as the server only instead:</p>
+<pre data-lang="sh">gz sim -s -r shapes.sdf     # -s: server only (headless), -r: run on start
+gz topic -l                 # the simulation is running; list its topics
+rviz2                       # view robot data in RViz2 through ros_gz_bridge (Phase 5)</pre>
+  <p lang="zh-CN">UTM 虚拟机在做大改动之前用 UTM 的 Clone 复制一份，坏了删掉重来，和 Kernel Engineering 专题里的做法一样。它的网络如果设成桥接，就真的在局域网上了，<code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> 在这里比在容器里更重要。</p><p lang="en">Before a large change, copy the UTM VM with UTM’s Clone, and if it breaks, delete it and start over, as in the Kernel Engineering topic. If its network is set to bridged, it really is on the LAN, so <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> matters even more here than in the container.</p>
+  <p lang="zh-CN"><strong>云主机或 x86 Linux 机器。</strong>Ubuntu 24.04 amd64 加一块 GPU，原生装 Jazzy（命令同上），Gazebo 用 GPU 渲染，大场景流畅。访问方式：SSH 登录，再用同一套 noVNC 桌面，经 SSH 隧道打开，不把任何端口暴露到公网：</p><p lang="en"><strong>A cloud or x86 Linux machine.</strong> Ubuntu 24.04 amd64 with a GPU, Jazzy installed natively (same commands as above), with Gazebo rendering on the GPU so large scenes run smoothly. Access: SSH in, then use the same noVNC desktop through an SSH tunnel, exposing no port to the internet:</p>
+<pre data-lang="sh">ssh -L 6080:localhost:6080 you@your-gpu-box
+# then open http://localhost:6080/vnc.html on the Mac</pre>
+  <p lang="zh-CN">延伸阅读：《Mastering ROS 2 for Robotics Programming》讲 Gazebo 仿真与 ros2_control 的章节（为什么仿真需要 GPU、哪些部分可以无头运行）。</p><p lang="en">Further reading: the chapters of <em>Mastering ROS 2 for Robotics Programming</em> on Gazebo simulation and ros2_control (why simulation wants a GPU, and which parts can run headless).</p>
+
+  <h3 lang="zh-CN">7. lab.sh 与快照</h3><h3 lang="en">7. lab.sh and snapshots</h3>
+  <p lang="zh-CN">把常用的五个动作收进一个脚本，以后每个 Phase 都只敲 <code>./lab.sh</code>：</p><p lang="en">Collect the five common actions in one script, so every later Phase only needs <code>./lab.sh</code>:</p>
+<pre data-lang="sh" data-file="lab.sh">#!/bin/sh
+# lab.sh: ROS 2 lab container.  Usage: ./lab.sh build|up|shell|down|snapshot [tag]
+set -eu
+cd "$(dirname "$0")"
+mkdir -p share
+case "${1:-}" in
+  build)    docker compose build ;;
+  up)       docker compose up -d
+            echo "desktop: http://localhost:6080/vnc.html" ;;
+  shell)    docker compose exec ros bash ;;
+  down)     docker compose down ;;
+  snapshot) tag="snap-${2:-$(date +%Y%m%d-%H%M)}"
+            docker commit ros2-lab "ros2-lab:$tag"
+            echo "saved ros2-lab:$tag (the ws volume is NOT included)" ;;
+  *)        echo "usage: $0 build|up|shell|down|snapshot [tag]" &gt;&amp;2; exit 2 ;;
+esac</pre>
+  <ul>
+    <li lang="zh-CN"><strong><code>snapshot</code> 存的是什么</strong>：<code>docker commit</code> 把容器当前的文件系统（比如你后来 <code>apt install</code> 的包）存成一个新镜像标签，但<strong>不包括命名卷</strong>。你的代码在 <code>ws</code> 卷里，它本来就不随容器消失；要备份它，另外打包：<code>docker run --rm -v ros2-lab_ws:/ws -v "$PWD/share:/out" ubuntu:24.04 tar czf /out/ws.tgz -C /ws .</code>（卷名是项目名 <code>ros2-lab</code> 加 <code>_ws</code>，用 <code>docker volume ls</code> 确认）。</li>
+    <li lang="en"><strong>What <code>snapshot</code> saves</strong>: <code>docker commit</code> saves the container’s current filesystem (for example packages you <code>apt install</code>-ed later) as a new image tag, but <strong>does not include named volumes</strong>. Your code is in the <code>ws</code> volume, which does not disappear with the container anyway; to back it up, archive it separately: <code>docker run --rm -v ros2-lab_ws:/ws -v "$PWD/share:/out" ubuntu:24.04 tar czf /out/ws.tgz -C /ws .</code> (the volume name is the project name <code>ros2-lab</code> plus <code>_ws</code>; confirm with <code>docker volume ls</code>).</li>
+    <li lang="zh-CN"><strong>回到某个快照</strong>：<code>docker tag ros2-lab:snap-名字 ros2-lab:jazzy</code>，再 <code>./lab.sh down</code> 和 <code>./lab.sh up</code>。想回到完全干净的状态，就 <code>./lab.sh build</code> 重建。</li>
+    <li lang="en"><strong>Going back to a snapshot</strong>: <code>docker tag ros2-lab:snap-name ros2-lab:jazzy</code>, then <code>./lab.sh down</code> and <code>./lab.sh up</code>. To return to a completely clean state, rebuild with <code>./lab.sh build</code>.</li>
+    <li lang="zh-CN"><strong>资源预算（推断）</strong>：镜像装完大约数 GB 到十几 GB；在 Docker Desktop 的设置里给它的 VM 至少 8 GB 内存和 4 个 CPU，Gazebo 软件渲染很吃 CPU。不做实验时 <code>./lab.sh down</code> 并退出 Docker Desktop。</li>
+    <li lang="en"><strong>Resource budget (inference)</strong>: the finished image is roughly several GB to over ten GB; in Docker Desktop’s settings give its VM at least 8 GB of memory and 4 CPUs, since Gazebo’s software rendering is CPU-hungry. When not doing labs, run <code>./lab.sh down</code> and quit Docker Desktop.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：《ROS 2 From Scratch》讲工作区和 colcon 构建的章节（<code>~/ws</code> 里以后放什么）。</p><p lang="en">Further reading: the chapters of <em>ROS 2 From Scratch</em> on workspaces and building with colcon (what goes into <code>~/ws</code> later).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">项目</span><span lang="en">Item</span></th><th class="ros"><span lang="zh-CN">arm64 Docker 容器</span><span lang="en">arm64 Docker container</span></th><th class="gz"><span lang="zh-CN">UTM 虚拟机</span><span lang="en">UTM VM</span></th><th><span lang="zh-CN">云 / x86 GPU 主机</span><span lang="en">Cloud / x86 GPU box</span></th></tr>
+    <tr><td><span lang="zh-CN">推荐程度</span><span lang="en">Recommendation</span></td><td><span lang="zh-CN">首选</span><span lang="en">First choice</span></td><td><span lang="zh-CN">备选</span><span lang="en">Fallback</span></td><td><span lang="zh-CN">可选，重仿真时</span><span lang="en">Optional, for heavy simulation</span></td></tr>
+    <tr><td><span lang="zh-CN">内核</span><span lang="en">Kernel</span></td><td><span lang="zh-CN">共用 Docker Desktop VM 的内核，换不了</span><span lang="en">Shares Docker Desktop VM’s kernel; cannot change it</span></td><td><span lang="zh-CN">自己的 Ubuntu 内核，可以换</span><span lang="en">Its own Ubuntu kernel, replaceable</span></td><td><span lang="zh-CN">自己的内核（云厂商镜像）</span><span lang="en">Its own kernel (the cloud vendor’s image)</span></td></tr>
+    <tr><td><span lang="zh-CN">桌面</span><span lang="en">Desktop</span></td><td><span lang="zh-CN">浏览器里的 noVNC（XFCE）</span><span lang="en">noVNC in the browser (XFCE)</span></td><td><span lang="zh-CN">UTM 窗口里的完整 Ubuntu 桌面</span><span lang="en">Full Ubuntu desktop in the UTM window</span></td><td><span lang="zh-CN">SSH 隧道 + noVNC</span><span lang="en">SSH tunnel + noVNC</span></td></tr>
+    <tr><td><span lang="zh-CN">Gazebo 图形界面</span><span lang="en">Gazebo GUI</span></td><td><span lang="zh-CN">llvmpipe 软件渲染，能用但慢</span><span lang="en">llvmpipe software rendering; works but slow</span></td><td><span lang="zh-CN">已知会失败；用 <code>gz sim -s</code> 无头运行</span><span lang="en">Known to fail; run headless with <code>gz sim -s</code></span></td><td><span lang="zh-CN">GPU 渲染，流畅</span><span lang="en">GPU rendering, smooth</span></td></tr>
+    <tr><td><span lang="zh-CN">回退</span><span lang="en">Rollback</span></td><td><span lang="zh-CN"><code>./lab.sh snapshot</code>、重建镜像</span><span lang="en"><code>./lab.sh snapshot</code>, rebuild the image</span></td><td><span lang="zh-CN">UTM 克隆</span><span lang="en">UTM clone</span></td><td><span lang="zh-CN">云厂商的磁盘快照</span><span lang="en">The cloud vendor’s disk snapshots</span></td></tr>
+    <tr><td><span lang="zh-CN">网络暴露</span><span lang="en">Network exposure</span></td><td><span lang="zh-CN">自己的网络命名空间，只发布 127.0.0.1:6080</span><span lang="en">Its own network namespace; publishes only 127.0.0.1:6080</span></td><td><span lang="zh-CN">桥接时直接在局域网上</span><span lang="en">Directly on the LAN when bridged</span></td><td><span lang="zh-CN">公网主机，只开 SSH</span><span lang="en">A public host; open SSH only</span></td></tr>
+    <tr><td><span lang="zh-CN">实时实验</span><span lang="en">Real-time labs</span></td><td><span lang="zh-CN"><code>SCHED_FIFO</code> 可以，<code>PREEMPT_RT</code> 不行</span><span lang="en"><code>SCHED_FIFO</code> yes, <code>PREEMPT_RT</code> no</span></td><td><span lang="zh-CN">可装 RT 内核，但有虚拟化抖动</span><span lang="en">Can install an RT kernel, with virtualisation jitter</span></td><td><span lang="zh-CN">取决于厂商是否允许换内核</span><span lang="en">Depends on whether the vendor lets you change the kernel</span></td></tr>
+    <tr><td><span lang="zh-CN">花费</span><span lang="en">Cost</span></td><td><span lang="zh-CN">免费（个人使用 Docker Desktop，以其许可为准）</span><span lang="en">Free (Docker Desktop for personal use; its licence is authoritative)</span></td><td><span lang="zh-CN">免费</span><span lang="en">Free</span></td><td><span lang="zh-CN">按小时计费，用完即关</span><span lang="en">Billed by the hour; shut down when done</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解：实验环境拓扑</h2><h2 id="diagram-en" lang="en">Diagram: lab topology</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2400"
+         data-captions='["全图：最上面是宿主 Mac，下面是 Docker Desktop 的 Linux VM，VM 里是实验容器 ros2-lab，容器里有 ROS 2 图、Gazebo 和浏览器桌面，右边是存放工作区的命名卷。按「播放」逐层走。",
+           "Step 1 · 宿主 Mac（macOS arm64）：只编辑文件、跑 lab.sh、开浏览器。宿主上不装 ROS 2，也不跑任何 ROS 节点。",
+           "Step 2 · Docker Desktop 的 Linux VM：所有容器共用这一个 Linux 内核。它由 Docker Desktop 管理，你换不了它的内核。",
+           "Step 3 · 实验容器 ros2-lab：基础镜像 ros:jazzy-ros-base，上面装 desktop、ros-gz、Nav2、ros2_control。容器里的 talker 和 listener 组成最小的 ROS 2 图。",
+           "Step 4 · Gazebo Harmonic：由 ros-jazzy-ros-gz 装进来。没有 GPU 直通，LIBGL_ALWAYS_SOFTWARE=1 让它用 Mesa llvmpipe 在 CPU 上渲染。",
+           "Step 5 · 浏览器桌面：Xtigervnc 开虚拟显示 :1，上面跑 XFCE，websockify 在 6080 端口提供 noVNC。Mac 浏览器打开 localhost:6080/vnc.html，端口只发布在 127.0.0.1。",
+           "Step 6 · 命名卷 ws 挂在 /root/ws，存 colcon 工作区。删容器它还在；docker commit 做的快照不包含它，要单独备份。",
+           "Step 7 · 网络命名空间：容器有自己的 lo 和 eth0。ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST 让发现只在容器内进行，ROS_DOMAIN_ID=42 再把图和别人分开；4g 的 /dev/shm 供 Fast DDS 共享内存传输。",
+           "Step 8 · 内核交叉点：SCHED_FIFO 需要 CAP_SYS_NICE 加 rtprio 99，compose 两样都给。PREEMPT_RT 要换的是 VM 的内核，这里做不到。"]'
+         data-captions-en='["Overview: the host Mac at the top, Docker Desktop Linux VM below it, the lab container ros2-lab inside the VM holding the ROS 2 graph, Gazebo and the browser desktop, and the named volume for the workspace on the right. Press Play to walk the layers.",
+           "Step 1 · Host Mac (macOS arm64): it only edits files, runs lab.sh and opens the browser. No ROS 2 is installed on the host and no ROS node runs there.",
+           "Step 2 · Docker Desktop Linux VM: every container shares this one Linux kernel. Docker Desktop manages it, and you cannot replace its kernel.",
+           "Step 3 · Lab container ros2-lab: base image ros:jazzy-ros-base, with desktop, ros-gz, Nav2 and ros2_control installed on top. Talker and listener in the container form the smallest ROS 2 graph.",
+           "Step 4 · Gazebo Harmonic: installed by ros-jazzy-ros-gz. There is no GPU passthrough, so LIBGL_ALWAYS_SOFTWARE=1 makes it render on the CPU with Mesa llvmpipe.",
+           "Step 5 · Browser desktop: Xtigervnc opens virtual display :1, XFCE runs on it, and websockify serves noVNC on port 6080. The Mac browser opens localhost:6080/vnc.html; the port is published on 127.0.0.1 only.",
+           "Step 6 · The named volume ws is mounted at /root/ws and holds the colcon workspace. It survives deleting the container; a docker commit snapshot does not include it, so back it up separately.",
+           "Step 7 · Network namespace: the container has its own lo and eth0. ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST keeps discovery inside the container, ROS_DOMAIN_ID=42 further separates the graph from others, and the 4g /dev/shm serves Fast DDS shared-memory transport.",
+           "Step 8 · Kernel crossover: SCHED_FIFO needs CAP_SYS_NICE plus rtprio 99, and compose grants both. PREEMPT_RT would mean replacing the VM kernel, which is not possible here."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+
+      <!-- step 1: host Mac -->
+      <g data-step="1"><rect class="box" x="40" y="14" width="820" height="66"/>
+        <text x="58" y="40" lang="zh-CN">宿主 Mac · macOS arm64</text><text x="58" y="40" lang="en">Host Mac · macOS arm64</text>
+        <text x="58" y="64" class="small" lang="zh-CN">浏览器 · 编辑器 · ./lab.sh · docker compose · 不装 ROS 2</text><text x="58" y="64" class="small" lang="en">Browser · editor · ./lab.sh · docker compose · no ROS 2 installed</text></g>
+
+      <!-- step 2: Docker Desktop VM -->
+      <g data-step="2"><rect class="box linux" x="40" y="110" width="820" height="300"/>
+        <text x="58" y="134" lang="zh-CN">Docker Desktop 的 Linux VM · 所有容器共用一个内核</text><text x="58" y="134" lang="en">Docker Desktop Linux VM · one kernel for every container</text></g>
+
+      <!-- step 3: container + ROS graph -->
+      <g data-step="3"><rect class="box ros" x="58" y="148" width="600" height="210"/>
+        <text x="74" y="172" lang="zh-CN">容器 ros2-lab · ros:jazzy-ros-base</text><text x="74" y="172" lang="en">Container ros2-lab · ros:jazzy-ros-base</text>
+        <rect class="box ros" x="74" y="184" width="180" height="92"/>
+        <text x="88" y="206" style="fill: var(--ros)" lang="zh-CN">ROS 2 图</text><text x="88" y="206" style="fill: var(--ros)" lang="en">ROS 2 graph</text>
+        <text x="88" y="230" class="mono">talker</text>
+        <text x="88" y="252" class="mono">→ chatter → listener</text></g>
+
+      <!-- step 4: Gazebo -->
+      <g data-step="4"><rect class="box gz" x="268" y="184" width="180" height="92"/>
+        <text x="282" y="206" style="fill: var(--gz)">Gazebo Harmonic</text>
+        <text x="282" y="230" class="mono">gz sim shapes.sdf</text>
+        <text x="282" y="252" class="small" lang="zh-CN">llvmpipe 软件渲染</text><text x="282" y="252" class="small" lang="en">llvmpipe software GL</text></g>
+
+      <!-- step 5: browser desktop + port -->
+      <g data-step="5"><rect class="box" x="462" y="184" width="180" height="92"/>
+        <text x="476" y="206" lang="zh-CN">浏览器桌面</text><text x="476" y="206" lang="en">Browser desktop</text>
+        <text x="476" y="230" class="mono">Xtigervnc :1 XFCE</text>
+        <text x="476" y="252" class="mono">websockify :6080</text>
+        <path class="arrow flow" d="M552 80 L552 182"/>
+        <text x="562" y="99" class="small">127.0.0.1:6080 /vnc.html</text></g>
+
+      <!-- step 6: named volume -->
+      <g data-step="6"><rect class="box" x="690" y="184" width="150" height="92"/>
+        <text x="704" y="206" lang="zh-CN">命名卷 ws</text><text x="704" y="206" lang="en">Named volume ws</text>
+        <text x="704" y="230" class="mono">/root/ws</text>
+        <text x="704" y="252" class="small" lang="zh-CN">不在 commit 里</text><text x="704" y="252" class="small" lang="en">not in commit</text>
+        <path class="arrow" d="M688 230 L660 230"/></g>
+
+      <!-- step 7: network namespace -->
+      <g data-step="7"><line x1="74" y1="290" x2="642" y2="290" class="lane"/>
+        <text x="74" y="308" class="small" lang="zh-CN">网络命名空间：lo + eth0（bridge）</text><text x="74" y="308" class="small" lang="en">Network namespace: lo + eth0 (bridge)</text>
+        <text x="74" y="328" class="mono">ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST  ROS_DOMAIN_ID=42</text>
+        <text x="74" y="348" class="small" lang="zh-CN">/dev/shm 4g：Fast DDS 共享内存传输</text><text x="74" y="348" class="small" lang="en">/dev/shm 4g: Fast DDS shared-memory transport</text></g>
+
+      <!-- step 8: kernel crossover -->
+      <g data-step="8">
+        <text x="58" y="382" class="small" lang="zh-CN">内核：SCHED_FIFO 需要 CAP_SYS_NICE + rtprio 99（compose 已给）</text><text x="58" y="382" class="small" lang="en">Kernel: SCHED_FIFO needs CAP_SYS_NICE + rtprio 99 (compose grants both)</text>
+        <text x="58" y="400" class="small" lang="zh-CN">PREEMPT_RT 要换 VM 的内核：这里做不到</text><text x="58" y="400" class="small" lang="en">PREEMPT_RT needs a different VM kernel: not possible here</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on lab</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 构建镜像，启动容器，跑通 talker 和 listener</h3><h3 lang="en">Lab A · Build the image, start the container, get talker and listener talking</h3>
+    <ol>
+      <li><span lang="zh-CN">安装 Docker Desktop for Mac（Apple silicon 版），在设置里给它至少 8 GB 内存、4 个 CPU（大致）。确认引擎是 arm64：</span><span lang="en">Install Docker Desktop for Mac (the Apple silicon build) and give it at least 8 GB of memory and 4 CPUs in its settings (approximate). Confirm the engine is arm64:</span><pre data-lang="sh">docker info --format '{{.Architecture}}'    # expect aarch64</pre></li>
+      <li><span lang="zh-CN">建实验目录，把概念 2、3、7 里的四个文件存进去：</span><span lang="en">Create the lab directory and save the four files from concepts 2, 3 and 7 into it:</span><pre data-lang="sh">mkdir -p ~/ros2-lab/share &amp;&amp; cd ~/ros2-lab
+# save Dockerfile, start-desktop.sh, compose.yaml, lab.sh here
+chmod +x lab.sh start-desktop.sh
+ls</pre></li>
+      <li><span lang="zh-CN">构建镜像。第一次要下载几 GB，可能要十几分钟以上：</span><span lang="en">Build the image. The first run downloads several GB and may take well over ten minutes:</span><pre data-lang="sh">./lab.sh build
+docker images ros2-lab</pre><span lang="zh-CN">如果某个包报 <code>Unable to locate package</code>，把它从 Dockerfile 里删掉再构建，并记下包名，对照 Jazzy 文档查新名字。</span><span lang="en">If a package fails with <code>Unable to locate package</code>, remove it from the Dockerfile, rebuild, and note the name to look up its new name in the Jazzy docs.</span></li>
+      <li><span lang="zh-CN">启动并进入容器，先看环境变量和共享内存：</span><span lang="en">Start and enter the container, and check the environment variables and shared memory first:</span><pre data-lang="sh">./lab.sh up
+./lab.sh shell
+# inside the container:
+printenv | grep -E '^ROS_'      # ROS_DISTRO=jazzy, ROS_DOMAIN_ID=42, ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+df -h /dev/shm                  # about 4.0G, not 64M</pre></li>
+      <li><span lang="zh-CN">第一个终端跑 talker：</span><span lang="en">Run talker in the first terminal:</span><pre data-lang="sh">ros2 run demo_nodes_cpp talker</pre><span lang="zh-CN">每秒一行 <code>Publishing: 'Hello World: N'</code>。若还看到 <code>ROS_LOCALHOST_ONLY is deprecated</code> 警告，说明某处（例如 <code>~/.bashrc</code>）还设着旧名，删掉它（见概念 4）。</span><span lang="en">One <code>Publishing: 'Hello World: N'</code> line per second appears. If you also see a <code>ROS_LOCALHOST_ONLY is deprecated</code> warning, the old name is set somewhere (for example in <code>~/.bashrc</code>); remove it (see concept 4).</span></li>
+      <li><span lang="zh-CN">在 Mac 上另开一个终端，再进同一个容器，跑 listener 并看图：</span><span lang="en">Open another terminal on the Mac, enter the same container again, run listener and look at the graph:</span><pre data-lang="sh">cd ~/ros2-lab &amp;&amp; ./lab.sh shell
+ros2 run demo_nodes_py listener     # I heard: [Hello World: N]
+# a third shell:
+ros2 node list                      # /talker  /listener
+ros2 topic info /chatter</pre></li>
+      <li><span lang="zh-CN">验证域隔离：在第三个 shell 里换一个 ID，应当看不到这两个节点：</span><span lang="en">Check domain isolation: in the third shell, change the ID; the two nodes should disappear:</span><pre data-lang="sh">ROS_DOMAIN_ID=7 ros2 node list      # empty
+ros2 daemon stop                    # the CLI caches the graph in a daemon; restart it if lists look stale</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 打开浏览器桌面，跑 RViz2 和 Gazebo，检查实时调度，存一个快照</h3><h3 lang="en">Lab B · Open the browser desktop, run RViz2 and Gazebo, check real-time scheduling, save a snapshot</h3>
+    <ol>
+      <li><span lang="zh-CN">在 Mac 浏览器里打开 noVNC，点 Connect，应看到一个 XFCE 桌面：</span><span lang="en">Open noVNC in the Mac browser and click Connect; you should see an XFCE desktop:</span><pre data-lang="sh">open http://localhost:6080/vnc.html</pre></li>
+      <li><span lang="zh-CN">在 XFCE 的终端里确认是软件渲染：</span><span lang="en">In an XFCE terminal, confirm that rendering is in software:</span><pre data-lang="sh">glxinfo -B | grep -i renderer     # expect llvmpipe</pre></li>
+      <li><span lang="zh-CN">启动 RViz2，把 Fixed Frame 留在默认值，确认窗口能画出网格：</span><span lang="en">Start RViz2, leave Fixed Frame at its default, and confirm the window draws the grid:</span><pre data-lang="sh">rviz2</pre></li>
+      <li><span lang="zh-CN">关掉 RViz2，启动 Gazebo 的 shapes 示例世界（两种写法任选一种）。软件渲染下第一次打开可能要等几十秒：</span><span lang="en">Close RViz2 and start Gazebo’s shapes example world (either form works). Under software rendering the first launch may take tens of seconds:</span><pre data-lang="sh">gz sim shapes.sdf
+# or through ROS:
+ros2 launch ros_gz_sim gz_sim.launch.py gz_args:="shapes.sdf"</pre><span lang="zh-CN">窗口黑屏或崩溃时，先试 OGRE 1：<code>gz sim --render-engine ogre shapes.sdf</code>；再不行就像 UTM 那样只跑服务端 <code>gz sim -s -r shapes.sdf</code>。</span><span lang="en">If the window is black or crashes, first try OGRE 1: <code>gz sim --render-engine ogre shapes.sdf</code>; if that also fails, run the server only, as on UTM: <code>gz sim -s -r shapes.sdf</code>.</span></li>
+      <li><span lang="zh-CN">检查实时调度权限（Phase 2 要用），并看一眼内核：</span><span lang="en">Check the real-time scheduling permission (needed in Phase 2) and take a look at the kernel:</span><pre data-lang="sh">ulimit -r                              # 99
+chrt -f 80 sh -c 'chrt -p $$'          # policy SCHED_FIFO, priority 80
+uname -r; uname -v                     # Docker Desktop VM kernel; look for PREEMPT_RT (you will most likely not see it)</pre><span lang="zh-CN"><code>chrt</code> 报 <code>Operation not permitted</code> 时，先确认 <code>compose.yaml</code> 里两项都在并且已 <code>./lab.sh down</code> 再 <code>up</code>；仍失败的话，可能是那台 VM 的 cgroup 没给实时任务分配预算（推断，检查 <code>/sys/fs/cgroup</code>），记下来，Phase 2 再处理。</span><span lang="en">If <code>chrt</code> reports <code>Operation not permitted</code>, first confirm both settings are in <code>compose.yaml</code> and that you ran <code>./lab.sh down</code> then <code>up</code>; if it still fails, the VM’s cgroup may give real-time tasks no budget (inference; check <code>/sys/fs/cgroup</code>). Note it and deal with it in Phase 2.</span></li>
+      <li><span lang="zh-CN">回到 Mac 终端，存一个干净快照：</span><span lang="en">Back in a Mac terminal, save a clean snapshot:</span><pre data-lang="sh">./lab.sh snapshot clean
+docker images ros2-lab               # jazzy and snap-clean</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 里 <code>ros2 node list</code> 的两次输出（ID 42 和 ID 7）、<code>df -h /dev/shm</code> 的输出；Lab B 里 RViz2 和 Gazebo 窗口的截图（存到 <code>share/</code>）、<code>chrt</code> 和 <code>uname -v</code> 的输出、<code>docker images ros2-lab</code> 的输出。写进当天日志，失败的步骤连同报错原文一起记。</div><div class="note" lang="en">Deliverables: the two <code>ros2 node list</code> outputs from Lab A (ID 42 and ID 7) and the <code>df -h /dev/shm</code> output; from Lab B, screenshots of the RViz2 and Gazebo windows (saved to <code>share/</code>), the <code>chrt</code> and <code>uname -v</code> output, and the <code>docker images ros2-lab</code> output. Write them into that day’s log, recording any failed step together with the exact error text.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/lab-setup">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 为什么实验环境默认设 <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>？</p><p lang="en">1. Why does the lab environment set <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> by default?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">不设的话，同一容器里的 talker 和 listener 互相看不到</span><span lang="en">Without it, talker and listener in the same container cannot see each other</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">发现靠局域网 UDP 多播，同网段、同 <code>ROS_DOMAIN_ID</code> 的其他 ROS 2 机器会和你互相看到、互相串数据</span><span lang="en">Discovery uses LAN UDP multicast, so other ROS 2 machines on the same subnet with the same <code>ROS_DOMAIN_ID</code> would see you and mix data with you</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">它能让 Gazebo 用 GPU 渲染</span><span lang="en">It lets Gazebo render on the GPU</span></label>
+      <div class="why" hidden><span lang="zh-CN">它把发现限制在本机（这里是容器的网络命名空间），别的机器看不到你。同一容器里的节点本来就互通，设不设都一样；它和渲染无关，渲染由 <code>LIBGL_ALWAYS_SOFTWARE</code> 和有没有 GPU 决定。</span><span lang="en">It limits discovery to the machine (here, the container’s network namespace), so other machines cannot see you. Nodes in the same container talk either way; it has nothing to do with rendering, which depends on <code>LIBGL_ALWAYS_SOFTWARE</code> and whether there is a GPU.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 在 UTM 的 Ubuntu 虚拟机里，<code>gz sim shapes.sdf</code> 的窗口一打开就黑屏崩溃。最合适的做法是？</p><p lang="en">2. In the Ubuntu VM in UTM, the <code>gz sim shapes.sdf</code> window goes black and crashes as soon as it opens. What is the best move?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">改用 <code>osrf/ros</code> 的 desktop-full 镜像</span><span lang="en">Switch to the <code>osrf/ros</code> desktop-full image</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">换一个 <code>ROS_DOMAIN_ID</code></span><span lang="en">Change <code>ROS_DOMAIN_ID</code></span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">用 <code>gz sim -s -r shapes.sdf</code> 只跑服务端，用 RViz2 看数据</span><span lang="en">Run the server only with <code>gz sim -s -r shapes.sdf</code> and view the data in RViz2</span></label>
+      <div class="why" hidden><span lang="zh-CN">问题在 UTM 不完整的 OpenGL，图形界面才需要它；服务端无头运行不受影响。<code>osrf/ros</code> 的 desktop 镜像只列 amd64，而且换镜像不改变虚拟机的 OpenGL；域 ID 只管发现，和渲染无关。</span><span lang="en">The problem is UTM’s partial OpenGL, which only the GUI needs; the headless server is unaffected. The <code>osrf/ros</code> desktop images list amd64 only, and changing images does not change the VM’s OpenGL; the domain ID governs discovery only and has nothing to do with rendering.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 容器里 <code>chrt -f 80 …</code> 报 <code>Operation not permitted</code>。按本页的设计，应该怎么做？</p><p lang="en">3. In the container, <code>chrt -f 80 …</code> reports <code>Operation not permitted</code>. Following this page’s design, what should you do?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">在 compose 里加 <code>cap_add: [SYS_NICE]</code> 和 <code>ulimits: rtprio: 99</code>，然后 down 再 up</span><span lang="en">Add <code>cap_add: [SYS_NICE]</code> and <code>ulimits: rtprio: 99</code> to compose, then down and up</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">在容器里 <code>apt install</code> 一个 PREEMPT_RT 内核</span><span lang="en">Run <code>apt install</code> for a PREEMPT_RT kernel inside the container</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">用 <code>--privileged</code> 启动容器</span><span lang="en">Start the container with <code>--privileged</code></span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>SCHED_FIFO</code> 需要 <code>CAP_SYS_NICE</code> 或 rtprio 上限，只给这一项能力就够。容器不引导内核，装 RT 内核包不起作用；<code>--privileged</code> 能用但给得太多，连往共享 VM 内核装模块都允许。</span><span lang="en"><code>SCHED_FIFO</code> needs <code>CAP_SYS_NICE</code> or an rtprio limit, and that one capability is enough. A container never boots a kernel, so installing an RT kernel package has no effect; <code>--privileged</code> would work but grants far too much, even loading modules into the shared VM kernel.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 你跑了 <code>./lab.sh snapshot clean</code>，后来在 <code>~/ws</code> 里写了一个包，又 <code>apt install</code> 了几个工具。回到 <code>snap-clean</code> 镜像后，会发生什么？</p><p lang="en">4. You ran <code>./lab.sh snapshot clean</code>, then wrote a package in <code>~/ws</code> and <code>apt install</code>-ed a few tools. After going back to the <code>snap-clean</code> image, what happens?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">新装的工具和 <code>~/ws</code> 里的包都消失</span><span lang="en">Both the new tools and the package in <code>~/ws</code> are gone</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">新装的工具消失，<code>~/ws</code> 里的包还在</span><span lang="en">The new tools are gone, and the package in <code>~/ws</code> is still there</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">两者都还在，因为快照只是一个标签</span><span lang="en">Both are still there, because a snapshot is only a tag</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>docker commit</code> 只存容器自己的文件系统，apt 装的工具在那里，回到旧镜像就没了。<code>~/ws</code> 是命名卷，不在快照里，也不随镜像切换改变。快照不只是标签：它是一个新的镜像层。</span><span lang="en"><code>docker commit</code> saves only the container’s own filesystem, where the apt-installed tools live, so going back to the old image drops them. <code>~/ws</code> is a named volume, not in the snapshot and unchanged by switching images. A snapshot is not only a tag: it is a new image layer.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html">ROS 2 Jazzy — Ubuntu (deb packages) installation</a> <span class="lvl" lang="zh-CN">官方：apt 源配置、desktop 与 ros-base 的区别，UTM 和云主机照这一页装</span><span class="lvl" lang="en">Official: apt source setup and desktop versus ros-base; the UTM VM and cloud box install from this page</span></li>
+    <li><a href="https://hub.docker.com/_/ros">Docker Hub — ros (Docker Official Image)</a> <span class="lvl" lang="zh-CN">官方镜像：标签列表与支持的架构（jazzy-ros-base 含 arm64v8）</span><span class="lvl" lang="en">Official image: the tag list and supported architectures (jazzy-ros-base includes arm64v8)</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Domain-ID.html">ROS 2 Jazzy — The ROS_DOMAIN_ID</a> <span class="lvl" lang="zh-CN">概念：域 ID 怎样换算成 UDP 端口，为什么取 0 到 101</span><span class="lvl" lang="en">Concept: how a domain ID maps to UDP ports, and why 0 to 101</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Improved-Dynamic-Discovery.html">ROS 2 Jazzy — Improved dynamic discovery</a> <span class="lvl" lang="zh-CN">进阶：<code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> 与 <code>ROS_STATIC_PEERS</code>，取代 <code>ROS_LOCALHOST_ONLY</code></span><span class="lvl" lang="en">Advanced: <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> and <code>ROS_STATIC_PEERS</code>, which replace <code>ROS_LOCALHOST_ONLY</code></span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Releases.html">ROS 2 — Distributions (Releases)</a> <span class="lvl" lang="zh-CN">发行版与停止支持日期：Jazzy、Kilted、Lyrical</span><span class="lvl" lang="en">Distributions and end-of-life dates: Jazzy, Kilted, Lyrical</span></li>
+    <li><a href="https://gazebosim.org/docs/harmonic/ros_installation">Gazebo Harmonic — Installing Gazebo with ROS</a> <span class="lvl" lang="zh-CN">官方：ROS 与 Gazebo 版本配对、从 Jazzy 起的 vendor 包、<code>ros-jazzy-ros-gz</code></span><span class="lvl" lang="en">Official: ROS and Gazebo version pairings, the vendor packages from Jazzy on, <code>ros-jazzy-ros-gz</code></span></li>
+    <li><a href="https://docs.docker.com/reference/compose-file/services/">Docker — Compose file reference: services</a> <span class="lvl" lang="zh-CN">查手册：<code>shm_size</code>、<code>cap_add</code>、<code>ulimits</code>、<code>ports</code>、<code>volumes</code></span><span class="lvl" lang="en">Reference: <code>shm_size</code>, <code>cap_add</code>, <code>ulimits</code>, <code>ports</code>, <code>volumes</code></span></li>
+    <li><a href="https://github.com/novnc/noVNC">noVNC</a> · <a href="https://tigervnc.org/">TigerVNC</a> <span class="lvl" lang="zh-CN">浏览器桌面的两半：VNC 客户端网页与 VNC 服务端</span><span class="lvl" lang="en">The two halves of the browser desktop: the VNC client web page and the VNC server</span></li>
+    <li><a href="https://docs.getutm.app/">UTM documentation</a> <span class="lvl" lang="zh-CN">备选环境：Linux 客体、显示与 OpenGL 设置、克隆</span><span class="lvl" lang="en">Fallback environment: Linux guests, display and OpenGL settings, cloning</span></li>
+    <li><a href="https://github.com/ros2/ros2_tracing">ros2_tracing</a> <span class="lvl" lang="zh-CN">可选：Phase 7 的追踪实验；Iron 起 LTTng 用户态追踪已是 ROS 2 依赖</span><span class="lvl" lang="en">Optional: the Phase 7 tracing lab; since Iron, LTTng user-space tracing is a ROS 2 dependency</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024. <span class="lvl">开头讲安装和搭建开发环境的章节、讲工作区与 colcon 的章节、讲执行器与回调的章节，对应概念 1、5、7 与 Lab A；基于 Jazzy</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024. <span class="lvl">The opening chapters on installation and setting up the development environment, the chapters on workspaces and colcon, and the chapters on executors and callbacks, corresponding to concepts 1, 5 and 7 and Lab A; based on Jazzy</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025. <span class="lvl">讲 ROS 2 架构、计算图与中间件的章节，对应概念 3、4</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025. <span class="lvl">The chapters on the ROS 2 architecture, the computation graph and middleware, corresponding to concepts 3 and 4</span></li>
+    <li lang="zh-CN">Lentin Joseph, Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025. <span class="lvl">讲安装与开发环境、Gazebo 仿真、ros2_control 的章节，对应概念 2、6 与 Lab B；基于 Jazzy</span></li>
+    <li lang="en">Lentin Joseph, Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025. <span class="lvl">The chapters on installation and the development environment, Gazebo simulation and ros2_control, corresponding to concepts 2 and 6 and Lab B; based on Jazzy</span></li>
+    <li lang="zh-CN">Morgan Quigley, Brian Gerkey, William D. Smart, 《Programming Robots with ROS》, O’Reilly, 2015. <span class="lvl">ROS 1 时代的书；开头讲 ROS 图的章节仍可对照概念 4（ROS 1 有 master，ROS 2 用 DDS 发现）</span></li>
+    <li lang="en">Morgan Quigley, Brian Gerkey, William D. Smart, <em>Programming Robots with ROS</em>, O’Reilly, 2015. <span class="lvl">A ROS 1 era book; its opening chapters on the ROS graph still compare well with concept 4 (ROS 1 has a master, ROS 2 uses DDS discovery)</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../index.html">← ROS 2</a>
+    <a href="../phase-0-foundations/index.html">Phase 0 · Foundations →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
