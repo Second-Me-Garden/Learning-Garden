@@ -66,6 +66,7 @@
     const file = pre.dataset.file || '';
     const lines = raw.split('\n');
     const wrap = document.createElement('figure'); wrap.className = 'code' + (lines.length >= 4 ? ' numbered' : '');
+    if (pre.hasAttribute('lang')) wrap.setAttribute('lang', pre.getAttribute('lang'));   // paired <pre> blocks hide as a whole
     const head = document.createElement('div'); head.className = 'code-head';
     const label = document.createElement('span'); label.className = 'code-lang';
     label.textContent = file ? file : (lang === 'sh' ? 'shell' : lang || 'text');
