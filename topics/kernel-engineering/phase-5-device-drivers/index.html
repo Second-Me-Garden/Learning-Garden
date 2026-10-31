@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 5 · Device Drivers · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
 <script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -14,7 +15,8 @@
     <a class="crumb" href="../index.html">Kernel Engineering</a>
     <span class="crumb">Phase 5</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
   <p class="meta">Phase 5 / 9 · 约 1–2 周</p>
@@ -45,7 +47,7 @@
   <h3>1. Linux 驱动模型</h3>
   <p>Linux 用三个对象描述「谁驱动谁」：<code>struct bus_type</code>（一条总线：platform、PCI、USB、I2C……，定义 <code>match</code>、<code>probe</code>、<code>uevent</code>）、<code>struct device</code>（一个设备实例，有 <code>parent</code>、<code>bus</code>、<code>driver</code>、<code>of_node</code>）、<code>struct device_driver</code>（一个驱动，有 <code>name</code>、<code>of_match_table</code>、<code>probe</code>/<code>remove</code>）。具体总线把它们嵌进自己的结构，如 <code>struct platform_device</code>、<code>struct pci_dev</code>。三者都基于 kobject，因此自动出现在 sysfs：<code>/sys/bus/*/devices</code>、<code>/sys/bus/*/drivers</code>、<code>/sys/devices</code>。</p>
   <p><strong>匹配</strong>是双向的：新设备注册（<code>device_add</code> → <code>bus_probe_device</code>）时遍历该总线上已有的驱动；新驱动注册（<code>driver_register</code> → <code>driver_attach</code>）时遍历已有的设备。每一对都调总线的 <code>match</code>，成功后进入 <code>drivers/base/dd.c</code> 的 <code>really_probe</code> → 驱动的 <code>probe</code>。<code>probe</code> 返回 0 即绑定；返回 <code>-EPROBE_DEFER</code> 表示依赖（时钟、GPIO、电源）还没就绪，稍后重试；返回 <code>-ENODEV</code> 表示「不是我的」。</p>
-  <p><strong>devicetree</strong>：ARM SoC 上的大多数外设不能被枚举（不像 PCI 有配置空间），只能由固件「声明」。bootloader（或 QEMU）把编译好的 DTB 的物理地址放在 <code>x0</code> 交给内核（arm64 启动协议），内核展开成 <code>struct device_node</code> 树，<code>of_platform_populate</code> 为带 <code>compatible</code> 的节点创建 platform_device。platform 总线的 <code>platform_match</code> 先比 <code>of_match_table</code> 里的 <code>compatible</code> 字符串（列表里越靠前越具体），再退回按名字匹配。驱动用 <code>MODULE_DEVICE_TABLE(of, ...)</code> 导出匹配表，生成 modalias，udev/mdev 据此自动 <code>modprobe</code>。arm64 服务器通常用 ACPI 而不是 devicetree，但驱动模型相同。</p>
+  <p><strong>devicetree</strong>：ARM SoC 上的大多数外设不能被枚举（不像 PCI 有配置空间），只能由固件「声明」。bootloader（或 QEMU）把编译好的 DTB 的物理地址放在 <code>x0</code> 交给内核（arm64 启动协议），内核展开成 <code>struct device_node</code> 树，<code>of_platform_populate</code> 为带 <code>compatible</code> 的节点创建 platform_device。platform 总线的 <code>platform_match</code> 先比 <code>of_match_table</code> 里的 <code>compatible</code> 字符串（列表里越靠前越具体），再退回按名字匹配。驱动用 <code>MODULE_DEVICE_TABLE(of, ...)</code> 导出匹配表，生成 modalias，udev/mdev 据此自动 <code>modprobe</code>。arm64 服务器通常用 ACPI 而不是 devicetree，但驱动模型相同。延伸阅读：《Linux Device Drivers》第 14 章「Linux 设备模型」（2.6 时代，早于 arm64 devicetree）。</p>
 
   <h3>2. 字符设备与 platform driver</h3>
   <p>用户态通过 <code>/dev</code> 下的设备节点访问驱动。<strong>字符设备</strong>由设备号 <code>dev_t</code>（major/minor）标识：<code>alloc_chrdev_region</code> 申请号、<code>cdev_init</code>/<code>cdev_add</code> 挂上 <code>struct file_operations</code>，再创建 class 和 device 让 devtmpfs/udev 生成节点。最省事的是 <strong>misc device</strong>：<code>misc_register</code>（或 <code>module_misc_device</code> 宏）一步完成，主设备号固定为 10、次设备号动态分配。<code>file_operations</code> 就是 Phase 4 VFS 分派的终点：<code>.open</code>、<code>.read</code>、<code>.write</code>、<code>.unlocked_ioctl</code>、<code>.mmap</code>、<code>.poll</code>、<code>.llseek</code>；在 <code>.read</code>/<code>.write</code> 里与用户缓冲区交换数据必须用 <code>copy_to_user</code>/<code>copy_from_user</code>（或 <code>simple_read_from_buffer</code> 这类辅助函数）。</p>
@@ -56,13 +58,13 @@
   <p>ARM64 上设备中断先到<strong>中断控制器</strong>：标准 Arm 平台（QEMU virt）是 GIC，Apple Silicon 是 Apple 自己的 <strong>AIC</strong>（Linux 驱动 <code>drivers/irqchip/irq-apple-aic.c</code>；Apple 芯片上定时器，以及支持 fast IPI 的芯片上的核间中断，走 FIQ）。控制器向 CPU 发 IRQ，CPU 跳到 <code>VBAR_EL1</code> 的 IRQ 向量。Linux 里 <code>handle_arch_irq</code> 指向控制器驱动（如 <code>gic_handle_irq</code>），它读出硬件中断号，经 <strong>irq domain</strong> 翻译成 Linux irq 号，调 <code>generic_handle_domain_irq</code> → 流控函数（如 <code>handle_fasteoi_irq</code>）→ <code>handle_irq_event</code> → 驱动注册的 handler。<code>/proc/interrupts</code> 每行就是一个 irq 号在各 CPU 上的计数。</p>
   <p><strong>上半部</strong>（hardirq handler，<code>request_irq(irq, handler, flags, name, dev)</code>）运行在中断上下文：本 CPU 中断已关、不能睡眠、要尽快返回——只做确认中断、读必要状态、把数据挪出硬件 FIFO 这类事，返回 <code>IRQ_HANDLED</code>（或共享中断线上「不是我的」时返回 <code>IRQ_NONE</code>）。其余工作推给<strong>下半部</strong>：<strong>softirq</strong>（编译期固定的少数几种，网络收发、块完成、定时器、RCU 用；在中断返回时或 <code>ksoftirqd</code> 里运行，仍不能睡眠）；<strong>tasklet</strong>（建在 softirq 之上，正被逐步淘汰，6.9 起引入 BH workqueue 作为替代）；<strong>workqueue</strong>（<code>schedule_work</code>/<code>queue_work</code>，在 kworker 内核线程里运行，可以睡眠）。</p>
   <p><strong>threaded IRQ</strong>：<code>request_threaded_irq(irq, handler, thread_fn, IRQF_ONESHOT, name, dev)</code>。<code>handler</code> 是快速的上半部，返回 <code>IRQ_WAKE_THREAD</code> 后内核唤醒专属线程 <code>irq/&lt;N&gt;-&lt;name&gt;</code> 执行 <code>thread_fn</code>，它可以睡眠（拿 mutex、做 I2C/SPI 传输——这些总线上的设备读一个寄存器就要睡眠等待）。<code>IRQF_ONESHOT</code> 让该中断线在线程跑完前保持屏蔽，避免电平触发的中断反复打进来。<code>handler</code> 传 NULL 则使用默认上半部。何时用：处理过程需要睡眠、或希望中断处理可被调度和设定优先级时；PREEMPT_RT 内核会把几乎所有中断强制线程化。</p>
-  <p><strong>XNU</strong>：<code>fleh_irq</code> → <code>sleh_irq</code>（<code>osfmk/arm64/sleh.c</code>）→ 平台中断控制器驱动（Apple Silicon 上是闭源 kext，基类 <code>IOInterruptController</code>）→ 分发到驱动注册的处理器。IOKit 驱动几乎从不在上半部做事：它创建 <code>IOInterruptEventSource</code> 并加入自己的 <code>IOWorkLoop</code>，中断发生时事件源在中断上下文里只记一次数并唤醒 workloop 线程，真正的 <code>action</code> 在线程里运行——<strong>IOKit 默认就是「threaded IRQ」</strong>。需要在中断上下文里先判断「是不是我的」时用 <code>IOFilterInterruptEventSource</code>，其 filter 函数在主中断上下文运行，返回 true 才调度 action。</p>
+  <p><strong>XNU</strong>：<code>fleh_irq</code> → <code>sleh_irq</code>（<code>osfmk/arm64/sleh.c</code>）→ 平台中断控制器驱动（Apple Silicon 上是闭源 kext，基类 <code>IOInterruptController</code>）→ 分发到驱动注册的处理器。IOKit 驱动几乎从不在上半部做事：它创建 <code>IOInterruptEventSource</code> 并加入自己的 <code>IOWorkLoop</code>，中断发生时事件源在中断上下文里只记一次数并唤醒 workloop 线程，真正的 <code>action</code> 在线程里运行——<strong>IOKit 默认就是「threaded IRQ」</strong>。需要在中断上下文里先判断「是不是我的」时用 <code>IOFilterInterruptEventSource</code>，其 filter 函数在主中断上下文运行，返回 true 才调度 action。延伸阅读：《Linux Kernel Development》第 7–8 章「中断和中断处理」「下半部和推后执行的工作」；《Linux Device Drivers》第 10 章「中断处理」。</p>
 
   <h3>4. DMA 与 IOMMU</h3>
   <p>DMA 让设备直接读写内存，CPU 只负责告诉设备「从哪读、写到哪」。问题是设备看到的地址既不是内核虚拟地址，也未必是物理地址，而是 <strong>DMA 地址</strong>（<code>dma_addr_t</code>，又叫 bus address / IOVA）。Linux 的 DMA API 屏蔽了差别：先用 <code>dma_set_mask_and_coherent(dev, DMA_BIT_MASK(n))</code> 声明设备能寻址多少位；<strong>一致性映射</strong> <code>dma_alloc_coherent(dev, size, &amp;dma_handle, GFP_KERNEL)</code> 分配 CPU 和设备都能随时看到一致内容的长期缓冲区（描述符环）；<strong>流式映射</strong> <code>dma_map_single(dev, buf, len, DMA_TO_DEVICE)</code> 为一次传输临时映射已有缓冲区，必须用 <code>dma_mapping_error</code> 检查结果，传完 <code>dma_unmap_single</code>；多段缓冲区用 scatterlist + <code>dma_map_sg</code>。</p>
   <p><strong>cache 一致性</strong>：arm64 上很多设备不参与 CPU cache 一致性。CPU 写进 cache 的数据设备看不到，设备写进内存的数据 CPU 可能读到旧 cache。流式映射的 map/unmap（以及 <code>dma_sync_single_for_cpu</code>/<code>_for_device</code>）会按方向自动做 cache clean/invalidate；设备树里标了 <code>dma-coherent</code> 的设备由硬件保证一致，省掉这些操作。绕过 DMA API 自己算物理地址是经典 bug 来源。</p>
   <p><strong>IOMMU</strong> 位于设备和内存之间，像设备专用的 MMU：每个设备（或设备组）有自己的 I/O 页表，把 IOVA 翻译成物理地址，未映射的地址直接拒绝。好处：设备只能访问驱动明确映射给它的页（防恶意或失控设备的 DMA 攻击，Thunderbolt/PCIe 外接设备尤其需要）；物理上不连续的页可以映射成连续的 IOVA；只能寻址 32 位的设备也能用高地址内存（否则要用 swiotlb 反弹缓冲区复制）。Arm 服务器上是 SMMU（<code>drivers/iommu/arm/arm-smmu-v3/</code>），驱动无需改动——DMA API 背后的 dma-iommu 层自动建 I/O 页表。</p>
-  <p><strong>XNU</strong> 用对象描述内存：<code>IOMemoryDescriptor</code>（任意一段内存，<code>withAddressRange</code> 等工厂方法）或 <code>IOBufferMemoryDescriptor</code>（新分配的缓冲区）；<code>prepare()</code> 把页钉住，<code>IODMACommand</code>（<code>withSpecification</code> 描述设备的寻址能力和段限制，<code>setMemoryDescriptor</code>，<code>gen64IOVMSegments</code> 生成设备可用的地址段，<code>complete()</code> 结束）负责地址翻译和 cache 同步；系统 IOMMU 抽象是 <code>IOMapper</code>。驱动永远不直接拿物理地址。</p>
+  <p><strong>XNU</strong> 用对象描述内存：<code>IOMemoryDescriptor</code>（任意一段内存，<code>withAddressRange</code> 等工厂方法）或 <code>IOBufferMemoryDescriptor</code>（新分配的缓冲区）；<code>prepare()</code> 把页钉住，<code>IODMACommand</code>（<code>withSpecification</code> 描述设备的寻址能力和段限制，<code>setMemoryDescriptor</code>，<code>gen64IOVMSegments</code> 生成设备可用的地址段，<code>complete()</code> 结束）负责地址翻译和 cache 同步；系统 IOMMU 抽象是 <code>IOMapper</code>。驱动永远不直接拿物理地址。延伸阅读：《Linux Device Drivers》第 15 章「内存映射与 DMA」。</p>
 
   <h3>5. XNU IOKit</h3>
   <p>IOKit 是 XNU 的面向对象驱动框架，用 C++ 的一个<strong>受限子集</strong>编写：没有异常、没有 RTTI、没有多重继承（历史上也不用模板）。libkern 用 <code>OSMetaClass</code> 自己实现运行时类型信息和引用计数：类用 <code>OSDeclareDefaultStructors</code>/<code>OSDefineMetaClassAndStructors</code> 宏声明，类型转换用 <code>OSDynamicCast</code>，对象用 <code>retain</code>/<code>release</code>（<code>OSSafeReleaseNULL</code>）。所有驱动都继承自 <code>IOService</code>（← <code>IORegistryEntry</code> ← <code>OSObject</code>）。</p>
@@ -449,6 +451,17 @@ ls iokit/Kernel/IOUserServer.cpp</pre>
     <li><a href="https://github.com/torvalds/linux/blob/master/drivers/iommu/apple-dart.c">linux/drivers/iommu/apple-dart.c</a> + <a href="https://asahilinux.org/docs/">Asahi Linux docs</a> <span class="lvl">深入，DART 的公开参考实现与逆向资料</span></li>
     <li>Jonathan Levin, <em>*OS Internals</em> Vol. II（Kernel Mode）IOKit 章节 <span class="lvl">进阶，IOKit 内部、IOUserClient、DriverKit</span></li>
   </ul>
+
+  <h2 id="books">参考书目</h2>
+  <ol class="books">
+    <li>Jonathan Corbet, Alessandro Rubini &amp; Greg Kroah-Hartman, 《Linux Device Drivers》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 3 章字符设备、第 10 章中断处理、第 14 章设备模型、第 15 章 DMA，对应概念 1–4；API 停在 2.6 时代 · 「免费在线」<a href="https://lwn.net/Kernel/LDD3/">lwn.net/Kernel/LDD3</a></span></li>
+    <li>John Madieu, 《Linux Device Driver Development》, 2nd ed., Packt, 2022. <span class="lvl">devicetree 与 platform driver 相关章节，基于较新内核，补上 LDD3 没有的 devicetree 部分（概念 1–2）</span></li>
+    <li>Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 7–8 章中断与下半部、第 17 章「设备与模块」，对应概念 2–3</span></li>
+    <li>Daniel P. Bovet &amp; Marco Cesati, 《Understanding the Linux Kernel》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 4 章「中断和异常」、第 13 章「I/O 体系结构和设备驱动程序」</span></li>
+    <li>Amit Singh, 《Mac OS X Internals: A Systems Approach》, Addison-Wesley, 2006. <span class="lvl">扩展内核（kext、IOKit）相关章节，对应概念 5；早于 DriverKit</span></li>
+    <li>Jonathan Levin, 《Mac OS X and iOS Internals: To the Apple's Core》, Wiley, 2012. <span class="lvl">IOKit 相关章节，对应概念 5</span></li>
+    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. II 的 IOKit 内部与 IOUserClient 相关章节，对应概念 5–6</span></li>
+  </ol>
 
   <nav class="pn">
     <a href="../phase-4-syscalls-vfs-filesystems/index.html">← Phase 4 · Syscalls, VFS &amp; Filesystems</a>

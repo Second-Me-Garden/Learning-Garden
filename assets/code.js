@@ -10,6 +10,8 @@
  */
 (function () {
   'use strict';
+  const ICON_COPY = '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+  const ICON_DONE = '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const KW_C = /\b(int|char|void|long|unsigned|static|const|struct|return|if|else|for|while|do|switch|case|break|continue|sizeof|typedef|enum|union|goto|extern|volatile|register|inline|include|define|ifdef|ifndef|endif|NULL)\b/g;
   const KW_JS = /\b(const|let|var|function|return|if|else|for|while|import|export|new|class|this|true|false|null|undefined|await|async)\b/g;
 
@@ -42,12 +44,12 @@
   function plain(s, lang) {
     let h = esc(s);
     if (lang === 'sh') h = h.replace(/^(\$ |# )/gm, '<span class="pr">$1</span>');
-    if (lang === 'c') h = h.replace(KW_C, '<span class="kw">$1</span>').replace(/^(\s*#\s*\w+)/gm, '<span class="pp">$1</span>');
+    if (lang === 'c') h = h.replace(/^(\s*#\s*\w+)/gm, '<span class="pp">$1</span>').replace(/(<span class="pp">[^<]*<\/span>)|\b(int|char|void|long|unsigned|static|const|struct|return|if|else|for|while|do|switch|case|break|continue|sizeof|typedef|enum|union|goto|extern|volatile|register|inline|NULL)\b/g, (m0, pp, kw) => pp ? pp : '<span class="kw">' + kw + '</span>');
     if (lang === 'js') h = h.replace(KW_JS, '<span class="kw">$1</span>');
     return h;
   }
   function copyText(text, btn) {
-    const done = () => { btn.textContent = '已复制'; btn.classList.add('ok'); setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('ok'); }, 1400); };
+    const done = () => { const T = (k) => (window.LG ? window.LG.t(k) : k); btn.innerHTML = ICON_DONE; btn.title = T('copied'); btn.setAttribute('aria-label', T('copied')); btn.classList.add('ok'); setTimeout(() => { btn.innerHTML = ICON_COPY; btn.title = T('copy'); btn.setAttribute('aria-label', T('copyLabel')); btn.classList.remove('ok'); }, 1400); };
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => fallback(text, done));
     else fallback(text, done);
   }
@@ -67,9 +69,12 @@
     const head = document.createElement('div'); head.className = 'code-head';
     const label = document.createElement('span'); label.className = 'code-lang';
     label.textContent = file ? file : (lang === 'sh' ? 'shell' : lang || 'text');
-    const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'code-copy'; btn.textContent = '复制';
-    btn.setAttribute('aria-label', '复制这段代码');
-    btn.addEventListener('click', () => copyText(raw, btn));
+    const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'code-copy';
+    const T = (k) => (window.LG ? window.LG.t(k) : ({ copy: '复制', copied: '已复制', copyLabel: '复制这段代码', shell: 'shell' })[k]);
+    btn.innerHTML = ICON_COPY; btn.title = T('copy');
+    btn.setAttribute('aria-label', T('copyLabel'));
+    document.addEventListener('lg-lang', () => { if (!btn.classList.contains('ok')) { btn.title = T('copy'); btn.setAttribute('aria-label', T('copyLabel')); } });
+    btn.addEventListener('click', () => copyText(lang === 'sh' ? raw.replace(/^\$ /gm, '') : raw, btn));
     head.appendChild(label); head.appendChild(btn);
     const body = document.createElement('pre'); body.className = 'code-body';
     for (const a of pre.attributes) if (a.name !== 'class') body.setAttribute(a.name, a.value);

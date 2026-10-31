@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 7 · Security &amp; Hardening · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
 <script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -14,7 +15,8 @@
     <a class="crumb" href="../index.html">Kernel Engineering</a>
     <span class="crumb">Phase 7</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
   <p class="meta">Phase 7 / 9 · 约 1–2 周</p>
@@ -44,7 +46,7 @@
 
   <h3>1. 内核威胁模型</h3>
   <p>威胁模型回答三个问题：<strong>攻击者从哪里开始</strong>（通常是一个低权限进程——沙箱里的 App、浏览器渲染进程——或者一段送进内核的外部数据）、<strong>能碰到哪些内核代码</strong>（攻击面）、<strong>想达到什么</strong>（提权、逃出沙箱、持久化）。<strong>Linux</strong> 的典型攻击面：几百个系统调用、设备文件上的 <code>ioctl</code>、netlink、网络协议栈、挂载不可信的文件系统镜像、io_uring、eBPF（非特权 eBPF 通常由 <code>kernel.unprivileged_bpf_disabled</code> 关闭）。<strong>XNU</strong> 多了两类：Mach trap 与发往内核对象的 Mach 消息（MIG 接口），以及 <strong>IOKit 用户客户端</strong>——用户态 <code>IOServiceOpen</code> 后通过 <code>IOConnectCallMethod</code> 进到驱动的 <code>IOUserClient::externalMethod</code>，每个驱动都是一块新攻击面。Sandbox 的意义正在于<em>缩小一个进程能够到的攻击面</em>。</p>
-  <p>典型利用链：<strong>漏洞</strong>（越界读写、释放后使用 UAF、竞态、类型混淆、逻辑错误）→ <strong>原语</strong>（信息泄露、有限的写 → 任意地址读写）→ <strong>绕过缓解</strong> → <strong>达成目标</strong>（例如改掉自己进程的凭证：Linux 的 <code>struct cred</code>，XNU 挂在 <code>struct proc_ro</code> 里的 <code>p_ucred</code>）。缓解措施的设计思路就是在这条链的每一环上加成本：让漏洞更难出现（类型安全、隔离）、更难变成原语（堆加固）、原语更难用（KASLR、PAC、PPL/SPTM）。XNU 自己的 <code>doc/allocators/read-only.md</code> 写得很直白：由于 PAC 等控制流防御，今天的攻击者更倾向<strong>只改数据</strong>（data-only），所以防线也在向「保护关键数据」移动。</p>
+  <p>典型利用链：<strong>漏洞</strong>（越界读写、释放后使用 UAF、竞态、类型混淆、逻辑错误）→ <strong>原语</strong>（信息泄露、有限的写 → 任意地址读写）→ <strong>绕过缓解</strong> → <strong>达成目标</strong>（例如改掉自己进程的凭证：Linux 的 <code>struct cred</code>，XNU 挂在 <code>struct proc_ro</code> 里的 <code>p_ucred</code>）。缓解措施的设计思路就是在这条链的每一环上加成本：让漏洞更难出现（类型安全、隔离）、更难变成原语（堆加固）、原语更难用（KASLR、PAC、PPL/SPTM）。XNU 自己的 <code>doc/allocators/read-only.md</code> 写得很直白：由于 PAC 等控制流防御，今天的攻击者更倾向<strong>只改数据</strong>（data-only），所以防线也在向「保护关键数据」移动。延伸阅读：《Modern Operating Systems》第 9 章「安全」；《Operating Systems: Three Easy Pieces》第 53–55 章（安全导论、认证、访问控制）。</p>
 
   <h3>2. KASLR 与 W^X / PXN / PAN</h3>
   <p><strong>KASLR</strong> 让内核镜像每次启动加载到随机虚拟地址，攻击者写死的地址全部失效，从而必须先拿到一个<strong>信息泄露</strong>。Linux arm64（<code>CONFIG_RANDOMIZE_BASE</code>）的种子来自设备树 <code>/chosen/kaslr-seed</code>，没有时用 CPU 的 <code>RNDR</code> 指令（FEAT_RNG），都没有就打印 <code>KASLR disabled due to lack of seed</code>（<code>arch/arm64/kernel/kaslr.c</code>）；<code>nokaslr</code> 关闭它；panic 时打印 <code>Kernel Offset</code>。配套的是「不泄露地址」：<code>kptr_restrict</code>、<code>%pK</code>、默认对 <code>%p</code> 打印的指针做哈希、<code>dmesg_restrict</code>。用户态 ASLR 由 <code>/proc/sys/kernel/randomize_va_space</code> 控制：0 关闭，1 随机化 mmap 基址、栈和 vDSO，2 再加上 <code>brk</code> 堆。<strong>XNU</strong> 的内核整体滑动一个 <strong>kernel slide</strong>（<code>vm_kernel_slide</code>）；内核往外报地址时用 <code>VM_KERNEL_UNSLIDE</code> / <code>VM_KERNEL_ADDRPERM</code> 去滑动或置换（<code>osfmk/mach/vm_param.h</code>）；查询 slide 的 <code>kas_info()</code> 系统调用要求 root，还要再过一道 MACF 检查（<code>bsd/vm/vm_unix.c</code>）。</p>
@@ -53,7 +55,7 @@
 
   <h3>3. stack canary 与 CFI</h3>
   <p><strong>Stack canary</strong>：编译器在有局部数组的函数栈帧里、返回地址之前放一个随机值，返回前检查；被连续溢出覆盖就调用 <code>__stack_chk_fail</code> 直接终止。Linux：<code>CONFIG_STACKPROTECTOR</code> / <code>_STRONG</code>，arm64 还有每任务不同 canary 的 <code>CONFIG_STACKPROTECTOR_PER_TASK</code>。XNU 同样有 <code>__stack_chk_guard</code>（<code>libkern/stack_protector.c</code>）。canary 只防<em>连续</em>溢出覆盖到返回地址；任意地址写、或者能先泄露 canary 时就挡不住。</p>
-  <p><strong>CFI</strong>（控制流完整性）把间接跳转限制在「合法目标」：<strong>后向边</strong>（返回）由 PAC（下一节）或 Linux 的 shadow call stack（<code>CONFIG_SHADOW_CALL_STACK</code>，返回地址另存一份在 <code>x18</code> 指向的隐藏栈）保护；<strong>前向边</strong>（函数指针调用）由 Clang <strong>kCFI</strong>（Linux <code>CONFIG_CFI</code>，旧名 <code>CONFIG_CFI_CLANG</code>：调用前检查目标函数前面的类型哈希）和 ARM <strong>BTI</strong>（Branch Target Identification，<code>CONFIG_ARM64_BTI_KERNEL</code>：间接跳转只能落在 <code>bti</code> 指令上，页表里的 GP 位开启检查）保护。XNU 在 arm64e 上主要靠 PAC 签名的函数指针和 vtable 指针实现前向边保护。</p>
+  <p><strong>CFI</strong>（控制流完整性）把间接跳转限制在「合法目标」：<strong>后向边</strong>（返回）由 PAC（下一节）或 Linux 的 shadow call stack（<code>CONFIG_SHADOW_CALL_STACK</code>，返回地址另存一份在 <code>x18</code> 指向的隐藏栈）保护；<strong>前向边</strong>（函数指针调用）由 Clang <strong>kCFI</strong>（Linux <code>CONFIG_CFI</code>，旧名 <code>CONFIG_CFI_CLANG</code>：调用前检查目标函数前面的类型哈希）和 ARM <strong>BTI</strong>（Branch Target Identification，<code>CONFIG_ARM64_BTI_KERNEL</code>：间接跳转只能落在 <code>bti</code> 指令上，页表里的 GP 位开启检查）保护。XNU 在 arm64e 上主要靠 PAC 签名的函数指针和 vtable 指针实现前向边保护。延伸阅读：《Computer Systems: A Programmer's Perspective》第 3 章中缓冲区溢出及其对抗（栈随机化、栈保护、不可执行栈）相关小节。</p>
 
   <h3>4. ARM Pointer Authentication（PAC）</h3>
   <p>ARMv8.3 的 FEAT_PAuth 增加了 5 把 128 位密钥（<code>APIAKey</code>、<code>APIBKey</code>、<code>APDAKey</code>、<code>APDBKey</code>、<code>APGAKey</code>，各分 <code>…Lo_EL1</code>/<code>…Hi_EL1</code> 两个系统寄存器；EL0 读不到）和一组指令：<code>pacia Xd, Xn</code> 用 IA 密钥、以 <code>Xn</code> 为修饰值（modifier）给 <code>Xd</code> 里的指针算出一个短 MAC——<strong>PAC</strong>——写进指针<strong>未用于寻址的高位</strong>；<code>autia</code> 用同样的密钥和修饰值重算并比较，对了就去掉 PAC 恢复原指针；<code>xpaci</code>/<code>xpacd</code> 只去掉不校验；<code>paciasp</code>/<code>pacibsp</code> 是「对 LR、以 SP 为修饰值」的简写；<code>retaa</code>/<code>retab</code>、<code>blraa</code> 把校验与跳转合成一条。PAC 位数取决于虚拟地址宽度和 TBI：48 位 VA 且开启 TBI 时只有 [54:48] 7 位（bit 55 用来选 TTBR），关闭 TBI 时高字节也可用；所以 PAC 是<em>概率</em>防护，靠的是「猜错一次就崩溃」。</p>
@@ -76,7 +78,7 @@
 
   <h3>7. 强制访问控制与代码签名</h3>
   <p><strong>Linux LSM</strong>：内核在敏感操作处调用 <code>security_*</code> 钩子（例如 <code>security_file_open</code>，钩子清单在 <code>include/linux/lsm_hook_defs.h</code>），由启用的安全模块决定放行与否：SELinux（基于标签的完整 MAC）、AppArmor（基于路径的配置文件）、Landlock（非特权进程给自己加限制）、Yama（限制 ptrace）、lockdown（限制连 root 也不能做的事，如写 <code>/dev/mem</code>、加载未签名模块）。完整性一侧有模块签名（<code>CONFIG_MODULE_SIG</code>）、IMA/EVM、dm-verity。</p>
-  <p><strong>XNU MACF</strong>（源自 TrustedBSD）：内核在同类位置调用 <code>mac_*_check_*</code>（如 <code>mac_vnode_check_open</code>，<code>security/mac_vfs.c</code>；IOKit 有 <code>mac_iokit_check_open</code>），策略模块用 <code>mac_policy_register</code> 注册（<code>security/mac_base.c</code>）。主要策略是两个内核扩展：<strong>Sandbox</strong>（Seatbelt：按配置文件限制文件、Mach 服务查找、IOKit 打开等，Lab B 能在内核日志里看到它的 <code>deny</code> 记录）和 <strong>AMFI</strong>（AppleMobileFileIntegrity：执行时校验代码签名与 entitlements，配合用户态 <code>amfid</code>；内核侧代码签名状态在 <code>bsd/kern/kern_cs.c</code>、<code>ubc_subr.c</code>）。<strong>SIP</strong>（System Integrity Protection）是「连 root 也不行」的那一层：保护系统文件、受保护进程、内核扩展加载等，检查点是 <code>csr_check()</code>（<code>bsd/kern/kern_csr.c</code>），只能在 recoveryOS 里修改。macOS 11 起的系统卷还是签名封存的只读快照（SSV），在 Apple Silicon 上 SPTM/TXM 也参与到「哪些代码可以执行」的决策中。</p>
+  <p><strong>XNU MACF</strong>（源自 TrustedBSD）：内核在同类位置调用 <code>mac_*_check_*</code>（如 <code>mac_vnode_check_open</code>，<code>security/mac_vfs.c</code>；IOKit 有 <code>mac_iokit_check_open</code>），策略模块用 <code>mac_policy_register</code> 注册（<code>security/mac_base.c</code>）。主要策略是两个内核扩展：<strong>Sandbox</strong>（Seatbelt：按配置文件限制文件、Mach 服务查找、IOKit 打开等，Lab B 能在内核日志里看到它的 <code>deny</code> 记录）和 <strong>AMFI</strong>（AppleMobileFileIntegrity：执行时校验代码签名与 entitlements，配合用户态 <code>amfid</code>；内核侧代码签名状态在 <code>bsd/kern/kern_cs.c</code>、<code>ubc_subr.c</code>）。<strong>SIP</strong>（System Integrity Protection）是「连 root 也不行」的那一层：保护系统文件、受保护进程、内核扩展加载等，检查点是 <code>csr_check()</code>（<code>bsd/kern/kern_csr.c</code>），只能在 recoveryOS 里修改。macOS 11 起的系统卷还是签名封存的只读快照（SSV），在 Apple Silicon 上 SPTM/TXM 也参与到「哪些代码可以执行」的决策中。延伸阅读：《*OS Internals》Vol. III 的 MACF、代码签名、Sandbox 相关章节；《The Design and Implementation of the FreeBSD Operating System》安全相关章节（MACF 源自 TrustedBSD）。</p>
 
   <h3>8. 读 CVE 分析</h3>
   <p>读任何一篇内核漏洞分析都填同一张表：<strong>① 根因</strong>（哪一行代码、属于哪类错误：越界、UAF、竞态、未初始化、逻辑）；<strong>② 可达性</strong>（从什么权限、经哪个接口触发，沙箱里能否够到）；<strong>③ 原语</strong>（漏洞直接给了什么：读/写多少字节、能否重复）；<strong>④ 缓解</strong>（哪些措施让利用更难，作者怎样绕过——或者为什么根本不需要绕过）；<strong>⑤ 修复</strong>（补丁改了什么，是只修这一处还是消灭了一类问题）。</p>
@@ -415,6 +417,15 @@ sysctl kern.bootargs</pre></li>
     <li><a href="https://googleprojectzero.blogspot.com/">Google Project Zero blog</a> · <a href="https://dirtypipe.cm4all.com/">The Dirty Pipe Vulnerability（CVE-2022-0847 原始报告）</a> <span class="lvl">实战，概念 8 的练习材料</span></li>
     <li><a href="https://github.com/apple-oss-distributions/xnu/blob/main/doc/allocators/read-only.md">xnu/doc/allocators/read-only.md</a> <span class="lvl">源码文档，只读 zone 与 data-only 攻击的动机</span></li>
   </ul>
+
+  <h2 id="books">参考书目</h2>
+  <ol class="books">
+    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. III：代码签名、Sandbox、SIP、MACF 与内核完整性保护相关章节，对应概念 5、7；出版早于 SPTM</span></li>
+    <li>Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 9 章「安全」：威胁、利用手法与防护，对应概念 1–3</span></li>
+    <li>Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 53–57 章：安全导论、认证、访问控制、密码学、分布式安全，对应概念 1、7 · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li>Randal E. Bryant &amp; David R. O'Hallaron, 《Computer Systems: A Programmer's Perspective》, 3rd ed., Pearson, 2016. <span class="lvl">第 3 章缓冲区溢出与对抗相关小节，对应概念 2–3</span></li>
+    <li>Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, 《The Design and Implementation of the FreeBSD Operating System》, 2nd ed., Addison-Wesley, 2014. <span class="lvl">安全相关章节（含 TrustedBSD MAC 框架），对应概念 7 的 XNU MACF 来历</span></li>
+  </ol>
 
   <nav class="pn">
     <a href="../phase-6-debugging-and-tooling/index.html">← Phase 6 · Debugging &amp; Tooling</a>

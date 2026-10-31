@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 2 · Memory · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
 <script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -14,7 +15,8 @@
     <a class="crumb" href="../index.html">Kernel Engineering</a>
     <span class="crumb">Phase 2</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
   <p class="meta">Phase 2 / 9 · 约 1–2 周</p>
@@ -59,7 +61,7 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
     <li>L3 上 <code>0b11</code> = <strong>page</strong> 描述符：给出 4 KB 页的输出地址（OA）。</li>
   </ul>
   <p>block/page 描述符里的属性位决定「能不能访问、怎么缓存」：<code>AttrIndx[4:2]</code> 是一个下标，指向 <code>MAIR_EL1</code> 里 8 组内存类型之一（Normal Write-Back、Device-nGnRE……，页表里不直接写缓存属性）；<code>AP[7:6]</code> 管只读/可写与 EL0 是否可访问；<code>SH[9:8]</code> 共享域；<code>AF[10]</code> access flag，为 0 时第一次访问触发 access flag fault（内核借此统计「最近用过」，有 FEAT_HAFDBS 的 CPU 可由硬件自动置位）；<code>nG[11]</code>；高位的 <code>PXN[53]</code>/<code>UXN[54]</code> 分别禁止 EL1 / EL0 在此执行。</p>
-  <p>改页表后 TLB 里的旧项不会自己消失：内核要发 <code>TLBI</code>（如按 VA+ASID 的 <code>tlbi vae1is</code>）再 <code>dsb ish</code>、<code>isb</code>。Linux 封装为 <code>flush_tlb_page()</code>/<code>flush_tlb_range()</code>（<code>arch/arm64/include/asm/tlbflush.h</code>）；XNU 在 <code>pmap</code> 层内部处理。Arm 还要求修改有效映射时遵守 break-before-make（先置无效、刷 TLB、再写新值）。</p>
+  <p>改页表后 TLB 里的旧项不会自己消失：内核要发 <code>TLBI</code>（如按 VA+ASID 的 <code>tlbi vae1is</code>）再 <code>dsb ish</code>、<code>isb</code>。Linux 封装为 <code>flush_tlb_page()</code>/<code>flush_tlb_range()</code>（<code>arch/arm64/include/asm/tlbflush.h</code>）；XNU 在 <code>pmap</code> 层内部处理。Arm 还要求修改有效映射时遵守 break-before-make（先置无效、刷 TLB、再写新值）。延伸阅读：《Computer Systems: A Programmer's Perspective》第 9 章「虚拟内存」；《Operating Systems: Three Easy Pieces》第 18–20 章（分页、TLB、多级页表）。</p>
 
   <h3>3. 缺页路径：从 data abort 到重新执行</h3>
   <p>翻译失败或权限不符时，CPU 产生同步异常 <strong>data abort</strong>（取指失败则是 instruction abort）：<code>ESR_EL1.EC = 0x24</code> 表示来自更低 EL（用户态），<code>0x25</code> 表示同一 EL（内核自己访问出错，例如 <code>copy_from_user</code> 碰到未映射的用户页）。ISS 里的 <code>DFSC</code> 区分 translation / access flag / permission fault 以及出错的表级，<code>WnR</code> 位说明是读还是写；出错的虚拟地址在 <code>FAR_EL1</code>。<code>ELR_EL1</code> 指向出错的那条指令本身——修好映射后 <code>eret</code>，同一条指令重新执行，用户程序完全无感。</p>
@@ -70,12 +72,13 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
     <li><strong>COW</strong>：<code>fork</code> 后父子共享物理页、PTE 都置只读；任一方写 → permission fault → <code>do_wp_page</code> 复制一页（若该页只剩自己一个使用者则直接改回可写）。</li>
   </ul>
   <p>找不到 VMA 或权限不符 → 用户态收到 <code>SIGSEGV</code>；内核态则查异常修复表（<code>fixup_exception</code>），查不到就 oops。</p>
-  <p><strong>XNU</strong>：<code>fleh_synchronous</code> → <code>sleh_synchronous</code>（<code>osfmk/arm64/sleh.c</code>）按 EC（<code>ESR_EC_DABORT_EL0</code>）调 <code>handle_abort</code>，用户态再进 <code>handle_user_abort</code> → <code>vm_fault</code>（<code>osfmk/vm/vm_fault.c</code>）。Mach VM 的模型和 Linux 同构但命名不同：任务的地址空间是 <code>vm_map</code>，由一串 <code>vm_map_entry</code>（对应 VMA）组成，每个 entry 指向一个 <code>vm_object</code>（「一段可被映射的内存」，背后挂 pager：vnode pager 读文件，匿名内存由 compressor / swap 承担），object 里是 <code>vm_page</code>。<code>vm_fault</code> 的大致路径：在 map 中查到 entry 和 object → <code>vm_fault_page</code> 在 object（及其 shadow 链）中找页，没有就向 pager 要或给零页 → <code>vm_fault_enter</code> → <code>pmap_enter</code> 写入硬件页表。<strong>COW 用 shadow object 实现</strong>：写一个 copy-on-write 的 entry 时，在原 object 前面叠一个新的 shadow object（<code>vm_object_shadow</code>），被写的页复制进 shadow，未写的页继续从下层 object 读。</p>
+  <p><strong>XNU</strong>：<code>fleh_synchronous</code> → <code>sleh_synchronous</code>（<code>osfmk/arm64/sleh.c</code>）按 EC（<code>ESR_EC_DABORT_EL0</code>）调 <code>handle_abort</code>，用户态再进 <code>handle_user_abort</code> → <code>vm_fault</code>（<code>osfmk/vm/vm_fault.c</code>）。Mach VM 的模型和 Linux 同构但命名不同：任务的地址空间是 <code>vm_map</code>，由一串 <code>vm_map_entry</code>（对应 VMA）组成，每个 entry 指向一个 <code>vm_object</code>（「一段可被映射的内存」，背后挂 pager：vnode pager 读文件，匿名内存由 compressor / swap 承担），object 里是 <code>vm_page</code>。<code>vm_fault</code> 的大致路径：在 map 中查到 entry 和 object → <code>vm_fault_page</code> 在 object（及其 shadow 链）中找页，没有就向 pager 要或给零页 → <code>vm_fault_enter</code> → <code>pmap_enter</code> 写入硬件页表。<strong>COW 用 shadow object 实现</strong>：写一个 copy-on-write 的 entry 时，在原 object 前面叠一个新的 shadow object（<code>vm_object_shadow</code>），被写的页复制进 shadow，未写的页继续从下层 object 读。延伸阅读：《Understanding the Linux Kernel》第 9 章「进程地址空间」（含缺页异常处理程序）；《Understanding the Linux Virtual Memory Manager》第 4 章「进程地址空间」。</p>
 
   <h3>4. 物理内存与内核分配器</h3>
   <p><strong>Linux</strong>：每页物理内存有一个 <code>struct page</code>（新代码越来越多用 <code>struct folio</code> 表示「一组连续页」）。物理内存按 node → zone（arm64 上有 <code>ZONE_DMA</code>/<code>ZONE_DMA32</code>/<code>ZONE_NORMAL</code>/<code>ZONE_MOVABLE</code>，没有 HIGHMEM）组织，每个 zone 用 <strong>buddy allocator</strong> 管理：按 2<sup>order</sup> 页分块挂在 free list 上，<code>alloc_pages(gfp, order)</code> 不够就拆大块、释放时与「伙伴」合并（<code>/proc/buddyinfo</code> 就是每个 order 的空闲块数）。小对象走 <strong>SLUB</strong>（6.8 起唯一的 slab 实现）：<code>kmem_cache_create</code> 建同类对象缓存，<code>kmalloc</code> 是按大小分档的通用缓存。需要虚拟连续、物理可以不连续的大块用 <code>vmalloc</code>。内核通过 linear map（<code>phys_to_virt</code>/<code>virt_to_phys</code>）直接访问全部物理内存。</p>
   <p><strong>XNU</strong>：架构相关的页表操作全部收在 <strong><code>pmap</code></strong> 层（<code>pmap_enter</code>、<code>pmap_remove</code>、<code>pmap_protect</code>……，arm 实现在 <code>osfmk/arm/pmap/</code>，旧版本是 <code>osfmk/arm/pmap.c</code>），机器无关的 Mach VM 只调这组接口——比 Linux 用通用的 pgd/pud/pmd/pte 抽象更彻底地隔离了硬件。物理页由 <code>vm_page</code> 描述，空闲页放在 free queue 上（<code>vm_page_grab</code> 取页）。内核小对象走 <strong>zone allocator</strong>：<code>zalloc</code>/<code>zfree</code> 按 zone（固定大小对象池）分配；<code>kalloc</code> 系列在其上按大小分档。iOS 15 / macOS 12 起引入 <strong><code>kalloc_type</code></strong>：按类型签名把不同类型的对象隔离到不同 zone（数据型走 <code>kalloc_data</code>），使 use-after-free 难以把一个类型的对象「换成」另一个类型——这是安全加固，不是性能优化。大块内核内存用 <code>kmem_alloc</code>（<code>osfmk/vm/vm_kern.c</code>）。</p>
   <div class="note">Apple Silicon 上页表并不由普通内核代码直接写：PPL（较新设备上是 SPTM）把页表修改关进一个更高权限的小环境里，<code>pmap</code> 调用会跨过这道边界。这是 Phase 7 的主题，这里只需知道「<code>pmap_enter</code> 背后还有一层保护」。</div>
+  <p>延伸阅读：《Understanding the Linux Virtual Memory Manager》第 6 章「物理页分配」与第 8 章「Slab 分配器」；《Linux Kernel Development》第 12 章「内存管理」。</p>
 
   <h3>5. 用户态视角：mmap、malloc 与 RSS</h3>
   <p>用户程序拿内存只有两类系统调用：<code>brk</code>（移动堆顶）和 <code>mmap</code>（映射一段匿名或文件内存）。glibc <code>malloc</code> 小块从堆（<code>brk</code>）和 arena 切，大块（默认阈值 128 KB 起，可动态调整）直接 <code>mmap</code>。macOS 上 BSD 层的 <code>mmap</code> 最终落到 Mach 的 <code>mach_vm_map</code>；也可以直接调 Mach 接口 <code>mach_vm_allocate</code>/<code>mach_vm_map</code>（旧名 <code>vm_allocate</code>/<code>vm_map</code>）；libmalloc 主要基于这些 VM 区域，而不是 <code>brk</code>。</p>
@@ -428,6 +431,18 @@ grep -rln "kalloc_type" osfmk/kern/ | head</pre>
     <li><a href="https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/ManagingMemory.html">Apple — Memory Usage Performance Guidelines</a> + <code>man vmmap</code> <span class="lvl">基础，用户态视角（归档文档，工具部分仍可用）</span></li>
     <li><a href="https://security.apple.com/blog/towards-the-next-generation-of-xnu-memory-safety/">Apple Security Research — Towards the next generation of XNU memory safety: kalloc_type</a> <span class="lvl">进阶，类型隔离分配器的设计动机；Phase 7 前导</span></li>
   </ul>
+
+  <h2 id="books">参考书目</h2>
+  <ol class="books">
+    <li>Mel Gorman, 《Understanding the Linux Virtual Memory Manager》, Prentice Hall, 2004. <span class="lvl">第 3 章页表管理、第 4 章进程地址空间、第 6 章 buddy、第 8 章 slab，对应概念 2–4；基于 2.4 / 2.6，细节以现代源码为准 · 「免费在线」<a href="https://www.kernel.org/doc/gorman/">www.kernel.org/doc/gorman</a></span></li>
+    <li>Daniel P. Bovet &amp; Marco Cesati, 《Understanding the Linux Kernel》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 2 章「内存寻址」、第 8 章「内存管理」、第 9 章「进程地址空间」，对应概念 1–4（x86 页表，结构可类比）</span></li>
+    <li>Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 12 章「内存管理」、第 15 章「进程地址空间」，对应概念 3–5</span></li>
+    <li>Randal E. Bryant &amp; David R. O'Hallaron, 《Computer Systems: A Programmer's Perspective》, 3rd ed., Pearson, 2016. <span class="lvl">第 9 章「虚拟内存」：地址翻译、TLB、多级页表、mmap 与 malloc，对应概念 1、2、5</span></li>
+    <li>Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 13–23 章：地址空间、地址翻译、分页、TLB、多级页表、换页 · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li>Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 3 章「内存管理」：分页与页面置换的通论</span></li>
+    <li>Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, 《The Design and Implementation of the FreeBSD Operating System》, 2nd ed., Addison-Wesley, 2014. <span class="lvl">内存管理相关章节：FreeBSD 的 VM 源自 Mach VM，vm_map / vm_object / shadow object 可直接对照 XNU（概念 3–4）</span></li>
+    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. II 的 Mach VM 与 pmap 相关章节，对应概念 3–4 的 XNU 一列</span></li>
+  </ol>
 
   <nav class="pn">
     <a href="../phase-1-boot-and-processes/index.html">← Phase 1 · Boot &amp; Processes</a>

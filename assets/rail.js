@@ -13,6 +13,8 @@
  */
 (function () {
   'use strict';
+  const T = (k) => (window.LG ? window.LG.t(k) : k);
+  function build() {
   const quiz = document.querySelector('form.quiz[data-quiz]');
   if (!quiz) return;
   const m = /^(.+)\/phase-(\d+)$/.exec(quiz.dataset.quiz || '');
@@ -49,7 +51,7 @@
 
   const aside = document.createElement('aside');
   aside.className = 'rail';
-  aside.setAttribute('aria-label', '本页导航');
+  aside.setAttribute('aria-label', T('nav'));
   const panel = document.createElement('div');
   panel.className = 'rail-panel';
   aside.appendChild(panel);
@@ -62,6 +64,8 @@
   if (brand) { const b = document.createElement('a'); b.className = 'rail-brand'; b.href = brand.getAttribute('href'); b.textContent = brand.textContent.trim(); rc.appendChild(b); }
   if (crumb) { const t = document.createElement('a'); t.className = 'rail-topic'; t.href = crumb.getAttribute('href'); t.textContent = crumb.textContent.trim(); rc.appendChild(t); }
   if (themeBtn) { const b = themeBtn.cloneNode(true); b.classList.add('rail-theme'); rc.appendChild(b); }
+  const langBtn = headerEl && headerEl.querySelector('button.lang');
+  if (langBtn) { const b = langBtn.cloneNode(true); b.classList.add('rail-lang'); rc.appendChild(b); }
   panel.appendChild(rc);
   if (meta) {
     const p = document.createElement('p'); p.className = 'rail-meta'; p.textContent = meta.textContent.trim();
@@ -82,19 +86,20 @@
     const label = document.createElement('span');
     label.textContent = 'Phase ' + i + (i === here && title ? ' · ' + title : '');
     a.appendChild(label);
-    const st = states[i] === 'done' ? '自测全对' : i === now ? '正在学' : '还没到';
+    const st = states[i] === 'done' ? T('done') : i === now ? T('now') : T('ahead');
     a.setAttribute('aria-label', 'Phase ' + i + '，' + st);
     li.appendChild(a); ol.appendChild(li); items.push({ li, label, i });
   }
   panel.appendChild(ol);
   const count = document.createElement('p'); count.className = 'rail-count';
-  count.textContent = '自测全对 ' + doneCount + ' / ' + total;
+  count.textContent = T('done') + ' ' + doneCount + ' / ' + total;
   panel.appendChild(count);
 
   // sections
-  const h2s = Array.from(document.querySelectorAll('h2'));
+  const cur = window.LG ? window.LG.lang() : 'zh-CN';
+  const h2s = Array.from(document.querySelectorAll('h2')).filter(h => { const l = h.closest('[lang]'); return !l || l === document.documentElement || l.getAttribute('lang') === cur; });
   if (h2s.length) {
-    const nav = document.createElement('nav'); nav.setAttribute('aria-label', '本页章节');
+    const nav = document.createElement('nav'); nav.setAttribute('aria-label', T('sections'));
     const toc = document.createElement('ol'); toc.className = 'rail-toc';
     const used = new Set();
     h2s.forEach((h, idx) => {
@@ -102,7 +107,7 @@
       used.add(h.id);
       const li = document.createElement('li'); const a = document.createElement('a');
       a.href = '#' + h.id; a.textContent = h.textContent.split('：')[0].trim();
-      if (/^自测/.test(a.textContent) && states[here] === 'done') a.textContent += ' · 自测全对';
+      if (/^(自测|Quiz|Self-check)/.test(a.textContent) && states[here] === 'done') a.textContent += ' · ' + T('done');
       li.appendChild(a); toc.appendChild(li);
     });
     nav.appendChild(toc); panel.appendChild(nav);
@@ -152,4 +157,11 @@
       });
     }).catch(() => {});
   }
+  }
+  build();
+  document.addEventListener('lg-lang', () => {
+    document.querySelectorAll('aside.rail, .rail-sentinel').forEach(el => el.remove());
+    document.body.classList.remove('lesson', 'scrolled');
+    build();
+  });
 })();

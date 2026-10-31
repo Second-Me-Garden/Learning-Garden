@@ -31,7 +31,9 @@ for (const page of pages) {
     if (!fs.existsSync(path.resolve(dir, target))) problems.push(`${rel}: missing ${target}`);
   }
 
-  if (!/<script src="[./]*assets\/theme\.js"><\/script>\s*<\/head>/.test(html)) problems.push(`${rel}: assets/theme.js not loaded in <head>`);
+  if (!/<script src="[./]*assets\/theme\.js"><\/script>\s*(<script src="[./]*assets\/lang\.js"><\/script>\s*)?<\/head>/.test(html)) problems.push(`${rel}: assets/theme.js not loaded in <head>`);
+  if (!/<script src="[./]*assets\/lang\.js"><\/script>/.test(html)) problems.push(`${rel}: assets/lang.js not loaded`);
+  if (!/<button class="lang"/.test(html)) problems.push(`${rel}: language button missing`);
 
   // phase pages
   if (/\/phase-\d+-[^/]+\/index\.html$/.test(page)) {
@@ -44,7 +46,7 @@ for (const page of pages) {
     if (!/assets\/rail\.js/.test(html)) problems.push(`${rel}: rail.js not loaded`);
     if (!/assets\/code\.js/.test(html)) problems.push(`${rel}: code.js not loaded`);
     if (/<form class="quiz"/.test(html) && !/assets\/quiz\.js/.test(html)) problems.push(`${rel}: quiz present but quiz.js not loaded`);
-    for (const h of ['目标', '核心概念', '动画图解', '资料']) {
+    for (const h of ['目标', '核心概念', '动画图解', '资料', '参考书目']) {
       if (!html.includes(h)) problems.push(`${rel}: section "${h}" missing`);
     }
   }
