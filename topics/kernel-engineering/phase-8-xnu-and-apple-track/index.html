@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 8 · XNU &amp; the Apple Track · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -16,7 +17,7 @@
     <button class="theme" type="button" title="切换明暗">◐</button>
   </header>
 
-  <p class="meta">Phase 8 / 9 · skeleton — 内容待写</p>
+  <p class="meta">Phase 8 / 9 · 约 1–2 周</p>
   <h1>XNU &amp; the Apple Track <span class="en">编译 XNU、Darwin 内部阅读计划、作品项目（Linux module + DriverKit driver）、Apple 面试环节</span></h1>
   <p class="lede">前面七个阶段用 Linux 打底、处处对照 XNU；这一阶段把重心完全切到 Apple：亲手编译 XNU、按计划读 Darwin 源码、做出能拿得出手的作品，并为 Apple 的面试流程做准备。目标是让你能用自己做过的东西，清楚地讲出对 XNU 的理解。</p>
 
@@ -34,64 +35,369 @@
   <h2 id="prereq">前置</h2>
   <ul>
     <li>Phase 0–7 全部（本阶段是综合应用）。</li>
-    <li>特别是 Phase 3（Mach IPC）、Phase 5（IOKit/DriverKit）、Phase 6（lldb + KDP）。</li>
+    <li>特别是 <a href="../phase-3-concurrency-and-ipc/index.html">Phase 3</a>（Mach IPC）、<a href="../phase-5-device-drivers/index.html">Phase 5</a>（IOKit/DriverKit）、<a href="../phase-6-debugging-and-tooling/index.html">Phase 6</a>（lldb + KDP、KDK 符号化）。</li>
+    <li>一台 Apple Silicon Mac + 完整 Xcode（不只是 Command Line Tools）；一个免费 Apple 开发者账号（下载 KDK 需要登录）。</li>
   </ul>
 
   <h2 id="concepts">核心概念</h2>
 
   <h3>1. 从源码构建 XNU</h3>
-  <p>本节讲获取 <code>apple-oss-distributions/xnu</code>、匹配版本的 KDK 与 SDK，以及按仓库 README 中的 <code>make</code> 参数（如 <code>KERNEL_CONFIGS</code>、<code>ARCH_CONFIGS</code>）构建。</p>
+  <p>仓库 README 给出的构建语法是 <code>make SDKROOT=&lt;sdkroot&gt; ARCH_CONFIGS=&lt;arch&gt; KERNEL_CONFIGS=&lt;variant&gt;</code>，variant 可以是 <code>release</code>、<code>development</code>、<code>debug</code>、<code>profile</code>（<code>makedefs/MakeInc.def</code> 的 <code>SUPPORTED_KERNEL_CONFIGS</code> 里还有 <code>KASAN</code> 和 <code>SPTM</code>）。ARM64 还要选机型 <code>MACHINE_CONFIGS</code>，公开源码支持的列表就写在同一文件的 <code>SUPPORTED_ARM64_MACHINE_CONFIGS</code> 里（当前为 <code>T6000 T6020 T6030 T6031 T6041 T8101 T8103 T8112 T8122 T8132 VMAPPLE</code>）。产物是可引导的 <code>kernel.[config]</code> 和带符号的 <code>kernel.[config].unstripped</code>，<code>make install_kernels DSTROOT=…</code> 安装，安装阶段生成 DWARF 的 <code>.dSYM</code>。README 里的例子写的是 <code>SDKROOT=macosx.internal</code>——那是 Apple 内部 SDK；外部只能用 Xcode 自带的 <code>macosx</code> SDK，缺的部分靠 <strong>KDK</strong> 补：makefile 在设置了 <code>KDKROOT</code> 时会从 KDK 里找平台头文件和 <code>libfirehose_kernel</code> 库（<code>makedefs/MakeInc.def</code>）。</p>
+  <p><strong>KDK</strong>（Kernel Debug Kit）在 developer.apple.com 的下载页搜索「Kernel Debug Kit」获取，必须与目标机器的 macOS build 号<em>完全一致</em>，安装到 <code>/Library/Developer/KDKs/</code>。里面有各 SoC 的 release / development（有时还有 kasan）内核、对应的 dSYM（带 lldbmacros）和说明文档。即使你不自己编译 XNU，KDK 也是 Phase 6 两机调试和符号化的前提。</p>
+  <p>两个必须提前知道的现实（在一台 macOS 27.2 的 Mac 上于 2026-10-30 实测）：<strong>① 源码发布滞后</strong>——本机 <code>uname -v</code> 显示运行的是 <code>xnu-13432.41.4</code>，而公开仓库最新的 tag 是 <code>xnu-12377.121.6</code>；<strong>② 机型可能不在列表里</strong>——同一台机器的 <code>RELEASE_ARM64_T8142</code> 不在公开的 <code>MACHINE_CONFIGS</code> 中。所以最稳妥的练习路径是：选一个公开 tag，在跑<em>对应 macOS 版本</em>的虚拟机里使用 <code>VMAPPLE</code> 配置。最后一步「引导自己编译的内核」：README 里的 <code>kextcache</code> + <code>com.apple.Boot.plist</code> 方法是 Intel 时代的；Apple Silicon 上要用 <code>kmutil</code> 生成 kernel collection，并在 recoveryOS 里降为 Reduced Security 后配置启动——具体步骤随版本变化，以 KDK 自带说明为准（大致路径）。</p>
 
   <h3>2. Darwin 内部阅读计划</h3>
-  <p>本节给出有序文件清单：<code>osfmk/arm64/start.s</code> → <code>osfmk/kern/startup.c</code> → <code>osfmk/kern/sched_prim.c</code> → <code>osfmk/ipc/ipc_kmsg.c</code> → <code>osfmk/vm/vm_fault.c</code> → <code>bsd/kern/kern_exec.c</code> → <code>bsd/vfs/vfs_lookup.c</code> → <code>iokit/Kernel/IOService.cpp</code>。</p>
+  <p>按「一个请求从进来到出去」的顺序读，每个文件只追一条主线，读完画一张自己的图。下面的文件都在当前公开 tag 中存在；遇到改名或移动，用 <code>grep -rn "^函数名(" osfmk bsd iokit</code> 重新定位，不要凭记忆补。</p>
+  <ol>
+    <li><code>osfmk/arm64/start.s</code> → <code>osfmk/arm/arm_init.c</code>：第一条指令到 <code>arm_init</code>（对照 Phase 1）。</li>
+    <li><code>osfmk/kern/startup.c</code> + <code>doc/lifecycle/startup.md</code>：<code>kernel_bootstrap</code> 与 <code>STARTUP</code> 分阶段初始化机制。</li>
+    <li><code>bsd/kern/bsd_init.c</code>：<code>bsd_init</code> 到 exec <code>launchd</code>。</li>
+    <li><code>osfmk/arm64/sleh.c</code>：<code>sleh_synchronous</code>、<code>handle_svc</code>（<code>x16</code> 非负走 <code>unix_syscall</code>，负数走 <code>mach_syscall</code>）、<code>sleh_irq</code>/<code>sleh_fiq</code>（对照 Phase 0、Phase 2）。</li>
+    <li><code>bsd/dev/arm/systemcalls.c</code> + <code>bsd/kern/syscalls.master</code>：BSD 系统调用分发与编号表。</li>
+    <li><code>osfmk/kern/task.c</code>、<code>osfmk/kern/thread.c</code>：task / thread 的创建与生命周期。</li>
+    <li><code>osfmk/kern/sched_prim.c</code>、<code>osfmk/kern/sched_clutch.c</code> + <code>doc/scheduler/sched_clutch_edge.md</code>：<code>thread_block</code>、<code>thread_invoke</code>、clutch / Edge（对照 Phase 1）。</li>
+    <li><code>osfmk/ipc/mach_msg.c</code> → <code>osfmk/ipc/ipc_kmsg.c</code> → <code>osfmk/ipc/ipc_port.c</code>、<code>ipc_right.c</code> + <code>doc/mach_ipc/</code>：一条消息的拷入、权限转移、排队与拷出（对照 Phase 3）。</li>
+    <li><code>osfmk/vm/vm_fault.c</code>、<code>osfmk/vm/vm_map.c</code>、<code>osfmk/kern/zalloc.c</code>、<code>osfmk/kern/kalloc.c</code> + <code>doc/allocators/</code>（对照 Phase 2、Phase 7）。</li>
+    <li><code>bsd/kern/kern_exec.c</code>：<code>posix_spawn</code> / <code>execve</code>、Mach-O 装载、代码签名相关钩子。</li>
+    <li><code>bsd/vfs/vfs_lookup.c</code> → <code>vfs_syscalls.c</code> → <code>vfs_vnops.c</code>（<code>vn_read</code>）→ <code>vfs_cluster.c</code>（<code>cluster_read</code>）（对照 Phase 4）。</li>
+    <li><code>iokit/Kernel/IOService.cpp</code> → <code>IOUserClient.cpp</code>（<code>is_io_connect_method</code> → <code>externalMethod</code>）→ <code>IOUserServer.cpp</code>（DriverKit 的内核一侧）；<code>libkern/c++/OSObject.cpp</code>、<code>OSKext.cpp</code>（对照 Phase 5）。</li>
+    <li><code>security/mac_base.c</code>、<code>security/mac_vfs.c</code>、<code>bsd/kern/kern_csr.c</code>：MACF 与 SIP 检查点（对照 Phase 7）。</li>
+    <li><code>osfmk/kern/debug.c</code> + <code>tools/lldbmacros/</code>：panic log 怎样生成、宏怎样读内核数据结构（对照 Phase 6）。</li>
+  </ol>
+  <p>节奏建议：每天 1–2 个文件；每个文件留下「入口函数、关键数据结构、加了什么锁、和 Linux 哪里对应」四行笔记。读完 14 项，你就拥有面试里讲 XNU 的全部素材。</p>
 
   <h3>3. 作品集项目</h3>
-  <p>本节规划一个 Linux 内核模块（如字符设备 + procfs 统计），再加一个 DriverKit 驱动或用户态 Mach IPC 工具，并写清设计说明。</p>
+  <p>作品的目的不是炫技，而是<strong>给面试官一个可以深挖的具体东西</strong>。规格：</p>
+  <ul>
+    <li><strong>A · Linux 内核模块（必做）</strong>：一个 misc 字符设备 <code>/dev/kstat</code>，统计打开与读取次数（Lab A 给了可编译的骨架），再扩展成真正有内容的东西——例如一个带 <code>ioctl</code> 的环形缓冲区，或者用 kprobe / tracepoint 统计某个系统调用的调用者。验收标准：<code>copy_to_user</code>/<code>copy_from_user</code> 的返回值全部检查；所有错误路径正确回滚；在开了 <code>CONFIG_KASAN</code> 和 <code>CONFIG_PROVE_LOCKING</code>（lockdep）的 QEMU 内核里压力测试零告警；附一个测试脚本和 README。</li>
+    <li><strong>B1 · DriverKit 驱动（二选一）</strong>：一个最小 dext：<code>IOService</code> 子类在 <code>Start</code> 里打日志，并提供一个 <code>IOUserClient</code> 子类和一个外部方法，由宿主 App 通过 SystemExtensions 框架激活、用 <code>IOServiceOpen</code> + <code>IOConnectCallScalarMethod</code> 调用。门槛是签名与 entitlement：DriverKit entitlement 需要向 Apple 申请，本地开发的加载方式（如 <code>systemextensionsctl developer on</code>）随系统版本有不同要求——先读 Apple 的「Requesting Entitlements for DriverKit Development」。</li>
+    <li><strong>B2 · Mach IPC 工具（二选一，不需要特殊 entitlement）</strong>：一对 client/server，server 用 <code>bootstrap_check_in</code> 注册服务（由 launchd plist 提供名字），client 用 <code>bootstrap_look_up</code> 找到它；消息里传一个端口权限（让 server 回复到 client 的 send-once 端口）和一段 OOL 内存；最后对比 <code>mach_msg</code>、pipe、Unix socket 的往返延迟。Lab B 给了最小的单进程 <code>mach_msg</code> 起点。</li>
+  </ul>
+  <p>每个项目都要有一份一页的<strong>设计说明</strong>：解决什么问题、接口长什么样、并发与锁的选择、失败路径、测了什么、一个你遇到并用 Phase 6 工具定位的 bug。</p>
 
   <h3>4. 跟踪 XNU 的版本变化</h3>
-  <p>本节讲如何在 opensource.apple.com 的版本发布与 xnu 仓库的 tag 之间做 diff，从变化中读出新机制。</p>
+  <p>Linux 的变化有完整记录：每个提交有说明，kernelnewbies 的 LinuxChanges 与 LWN 的合并窗口总结按版本汇总。XNU 只有<strong>按发布的快照</strong>：<code>opensource.apple.com/releases</code> 列出每个 macOS 版本对应的 xnu 版本号，GitHub 仓库里对应同名 tag（如 <code>xnu-12377.101.15</code>、<code>xnu-12377.121.6</code>），一个 tag 大致就是一个提交。读法是<strong>做 diff</strong>：</p>
+  <ul>
+    <li><code>git diff --stat 旧tag 新tag -- osfmk/ipc/</code> 先看哪些文件变了、变了多少；</li>
+    <li>新增的文件、<code>doc/</code> 下新增的设计说明、新出现的宏（例如本阶段在 Phase 7 里看到的 <code>CONFIG_SPTM</code>、<code>KALLOC_TYPE_DEFINE</code>）往往标志一项新机制；</li>
+    <li>把 diff 和同期 Apple 安全研究博客、Platform Security Guide 的修订记录对照——机制的「为什么」通常写在那里。</li>
+  </ul>
 
   <h3>5. Apple 面试流程</h3>
-  <p>本节梳理常见环节：电话面、编码（C/C++）、操作系统基础、调试题、系统设计，以及每一环的准备方法。</p>
+  <p>下面是公开面经里常见的形状（推断：Apple 按团队招聘，环节、顺序和题目因团队而异，以招聘方的实际安排为准）。每一环都写上「考什么」和「带哪件作品」：</p>
+  <ul>
+    <li><strong>招聘方 / 经理初筛</strong>：为什么是这个团队、你做过什么。带：两分钟版的作品介绍。</li>
+    <li><strong>技术电话面</strong>：一道 C 编码题 + 操作系统问题。带：Phase 0–2 的基本功（异常、页表、上下文切换能讲清）。</li>
+    <li><strong>编码（C / C++）</strong>：链表、位运算、环形缓冲区、简单分配器、带锁的数据结构，重在边界条件、错误处理和并发正确性。带：作品 A 的代码，准备好被问「这里如果并发会怎样」。</li>
+    <li><strong>操作系统基础</strong>：虚拟内存、缺页、调度、系统调用、中断、同步原语、IPC。带：阅读计划的笔记与 Phase 1–4 的动画——能在白板上画出来。</li>
+    <li><strong>调试</strong>：给一份 panic log / crash / 一段有 bug 的代码，说出你的排查顺序。带：Phase 6 的符号化流程和你在作品里定位过的真实 bug。</li>
+    <li><strong>系统设计</strong>：设计一个内核子系统或驱动接口（例如一个高频日志缓冲区、一个省电的定时器合并机制），讲清取舍。带：作品的设计说明，Phase 7 的安全考量。</li>
+  </ul>
 
   <h3>6. 讲述你的工作</h3>
-  <p>本节讲如何把前面各阶段的实验和作品组织成「问题 → 做法 → 取舍 → 结果」的面试叙事。</p>
+  <p>每件作品准备一个「<strong>问题 → 做法 → 取舍 → 结果</strong>」的故事，有两分钟和十分钟两个版本。<strong>问题</strong>要具体（「我想知道一次 <code>mach_msg</code> 往返比 pipe 慢多少、慢在哪」比「我学习了 Mach IPC」好得多）；<strong>做法</strong>讲你用了哪些内核接口和工具；<strong>取舍</strong>是面试官最想听的部分（为什么用 mutex 而不是 spinlock、为什么选 B2 而不是 B1）；<strong>结果</strong>给数字和你学到的、能迁移到 Apple 工作里的东西。</p>
+  <p>两条纪律：对 XNU 内部的每个说法，都能指出源码文件（「这在 <code>osfmk/ipc/ipc_kmsg.c</code> 里」），说不准的就直说「我读到的版本是这样，新版本可能变了」；不要声称理解你没读过的东西——面试官多半就是写那段代码的人。</p>
 
   <h2 id="compare">对照表</h2>
   <div class="table-wrap">
   <table class="cmp">
     <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
     <tr><td>源码仓库</td><td><code>torvalds/linux</code></td><td><code>apple-oss-distributions/xnu</code></td></tr>
-    <tr><td>开发方式</td><td>公开邮件列表（LKML）</td><td>内部开发，按版本发布开源快照</td></tr>
-    <tr><td>调试符号</td><td><code>vmlinux</code></td><td>Kernel Debug Kit（KDK）</td></tr>
-    <tr><td>可加载内核代码</td><td>内核模块（<code>.ko</code>）</td><td>kext</td></tr>
-    <tr><td>用户态驱动</td><td>UIO / VFIO</td><td>DriverKit（dext）</td></tr>
-    <tr><td>版本变化追踪</td><td>kernelnewbies LinuxChanges</td><td>opensource.apple.com releases</td></tr>
+    <tr><td>开发方式</td><td>公开邮件列表（LKML），逐提交可见</td><td>内部开发，按版本发布开源快照，且可能滞后于正在运行的系统</td></tr>
+    <tr><td>构建</td><td><code>make defconfig</code> + <code>make</code>，任何主机、任何目标板</td><td><code>make SDKROOT ARCH_CONFIGS MACHINE_CONFIGS KERNEL_CONFIGS</code> + Xcode SDK + KDK；只支持列出的机型</td></tr>
+    <tr><td>内核变体</td><td>一份 <code>.config</code> 决定一切</td><td>RELEASE / DEVELOPMENT / DEBUG / KASAN / PROFILE（另有 SPTM）</td></tr>
+    <tr><td>运行自己的内核</td><td>QEMU <code>-kernel</code>，或装到真机</td><td>macOS 虚拟机（<code>VMAPPLE</code>）或真机 Reduced Security + <code>kmutil</code>（大致）</td></tr>
+    <tr><td>调试符号</td><td><code>vmlinux</code></td><td>Kernel Debug Kit（KDK），按 build 号匹配</td></tr>
+    <tr><td>可加载内核代码</td><td>内核模块（<code>.ko</code>）</td><td>kext（第三方已逐步迁到 DriverKit / 系统扩展）</td></tr>
+    <tr><td>用户态驱动</td><td>UIO / VFIO</td><td>DriverKit（dext），内核侧 <code>IOUserServer.cpp</code></td></tr>
+    <tr><td>设计文档</td><td><code>Documentation/</code></td><td><code>doc/</code>（startup、mach_ipc、scheduler、allocators、debugging……）</td></tr>
+    <tr><td>版本变化追踪</td><td>kernelnewbies LinuxChanges、LWN</td><td>opensource.apple.com releases + 相邻 tag 的 diff</td></tr>
+    <tr><td>公开贡献记录</td><td>补丁进主线，可被检索</td><td>没有公开贡献渠道，靠作品和讲述</td></tr>
   </table>
   </div>
 
-  <h2 id="diagram">动画图解：Apple Track 路线图（占位）</h2>
+  <h2 id="diagram">动画图解</h2>
+
+  <h3>A · Apple Track 路线图</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 200"
-         data-captions='["（占位）本阶段动画待制作：将逐步展示从构建 XNU、按清单阅读源码、完成作品项目到准备面试各环节的路线与产出物。"]'>
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2600"
+         data-captions='["全图：上方四个里程碑——构建 XNU、阅读计划、作品项目、面试；中间是每一步留下的产出物；下方是面试的五个环节。按「播放」看产出物怎样一一对应到面试环节。",
+           "① 构建 XNU：选一个公开 tag，配合 Xcode 的 macosx SDK 和 build 号完全匹配的 KDK，用 MACHINE_CONFIGS=VMAPPLE 构建 DEVELOPMENT 内核。产出：kernel.development 与 dSYM，外加一份踩坑记录。",
+           "② 让它跑起来并接上调试器：在运行对应 macOS 版本的虚拟机里引导自己的内核，用 lldb 读它的版本字符串和 showbootargs。产出：一页启动与调试笔记，直接复用 Phase 6 的工具链。",
+           "③ 阅读计划：14 项文件按请求路径排序，从 start.s 到 lldbmacros，每天 1 到 2 个文件，每个留下入口、数据结构、锁、Linux 对应四行笔记和一张图。",
+           "④ 作品项目：必做的 Linux 内核模块（KASAN 与 lockdep 下零告警），再加 DriverKit 驱动或 Mach IPC 工具二选一；每个附一页设计说明和一个真实 bug 的定位过程。",
+           "⑤ 面试环节：初筛与电话面、C 编码、操作系统基础、调试、系统设计。环节因团队而异，这里是公开面经中常见的形状。",
+           "⑥ 对号入座：构建与调试笔记对应调试环节；阅读笔记对应操作系统基础和系统设计；作品代码对应编码和系统设计；两分钟的作品介绍用于初筛和电话面。"]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <rect class="box xnu" x="200" y="60" width="500" height="80"/>
-      <text x="230" y="106">构建 XNU → 阅读计划 → 作品项目 → 面试</text>
+      <!-- milestones -->
+      <g data-step="1 2"><rect class="box xnu" x="20" y="30" width="190" height="56"/>
+        <text x="32" y="53" class="mono">① 构建 XNU</text>
+        <text x="32" y="73" class="small">tag + macosx SDK + KDK</text></g>
+      <g data-step="3"><rect class="box xnu" x="245" y="30" width="190" height="56"/>
+        <text x="257" y="53" class="mono">② 阅读计划</text>
+        <text x="257" y="73" class="small">14 项，按请求路径</text></g>
+      <g data-step="4"><rect class="box xnu" x="470" y="30" width="190" height="56"/>
+        <text x="482" y="53" class="mono">③ 作品项目</text>
+        <text x="482" y="73" class="small">Linux 模块 + dext / Mach</text></g>
+      <g data-step="5"><rect class="box xnu" x="695" y="30" width="190" height="56"/>
+        <text x="707" y="53" class="mono">④ 面试</text>
+        <text x="707" y="73" class="small">五个环节</text></g>
+      <path class="arrow" d="M210 58 L243 58"/>
+      <path class="arrow" d="M435 58 L468 58"/>
+      <path class="arrow" d="M660 58 L693 58"/>
+
+      <!-- artifacts -->
+      <g data-step="1 6"><rect class="box" x="20" y="104" width="190" height="64"/>
+        <text x="30" y="124" class="mono">kernel.development</text>
+        <text x="30" y="142" class="small">+ dSYM（VMAPPLE）</text>
+        <text x="30" y="158" class="small">+ 踩坑记录 build.log</text></g>
+      <g data-step="2 6"><rect class="box pulse" x="20" y="180" width="190" height="56"/>
+        <text x="30" y="200" class="mono">VM 里启动 + lldb</text>
+        <text x="30" y="220" class="small">showbootargs / showversion</text></g>
+      <g data-step="3 6"><rect class="box" x="245" y="104" width="190" height="64"/>
+        <text x="255" y="124" class="mono">14 份四行笔记</text>
+        <text x="255" y="142" class="small">入口 · 数据结构 · 锁</text>
+        <text x="255" y="158" class="small">· Linux 对应 + 一张图</text></g>
+      <g data-step="4 6"><rect class="box" x="470" y="104" width="190" height="64"/>
+        <text x="480" y="124" class="mono">/dev/kstat + B1 或 B2</text>
+        <text x="480" y="142" class="small">KASAN + lockdep 零告警</text>
+        <text x="480" y="158" class="small">设计说明 + 一个真实 bug</text></g>
+      <g data-step="4 6"><rect class="box" x="470" y="180" width="190" height="56"/>
+        <text x="480" y="200" class="mono">两分钟作品介绍</text>
+        <text x="480" y="220" class="small">问题 → 做法 → 取舍 → 结果</text></g>
+
+      <!-- interview stations -->
+      <g data-step="5 6"><rect class="box" x="20" y="300" width="160" height="64"/>
+        <text x="30" y="324" class="mono">初筛 / 电话面</text>
+        <text x="30" y="344" class="small">动机 + 基础题</text>
+        <rect class="box" x="197" y="300" width="160" height="64"/>
+        <text x="207" y="324" class="mono">C 编码</text>
+        <text x="207" y="344" class="small">边界 · 错误 · 并发</text>
+        <rect class="box" x="374" y="300" width="160" height="64"/>
+        <text x="384" y="324" class="mono">OS 基础</text>
+        <text x="384" y="344" class="small">VM · 调度 · IPC</text>
+        <rect class="box" x="551" y="300" width="160" height="64"/>
+        <text x="561" y="324" class="mono">调试</text>
+        <text x="561" y="344" class="small">panic log · 排查顺序</text>
+        <rect class="box" x="728" y="300" width="160" height="64"/>
+        <text x="738" y="324" class="mono">系统设计</text>
+        <text x="738" y="344" class="small">子系统 · 取舍</text></g>
+
+      <!-- mapping -->
+      <g data-step="6"><path class="arrow flow" d="M210 208 C 450 230, 600 250, 630 298"/>
+        <path class="arrow flow" d="M340 168 L450 298"/>
+        <path class="arrow flow" d="M380 168 C 600 210, 780 240, 800 298"/>
+        <path class="arrow flow" d="M520 168 C 380 220, 300 250, 277 298"/>
+        <path class="arrow flow" d="M640 168 C 760 200, 800 240, 810 298"/>
+        <path class="arrow flow" d="M500 236 C 300 260, 150 270, 100 298"/></g>
+      <text x="20" y="390" class="small">环节、顺序、题目因团队而异（推断，来自公开面经）；以招聘方实际安排为准。</text>
+    </svg>
+  </div>
+
+  <h3>B · XNU 的分层：一次 read() 穿过 Mach / BSD / IOKit / libkern / pexpert</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 410" data-interval="2600"
+         data-captions='["全图：左边一列是 XNU 源码树的五个部分（加上最上面的用户态），右边是一次 read(fd, buf, 4096) 在页缓存未命中时，依次经过的函数。按「播放」跟着它走一遍。",
+           "① 用户态：libsystem_kernel 里的桩把系统调用号 3（SYS_read）放进 x16，执行 svc #0x80。同步异常进入 Mach 层的 osfmk/arm64/sleh.c：sleh_synchronous 交给 handle_svc——x16 非负走 unix_syscall，负数走 mach_syscall。",
+           "② BSD 层：unix_syscall（bsd/dev/arm/systemcalls.c）查 syscalls.master 生成的表调 read，经 dofileread、vn_read，再由 VNOP_READ 交给具体文件系统；文件系统通过 UBC 的 cluster_read 读页缓存。命中就直接拷贝返回；这里假设未命中。",
+           "③ IOKit 与 libkern：文件系统向它所在的存储对象发起读请求，沿 IOKit 存储栈往下到 NVMe 控制器驱动（这些驱动是独立的 kext，不在 xnu 仓库里，大致路径）。这些驱动对象都是 libkern 的 C++ 类：继承 OSObject，靠 OSMetaClass 做运行时类型信息与 OSDynamicCast，由 OSKext 加载。",
+           "④ Mach 层：发出 I/O 后，读线程在等待事件上调用 thread_block 让出 CPU（osfmk/kern/sched_prim.c），调度器换别的线程运行——Phase 1 的上下文切换在这里发生。",
+           "⑤ 完成中断：设备完成 DMA 后发中断，进入 sleh_irq 或 sleh_fiq；平台中断控制器的处理经 pexpert 与 ml_ 系列例程接到驱动（pexpert 还提供设备树、boot-args 的 PE_parse_boot_argn、时基等平台信息，大致路径）。IOKit 的中断事件源调用完成回调，thread_wakeup 唤醒读线程。",
+           "⑥ 返回：读线程醒来，数据已在页缓存；BSD 层把它 copyout 到用户缓冲区，unix_syscall 设置返回值，经异常返回 eret 回到用户态的 svc 下一条指令。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <!-- layer labels -->
+      <rect class="box" x="10" y="28" width="110" height="52"/><text x="20" y="50" class="mono">用户态</text><text x="20" y="68" class="small">libsystem_kernel</text>
+      <rect class="box xnu" x="10" y="90" width="110" height="62"/><text x="20" y="114" class="mono">Mach</text><text x="20" y="132" class="small">osfmk/</text>
+      <rect class="box xnu" x="10" y="162" width="110" height="62"/><text x="20" y="186" class="mono">BSD</text><text x="20" y="204" class="small">bsd/</text>
+      <rect class="box xnu" x="10" y="234" width="110" height="52"/><text x="20" y="256" class="mono">IOKit</text><text x="20" y="274" class="small">iokit/ + kext</text>
+      <rect class="box xnu" x="10" y="296" width="110" height="46"/><text x="20" y="316" class="mono">libkern</text><text x="20" y="332" class="small">libkern/</text>
+      <rect class="box xnu" x="10" y="352" width="110" height="46"/><text x="20" y="372" class="mono">pexpert</text><text x="20" y="388" class="small">pexpert/</text>
+      <line x1="130" y1="28" x2="130" y2="398" class="lane"/>
+
+      <!-- step 1 -->
+      <g data-step="1"><rect class="box" x="140" y="28" width="330" height="52"/>
+        <text x="150" y="50" class="mono">read(fd, buf, 4096)</text>
+        <text x="150" y="68" class="small">mov x16, #3 ; svc #0x80</text>
+        <path class="arrow" d="M300 80 L300 96"/>
+        <rect class="box" x="140" y="96" width="330" height="50"/>
+        <text x="150" y="116" class="mono">sleh_synchronous → handle_svc</text>
+        <text x="150" y="134" class="small">x16 ≥ 0 → unix_syscall；x16 &lt; 0 → mach_syscall</text></g>
+
+      <!-- step 2 -->
+      <g data-step="2"><path class="arrow" d="M300 146 L300 168"/>
+        <rect class="box" x="140" y="168" width="560" height="50"/>
+        <text x="150" y="188" class="mono">unix_syscall → read → dofileread → vn_read → VNOP_READ</text>
+        <text x="150" y="206" class="small">文件系统 → cluster_read（UBC 页缓存）；命中即返回，此处假设未命中</text></g>
+
+      <!-- step 3 -->
+      <g data-step="3"><path class="arrow" d="M420 218 L420 240"/>
+        <rect class="box" x="140" y="240" width="560" height="44"/>
+        <text x="150" y="258" class="mono">存储对象 → 块存储驱动 → NVMe 控制器驱动</text>
+        <text x="150" y="276" class="small">独立 kext，不在 xnu 仓库（大致路径）；发起 DMA</text>
+        <rect class="box" x="140" y="298" width="560" height="42"/>
+        <text x="150" y="316" class="mono">class … : public OSObject ; OSMetaClass ; OSDynamicCast</text>
+        <text x="150" y="333" class="small">驱动对象的 C++ 运行时；OSKext 负责加载</text></g>
+
+      <!-- step 4 -->
+      <g data-step="4"><rect class="box pulse" x="490" y="96" width="210" height="50"/>
+        <text x="500" y="116" class="mono">thread_block</text>
+        <text x="500" y="134" class="small">读线程让出 CPU，等待 I/O</text>
+        <path class="arrow" d="M600 240 C 640 200, 640 170, 600 146"/></g>
+
+      <!-- step 5 -->
+      <g data-step="5"><rect class="box" x="140" y="354" width="560" height="44"/>
+        <text x="150" y="372" class="mono">中断控制器 · 设备树 · PE_parse_boot_argn</text>
+        <text x="150" y="390" class="small">平台信息与中断经 pexpert / ml_ 例程接到驱动（大致路径）</text>
+        <rect class="box" x="720" y="96" width="170" height="50"/>
+        <text x="730" y="116" class="mono">sleh_irq / sleh_fiq</text>
+        <text x="730" y="134" class="small">→ thread_wakeup</text>
+        <path class="arrow flow" d="M700 376 C 860 370, 860 200, 805 148"/>
+        <path class="arrow" d="M720 121 L702 121"/></g>
+
+      <!-- step 6 -->
+      <g data-step="6"><rect class="box" x="720" y="168" width="170" height="50"/>
+        <text x="730" y="188" class="mono">copyout → eret</text>
+        <text x="730" y="206" class="small">返回 svc 的下一条</text>
+        <path class="arrow flow" d="M805 168 C 840 120, 840 60, 472 54"/></g>
     </svg>
   </div>
 
   <h2 id="lab">动手实验</h2>
   <div class="lab">
-    <ul>
-      <li>macOS：克隆 xnu 仓库，按 README 构建一次（或至少跑通依赖准备），记录用到的 SDK 与 KDK 版本。</li>
-      <li>macOS：用 <code>git log</code>/<code>git diff</code> 对比 xnu 两个相邻 tag 中 <code>osfmk/ipc/</code> 的变化，写一段摘要。</li>
-      <li>Linux（QEMU）：完成作品集中的内核模块，附带测试脚本与 README。</li>
-      <li>macOS：用 Xcode 的 DriverKit 模板创建一个最小 dext，或写一个用 <code>mach_msg</code> 通信的客户端/服务端工具。</li>
-    </ul>
+    <h3>Lab A · QEMU Linux：作品项目 A 的骨架</h3>
+    <ol>
+      <li>把下面存为 <code>kstat/kstat.c</code>（在 Linux 6.6 头文件上编译通过；你的 Phase 0 树更新，接口可能有变，以编译器报错为准）：<pre>// SPDX-License-Identifier: GPL-2.0
+#include &lt;linux/module.h&gt;
+#include &lt;linux/miscdevice.h&gt;
+#include &lt;linux/fs.h&gt;
+#include &lt;linux/mutex.h&gt;
+#include &lt;linux/uaccess.h&gt;
+
+static DEFINE_MUTEX(kstat_lock);
+static unsigned long opens, reads;
+
+static int kstat_open(struct inode *inode, struct file *f)
+{
+	mutex_lock(&amp;kstat_lock);
+	opens++;
+	mutex_unlock(&amp;kstat_lock);
+	return 0;
+}
+
+static ssize_t kstat_read(struct file *f, char __user *buf, size_t len, loff_t *pos)
+{
+	char tmp[64];
+	int n;
+
+	mutex_lock(&amp;kstat_lock);
+	if (*pos == 0)
+		reads++;
+	n = scnprintf(tmp, sizeof(tmp), "opens=%lu reads=%lu\n", opens, reads);
+	mutex_unlock(&amp;kstat_lock);
+	return simple_read_from_buffer(buf, len, pos, tmp, n);
+}
+
+static const struct file_operations kstat_fops = {
+	.owner = THIS_MODULE,
+	.open  = kstat_open,
+	.read  = kstat_read,
+};
+
+static struct miscdevice kstat_dev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name  = "kstat",
+	.fops  = &amp;kstat_fops,
+};
+module_misc_device(kstat_dev);
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Phase 8 portfolio skeleton: /dev/kstat");</pre>
+        同目录放一个只有一行的 <code>Makefile</code>：<code>obj-m += kstat.o</code>。</li>
+      <li>对着 Phase 0 的内核树编译（模块必须与正在运行的 <code>Image</code> 来自同一棵树、同一份 <code>.config</code>，否则 <code>insmod</code> 会因版本魔数不符被拒）：<pre>make -C ~/linux LLVM=1 ARCH=arm64 modules_prepare
+make -C ~/linux LLVM=1 ARCH=arm64 M="$PWD/kstat" modules
+ls kstat/kstat.ko</pre></li>
+      <li>放进 initramfs：沿用 Phase 2 的做法，把 <code>kstat.ko</code> 拷进 <code>/r/</code>，busybox 链接列表再加 <code>insmod rmmod lsmod</code>。启动后：<pre>mount -t devtmpfs none /dev           # 让 /dev/kstat 自动出现
+insmod /kstat.ko
+lsmod
+cat /dev/kstat; cat /dev/kstat; cat /dev/kstat   # opens 与 reads 递增
+rmmod kstat</pre></li>
+      <li>把它变成作品：给内核打开 <code>CONFIG_KASAN</code> 与 <code>CONFIG_PROVE_LOCKING</code>（<code>./scripts/config -e KASAN -e PROVE_LOCKING</code> 后 <code>olddefconfig</code> 重编），写一个并发压测脚本（多个后台 <code>cat</code> 循环 + 反复 <code>insmod</code>/<code>rmmod</code>），确认 <code>dmesg</code> 里没有 KASAN 或 lockdep 报告；然后按概念 3 的规格扩展功能并写 README。</li>
+    </ol>
+
+    <h3>Lab B · macOS：构建 XNU、比对版本、Mach IPC 起点</h3>
+    <ol>
+      <li>先弄清「我在跑什么」与「公开了什么」：<pre>uname -v                      # …root:xnu-XXXXX.YY.Z~N/RELEASE_ARM64_TXXXX
+sw_vers                        # 记下 ProductVersion 和 BuildVersion（找 KDK 用）
+git ls-remote --tags https://github.com/apple-oss-distributions/xnu.git \
+  | grep -o 'xnu-[0-9.]*$' | sort -V | tail -3</pre>
+        若本机版本比最新公开 tag 新、或者 <code>TXXXX</code> 不在下一步的列表里，就走 <code>VMAPPLE</code> + 虚拟机路线。</li>
+      <li>获取源码与依赖：<pre>git clone https://github.com/apple-oss-distributions/xnu.git &amp;&amp; cd xnu
+git checkout xnu-12377.121.6            # 换成你选定的 tag
+grep -n "SUPPORTED_ARM64_MACHINE_CONFIGS\|SUPPORTED_KERNEL_CONFIGS" makedefs/MakeInc.def
+xcode-select -p                         # 必须指向 Xcode.app，而不是 CommandLineTools
+xcrun --sdk macosx --show-sdk-path
+ls /Library/Developer/KDKs/             # 从 developer.apple.com 下载与目标 build 号一致的 KDK 后应出现在这里</pre></li>
+      <li>按 README 的语法构建（外部环境用 <code>SDKROOT=macosx</code>，并把 KDK 交给 makefile）：<pre>KDK=/Library/Developer/KDKs/KDK_你的版本_build号.kdk
+make SDKROOT=macosx ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=VMAPPLE \
+     KERNEL_CONFIGS=DEVELOPMENT KDKROOT="$KDK" \
+     -j"$(sysctl -n hw.ncpu)" 2&gt;&amp;1 | tee build.log
+make SDKROOT=macosx ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=VMAPPLE \
+     KERNEL_CONFIGS=DEVELOPMENT KDKROOT="$KDK" install_kernels DSTROOT=/tmp/xnu-dst</pre>
+        <strong>通常坏在哪里</strong>（按出现顺序；每遇到一个，把错误原文和解决方法记进 <code>build.log</code> 旁的笔记）：
+        <ul>
+          <li><code>xcode-select</code> 指向 Command Line Tools：找不到 SDK 内的工具。<code>sudo xcode-select -s /Applications/Xcode.app</code>。</li>
+          <li><strong>SDK 与 tag 不匹配</strong>：tag 比 SDK 新时会缺头文件或缺宏，比 SDK 旧时可能遇到新编译器的新警告被当成错误。选与 Xcode SDK 同一代 macOS 的 tag。</li>
+          <li><code>library not found for -lfirehose_kernel</code> 或缺平台头文件：<code>KDKROOT</code> 没设或 KDK 版本不对——makefile 会去 <code>$(KDKROOT)/usr/local/lib/kernel/platform</code> 找它。</li>
+          <li>README 示例依赖的 <code>macosx.internal</code> 里有外部 SDK 没有的东西：不同 tag 缺的不一样，社区经验是从其他 <code>apple-oss-distributions</code> 项目补（例如 AvailabilityVersions、dtrace 的 CTF 工具、libdispatch 的 firehose 部分）——这一条随版本变化最大，以实际报错为准。</li>
+          <li>找不到 <code>ctfconvert</code>/<code>ctfmerge</code>：<em>不致命</em>，makefile 会自动关掉 CTF 合并（<code>DO_CTFMERGE := 0</code>），只是 dtrace 拿不到类型信息。</li>
+          <li>编译成功但引导不了：README 的 <code>kextcache</code> / <code>boot.plist</code> 步骤只适用于 Intel；Apple Silicon 要用 <code>kmutil</code> 生成 kernel collection，并在 recoveryOS 里降为 Reduced Security——按 KDK 说明操作，只在虚拟机或专用测试机上做。</li>
+        </ul></li>
+      <li>比对两个相邻版本的 Mach IPC（需要完整克隆，浅克隆没有旧 tag）：<pre>git diff --stat xnu-12377.101.15 xnu-12377.121.6 -- osfmk/ipc/ | tail -5
+git diff xnu-12377.101.15 xnu-12377.121.6 -- osfmk/ipc/ipc_kmsg.c | head -80
+git diff --stat xnu-12377.101.15 xnu-12377.121.6 -- doc/</pre>
+        写一段摘要：哪些函数变了、新出现了什么宏或检查、你猜它是为了解决什么问题（标明是推断）。</li>
+      <li>作品 B2 的起点：一个单进程 Mach 消息往返，存为 <code>machping.c</code>：<pre>#include &lt;stdio.h&gt;
+#include &lt;mach/mach.h&gt;
+
+typedef struct { mach_msg_header_t h; int value; } ping_t;
+typedef struct { mach_msg_header_t h; int value; mach_msg_trailer_t t; } ping_rcv_t;
+
+int main(void) {
+  mach_port_t port;
+  kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &amp;port);
+  if (kr != KERN_SUCCESS) { fprintf(stderr, "allocate: %s\n", mach_error_string(kr)); return 1; }
+  kr = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+  if (kr != KERN_SUCCESS) { fprintf(stderr, "insert_right: %s\n", mach_error_string(kr)); return 1; }
+
+  ping_t msg = {0};
+  msg.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  msg.h.msgh_size = sizeof msg;
+  msg.h.msgh_remote_port = port;
+  msg.h.msgh_id = 4242;
+  msg.value = 7;
+  kr = mach_msg(&amp;msg.h, MACH_SEND_MSG, sizeof msg, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+  if (kr != MACH_MSG_SUCCESS) { fprintf(stderr, "send: %s\n", mach_error_string(kr)); return 1; }
+
+  ping_rcv_t rcv = {0};
+  kr = mach_msg(&amp;rcv.h, MACH_RCV_MSG, 0, sizeof rcv, port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+  if (kr != MACH_MSG_SUCCESS) { fprintf(stderr, "receive: %s\n", mach_error_string(kr)); return 1; }
+  printf("port=0x%x msgh_id=%d value=%d size=%u\n", port, rcv.h.msgh_id, rcv.value, rcv.h.msgh_size);
+  return 0;
+}</pre>
+        <pre>clang -Wall -O1 -o machping machping.c &amp;&amp; ./machping
+# 实测：port=0x903 msgh_id=4242 value=7 size=28（端口名每次可能不同）</pre>
+        接下来按概念 3 的 B2 规格拆成 client/server：server 用 <code>bootstrap_check_in</code>，client 用 <code>bootstrap_look_up</code>，消息头里带一个 <code>MACH_MSG_TYPE_MAKE_SEND_ONCE</code> 的回复端口。读 <code>osfmk/ipc/mach_msg.c</code> 时对照：你这条消息在内核里经过了哪几个函数。</li>
+      <li>选 B1 的话：在 Xcode 里新建 macOS App，再添加 DriverKit Driver target；先读 Apple 的 DriverKit 与「Requesting Entitlements for DriverKit Development」文档，确认你的账号和系统能在本地加载 dext，再写代码。</li>
+    </ol>
+    <div class="note">交付物：<code>build.log</code> 与踩坑笔记（即使没构建成功，记录到哪一步、什么报错也是好素材）；一段 <code>osfmk/ipc/</code> 版本差异摘要；作品 A 的仓库（代码、测试脚本、README、设计说明）；B1 或 B2 的起步代码；以及一页「问题 → 做法 → 取舍 → 结果」的两分钟讲稿。</div>
   </div>
 
   <h2 id="quiz">自测</h2>
@@ -101,14 +407,28 @@
       <label><input type="radio" name="q1" value="a"> Linux、BSD、IOKit</label>
       <label><input type="radio" name="q1" value="b"> Mach、BSD、IOKit</label>
       <label><input type="radio" name="q1" value="c"> Mach、Hurd、DriverKit</label>
-      <div class="why" hidden>XNU = Mach（osfmk/：任务、线程、IPC、VM）+ BSD（bsd/：POSIX、VFS、网络）+ IOKit（iokit/：C++ 驱动框架）。DriverKit 是用户态的驱动框架，不在内核中。</div>
+      <div class="why" hidden>XNU = Mach（osfmk/：任务、线程、IPC、VM、调度）+ BSD（bsd/：POSIX、VFS、网络）+ IOKit（iokit/：C++ 驱动框架），另有 libkern（C++ 运行时、kext 支持）和 pexpert（平台相关）。DriverKit 是用户态的驱动框架，不在内核中。</div>
     </div>
     <div class="q" data-answer="a">
       <p>2. 在 xnu 源码树中，Mach IPC 的核心实现位于哪个目录？</p>
       <label><input type="radio" name="q2" value="a"> <code>osfmk/ipc/</code></label>
       <label><input type="radio" name="q2" value="b"> <code>bsd/ipc/</code></label>
       <label><input type="radio" name="q2" value="c"> <code>libkern/ipc/</code></label>
-      <div class="why" hidden>Mach 部分都在 osfmk/ 下：IPC 在 osfmk/ipc/，消息收发的 trap 入口在 osfmk/ipc/mach_msg.c。</div>
+      <div class="why" hidden>Mach 部分都在 osfmk/ 下：IPC 在 osfmk/ipc/，消息收发入口在 osfmk/ipc/mach_msg.c，消息本体的处理在 ipc_kmsg.c。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>3. arm64 上的 macOS 用户程序调用 <code>read()</code> 时，内核怎么知道该走 BSD 系统调用还是 Mach trap？</p>
+      <label><input type="radio" name="q3" value="a"> 看 <code>svc</code> 指令的立即数：<code>#0x80</code> 是 BSD，<code>#0x81</code> 是 Mach</label>
+      <label><input type="radio" name="q3" value="b"> 看 <code>x0</code> 里的第一个参数</label>
+      <label><input type="radio" name="q3" value="c"> 看 <code>x16</code> 里的调用号：非负数由 <code>unix_syscall</code> 处理，负数由 <code>mach_syscall</code> 处理</label>
+      <div class="why" hidden>libsyscall 的桩把调用号放进 x16 再执行 svc #0x80；osfmk/arm64/sleh.c 的 handle_svc 按 x16 的符号分发（另有一个特殊的平台调用号）。read 的编号是 3，见 bsd/kern/syscalls.master。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>4. 你的 Mac 运行的 xnu 版本比 GitHub 上最新的公开 tag 还新，芯片型号也不在 <code>SUPPORTED_ARM64_MACHINE_CONFIGS</code> 里。最稳妥的练习方式是？</p>
+      <label><input type="radio" name="q4" value="a"> 用最新 tag 为本机芯片硬改配置后，直接替换本机内核</label>
+      <label><input type="radio" name="q4" value="b"> 选一个公开 tag，以 <code>MACHINE_CONFIGS=VMAPPLE</code> 构建，并在运行对应 macOS 版本的虚拟机里试验</label>
+      <label><input type="radio" name="q4" value="c"> 放弃构建，只读源码</label>
+      <div class="why" hidden>公开源码发布滞后且只支持列出的机型；VMAPPLE 配置加上与 tag 对应的 macOS 虚拟机，可以在不降低主力机安全级别的前提下练习构建、引导和 lldb 调试。读源码当然要做，但构建与调试是面试中能讲出细节的经历。</div>
     </div>
     <button type="submit">检查答案</button>
     <div class="result"></div>
@@ -116,13 +436,16 @@
 
   <h2 id="resources">资料</h2>
   <ul class="res">
-    <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl">源码与 README 构建说明</span></li>
-    <li><a href="https://opensource.apple.com/releases/">Apple Open Source — Releases</a> <span class="lvl">各 macOS 版本对应的开源组件版本</span></li>
-    <li><a href="https://developer.apple.com/documentation/kernel">Apple Developer — Kernel</a> <span class="lvl">查手册，内核 API</span></li>
-    <li><a href="https://developer.apple.com/documentation/driverkit">Apple Developer — DriverKit</a> <span class="lvl">作品项目</span></li>
-    <li><a href="https://www.kernel.org/doc/html/latest/kbuild/modules.html">Linux kernel docs — Building External Modules</a> <span class="lvl">作品项目，Linux 模块构建</span></li>
-    <li><a href="http://newosxbook.com/">Jonathan Levin — *OS Internals（newosxbook.com）</a> <span class="lvl">深入，XNU/Darwin 最系统的书</span></li>
-    <li><a href="https://jobs.apple.com/">Apple Jobs</a> <span class="lvl">查看内核相关岗位的职责描述</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl">源码与 README 构建说明；<code>makedefs/MakeInc.def</code> 列出支持的机型与变体</span></li>
+    <li><a href="https://opensource.apple.com/releases/">Apple Open Source — Releases</a> <span class="lvl">各 macOS 版本对应的 xnu 版本号</span></li>
+    <li><a href="https://developer.apple.com/download/all/">Apple Developer — More Downloads</a> <span class="lvl">搜索「Kernel Debug Kit」下载 KDK，需登录；按 build 号匹配</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/blob/main/doc/lifecycle/startup.md">xnu/doc/lifecycle/startup.md</a> · <a href="https://github.com/apple-oss-distributions/xnu/blob/main/doc/mach_ipc/ipc_security_concepts.md">doc/mach_ipc/</a> · <a href="https://github.com/apple-oss-distributions/xnu/blob/main/doc/scheduler/sched_clutch_edge.md">doc/scheduler/</a> <span class="lvl">源码文档，阅读计划的配套设计说明</span></li>
+    <li><a href="https://developer.apple.com/documentation/kernel/mach">Apple Developer — Mach</a> · <a href="https://developer.apple.com/documentation/kernel">Kernel</a> <span class="lvl">查手册，Mach 与内核 API（作品 B2）</span></li>
+    <li><a href="https://developer.apple.com/documentation/driverkit">Apple Developer — DriverKit</a> · <a href="https://developer.apple.com/documentation/driverkit/requesting-entitlements-for-driverkit-development">Requesting Entitlements for DriverKit Development</a> <span class="lvl">作品 B1，先读 entitlement 要求</span></li>
+    <li><a href="https://docs.kernel.org/kbuild/modules.html">Linux kernel docs — Building External Modules</a> <span class="lvl">作品 A，<code>M=</code> 外部模块构建</span></li>
+    <li><a href="http://newosxbook.com/">Jonathan Levin — *OS Internals（newosxbook.com）</a> · Amit Singh, <em>Mac OS X Internals: A Systems Approach</em> <span class="lvl">深入，XNU/Darwin 最系统的书；后者较旧，概念仍有用</span></li>
+    <li><a href="https://kernelnewbies.org/LinuxChanges">kernelnewbies — LinuxChanges</a> · <a href="https://lwn.net/Kernel/">LWN Kernel</a> <span class="lvl">对照，Linux 一侧怎样跟踪版本变化</span></li>
+    <li><a href="https://jobs.apple.com/">Apple Jobs</a> <span class="lvl">查看内核相关岗位的职责描述，反推面试重点</span></li>
   </ul>
 
   <nav class="pn">
@@ -132,5 +455,6 @@
 </div>
 <script src="../../../assets/diagram.js"></script>
 <script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
 </body>
 </html>

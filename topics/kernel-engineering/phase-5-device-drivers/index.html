@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 5 · Device Drivers · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -16,7 +17,7 @@
     <button class="theme" type="button" title="切换明暗">◐</button>
   </header>
 
-  <p class="meta">Phase 5 / 9 · skeleton — 内容待写</p>
+  <p class="meta">Phase 5 / 9 · 约 1–2 周</p>
   <h1>Device Drivers <span class="en">设备驱动：Linux driver model / devicetree ↔ IOKit / DriverKit，中断与 DMA</span></h1>
   <p class="lede">驱动是内核与硬件之间的那一层，也是内核里代码量最大、bug 最多的部分。Apple 自己设计芯片和外设，驱动工作（IOKit、DriverKit、DART）是 Apple 内核团队的日常；这一阶段建立 Linux 驱动模型和 IOKit 的对照理解。</p>
 
@@ -33,69 +34,372 @@
 
   <h2 id="prereq">前置</h2>
   <ul>
-    <li>Phase 0（异常与中断、MMIO 与 <code>volatile</code>）。</li>
-    <li>Phase 2（物理地址与虚拟地址、页表）。</li>
-    <li>Phase 3（中断上下文中的锁与 per-CPU 数据）。</li>
+    <li>Phase 0（异常与中断、<code>VBAR_EL1</code> 向量表、MMIO 与 <code>volatile</code>）；QEMU 环境和对源码树编模块的流程（Phase 3、4 已用过）。</li>
+    <li>Phase 2（物理地址与虚拟地址、页表——DMA 地址是第三种地址）。</li>
+    <li>Phase 3（中断上下文中的锁与 per-CPU 数据；Mach port——IOKit 用户客户端就是一个 port）。</li>
+    <li>Phase 4（块层把请求交给驱动的 <code>queue_rq</code> / IOKit 存储栈——本阶段从另一端接住它）。</li>
   </ul>
 
   <h2 id="concepts">核心概念</h2>
 
   <h3>1. Linux 驱动模型</h3>
-  <p>本节讲 <code>struct bus_type</code>/<code>struct device</code>/<code>struct device_driver</code>，以及 devicetree 节点如何驱动匹配和 <code>probe</code>。</p>
+  <p>Linux 用三个对象描述「谁驱动谁」：<code>struct bus_type</code>（一条总线：platform、PCI、USB、I2C……，定义 <code>match</code>、<code>probe</code>、<code>uevent</code>）、<code>struct device</code>（一个设备实例，有 <code>parent</code>、<code>bus</code>、<code>driver</code>、<code>of_node</code>）、<code>struct device_driver</code>（一个驱动，有 <code>name</code>、<code>of_match_table</code>、<code>probe</code>/<code>remove</code>）。具体总线把它们嵌进自己的结构，如 <code>struct platform_device</code>、<code>struct pci_dev</code>。三者都基于 kobject，因此自动出现在 sysfs：<code>/sys/bus/*/devices</code>、<code>/sys/bus/*/drivers</code>、<code>/sys/devices</code>。</p>
+  <p><strong>匹配</strong>是双向的：新设备注册（<code>device_add</code> → <code>bus_probe_device</code>）时遍历该总线上已有的驱动；新驱动注册（<code>driver_register</code> → <code>driver_attach</code>）时遍历已有的设备。每一对都调总线的 <code>match</code>，成功后进入 <code>drivers/base/dd.c</code> 的 <code>really_probe</code> → 驱动的 <code>probe</code>。<code>probe</code> 返回 0 即绑定；返回 <code>-EPROBE_DEFER</code> 表示依赖（时钟、GPIO、电源）还没就绪，稍后重试；返回 <code>-ENODEV</code> 表示「不是我的」。</p>
+  <p><strong>devicetree</strong>：ARM SoC 上的大多数外设不能被枚举（不像 PCI 有配置空间），只能由固件「声明」。bootloader（或 QEMU）把编译好的 DTB 的物理地址放在 <code>x0</code> 交给内核（arm64 启动协议），内核展开成 <code>struct device_node</code> 树，<code>of_platform_populate</code> 为带 <code>compatible</code> 的节点创建 platform_device。platform 总线的 <code>platform_match</code> 先比 <code>of_match_table</code> 里的 <code>compatible</code> 字符串（列表里越靠前越具体），再退回按名字匹配。驱动用 <code>MODULE_DEVICE_TABLE(of, ...)</code> 导出匹配表，生成 modalias，udev/mdev 据此自动 <code>modprobe</code>。arm64 服务器通常用 ACPI 而不是 devicetree，但驱动模型相同。</p>
 
   <h3>2. 字符设备与 platform driver</h3>
-  <p>本节讲 <code>file_operations</code> 暴露给用户态的接口，以及 SoC 上最常见的 <code>platform_driver</code> 写法。</p>
+  <p>用户态通过 <code>/dev</code> 下的设备节点访问驱动。<strong>字符设备</strong>由设备号 <code>dev_t</code>（major/minor）标识：<code>alloc_chrdev_region</code> 申请号、<code>cdev_init</code>/<code>cdev_add</code> 挂上 <code>struct file_operations</code>，再创建 class 和 device 让 devtmpfs/udev 生成节点。最省事的是 <strong>misc device</strong>：<code>misc_register</code>（或 <code>module_misc_device</code> 宏）一步完成，主设备号固定为 10、次设备号动态分配。<code>file_operations</code> 就是 Phase 4 VFS 分派的终点：<code>.open</code>、<code>.read</code>、<code>.write</code>、<code>.unlocked_ioctl</code>、<code>.mmap</code>、<code>.poll</code>、<code>.llseek</code>；在 <code>.read</code>/<code>.write</code> 里与用户缓冲区交换数据必须用 <code>copy_to_user</code>/<code>copy_from_user</code>（或 <code>simple_read_from_buffer</code> 这类辅助函数）。</p>
+  <p><strong>platform driver</strong> 是 SoC 外设最常见的写法：<code>struct platform_driver</code> 填 <code>.probe</code> 和 <code>.driver = { .name, .of_match_table }</code>，用 <code>module_platform_driver()</code> 注册。<code>probe</code> 里的典型动作：<code>devm_platform_ioremap_resource(pdev, 0)</code> 把设备树里 <code>reg</code> 描述的寄存器区映射成内核虚拟地址（页表属性是 Device-nGnRE，Phase 2 的 MAIR），用 <code>readl</code>/<code>writel</code> 访问；<code>platform_get_irq</code> 拿中断号、<code>devm_request_irq</code> 注册处理函数。<code>devm_*</code> 是<strong>托管资源</strong>：设备解绑时按逆序自动释放，消灭了大量错误路径上的泄漏。</p>
+  <p><strong>XNU</strong> 的 BSD 层也有字符设备（<code>cdevsw_add</code> + <code>devfs_make_node</code>，<code>/dev/null</code>、终端都是这样来的），但 IOKit 驱动通常不走 <code>/dev</code>：用户态通过 <code>IOServiceOpen</code> 打开一个 <strong><code>IOUserClient</code></strong>，再用 <code>IOConnectCallMethod</code> 调驱动的 <code>externalMethod</code>。这个连接本身是一个 Mach port（Phase 3 的 kobject），每次调用就是一条 Mach 消息——IOUserClient 的参数校验也因此是 macOS/iOS 内核漏洞最集中的地方之一。</p>
 
   <h3>3. 中断：上半部、下半部、threaded IRQ</h3>
-  <p>本节讲 <code>request_irq</code> 的快速处理、softirq/tasklet/workqueue 下半部，以及 threaded IRQ 如何把慢工作移到内核线程。</p>
+  <p>ARM64 上设备中断先到<strong>中断控制器</strong>：标准 Arm 平台（QEMU virt）是 GIC，Apple Silicon 是 Apple 自己的 <strong>AIC</strong>（Linux 驱动 <code>drivers/irqchip/irq-apple-aic.c</code>；Apple 芯片上定时器，以及支持 fast IPI 的芯片上的核间中断，走 FIQ）。控制器向 CPU 发 IRQ，CPU 跳到 <code>VBAR_EL1</code> 的 IRQ 向量。Linux 里 <code>handle_arch_irq</code> 指向控制器驱动（如 <code>gic_handle_irq</code>），它读出硬件中断号，经 <strong>irq domain</strong> 翻译成 Linux irq 号，调 <code>generic_handle_domain_irq</code> → 流控函数（如 <code>handle_fasteoi_irq</code>）→ <code>handle_irq_event</code> → 驱动注册的 handler。<code>/proc/interrupts</code> 每行就是一个 irq 号在各 CPU 上的计数。</p>
+  <p><strong>上半部</strong>（hardirq handler，<code>request_irq(irq, handler, flags, name, dev)</code>）运行在中断上下文：本 CPU 中断已关、不能睡眠、要尽快返回——只做确认中断、读必要状态、把数据挪出硬件 FIFO 这类事，返回 <code>IRQ_HANDLED</code>（或共享中断线上「不是我的」时返回 <code>IRQ_NONE</code>）。其余工作推给<strong>下半部</strong>：<strong>softirq</strong>（编译期固定的少数几种，网络收发、块完成、定时器、RCU 用；在中断返回时或 <code>ksoftirqd</code> 里运行，仍不能睡眠）；<strong>tasklet</strong>（建在 softirq 之上，正被逐步淘汰，6.9 起引入 BH workqueue 作为替代）；<strong>workqueue</strong>（<code>schedule_work</code>/<code>queue_work</code>，在 kworker 内核线程里运行，可以睡眠）。</p>
+  <p><strong>threaded IRQ</strong>：<code>request_threaded_irq(irq, handler, thread_fn, IRQF_ONESHOT, name, dev)</code>。<code>handler</code> 是快速的上半部，返回 <code>IRQ_WAKE_THREAD</code> 后内核唤醒专属线程 <code>irq/&lt;N&gt;-&lt;name&gt;</code> 执行 <code>thread_fn</code>，它可以睡眠（拿 mutex、做 I2C/SPI 传输——这些总线上的设备读一个寄存器就要睡眠等待）。<code>IRQF_ONESHOT</code> 让该中断线在线程跑完前保持屏蔽，避免电平触发的中断反复打进来。<code>handler</code> 传 NULL 则使用默认上半部。何时用：处理过程需要睡眠、或希望中断处理可被调度和设定优先级时；PREEMPT_RT 内核会把几乎所有中断强制线程化。</p>
+  <p><strong>XNU</strong>：<code>fleh_irq</code> → <code>sleh_irq</code>（<code>osfmk/arm64/sleh.c</code>）→ 平台中断控制器驱动（Apple Silicon 上是闭源 kext，基类 <code>IOInterruptController</code>）→ 分发到驱动注册的处理器。IOKit 驱动几乎从不在上半部做事：它创建 <code>IOInterruptEventSource</code> 并加入自己的 <code>IOWorkLoop</code>，中断发生时事件源在中断上下文里只记一次数并唤醒 workloop 线程，真正的 <code>action</code> 在线程里运行——<strong>IOKit 默认就是「threaded IRQ」</strong>。需要在中断上下文里先判断「是不是我的」时用 <code>IOFilterInterruptEventSource</code>，其 filter 函数在主中断上下文运行，返回 true 才调度 action。</p>
 
   <h3>4. DMA 与 IOMMU</h3>
-  <p>本节讲 <code>dma_map_single</code>/<code>dma_alloc_coherent</code>、cache 一致性，以及 IOMMU 如何限制设备能访问的物理内存。</p>
+  <p>DMA 让设备直接读写内存，CPU 只负责告诉设备「从哪读、写到哪」。问题是设备看到的地址既不是内核虚拟地址，也未必是物理地址，而是 <strong>DMA 地址</strong>（<code>dma_addr_t</code>，又叫 bus address / IOVA）。Linux 的 DMA API 屏蔽了差别：先用 <code>dma_set_mask_and_coherent(dev, DMA_BIT_MASK(n))</code> 声明设备能寻址多少位；<strong>一致性映射</strong> <code>dma_alloc_coherent(dev, size, &amp;dma_handle, GFP_KERNEL)</code> 分配 CPU 和设备都能随时看到一致内容的长期缓冲区（描述符环）；<strong>流式映射</strong> <code>dma_map_single(dev, buf, len, DMA_TO_DEVICE)</code> 为一次传输临时映射已有缓冲区，必须用 <code>dma_mapping_error</code> 检查结果，传完 <code>dma_unmap_single</code>；多段缓冲区用 scatterlist + <code>dma_map_sg</code>。</p>
+  <p><strong>cache 一致性</strong>：arm64 上很多设备不参与 CPU cache 一致性。CPU 写进 cache 的数据设备看不到，设备写进内存的数据 CPU 可能读到旧 cache。流式映射的 map/unmap（以及 <code>dma_sync_single_for_cpu</code>/<code>_for_device</code>）会按方向自动做 cache clean/invalidate；设备树里标了 <code>dma-coherent</code> 的设备由硬件保证一致，省掉这些操作。绕过 DMA API 自己算物理地址是经典 bug 来源。</p>
+  <p><strong>IOMMU</strong> 位于设备和内存之间，像设备专用的 MMU：每个设备（或设备组）有自己的 I/O 页表，把 IOVA 翻译成物理地址，未映射的地址直接拒绝。好处：设备只能访问驱动明确映射给它的页（防恶意或失控设备的 DMA 攻击，Thunderbolt/PCIe 外接设备尤其需要）；物理上不连续的页可以映射成连续的 IOVA；只能寻址 32 位的设备也能用高地址内存（否则要用 swiotlb 反弹缓冲区复制）。Arm 服务器上是 SMMU（<code>drivers/iommu/arm/arm-smmu-v3/</code>），驱动无需改动——DMA API 背后的 dma-iommu 层自动建 I/O 页表。</p>
+  <p><strong>XNU</strong> 用对象描述内存：<code>IOMemoryDescriptor</code>（任意一段内存，<code>withAddressRange</code> 等工厂方法）或 <code>IOBufferMemoryDescriptor</code>（新分配的缓冲区）；<code>prepare()</code> 把页钉住，<code>IODMACommand</code>（<code>withSpecification</code> 描述设备的寻址能力和段限制，<code>setMemoryDescriptor</code>，<code>gen64IOVMSegments</code> 生成设备可用的地址段，<code>complete()</code> 结束）负责地址翻译和 cache 同步；系统 IOMMU 抽象是 <code>IOMapper</code>。驱动永远不直接拿物理地址。</p>
 
   <h3>5. XNU IOKit</h3>
-  <p>本节讲 IOKit 的 C++ 类层次（<code>IOService</code>）、IORegistry 与 matching，以及 <code>IOWorkLoop</code>、<code>IOInterruptEventSource</code>、<code>IOMemoryDescriptor</code>。</p>
+  <p>IOKit 是 XNU 的面向对象驱动框架，用 C++ 的一个<strong>受限子集</strong>编写：没有异常、没有 RTTI、没有多重继承（历史上也不用模板）。libkern 用 <code>OSMetaClass</code> 自己实现运行时类型信息和引用计数：类用 <code>OSDeclareDefaultStructors</code>/<code>OSDefineMetaClassAndStructors</code> 宏声明，类型转换用 <code>OSDynamicCast</code>，对象用 <code>retain</code>/<code>release</code>（<code>OSSafeReleaseNULL</code>）。所有驱动都继承自 <code>IOService</code>（← <code>IORegistryEntry</code> ← <code>OSObject</code>）。</p>
+  <p><strong>IORegistry</strong> 是运行时的对象树，按「平面」（plane）组织：<code>IOService</code> 平面表示 provider/client 关系（总线 nub → 驱动 → 驱动发布的 nub → 下一层驱动……），<code>IODeviceTree</code> 平面对应固件给的设备树，<code>IOPower</code> 平面表示电源依赖。<code>ioreg</code> 就是它的查看器。<strong>Matching</strong>：provider（比如 PCI 总线驱动为每个设备创建的 nub）调 <code>registerService()</code> 后，IOKit 在 IOCatalogue 里找 <code>IOProviderClass</code> 与之相符的 <strong>personality</strong>（kext 的 <code>Info.plist</code> 中 <code>IOKitPersonalities</code> 字典：<code>IOClass</code>、<code>IOProviderClass</code>、<code>IONameMatch</code>、<code>IOPropertyMatch</code>、<code>IOPCIMatch</code>、<code>IOProbeScore</code>……），先做<strong>被动匹配</strong>（比较属性），需要时按需加载 kext。</p>
+  <p>候选驱动的生命周期：<code>init</code> → <code>attach(provider)</code> → <code>probe(provider, &amp;score)</code>（<strong>主动匹配</strong>：可以真的去碰硬件，调整分数或返回 NULL 放弃）→ 按分数从高到低尝试 <code>start(provider)</code>，第一个成功的胜出，其余 <code>detach</code> 并释放。<code>start</code> 里驱动通常：<code>mapDeviceMemoryWithIndex</code> 映射寄存器、建或取 <code>IOWorkLoop</code>（<code>getWorkLoop</code>）、添加 <code>IOInterruptEventSource</code>/<code>IOTimerEventSource</code>/<code>IOCommandGate</code>、最后自己 <code>registerService()</code> 让上层客户端来匹配它。关闭时 <code>stop</code> → <code>detach</code> → <code>free</code>。</p>
+  <p><strong>IOWorkLoop</strong> 是 IOKit 的并发模型：一个 workloop 一个线程，挂在上面的所有事件源（中断、定时器、command gate 发来的调用）<strong>串行执行</strong>。驱动状态只在 workloop 上修改，就不需要细粒度锁；其他线程想改状态时用 <code>IOCommandGate::runAction</code> 「进门」排队。代价是一个慢 action 会挡住同一 workloop 上的其他事件。</p>
 
   <h3>6. DriverKit</h3>
-  <p>本节讲 DriverKit 把第三方驱动移到用户态（dext，作为 System Extension 安装）的架构与限制。</p>
+  <p>DriverKit（macOS 10.15 起）把<strong>第三方驱动移到用户态</strong>：驱动打包成 <strong>dext</strong>，随宿主 App 分发，由 App 通过 SystemExtensions 框架（<code>OSSystemExtensionRequest</code>）请求激活、经用户批准后安装；运行时每个 dext 是一个独立的、受沙箱限制的用户态进程。崩溃只会让该进程重启，不会 kernel panic；漏洞也不直接等于内核代码执行。</p>
+  <p>编程模型刻意模仿 IOKit：类仍叫 <code>IOService</code>、<code>IOBufferMemoryDescriptor</code>、<code>IODMACommand</code>，方法首字母大写（<code>Start</code>、<code>Stop</code>）；接口声明写在 <code>.iig</code> 文件里，由 iig 工具生成跨进程调用的桩代码。中断用 <code>IOInterruptDispatchSource</code> 投递到 <code>IODispatchQueue</code>（对应 IOWorkLoop + IOInterruptEventSource）。personality 里多了 <code>IOUserClass</code>、<code>IOUserServerName</code> 键；内核里由 <code>IOUserServer</code>（<code>iokit/Kernel/IOUserServer.cpp</code>）代表 dext 参与匹配并转发调用。</p>
+  <p>限制：只支持 Apple 提供的 family（USBDriverKit、PCIDriverKit、HIDDriverKit、NetworkingDriverKit、SerialDriverKit、AudioDriverKit 等），每类访问需要 Apple 授予的 entitlement（如 <code>com.apple.developer.driverkit</code> 及 transport 类 entitlement）；每次与内核交互都有 IPC 开销；不能任意访问内核内存。与之相对，<strong>kext</strong> 在内核态运行，Apple 已将第三方 kext 标为废弃，Apple Silicon 上加载第三方 kext 需要在恢复模式中降低安全策略并经用户批准。Linux 的对照是 UIO/VFIO（用户态驱动框架），但 Linux 没有「第三方驱动默认在用户态」的平台政策。</p>
 
   <h3>7. Apple Silicon DART</h3>
-  <p>本节讲 Apple 的 DART（IOMMU）如何为每个设备提供独立的 I/O 地址空间，以及 Asahi Linux 的 <code>apple-dart</code> 驱动作为公开参考。</p>
+  <p><strong>DART</strong>（Device Address Resolution Table）是 Apple SoC 上的 IOMMU。公开资料主要来自 Asahi Linux 的逆向：SoC 上有很多个 DART 实例，分别位于 USB、PCIe、显示、ISP 等设备前面；每个 DART 支持若干 stream（不同的设备或功能），每个 stream 有自己的 I/O 页表，页大小为 16 KB。设备发出的每次 DMA 都经 DART 翻译，未映射的地址直接被拒绝并报错。</p>
+  <p>在 macOS 中，DART 由 Apple 的闭源驱动管理，以 <code>IOMapper</code> 的形式接入 IOKit：驱动通过 <code>IODMACommand</code> 拿到的地址就是 DART 里的 IOVA，驱动本身感知不到物理地址。这让 Thunderbolt/PCIe 外接设备只能看到为它映射的缓冲区，也是 Apple 平台防 DMA 攻击的硬件基础。</p>
+  <p>公开参考是 Linux 的 <code>drivers/iommu/apple-dart.c</code>（由 Asahi 项目贡献，已进入主线），它实现了标准 IOMMU API，所以上层驱动照常用 DMA API。DART 的 16 KB 粒度也影响了 Linux：页大小 4 KB 的内核与 16 KB 的 IOMMU 页配合存在困难，这是 Asahi 选择 16 KB 页内核的原因之一（Phase 2 的页大小在这里又出现了）。</p>
 
   <h2 id="compare">对照表</h2>
   <div class="table-wrap">
   <table class="cmp">
     <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
-    <tr><td>驱动基类 / 结构</td><td><code>struct device_driver</code></td><td><code>IOService</code></td></tr>
-    <tr><td>设备树 / 设备注册表</td><td>devicetree + sysfs</td><td>IORegistry（<code>ioreg</code>）</td></tr>
-    <tr><td>匹配与初始化</td><td><code>of_match_table</code> → <code>probe</code></td><td><code>IOKitPersonalities</code> → <code>probe</code> / <code>start</code></td></tr>
-    <tr><td>中断处理</td><td><code>request_threaded_irq</code></td><td><code>IOInterruptEventSource</code> + <code>IOWorkLoop</code></td></tr>
-    <tr><td>DMA 内存描述</td><td><code>dma_map_single</code> / scatterlist</td><td><code>IOMemoryDescriptor</code> + <code>IODMACommand</code></td></tr>
+    <tr><td>驱动基类 / 结构</td><td><code>struct device_driver</code>（嵌在 <code>platform_driver</code> 等中）</td><td><code>IOService</code>（受限 C++，<code>OSMetaClass</code>）</td></tr>
+    <tr><td>设备树 / 设备注册表</td><td>devicetree（或 ACPI）+ sysfs</td><td>IORegistry（<code>IOService</code>、<code>IODeviceTree</code> 平面；<code>ioreg</code>）</td></tr>
+    <tr><td>匹配依据</td><td><code>of_match_table</code> 的 <code>compatible</code>、PCI/USB ID 表</td><td><code>IOKitPersonalities</code>：<code>IOProviderClass</code>、<code>IONameMatch</code>、<code>IOPropertyMatch</code></td></tr>
+    <tr><td>匹配与初始化</td><td><code>bus-&gt;match</code> → <code>really_probe</code> → <code>probe</code></td><td>被动匹配 → <code>probe</code>（打分）→ <code>start</code></td></tr>
+    <tr><td>依赖未就绪</td><td><code>-EPROBE_DEFER</code> 稍后重试</td><td>等 provider <code>registerService</code> 后才开始匹配</td></tr>
+    <tr><td>资源清理</td><td><code>devm_*</code> 托管资源自动释放</td><td><code>stop</code>/<code>free</code> 中手动 <code>release</code>（<code>OSSafeReleaseNULL</code>）</td></tr>
+    <tr><td>寄存器映射</td><td><code>devm_platform_ioremap_resource</code> + <code>readl</code>/<code>writel</code></td><td><code>mapDeviceMemoryWithIndex</code> → <code>IOMemoryMap</code></td></tr>
+    <tr><td>中断控制器</td><td>GIC（QEMU virt）/ AIC（Asahi <code>irq-apple-aic.c</code>）</td><td>Apple 闭源驱动，基类 <code>IOInterruptController</code></td></tr>
+    <tr><td>中断处理</td><td><code>request_irq</code> / <code>request_threaded_irq</code></td><td><code>IOInterruptEventSource</code> + <code>IOWorkLoop</code></td></tr>
+    <tr><td>中断上下文里过滤</td><td>上半部 handler 返回 <code>IRQ_NONE</code>/<code>IRQ_WAKE_THREAD</code></td><td><code>IOFilterInterruptEventSource</code> 的 filter</td></tr>
+    <tr><td>下半部 / 串行化</td><td>softirq、tasklet、workqueue、irq 线程</td><td>IOWorkLoop 线程（<code>IOCommandGate</code>、<code>IOTimerEventSource</code>）</td></tr>
+    <tr><td>DMA 内存描述</td><td><code>dma_map_single</code> / <code>dma_alloc_coherent</code> / scatterlist</td><td><code>IOMemoryDescriptor</code> + <code>IODMACommand</code></td></tr>
+    <tr><td>IOMMU</td><td>IOMMU API（SMMU、<code>apple-dart.c</code>），dma-iommu</td><td><code>IOMapper</code>（Apple Silicon 上是 DART）</td></tr>
+    <tr><td>用户态接口</td><td><code>/dev</code> 节点 + <code>file_operations</code>（<code>ioctl</code>）</td><td><code>IOUserClient</code>（<code>IOServiceOpen</code>、<code>IOConnectCallMethod</code>）</td></tr>
     <tr><td>用户态驱动</td><td>UIO / VFIO</td><td>DriverKit（dext）</td></tr>
+    <tr><td>加载内核代码</td><td><code>insmod</code>/<code>modprobe</code>，按 modalias 自动加载</td><td><code>kmutil load</code>；personality 匹配时按需加载 kext</td></tr>
+    <tr><td>观察工具</td><td><code>/sys/bus</code>、<code>/proc/interrupts</code>、<code>/sys/firmware/devicetree</code></td><td><code>ioreg</code>、<code>kmutil showloaded</code>、<code>systemextensionsctl list</code></td></tr>
   </table>
   </div>
 
-  <h2 id="diagram">动画图解：一次中断从设备到驱动（占位）</h2>
+  <h2 id="diagram">动画图解</h2>
+
+  <h3>A · 一次中断从设备到驱动：上半部 / 下半部 ↔ IOInterruptEventSource / IOWorkLoop</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 200"
-         data-captions='["（占位）本阶段动画待制作：将逐步展示设备拉起中断后，Linux 走 hardirq 上半部到 threaded handler，XNU 走 IOInterruptEventSource 到 IOWorkLoop 线程的并排路径。"]'>
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
+         data-captions='["全图：最上方是设备和中断控制器，左列 Linux 的 threaded IRQ 路径，右列 XNU IOKit 的事件源加工作循环路径。上面几层在中断上下文，下面几层在线程里。",
+           "① 设备完成一次传输，拉起中断线；中断控制器（QEMU virt 上是 GIC，Apple Silicon 上是 AIC）把它送给某个 CPU。CPU 在 PSTATE.I 未屏蔽时进入 IRQ 异常，跳到 VBAR_EL1 的 IRQ 向量，同时屏蔽后续 IRQ。",
+           "② 找到是谁。Linux：handle_arch_irq 指向 gic_handle_irq，读出硬件中断号，经 irq domain 映射为 Linux irq 号，generic_handle_domain_irq → handle_fasteoi_irq → handle_irq_event。XNU：fleh_irq → sleh_irq → 平台中断控制器驱动（IOInterruptController 子类）分发给注册了这个中断源的对象。",
+           "③ 上半部，在中断上下文里，越短越好。Linux：驱动的 handler 读状态寄存器、清中断，返回 IRQ_WAKE_THREAD。XNU：IOInterruptEventSource 只记一次数并唤醒 workloop 线程；若用 IOFilterInterruptEventSource，filter 先判断是不是自己的中断。",
+           "④ 尽快退出中断。Linux：发 EOI，IRQF_ONESHOT 让这条中断线保持屏蔽直到线程处理完，CPU 立刻可以响应别的中断。XNU：同样尽快返回；电平触发的中断源会先被关掉，等 action 处理完再打开（大致机制，细节见 IOInterruptEventSource.cpp）。",
+           "⑤ 下半部，在线程里，可以睡眠。Linux：内核线程 irq/N-name 被唤醒，执行 thread_fn，可以拿 mutex、做 I2C 传输（也可改用 workqueue 或 softirq）。XNU：IOWorkLoop 线程调事件源的 checkForWork，再调驱动的 action；它与同一 workloop 上的定时器、command gate 串行执行，所以驱动状态不需要细粒度锁。",
+           "⑥ 收尾。Linux：thread_fn 返回 IRQ_HANDLED，内核解除中断线屏蔽，驱动用 complete() 或 wake_up 唤醒等待这次 I/O 的进程。XNU：action 返回，中断源重新打开，驱动完成 I/O 回调或唤醒客户端。下一次中断沿同一路径再来一遍。"]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <rect class="box" x="200" y="60" width="500" height="80"/>
-      <text x="230" y="106">中断：设备 → 上半部 → 下半部 ↔ IOWorkLoop</text>
+      <text x="200" y="102" class="small" style="fill: var(--linux)">Linux</text>
+      <text x="640" y="102" class="small" style="fill: var(--xnu)">XNU IOKit</text>
+      <line x1="450" y1="92" x2="450" y2="395" class="lane"/>
+      <text x="12" y="135" class="small" transform="rotate(-90 12 135)">中断上下文</text>
+      <text x="12" y="330" class="small" transform="rotate(-90 12 330)">线程</text>
+      <line x1="25" y1="252" x2="875" y2="252" style="stroke: var(--line); stroke-dasharray: 2 6"/>
+
+      <g data-step="1"><rect class="box pulse" x="150" y="20" width="600" height="55"/>
+        <text x="165" y="42" class="mono">设备 IRQ 线 → 中断控制器 → CPU（IRQ 异常）</text>
+        <text x="165" y="63" class="small">QEMU virt：GIC ｜ Apple Silicon：AIC（定时器、IPI 走 FIQ）；PC ← VBAR_EL1 的 IRQ 向量</text>
+        <path class="arrow" d="M300 75 L230 108"/><path class="arrow" d="M600 75 L670 108"/></g>
+
+      <g data-step="2"><rect class="box linux" x="40" y="108" width="380" height="42"/>
+        <text x="52" y="126" class="mono">gic_handle_irq → handle_fasteoi_irq</text>
+        <text x="52" y="143" class="small">irq domain：hwirq → Linux irq 号</text>
+        <rect class="box xnu" x="480" y="108" width="380" height="42"/>
+        <text x="492" y="126" class="mono">fleh_irq → sleh_irq</text>
+        <text x="492" y="143" class="small">→ IOInterruptController 子类分发</text></g>
+
+      <g data-step="3"><path class="arrow" d="M230 150 L230 160"/><path class="arrow" d="M670 150 L670 160"/>
+        <rect class="box linux" x="40" y="160" width="380" height="42"/>
+        <text x="52" y="178" class="mono">handler(irq, dev_id)</text>
+        <text x="52" y="195" class="small">读状态、清中断 → return IRQ_WAKE_THREAD</text>
+        <rect class="box xnu" x="480" y="160" width="380" height="42"/>
+        <text x="492" y="178" class="mono">IOInterruptEventSource</text>
+        <text x="492" y="195" class="small">计数 +1，唤醒 workloop（filter 版先判断）</text></g>
+
+      <g data-step="4"><path class="arrow" d="M230 202 L230 210"/><path class="arrow" d="M670 202 L670 210"/>
+        <rect class="box linux" x="40" y="210" width="380" height="36"/>
+        <text x="52" y="233" class="small">EOI；IRQF_ONESHOT：该线保持屏蔽；退出异常</text>
+        <rect class="box xnu" x="480" y="210" width="380" height="36"/>
+        <text x="492" y="233" class="small">退出中断；电平触发源先关闭，处理完再开</text></g>
+
+      <g data-step="5"><path class="arrow flow" d="M230 246 L230 262"/><path class="arrow flow" d="M670 246 L670 262"/>
+        <rect class="box linux" x="40" y="262" width="380" height="55"/>
+        <text x="52" y="282" class="mono">irq/N-name 线程 → thread_fn</text>
+        <text x="52" y="300" class="small">可睡眠：mutex、I2C/SPI 传输</text>
+        <text x="52" y="313" class="small">（或 workqueue / softirq）</text>
+        <rect class="box xnu" x="480" y="262" width="380" height="55"/>
+        <text x="492" y="282" class="mono">IOWorkLoop 线程 → checkForWork → action</text>
+        <text x="492" y="300" class="small">与 IOTimerEventSource、IOCommandGate 串行</text>
+        <text x="492" y="313" class="small">驱动状态只在 workloop 上改，免细锁</text></g>
+
+      <g data-step="6"><path class="arrow" d="M230 317 L230 330"/><path class="arrow" d="M670 317 L670 330"/>
+        <rect class="box linux" x="40" y="330" width="380" height="45"/>
+        <text x="52" y="349" class="mono">IRQ_HANDLED → 解除屏蔽</text>
+        <text x="52" y="367" class="small">complete() / wake_up：唤醒等 I/O 的进程</text>
+        <rect class="box xnu" x="480" y="330" width="380" height="45"/>
+        <text x="492" y="349" class="mono">action 返回 → 重新打开中断源</text>
+        <text x="492" y="367" class="small">完成 I/O 回调 / 唤醒客户端</text>
+        <path class="arrow flow" d="M40 352 C 5 352, 5 47, 148 47"/>
+        <path class="arrow flow" d="M860 352 C 895 352, 895 47, 752 47"/></g>
+    </svg>
+  </div>
+
+  <h3>B · 驱动匹配：Linux bus match → probe ↔ IOKit personality matching → start</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
+         data-captions='["全图：左列 Linux 从 devicetree 节点到驱动 probe，右列 XNU 从 IORegistry 里的 nub 到驱动 start。两边都在回答同一个问题：这个设备由哪个驱动接管。",
+           "① 固件描述硬件。Linux：QEMU 或 bootloader 把 DTB 地址放在 x0 交给内核，例如节点 virtio_mmio@a000000 带 compatible = virtio,mmio。XNU：iBoot 交给内核 Apple 设备树，出现在 IORegistry 的 IODeviceTree 平面，平台驱动为外设创建 nub 对象。",
+           "② 设备注册，触发匹配。Linux：of_platform_populate 为带 compatible 的节点建 platform_device，device_add → bus_probe_device 遍历 platform 总线上的驱动。XNU：provider（nub）调用 registerService()，IOKit 开始为它找驱动。",
+           "③ 找候选。Linux：platform_match 用驱动 of_match_table 里的字符串比 compatible；驱动若是模块，modalias 让 udev 或 mdev 自动 modprobe。XNU：IOCatalogue 中 IOProviderClass 与 nub 类相符的 personality 进入被动匹配，比较 IONameMatch、IOPropertyMatch 等属性；需要时按需加载 kext。",
+           "④ probe。Linux：really_probe → 驱动的 probe(pdev)：取寄存器和中断资源、ioremap、request_irq；返回 0 绑定，-EPROBE_DEFER 稍后重试，-ENODEV 放弃。XNU：每个候选 init → attach → probe(provider, score)，可以真的去碰硬件并调整分数；IOProbeScore 是初始分。",
+           "⑤ 绑定 / 启动。Linux：probe 成功即绑定，dev 的 driver 指向它，sysfs 出现 driver 符号链接。XNU：按分数从高到低调 start(provider)，第一个成功的胜出：建 workloop、加中断事件源、自己 registerService()；落选者 detach 并释放。",
+           "⑥ 结果可观察，并继续向上一层。Linux：/sys/bus/platform/devices 下的设备有 driver 链接，uevent 通知用户态；驱动可再注册 misc 设备等。XNU：ioreg 中驱动挂在 nub 之下；它的 registerService 又让上一层驱动来匹配它，驱动栈就这样一层层长出来。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="170" y="22" class="small" style="fill: var(--linux)">Linux driver model</text>
+      <text x="620" y="22" class="small" style="fill: var(--xnu)">XNU IOKit</text>
+      <line x1="450" y1="30" x2="450" y2="395" class="lane"/>
+
+      <g data-step="1"><rect class="box linux" x="40" y="35" width="380" height="45"/>
+        <text x="52" y="54" class="mono">DT: compatible = "virtio,mmio"</text>
+        <text x="52" y="72" class="small">DTB 由 QEMU / bootloader 经 x0 传入</text>
+        <rect class="box xnu" x="480" y="35" width="380" height="45"/>
+        <text x="492" y="54" class="mono">Apple Device Tree（iBoot）</text>
+        <text x="492" y="72" class="small">IODeviceTree 平面；平台驱动为外设建 nub</text></g>
+
+      <g data-step="2"><path class="arrow" d="M230 80 L230 92"/><path class="arrow" d="M670 80 L670 92"/>
+        <rect class="box linux" x="40" y="92" width="380" height="45"/>
+        <text x="52" y="111" class="mono">of_platform_populate → device_add</text>
+        <text x="52" y="129" class="small">→ bus_probe_device：遍历总线上的驱动</text>
+        <rect class="box xnu" x="480" y="92" width="380" height="45"/>
+        <text x="492" y="111" class="mono">nub-&gt;registerService()</text>
+        <text x="492" y="129" class="small">开始为这个 provider 找驱动</text></g>
+
+      <g data-step="3"><path class="arrow" d="M230 137 L230 149"/><path class="arrow" d="M670 137 L670 149"/>
+        <rect class="box linux" x="40" y="149" width="380" height="45"/>
+        <text x="52" y="168" class="mono">platform_match：of_match_table</text>
+        <text x="52" y="186" class="small">比 compatible 字符串；modalias → 自动 modprobe</text>
+        <rect class="box xnu" x="480" y="149" width="380" height="45"/>
+        <text x="492" y="168" class="mono">IOCatalogue：IOProviderClass 相符</text>
+        <text x="492" y="186" class="small">被动匹配 IONameMatch / IOPropertyMatch</text></g>
+
+      <g data-step="4"><path class="arrow" d="M230 194 L230 206"/><path class="arrow" d="M670 194 L670 206"/>
+        <rect class="box linux pulse" x="40" y="206" width="380" height="45"/>
+        <text x="52" y="225" class="mono">really_probe → drv probe(pdev)</text>
+        <text x="52" y="243" class="small">0 绑定 ｜ -EPROBE_DEFER 稍后 ｜ -ENODEV 放弃</text>
+        <rect class="box xnu pulse" x="480" y="206" width="380" height="45"/>
+        <text x="492" y="225" class="mono">init → attach → probe(provider, score)</text>
+        <text x="492" y="243" class="small">主动匹配：碰硬件、调整分数</text></g>
+
+      <g data-step="5"><path class="arrow" d="M230 251 L230 263"/><path class="arrow" d="M670 251 L670 263"/>
+        <rect class="box linux" x="40" y="263" width="380" height="45"/>
+        <text x="52" y="282" class="mono">绑定：dev 的 driver = drv</text>
+        <text x="52" y="300" class="small">sysfs 出现 driver 符号链接</text>
+        <rect class="box xnu" x="480" y="263" width="380" height="45"/>
+        <text x="492" y="282" class="mono">最高分 start(provider) 成功即胜出</text>
+        <text x="492" y="300" class="small">建 workloop、加中断源；落选者 detach</text></g>
+
+      <g data-step="6"><path class="arrow" d="M230 308 L230 320"/><path class="arrow" d="M670 308 L670 320"/>
+        <rect class="box linux" x="40" y="320" width="380" height="45"/>
+        <text x="52" y="339" class="mono">/sys/bus/platform/devices/…/driver</text>
+        <text x="52" y="357" class="small">uevent → udev / mdev</text>
+        <rect class="box xnu" x="480" y="320" width="380" height="45"/>
+        <text x="492" y="339" class="mono">driver-&gt;registerService()</text>
+        <text x="492" y="357" class="small">ioreg 可见；上一层驱动再来匹配它</text>
+        <path class="arrow flow" d="M860 342 C 890 342, 890 114, 862 114"/>
+        <path class="arrow flow" d="M40 342 C 10 342, 10 114, 38 114"/></g>
     </svg>
   </div>
 
   <h2 id="lab">动手实验</h2>
   <div class="lab">
-    <ul>
-      <li>Linux（QEMU）：写一个 misc 字符设备驱动，实现 <code>read</code>/<code>write</code>，用 <code>cat</code>/<code>echo</code> 测试。</li>
-      <li>Linux（QEMU）：用 <code>-M virt,dumpdtb=virt.dtb</code> 导出设备树，再用 <code>dtc -I dtb -O dts</code> 反编译阅读。</li>
-      <li>macOS：用 <code>ioreg -l -w0 | less</code> 浏览 IORegistry，找一个设备的 <code>IOProviderClass</code> 与匹配属性。</li>
-      <li>macOS：用 <code>systemextensionsctl list</code> 查看已安装的 System Extension（包括 DriverKit dext）。</li>
-    </ul>
+    <h3>Lab A · Linux（Phase 0 的 QEMU 环境）：读设备树、写 misc 字符设备和 platform 驱动</h3>
+    <ol>
+      <li>导出并阅读 QEMU virt 的设备树（在 macOS 上；<code>dumpdtb</code> 导出后 QEMU 直接退出。导出时的 <code>-smp</code>/<code>-m</code> 要与平时启动参数一致，内容才相同）：<pre>brew install dtc
+qemu-system-aarch64 -M virt,dumpdtb=virt.dtb -cpu cortex-a72 -smp 2 -m 1G -nographic
+dtc -I dtb -O dts -o virt.dts virt.dtb 2&gt;/dev/null
+grep -n "compatible" virt.dts | head -30
+grep -n -A6 "virtio_mmio@a000000 {" virt.dts</pre>
+        找到根节点的 <code>compatible = "linux,dummy-virt"</code>、中断控制器节点、PL011 串口（<code>arm,pl011</code>，它挂在 AMBA 总线而不是 platform 总线上）和一串 <code>virtio,mmio</code> 节点；看清 <code>reg</code>（寄存器地址和长度）和 <code>interrupts</code> 两个属性——驱动的 <code>probe</code> 就是从这里拿资源。</li>
+      <li>两个模块。<code>lg_echo.c</code>：一个 misc 字符设备，<code>write</code> 存下最多 256 字节，<code>read</code> 原样读回：<pre>// lg_echo.c
+#include &lt;linux/module.h&gt;
+#include &lt;linux/miscdevice.h&gt;
+#include &lt;linux/fs.h&gt;
+#include &lt;linux/mutex.h&gt;
+#include &lt;linux/uaccess.h&gt;
+
+#define BUF_SZ 256
+static char buf[BUF_SZ];
+static size_t len;
+static DEFINE_MUTEX(lock);                    /* read/write 可能并发，且 copy_*_user 可能睡眠：用 mutex */
+
+static ssize_t lg_read(struct file *f, char __user *u, size_t n, loff_t *pos)
+{
+	ssize_t ret;
+
+	mutex_lock(&amp;lock);
+	ret = simple_read_from_buffer(u, n, pos, buf, len);
+	mutex_unlock(&amp;lock);
+	return ret;
+}
+
+static ssize_t lg_write(struct file *f, const char __user *u, size_t n, loff_t *pos)
+{
+	ssize_t ret;
+
+	if (n &gt; BUF_SZ)
+		return -EINVAL;
+	mutex_lock(&amp;lock);
+	if (copy_from_user(buf, u, n)) {
+		len = 0;
+		ret = -EFAULT;
+	} else {
+		len = n;
+		ret = n;
+	}
+	mutex_unlock(&amp;lock);
+	return ret;
+}
+
+static const struct file_operations lg_fops = {
+	.owner  = THIS_MODULE,
+	.read   = lg_read,
+	.write  = lg_write,
+	.llseek = default_llseek,
+};
+
+static struct miscdevice lg_dev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name  = "lg_echo",
+	.fops  = &amp;lg_fops,
+	.mode  = 0666,
+};
+module_misc_device(lg_dev);
+MODULE_LICENSE("GPL");</pre>
+        <code>lg_plat.c</code>：自己注册一个 platform_device 和一个同名 platform_driver，看总线把它们配对并调用 <code>probe</code>：<pre>// lg_plat.c
+#include &lt;linux/module.h&gt;
+#include &lt;linux/platform_device.h&gt;
+
+static int lg_probe(struct platform_device *pdev)
+{
+	dev_info(&amp;pdev-&gt;dev, "probe: matched by name %s\n", pdev-&gt;name);
+	return 0;
+}
+
+static struct platform_driver lg_drv = {
+	.probe  = lg_probe,
+	.driver = { .name = "lg_plat" },     /* 没有 of_match_table：platform_match 退回按名字匹配 */
+};
+
+static struct platform_device *lg_pdev;
+
+static int __init lg_init(void)
+{
+	int ret = platform_driver_register(&amp;lg_drv);
+
+	if (ret)
+		return ret;
+	lg_pdev = platform_device_register_simple("lg_plat", -1, NULL, 0);
+	if (IS_ERR(lg_pdev)) {
+		platform_driver_unregister(&amp;lg_drv);
+		return PTR_ERR(lg_pdev);
+	}
+	return 0;
+}
+
+static void __exit lg_exit(void)
+{
+	platform_device_unregister(lg_pdev);
+	platform_driver_unregister(&amp;lg_drv);
+}
+module_init(lg_init);
+module_exit(lg_exit);
+MODULE_LICENSE("GPL");</pre>
+        <code>Makefile</code>：<code>obj-m := lg_echo.o lg_plat.o</code>，用 Phase 3 的方式 <code>make -C ../linux LLVM=1 ARCH=arm64 M="$PWD" modules</code>；把两个 <code>.ko</code> 放进 initramfs，busybox 链接列表包含 <code>insmod rmmod lsmod readlink</code>。</li>
+      <li>在 guest 里看设备树和驱动模型：<pre>mount -t devtmpfs none /dev
+cat /sys/firmware/devicetree/base/compatible; echo
+ls /sys/bus/platform/devices | head -20          # a000000.virtio_mmio 等：单元地址 + 节点名
+ls /sys/bus/platform/drivers                     # 已注册的 platform 驱动
+readlink /sys/bus/platform/devices/a000000.virtio_mmio/driver
+cat /proc/interrupts                             # 每个 irq 在各 CPU 上的计数与控制器名</pre></li>
+      <li>加载两个模块：<pre>insmod /lg_plat.ko; dmesg | tail -2               # lg_plat: probe: matched by name lg_plat
+readlink /sys/bus/platform/devices/lg_plat/driver
+insmod /lg_echo.ko; ls -l /dev/lg_echo            # 主设备号 10，次设备号动态
+echo "hello driver" &gt; /dev/lg_echo
+cat /dev/lg_echo
+cat /sys/class/misc/lg_echo/dev                   # 10:N
+rmmod lg_echo; rmmod lg_plat</pre>
+        再试一次：先 <code>insmod</code> 一个只注册驱动、不注册设备的版本（自己改代码），确认 <code>probe</code> 不会被调用——匹配需要设备和驱动两边都在。</li>
+      <li>在源码里找到动画 B 和 A 的 Linux 列：<pre>grep -n "^static int really_probe\|^static int __driver_attach\|^static int driver_probe_device" drivers/base/dd.c
+grep -n "^static int platform_match" drivers/base/platform.c
+grep -n "^int request_threaded_irq\|^static int irq_thread(" kernel/irq/manage.c
+grep -n "IRQ_WAKE_THREAD" kernel/irq/handle.c | head
+grep -n "gic_handle_irq" drivers/irqchip/irq-gic.c | head -3
+grep -n "compatible" drivers/iommu/apple-dart.c | head</pre></li>
+    </ol>
+
+    <h3>Lab B · macOS：IORegistry、personality 与驱动生命周期</h3>
+    <ol>
+      <li>浏览 IORegistry 的两个平面：<pre>ioreg -p IODeviceTree -d 2 | head -40        # 固件设备树平面
+ioreg -l -w0 | less                          # IOService 平面全部属性，/ 搜 IOProviderClass
+ioreg -r -c IOPlatformExpertDevice -d 1 -l | head -30</pre>
+        在 IOService 平面里任选一个驱动，向上看它的 provider（缩进上一级），向下看它发布的 nub 和客户端——这就是动画 B 第 ⑥ 步「一层层长出来」的驱动栈。</li>
+      <li>personality 合并进了驱动的属性表，所以能直接统计：<pre>ioreg -l -w0 | grep -E '"IOProviderClass"' | sort | uniq -c | sort -rn | head -15
+ioreg -l -w0 | grep -i '"IOProbeScore"' | head
+ioreg -l -w0 | grep -i dart | head            # Apple Silicon 上的 DART 实例与 IOMapper 相关对象</pre></li>
+      <li>看一个 kext 的 <code>IOKitPersonalities</code>（<code>/System/Library/Extensions</code> 下的具体 kext 随版本变化，先 <code>ls</code> 挑一个存在的）：<pre>ls /System/Library/Extensions | head -40
+K=/System/Library/Extensions/IOUSBHostFamily.kext
+plutil -p "$K/Contents/Info.plist" | grep -A30 IOKitPersonalities | head -50</pre>
+        找出 <code>IOClass</code>、<code>IOProviderClass</code> 和匹配键；对照 <code>ioreg</code> 里同名类的实例。</li>
+      <li>已加载的内核代码与 System Extension：<pre>kmutil showloaded --list-only | head -30
+kmutil showloaded --list-only | grep -vc com.apple   # 非 Apple 的 kext 数量，通常为 0
+systemextensionsctl list                             # DriverKit dext 和其他 System Extension</pre></li>
+      <li>在 XNU 源码里找到动画 A、B 的 XNU 列（IOKit 源码在 <code>iokit/</code> 下；C++ 定义同样把返回类型放在上一行）：<pre>cd xnu
+grep -n "^IOService::probe(\|^IOService::start(\|^IOService::registerService(\|^IOService::probeCandidates(" iokit/Kernel/IOService.cpp
+grep -n "^IOInterruptEventSource::interruptEventSource(\|^IOInterruptEventSource::checkForWork(\|InterruptOccurred(" iokit/Kernel/IOInterruptEventSource.cpp
+grep -n "^IOWorkLoop::threadMain(\|^IOWorkLoop::runEventSources(\|^IOWorkLoop::addEventSource(" iokit/Kernel/IOWorkLoop.cpp
+grep -n "^IODMACommand::prepare(\|^IODMACommand::gen64IOVMSegments(" iokit/Kernel/IODMACommand.cpp
+grep -n "class IOMapper" iokit/IOKit/IOMapper.h
+grep -n "^sleh_irq\|^sleh_fiq" osfmk/arm64/sleh.c
+ls iokit/Kernel/IOUserServer.cpp</pre>
+        没有结果时去掉 <code>^</code> 或改用 <code>grep -rn 名字 iokit osfmk</code>，把实际位置记下来，不要凭记忆补。</li>
+    </ol>
+    <div class="note">交付物：<code>virt.dts</code> 里一个 <code>virtio,mmio</code> 节点的全文、<code>lg_plat</code> 的 probe 日志和 <code>driver</code> 符号链接、<code>/dev/lg_echo</code> 的读写结果；macOS 上一条驱动栈（从 nub 到最上层客户端，3–5 层）的 <code>ioreg</code> 摘录；再用 5 行写「IOWorkLoop 和 threaded IRQ 各自如何避免在中断上下文里做慢事」。</div>
   </div>
 
   <h2 id="quiz">自测</h2>
@@ -105,14 +409,28 @@
       <label><input type="radio" name="q1" value="a"> 因为上半部运行在用户态</label>
       <label><input type="radio" name="q1" value="b"> 因为它运行在中断上下文、不能睡眠，且执行期间会推迟其他中断和任务</label>
       <label><input type="radio" name="q1" value="c"> 因为上半部无法访问设备寄存器</label>
-      <div class="why" hidden>上半部只做确认中断、读取必要状态等快速工作；耗时工作交给 softirq、workqueue 或 threaded IRQ（可以睡眠的内核线程）。</div>
+      <div class="why" hidden>上半部只做确认中断、读取必要状态等快速工作；耗时工作交给 softirq、workqueue 或 threaded IRQ（可以睡眠的内核线程）。IOKit 用 IOInterruptEventSource 把工作挪到 IOWorkLoop 线程，是同一思路。</div>
     </div>
     <div class="q" data-answer="c">
       <p>2. DriverKit 驱动（dext）运行在哪里？</p>
       <label><input type="radio" name="q2" value="a"> 内核态，作为 kext 加载</label>
       <label><input type="radio" name="q2" value="b"> Secure Enclave 中</label>
       <label><input type="radio" name="q2" value="c"> 用户态进程中，通过 IOKit 与内核通信</label>
-      <div class="why" hidden>DriverKit 的设计目标就是把第三方驱动移出内核：dext 在用户态运行，崩溃不会导致内核 panic。</div>
+      <div class="why" hidden>DriverKit 的设计目标就是把第三方驱动移出内核：dext 在用户态运行，内核里由 IOUserServer 代表它参与匹配并转发调用；dext 崩溃不会导致内核 panic。</div>
+    </div>
+    <div class="q" data-answer="a">
+      <p>3. 一个 platform 驱动的 <code>probe</code> 返回 <code>-EPROBE_DEFER</code>，意味着什么？</p>
+      <label><input type="radio" name="q3" value="a"> 它依赖的资源（如时钟、GPIO、电源）还没就绪，驱动核心稍后会重新尝试 probe</label>
+      <label><input type="radio" name="q3" value="b"> 设备与驱动不匹配，永远不会再试</label>
+      <label><input type="radio" name="q3" value="c"> 驱动要求以 threaded IRQ 方式运行</label>
+      <div class="why" hidden>-EPROBE_DEFER 把这次 probe 放进延迟列表，在其他驱动成功绑定后重试；表示「不是我的」应返回 -ENODEV。IOKit 里对应的思路是：provider 自己 registerService 之后才开始为它匹配驱动。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>4. 在 Apple Silicon 的 macOS 上，驱动通过 <code>IODMACommand</code> 拿到并写进设备寄存器的 DMA 地址是什么？</p>
+      <label><input type="radio" name="q4" value="a"> 缓冲区的物理地址</label>
+      <label><input type="radio" name="q4" value="b"> 由 DART（经 IOMapper）翻译的 I/O 虚拟地址（IOVA）</label>
+      <label><input type="radio" name="q4" value="c"> 缓冲区的内核虚拟地址</label>
+      <div class="why" hidden>设备发出的 DMA 先经 DART 按该设备的 I/O 页表翻译；驱动看到的只有 IOVA，设备也只能访问被映射给它的页。Linux 的 DMA API 返回的 dma_addr_t 在有 IOMMU 时同样是 IOVA。</div>
     </div>
     <button type="submit">检查答案</button>
     <div class="result"></div>
@@ -122,11 +440,14 @@
   <ul class="res">
     <li><a href="https://www.kernel.org/doc/html/latest/driver-api/driver-model/index.html">Linux kernel docs — Driver Model</a> <span class="lvl">入门，bus/device/driver</span></li>
     <li><a href="https://www.kernel.org/doc/html/latest/devicetree/usage-model.html">Linux kernel docs — Linux and the Devicetree</a> <span class="lvl">入门，devicetree 使用模型</span></li>
+    <li><a href="https://docs.kernel.org/core-api/genericirq.html">Linux kernel docs — Linux generic IRQ handling</a> <span class="lvl">进阶，irq domain、流控函数、threaded IRQ</span></li>
     <li><a href="https://www.kernel.org/doc/html/latest/core-api/dma-api-howto.html">Linux kernel docs — Dynamic DMA mapping Guide</a> <span class="lvl">进阶，DMA API</span></li>
-    <li><a href="https://lwn.net/Kernel/LDD3/">Linux Device Drivers, 3rd Edition (LWN)</a> <span class="lvl">经典，部分 API 已过时</span></li>
-    <li><a href="https://developer.apple.com/library/archive/documentation/DeviceDrivers/Conceptual/IOKitFundamentals/Introduction/Introduction.html">Apple — IOKit Fundamentals（archive）</a> <span class="lvl">入门，IOKit 架构</span></li>
+    <li><a href="https://lwn.net/Kernel/LDD3/">Linux Device Drivers, 3rd Edition (LWN)</a> <span class="lvl">经典，部分 API 已过时，概念仍适用</span></li>
+    <li><a href="https://developer.apple.com/library/archive/documentation/DeviceDrivers/Conceptual/IOKitFundamentals/Introduction/Introduction.html">Apple — IOKit Fundamentals（archive）</a> <span class="lvl">入门，IOKit 架构、matching、workloop</span></li>
     <li><a href="https://developer.apple.com/documentation/driverkit">Apple Developer — DriverKit</a> <span class="lvl">查手册，DriverKit API</span></li>
-    <li><a href="https://asahilinux.org/docs/">Asahi Linux docs</a> <span class="lvl">深入，Apple Silicon 硬件与 DART（逆向来源）</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/tree/main/iokit">apple-oss-distributions/xnu — iokit/</a> <span class="lvl">源码；IOService.cpp、IOWorkLoop.cpp、IOInterruptEventSource.cpp、IODMACommand.cpp</span></li>
+    <li><a href="https://github.com/torvalds/linux/blob/master/drivers/iommu/apple-dart.c">linux/drivers/iommu/apple-dart.c</a> + <a href="https://asahilinux.org/docs/">Asahi Linux docs</a> <span class="lvl">深入，DART 的公开参考实现与逆向资料</span></li>
+    <li>Jonathan Levin, <em>*OS Internals</em> Vol. II（Kernel Mode）IOKit 章节 <span class="lvl">进阶，IOKit 内部、IOUserClient、DriverKit</span></li>
   </ul>
 
   <nav class="pn">
@@ -136,5 +457,6 @@
 </div>
 <script src="../../../assets/diagram.js"></script>
 <script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
 </body>
 </html>

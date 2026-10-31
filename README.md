@@ -14,7 +14,7 @@ open index.html
 
 | Topic | Goal | Status |
 |---|---|---|
-| [Kernel Engineering](topics/kernel-engineering/index.html) | 成为 Apple 的 kernel engineer：从内核基础（以 Linux 为教学载体）到 XNU/Darwin 与 Apple 面试 | Phase 0–2 complete, 3–8 skeleton |
+| [Kernel Engineering](topics/kernel-engineering/index.html) | 成为 Apple 的 kernel engineer：从内核基础（以 Linux 为教学载体）到 XNU/Darwin 与 Apple 面试 | Phases 0–8 complete |
 
 ## Layout
 
