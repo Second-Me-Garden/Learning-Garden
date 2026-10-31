@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 4 · Syscalls, VFS &amp; Filesystems · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -16,7 +17,7 @@
     <button class="theme" type="button" title="切换明暗">◐</button>
   </header>
 
-  <p class="meta">Phase 4 / 9 · skeleton — 内容待写</p>
+  <p class="meta">Phase 4 / 9 · 约 1–2 周</p>
   <h1>Syscalls, VFS &amp; Filesystems <span class="en">系统调用入口、VFS 层次、ext4 ↔ APFS、块 I/O</span></h1>
   <p class="lede">一次 <code>open()</code>/<code>read()</code> 会穿过系统调用入口、VFS 抽象层、页缓存、具体文件系统和块层，最终到达存储设备。Apple 的内核工程师经常要回答「数据到底什么时候落盘」「APFS 的 clone 和 snapshot 是怎么实现的」这类问题，这一阶段把整条 I/O 路径串起来。</p>
 
@@ -33,69 +34,376 @@
 
   <h2 id="prereq">前置</h2>
   <ul>
-    <li>Phase 0（系统调用的异常进入与返回）。</li>
-    <li>Phase 2（页、页缓存依赖的虚拟内存机制）。</li>
-    <li>Phase 3（VFS 对象的引用计数与锁）。</li>
+    <li>Phase 0（系统调用的异常进入与返回：<code>svc</code>、<code>ESR_EL1</code>、<code>eret</code>）；QEMU 里能启动 Linux arm64 内核，Phase 3 已经会对那棵源码树编模块。</li>
+    <li>Phase 2（页、缺页、<code>vm_object</code> 与 pager——页缓存和 UBC 就建立在它们之上）。</li>
+    <li>Phase 3（VFS 对象的引用计数与锁；RCU——Linux 路径查找的快路径就是 RCU-walk）。</li>
   </ul>
 
   <h2 id="concepts">核心概念</h2>
 
   <h3>1. 系统调用表与 ABI（回顾）</h3>
-  <p>本节回顾 Phase 0 的入口路径，补充参数校验、<code>copy_from_user</code>/<code>copyin</code> 与错误码返回约定。</p>
+  <p><strong>Linux arm64</strong>：用户态把调用号放 <code>x8</code>、参数放 <code>x0</code>–<code>x5</code>，执行 <code>svc #0</code>；返回值在 <code>x0</code>，失败时是 <code>-errno</code>（−4095 到 −1），libc 把它变成 <code>-1</code> 并设置 <code>errno</code>。内核侧 <code>el0_svc</code> → <code>do_el0_svc</code> → <code>el0_svc_common</code> → <code>invoke_syscall</code>（<code>arch/arm64/kernel/syscall.c</code>）按号查 <code>sys_call_table</code>。每个调用用 <code>SYSCALL_DEFINEn</code> 宏定义（如 <code>fs/open.c</code> 里的 <code>SYSCALL_DEFINE4(openat, ...)</code>），宏会生成从 <code>pt_regs</code> 取参数的包装函数 <code>__arm64_sys_openat</code>。arm64 只有 <code>openat</code> 没有 <code>open</code>——新架构不再提供旧式调用。</p>
+  <p><strong>XNU arm64</strong>：<code>svc #0x80</code>，调用号在 <code>x16</code>（正数是 BSD syscall，负数是 Mach trap，Phase 3 的 <code>mach_msg_trap</code> 就是 −31）。BSD 调用的错误约定不同：失败时内核<strong>置 PSTATE 的 C（进位）标志</strong>、<code>x0</code> 放正的 errno，libsystem 的汇编桩看到进位再跳去设置 <code>errno</code>。内核侧 <code>sleh_synchronous</code> → <code>handle_svc</code> → <code>unix_syscall</code>（<code>bsd/dev/arm/systemcalls.c</code>）查 <code>sysent[]</code>；这张表由 <code>bsd/kern/syscalls.master</code> 在构建时生成（<code>init_sysent.c</code>）。实现函数的签名统一是 <code>int open(proc_t p, struct open_args *uap, int32_t *retval)</code>：返回值是 errno，结果写进 <code>retval</code>。</p>
+  <p><strong>参数校验</strong>是系统调用最容易出安全漏洞的地方：用户传来的指针一律不可信，不能直接解引用。Linux 用 <code>copy_from_user</code>/<code>copy_to_user</code>（返回<strong>未</strong>拷贝的字节数，非 0 就返回 <code>-EFAULT</code>）、<code>strncpy_from_user</code>（路径名经 <code>getname()</code> 进内核），指针参数标注 <code>__user</code> 供 sparse 检查；XNU 用 <code>copyin</code>/<code>copyout</code>/<code>copyinstr</code>（arm64 实现在 <code>osfmk/arm64/</code> 下的 copyio 相关文件）。两边在 ARMv8.1+ 上都开启 <strong>PAN</strong>（Privileged Access Never）：内核普通访存碰到用户页直接 fault，只有专门的 uaccess 路径才能访问——把「忘了用 copyin」的 bug 变成立即崩溃而不是可利用漏洞。另一条铁律是 <strong>TOCTOU</strong>：只拷贝一次，之后只用内核里的副本做检查和使用。</p>
 
   <h3>2. VFS 对象模型</h3>
-  <p>本节对比 Linux 的 <code>super_block</code>/<code>inode</code>/<code>dentry</code>/<code>file</code> 与 XNU 的 <code>mount</code>/<code>vnode</code>/<code>fileproc</code>。</p>
+  <p>VFS 让 <code>read()</code> 不必知道底下是 ext4、NFS 还是 procfs：通用代码只操作抽象对象，具体行为通过<strong>操作表</strong>（函数指针结构）分派给文件系统。</p>
+  <p><strong>Linux</strong> 有四个核心对象：<code>struct super_block</code>——一个已挂载的文件系统实例（<code>s_op</code> 指向 <code>super_operations</code>）；<code>struct inode</code>——一个文件本身（元数据、<code>i_op</code>、<code>i_fop</code>、<code>i_mapping</code> 指向它的页缓存）；<code>struct dentry</code>——一个<strong>名字</strong>到 inode 的绑定（<code>d_parent</code>、<code>d_name</code>、<code>d_inode</code>），硬链接就是多个 dentry 指向同一 inode；<code>struct file</code>——一次 <code>open</code> 的结果（<code>f_pos</code> 偏移、打开标志、<code>f_op</code>）。进程的 fd 表 <code>files_struct</code>/<code>fdtable</code> 是 <code>struct file *</code> 数组，fd 就是下标。</p>
+  <p><strong>XNU</strong>（BSD 层）：<code>struct mount</code> 对应 super_block（<code>mnt_vfsops</code>）；<code>struct vnode</code> 同时扮演 inode 的角色（<code>v_type</code>、<code>v_op</code> 操作向量、<code>v_mount</code>、<code>v_data</code> 指向文件系统私有节点、<code>v_ubcinfo</code>），文件系统操作统一走 <code>VNOP_LOOKUP</code>、<code>VNOP_OPEN</code>、<code>VNOP_READ</code>、<code>VNOP_WRITE</code>、<code>VNOP_PAGEIN</code> 等 KPI。XNU <strong>没有独立的 dentry</strong>：名字信息由 name cache 和 vnode 上的 <code>v_name</code>/<code>v_parent</code> 承担。打开的文件分两层：<code>struct fileglob</code> 是真正的打开文件（偏移、标志、<code>fg_ops</code>、<code>fg_data</code> 指向 vnode 或 socket），<code>struct fileproc</code> 是 fd 表里的每进程条目，指向 fileglob——<code>dup</code> 和 <code>fork</code> 后多个 fileproc 共享一个 fileglob，这与 Linux 多个 fd 共享同一 <code>struct file</code> 是同一件事。</p>
 
   <h3>3. 路径查找</h3>
-  <p>本节讲 Linux <code>fs/namei.c</code> 的逐级查找与 dcache，以及 XNU <code>bsd/vfs/vfs_lookup.c</code> 的 <code>namei()</code> 与 name cache。</p>
+  <p><strong>Linux</strong>（<code>fs/namei.c</code>）：<code>do_sys_openat2</code> → <code>do_filp_open</code> → <code>path_openat</code>。<code>path_init</code> 定起点（绝对路径用 <code>current-&gt;fs</code> 的 root，相对路径用 cwd 或 <code>dirfd</code>），<code>link_path_walk</code> 逐个分量循环，每个分量 <code>walk_component</code>：先 <code>lookup_fast</code> 在 <strong>dcache</strong>（按「父 dentry + 名字」散列）里找，未命中才 <code>lookup_slow</code> 调父目录的 <code>i_op-&gt;lookup</code>（如 <code>ext4_lookup</code>）去读磁盘上的目录、分配新 dentry 和 inode。途中处理挂载点（dentry 被挂载时换到被挂载文件系统的根）、符号链接（有深度上限，防循环）和每级目录的执行权限（<code>may_lookup</code> → <code>inode_permission</code>）。</p>
+  <p>快路径是 <strong>RCU-walk</strong>：整个查找先在 <code>rcu_read_lock</code> 下进行，不增加任何引用计数、不拿锁，靠 seqcount 检测并发修改；一旦遇到需要睡眠的情况（未命中、要读磁盘）或检测到变化，返回 <code>-ECHILD</code>，退回带引用计数的 <strong>REF-walk</strong> 重来。热路径上的路径查找因此几乎没有 cache line 争用——这正是 Phase 3 RCU 的大规模应用。最后一个分量由 <code>open_last_lookups</code>/<code>do_open</code> 处理（可能创建文件），<code>vfs_open</code> 调 <code>f_op-&gt;open</code>，<code>fd_install</code> 把 <code>struct file</code> 放进 fd 表。</p>
+  <p><strong>XNU</strong>（<code>bsd/vfs/vfs_lookup.c</code>）：<code>open</code> → <code>openat_internal</code> → <code>open1</code> → <code>vn_open_auth</code>（<code>bsd/vfs/vfs_vnops.c</code>）→ <code>namei()</code>。<code>namei</code> 把路径 <code>copyinstr</code> 进 <code>nameidata</code>，定起点（进程根或 cwd 的 vnode），交给 <code>lookup()</code> 逐分量处理：先查 <strong>name cache</strong>（<code>bsd/vfs/vfs_cache.c</code>，<code>cache_lookup</code>，按「目录 vnode + 名字」散列；还有一次走多个分量的快路径 <code>cache_lookup_path</code>），未命中则 <code>VNOP_LOOKUP</code> 让文件系统返回 vnode 并 <code>cache_enter</code> 记入缓存。挂载点通过目录 vnode 的 <code>v_mountedhere</code> 跳到被挂载卷的根。权限检查走 kauth（<code>vnode_authorize</code>），并且每一步都可能经过 <strong>MAC Framework</strong> 钩子——macOS 沙箱（Sandbox.kext）就在这里拒绝访问。最后 <code>VNOP_OPEN</code>，<code>falloc</code> 分配 fileproc/fileglob，返回 fd。</p>
 
   <h3>4. 页缓存 ↔ UBC</h3>
-  <p>本节讲 Linux <code>address_space</code> 与 XNU Unified Buffer Cache（<code>ubc_info</code>）如何让文件 I/O 和 <code>mmap</code> 共享同一批物理页。</p>
+  <p>文件数据被缓存在内存页里，<code>read</code>/<code>write</code> 只是在用户缓冲区和这些页之间拷贝；同一个文件被 <code>mmap</code> 时，进程页表直接映射<strong>同一批物理页</strong>——所以 <code>write()</code> 的结果立即在 <code>mmap</code> 里可见，反之亦然，不存在两份缓存的一致性问题。</p>
+  <p><strong>Linux</strong>：每个 inode 有一个 <code>struct address_space</code>（<code>inode-&gt;i_mapping</code>），用 xarray（<code>i_pages</code>）按文件页偏移索引 folio，操作表 <code>address_space_operations</code>（<code>read_folio</code>、<code>readahead</code>、<code>writepages</code>、<code>dirty_folio</code> 等）由文件系统提供。读路径 <code>filemap_read</code> → <code>filemap_get_pages</code>：命中直接拷贝，未命中触发<strong>预读</strong>（readahead，顺序读时窗口逐步变大）。写路径 <code>generic_perform_write</code>：把数据拷进页缓存、标脏，然后<strong>立即返回</strong>；回写由 per-bdi 的 writeback 工作线程完成，触发条件是脏页超时（<code>/proc/sys/vm/dirty_expire_centisecs</code>，默认 3000 即 30 秒）、脏页比例超限（<code>dirty_background_ratio</code>/<code>dirty_ratio</code>）或显式 <code>fsync</code>/<code>sync</code>。<code>/proc/meminfo</code> 的 <code>Cached</code>、<code>Dirty</code>、<code>Writeback</code> 就是这几类页的数量。</p>
+  <p><strong>XNU 的 UBC</strong>（Unified Buffer Cache）把文件缓存直接做成 Mach VM 对象：vnode 的 <code>ubc_info</code>（<code>bsd/sys/ubc_internal.h</code>）通过 <code>ui_control</code> 关联一个 <code>vm_object</code>，文件页就是这个 object 里的 <code>vm_page</code>，背后的 pager 是 vnode pager——Phase 2 讲的「<code>vm_object</code> + pager」在这里落地。文件系统在 <code>VNOP_READ</code>/<code>VNOP_WRITE</code> 里调用通用的 <strong>cluster 层</strong>（<code>bsd/vfs/vfs_cluster.c</code>：<code>cluster_read</code>、<code>cluster_write</code>、<code>cluster_push</code>），它负责查 UBC、预读、聚合 I/O；缺页时 VM 经 vnode pager 调 <code>VNOP_PAGEIN</code>，换出脏页调 <code>VNOP_PAGEOUT</code>。I/O 以 <strong>UPL</strong>（universal page list，一组被锁定的页）为单位在 VM 与文件系统之间传递。<code>bsd/kern/ubc_subr.c</code> 是 UBC 的主要实现文件。</p>
 
   <h3>5. ext4 vs APFS</h3>
-  <p>本节对比 ext4 的日志与 extent，和 APFS 的 copy-on-write 元数据、snapshot、clone 与原生加密。</p>
+  <p><strong>ext4</strong> 是「原地更新 + 日志」：磁盘分成若干 block group，每组有位图和 inode 表；文件数据用 <strong>extent</strong>（起始块 + 长度，单个 extent 最多 32768 块，4 KB 块时为 128 MB）描述，比 ext2/3 的间接块表紧凑得多；目录用 htree 散列索引；新内核默认开启元数据校验和。崩溃一致性靠 <strong>jbd2 日志</strong>：元数据修改先写进日志并提交，再写回原位；默认 <code>data=ordered</code> 模式保证数据块在引用它的元数据提交<strong>之前</strong>落盘（不会在崩溃后看到别的文件的旧数据），但数据本身不进日志。<strong>延迟分配</strong>让块分配推迟到回写时，有利于连续分配，但也是「应用不 fsync 就 rename」在崩溃后得到空文件的历史原因。</p>
+  <p><strong>APFS</strong> 是「从不原地覆盖」的 <strong>copy-on-write</strong> 文件系统，为闪存设计。磁盘上一个<strong>容器</strong>（container superblock <code>nx_superblock_t</code>）内含多个<strong>卷</strong>（<code>apfs_superblock_t</code>），卷之间<strong>共享空闲空间</strong>（macOS 的系统卷、数据卷、Preboot、VM 卷都在一个容器里）。元数据是 B-tree，改一个节点就写一个新副本并向上更新到根，再通过<strong>对象映射</strong>（omap，虚拟对象 ID → 物理地址）和<strong>检查点</strong>原子地切换——没有传统日志，因为旧版本始终完好。</p>
+  <p>COW 直接带来三项能力：<strong>snapshot</strong>——保留某个事务时刻的树根，代价几乎为零（Time Machine 本地快照、系统更新都依赖它；macOS 11 起系统卷是带哈希校验的<strong>签名快照</strong>，即 SSV）；<strong>clone</strong>——<code>clonefile(2)</code> 或 <code>cp -c</code> 让新文件共享原文件的 extent（带引用计数），之后哪边写就只复制被写的块；<strong>原生加密</strong>——按卷或按文件的密钥（FileVault、iOS Data Protection 的各保护等级），加密在文件系统层而不是整盘层。APFS 的实现（apfs.kext）不开源，但 Apple 公开了磁盘格式规范 <em>Apple File System Reference</em>。</p>
 
   <h3>6. 块层与 I/O 调度</h3>
-  <p>本节讲 Linux <code>bio</code> 与 blk-mq 多队列，以及 XNU 中 <code>buf_t</code> 经 IOKit 存储栈下发的路径。</p>
+  <p><strong>Linux</strong>：文件系统把要读写的页组织成 <code>struct bio</code>（目标设备、起始扇区、一组 <code>bio_vec</code> 页段），<code>submit_bio</code> 交给块层。现代块层是 <strong>blk-mq</strong>：每 CPU 一个软件队列，合并相邻请求成 <code>struct request</code>，再分发到与硬件队列一一对应的 hardware dispatch queue，最后调驱动的 <code>queue_rq</code>（QEMU 里的 virtio-blk 是 <code>virtio_queue_rq</code>，NVMe 是 <code>nvme_queue_rq</code>）。NVMe 本身就有多个硬件队列，blk-mq 的设计正是为它们准备的。I/O 调度器可选 <code>none</code>、<code>mq-deadline</code>、<code>bfq</code>、<code>kyber</code>（<code>/sys/block/&lt;dev&gt;/queue/scheduler</code>），NVMe 上常用 <code>none</code>。设备完成后中断 → 驱动 → <code>blk_mq_complete_request</code> → <code>bio_endio</code>，回调解锁页并唤醒等待者。</p>
+  <p><strong>XNU</strong>：I/O 单位是 <code>buf_t</code>（<code>struct buf</code>，<code>bsd/sys/buf_internal.h</code>）。cluster 层用 <code>VNOP_BLOCKMAP</code> 问文件系统「文件偏移对应哪个设备块」，生成 buf 后经 <code>VNOP_STRATEGY</code> 下发；对块设备 vnode 是 specfs 的 <code>spec_strategy</code>（<code>bsd/miscfs/specfs/spec_vnops.c</code>），这里也执行低优先级 I/O 的<strong>节流</strong>（throttling，后台任务的 I/O 让位于前台，与 <code>taskpolicy</code>/IOPOL 策略相关）。再往下进入 IOKit 存储栈，大致路径是 BSD 块设备入口 → <code>IOMediaBSDClient</code> → <code>IOMedia</code> → <code>IOBlockStorageDriver</code> → 具体控制器驱动（Apple Silicon 上是 Apple 自家的 NVMe 控制器驱动）。IOKit 驱动层在 Phase 5 展开。</p>
 
   <h3>7. 持久化语义：<code>fsync</code> 与 <code>F_FULLFSYNC</code></h3>
-  <p>本节讲 macOS 上 <code>fsync</code> 不保证设备缓存落盘、需要 <code>F_FULLFSYNC</code> 的原因及其性能代价。</p>
+  <p>「写完」有四个层级：数据在<strong>用户缓冲区</strong>（stdio）→ 在<strong>页缓存</strong>（<code>write</code> 返回时）→ 已发给<strong>设备</strong>但在设备自己的易失写缓存里 → 在<strong>持久介质</strong>上。只有最后一层能扛住断电。</p>
+  <p><strong>Linux</strong>：<code>fsync(fd)</code> → <code>vfs_fsync_range</code> → <code>f_op-&gt;fsync</code>（ext4 是 <code>ext4_sync_file</code>）：写回该文件的脏页、提交日志，并向设备发 <strong>cache flush</strong>（块层 <code>REQ_PREFLUSH</code>/<code>REQ_FUA</code> 标志）——在默认挂载选项下，Linux 的 <code>fsync</code> 返回就意味着到了持久介质（前提是设备如实执行 flush）。<code>fdatasync</code> 省掉与读取数据无关的元数据（如 mtime）。<code>sync_file_range</code> 不发 flush，不保证持久。<code>O_DIRECT</code> 绕过页缓存，但同样不等于持久。新建文件还要 <code>fsync</code> 它所在的<strong>目录</strong>，目录项才算落盘。</p>
+  <p><strong>macOS</strong>：<code>man 2 fsync</code> 写得很清楚——<code>fsync</code> 把数据交给驱动器，但<strong>不要求驱动器把自己的写缓存刷到介质</strong>；要做到这一点需要 <code>fcntl(fd, F_FULLFSYNC)</code>，它额外向设备发 flush 命令，开销显著更高（实验里你会测到数量级差异）。还有一个折中 <code>F_BARRIERFSYNC</code>：只要求<strong>顺序</strong>（屏障之前的写先于之后的写到达介质），不等全部刷完，适合日志型存储。所以 SQLite 在 macOS 上有 <code>PRAGMA fullfsync</code>，数据库和需要崩溃一致性的应用要显式选择用哪一种——这正是「数据到底什么时候落盘」这个问题在 Apple 平台上的标准答案。</p>
 
   <h2 id="compare">对照表</h2>
   <div class="table-wrap">
   <table class="cmp">
     <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td>syscall 指令与调用号</td><td><code>svc #0</code>，号在 <code>x8</code></td><td><code>svc #0x80</code>，号在 <code>x16</code>（负数 = Mach trap）</td></tr>
+    <tr><td>错误返回</td><td><code>x0</code> = <code>-errno</code></td><td>置进位标志，<code>x0</code> = errno</td></tr>
+    <tr><td>分发表</td><td><code>sys_call_table</code>，<code>invoke_syscall</code></td><td><code>sysent[]</code>（由 <code>syscalls.master</code> 生成），<code>unix_syscall</code></td></tr>
+    <tr><td>拷贝用户数据</td><td><code>copy_from_user</code>/<code>copy_to_user</code>/<code>strncpy_from_user</code></td><td><code>copyin</code>/<code>copyout</code>/<code>copyinstr</code></td></tr>
     <tr><td>文件系统实例</td><td><code>struct super_block</code></td><td><code>struct mount</code></td></tr>
-    <tr><td>文件对象</td><td><code>struct inode</code> + <code>struct dentry</code></td><td><code>struct vnode</code></td></tr>
-    <tr><td>打开的文件</td><td><code>struct file</code></td><td><code>struct fileproc</code> / <code>struct fileglob</code></td></tr>
-    <tr><td>路径查找</td><td><code>fs/namei.c</code></td><td><code>bsd/vfs/vfs_lookup.c</code></td></tr>
-    <tr><td>文件页缓存</td><td>page cache（<code>address_space</code>）</td><td>UBC（<code>ubc_info</code>）</td></tr>
-    <tr><td>主力文件系统</td><td>ext4 / XFS / Btrfs</td><td>APFS（不开源）</td></tr>
+    <tr><td>文件对象</td><td><code>struct inode</code> + <code>struct dentry</code></td><td><code>struct vnode</code>（无独立 dentry）</td></tr>
+    <tr><td>打开的文件</td><td><code>struct file</code>，fd 表 <code>fdtable</code></td><td><code>struct fileglob</code> + 每 fd 的 <code>struct fileproc</code></td></tr>
+    <tr><td>文件系统操作分派</td><td><code>inode_operations</code>、<code>file_operations</code>、<code>address_space_operations</code></td><td><code>VNOP_*</code> 操作向量</td></tr>
+    <tr><td>路径查找</td><td><code>fs/namei.c</code>：<code>path_openat</code>、<code>link_path_walk</code>，RCU-walk / REF-walk</td><td><code>bsd/vfs/vfs_lookup.c</code>：<code>namei</code>、<code>lookup</code></td></tr>
+    <tr><td>名字缓存</td><td>dcache（<code>lookup_fast</code>）</td><td>name cache（<code>cache_lookup</code>，<code>vfs_cache.c</code>）</td></tr>
+    <tr><td>文件页缓存</td><td>page cache（<code>address_space</code>，xarray 里的 folio）</td><td>UBC（<code>ubc_info</code> → <code>vm_object</code>）</td></tr>
+    <tr><td>通用读写 / 预读</td><td><code>filemap_read</code>、readahead</td><td>cluster 层：<code>cluster_read</code>/<code>cluster_write</code></td></tr>
+    <tr><td>主力文件系统</td><td>ext4 / XFS / Btrfs（开源）</td><td>APFS（不开源，格式规范公开）</td></tr>
+    <tr><td>崩溃一致性</td><td>ext4：jbd2 日志，<code>data=ordered</code></td><td>APFS：copy-on-write + 检查点</td></tr>
+    <tr><td>块 I/O 单位</td><td><code>struct bio</code> → <code>struct request</code></td><td><code>buf_t</code>（+ UPL）</td></tr>
+    <tr><td>块设备下发</td><td>blk-mq → 驱动 <code>queue_rq</code></td><td><code>VNOP_STRATEGY</code> → <code>spec_strategy</code> → IOKit 存储栈</td></tr>
+    <tr><td>真正落盘</td><td><code>fsync</code>（默认含设备 flush）</td><td><code>F_FULLFSYNC</code>（<code>fsync</code> 不刷设备缓存）；<code>F_BARRIERFSYNC</code> 只保序</td></tr>
+    <tr><td>观察工具</td><td>ftrace、<code>strace</code>、<code>/proc/meminfo</code>、<code>/sys/block</code></td><td><code>fs_usage</code>、<code>dtrace</code>、<code>diskutil apfs list</code>、<code>tmutil</code></td></tr>
   </table>
   </div>
 
-  <h2 id="diagram">动画图解：open() 从路径到文件对象（占位）</h2>
+  <h2 id="diagram">动画图解</h2>
+
+  <h3>A · open() 的路径查找（Linux ↔ XNU）</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 200"
-         data-captions='["（占位）本阶段动画待制作：将逐步展示 open() 进入内核后逐级查找路径分量，Linux 走 dentry/inode、XNU 走 vnode，最终返回文件描述符。"]'>
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
+         data-captions='["全图：用户程序打开 /usr/lib/x.so。左列 Linux，右列 XNU，从上到下是内核里的六个阶段，最后得到一个 fd 回到用户态。",
+           "① 进入内核并把路径拷进来。Linux：openat 系统调用 → do_sys_openat2，getname 用 strncpy_from_user 生成内核里的 struct filename。XNU：open → openat_internal → open1 → vn_open_auth，namei 用 copyinstr 把路径放进 nameidata。之后只用内核副本，避免 TOCTOU。",
+           "② 确定起点。Linux：path_openat → path_init，绝对路径从当前进程 fs 的 root 开始，先以 RCU-walk 模式尝试，不拿锁不加引用。XNU：namei 取进程的根目录或 cwd 的 vnode，交给 lookup() 逐分量处理。",
+           "③ 分量命中缓存（最常见）。Linux：link_path_walk 对 usr、lib 各调一次 walk_component，lookup_fast 在 dcache 中按父 dentry 加名字散列命中。XNU：cache_lookup 在 name cache 中按目录 vnode 加名字命中，直接得到子 vnode。",
+           "④ 分量未命中：问文件系统。Linux：lookup_slow → 父目录 inode 的 i_op 里的 lookup（如 ext4_lookup）读目录块，分配新 dentry 和 inode 并放进缓存；RCU-walk 此时退回 REF-walk。XNU：VNOP_LOOKUP 让文件系统返回 vnode，再 cache_enter 记入 name cache。",
+           "⑤ 每一级都要检查。挂载点：Linux 发现 dentry 被挂载就换到被挂载文件系统的根；XNU 看目录 vnode 的 v_mountedhere。权限：Linux may_lookup → inode_permission 查目录的 x 位；XNU vnode_authorize（kauth）加 MAC Framework 钩子，沙箱在这里拒绝访问。",
+           "⑥ 打开最后一个分量。Linux：do_open → vfs_open 调 f_op 的 open，得到 struct file，fd_install 放进 fd 表。XNU：VNOP_OPEN，falloc 分配 fileproc 和 fileglob。两边都把 fd 号返回给用户态。"]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <rect class="box" x="200" y="60" width="500" height="80"/>
-      <text x="230" y="106">open()：路径查找 → dentry/inode ↔ vnode → fd</text>
+      <text x="200" y="22" class="small" style="fill: var(--linux)">Linux（fs/namei.c）</text>
+      <text x="620" y="22" class="small" style="fill: var(--xnu)">XNU（bsd/vfs/）</text>
+      <line x1="450" y1="30" x2="450" y2="395" class="lane"/>
+
+      <g data-step="1"><rect class="box linux" x="40" y="35" width="380" height="45"/>
+        <text x="52" y="54" class="mono">openat → do_sys_openat2 → getname</text>
+        <text x="52" y="72" class="small">strncpy_from_user：路径进内核 struct filename</text></g>
+      <g data-step="1"><rect class="box xnu" x="480" y="35" width="380" height="45"/>
+        <text x="492" y="54" class="mono">open → open1 → vn_open_auth → namei</text>
+        <text x="492" y="72" class="small">copyinstr：路径进 nameidata</text></g>
+
+      <g data-step="2"><path class="arrow" d="M230 80 L230 92"/><path class="arrow" d="M670 80 L670 92"/>
+        <rect class="box linux" x="40" y="92" width="380" height="45"/>
+        <text x="52" y="111" class="mono">path_openat → path_init</text>
+        <text x="52" y="129" class="small">起点：current 的 fs root 或 cwd；先走 RCU-walk</text>
+        <rect class="box xnu" x="480" y="92" width="380" height="45"/>
+        <text x="492" y="111" class="mono">namei → lookup()</text>
+        <text x="492" y="129" class="small">起点：进程根目录或 cwd 的 vnode</text></g>
+
+      <g data-step="3"><path class="arrow" d="M230 137 L230 149"/><path class="arrow" d="M670 137 L670 149"/>
+        <rect class="box linux pulse" x="40" y="149" width="380" height="45"/>
+        <text x="52" y="168" class="mono">link_path_walk → lookup_fast</text>
+        <text x="52" y="186" class="small">dcache：(父 dentry, 名字) → dentry → inode</text>
+        <rect class="box xnu pulse" x="480" y="149" width="380" height="45"/>
+        <text x="492" y="168" class="mono">cache_lookup(dvp, cnp)</text>
+        <text x="492" y="186" class="small">name cache：(目录 vnode, 名字) → vnode</text></g>
+
+      <g data-step="4"><path class="arrow" d="M230 194 L230 206"/><path class="arrow" d="M670 194 L670 206"/>
+        <rect class="box linux" x="40" y="206" width="380" height="45"/>
+        <text x="52" y="225" class="mono">lookup_slow → i_op lookup</text>
+        <text x="52" y="243" class="small">ext4_lookup 读目录块 → 新 dentry + inode</text>
+        <rect class="box xnu" x="480" y="206" width="380" height="45"/>
+        <text x="492" y="225" class="mono">VNOP_LOOKUP → cache_enter</text>
+        <text x="492" y="243" class="small">文件系统返回 vnode，记入 name cache</text></g>
+
+      <g data-step="5"><path class="arrow" d="M230 251 L230 263"/><path class="arrow" d="M670 251 L670 263"/>
+        <rect class="box linux" x="40" y="263" width="380" height="45"/>
+        <text x="52" y="282" class="mono">挂载点切换；may_lookup</text>
+        <text x="52" y="300" class="small">inode_permission：每级目录的 x 权限</text>
+        <rect class="box xnu" x="480" y="263" width="380" height="45"/>
+        <text x="492" y="282" class="mono">v_mountedhere；vnode_authorize</text>
+        <text x="492" y="300" class="small">kauth + MAC 钩子（沙箱）</text></g>
+
+      <g data-step="6"><path class="arrow" d="M230 308 L230 320"/><path class="arrow" d="M670 308 L670 320"/>
+        <rect class="box linux" x="40" y="320" width="380" height="45"/>
+        <text x="52" y="339" class="mono">do_open → vfs_open → fd_install</text>
+        <text x="52" y="357" class="small">struct file 进 fd 表，返回 fd</text>
+        <rect class="box xnu" x="480" y="320" width="380" height="45"/>
+        <text x="492" y="339" class="mono">VNOP_OPEN；falloc</text>
+        <text x="492" y="357" class="small">fileproc → fileglob → vnode，返回 fd</text>
+        <path class="arrow flow" d="M40 342 C 10 342, 10 57, 38 57"/>
+        <path class="arrow flow" d="M860 342 C 890 342, 890 57, 862 57"/></g>
+
+      <g data-step="3 4"><path class="arrow" d="M420 171 C 440 180, 440 220, 422 228"/>
+        <text x="300" y="390" class="small">③ 命中则跳过 ④；每个分量循环一次 ③–⑤</text></g>
+    </svg>
+  </div>
+
+  <h3>B · 一次 read() 的往返：syscall → VFS → 页缓存 / UBC → 块层</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
+         data-captions='["全图：read(fd, buf, 4096) 读一个还不在内存里的文件页。左列 Linux（ext4 + virtio-blk），右列 XNU（APFS + NVMe）。从上往下走到设备，再沿虚线回到用户态。",
+           "① 系统调用进入 VFS。Linux：ksys_read → vfs_read → f_op 的 read_iter（ext4_file_read_iter 落到通用的 generic_file_read_iter）。XNU：read → dofileread → vn_read → VNOP_READ，APFS 把读交给通用的 cluster_read。",
+           "② 先查缓存。Linux：filemap_read → filemap_get_pages 在 inode 的 address_space（xarray）里找 folio。XNU：cluster_read 在 vnode 的 UBC（ubc_info 关联的 vm_object）里找页。命中就直接跳到 ⑥，不碰磁盘——绝大多数 read 都在这里结束。",
+           "③ 未命中：确定在磁盘哪里。Linux：触发预读，a_ops 的 readahead 让 ext4 把文件偏移映射到 extent，组装 bio。XNU：cluster_io 通过 VNOP_BLOCKMAP 问 APFS 文件偏移对应的设备块，用 UPL 锁住目标页，生成 buf_t。",
+           "④ 进入块层并下发给驱动。Linux：submit_bio → blk-mq 软件队列合并成 request → 硬件队列 → virtio_queue_rq（实机 NVMe 是 nvme_queue_rq）。XNU：VNOP_STRATEGY → spec_strategy（这里做后台 I/O 节流）→ IOKit 存储栈 → NVMe 控制器驱动。",
+           "⑤ 设备 DMA 把数据写进那些页，然后发中断。Linux：驱动完成 request → bio_endio，folio 标记 uptodate 并解锁，唤醒在页上等待的读者。XNU：buf_biodone，提交 UPL，页成为有效页，唤醒读者。",
+           "⑥ 拷回用户态并返回。Linux：copy_to_user 拷到 buf，read 返回字节数。XNU：uiomove → copyout。写路径对称但不等设备：write 只把页标脏就返回，回写线程（Linux）或 cluster_push / pageout（XNU）稍后下发；要立刻落盘就用 fsync，在 macOS 上还要 F_FULLFSYNC。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="200" y="22" class="small" style="fill: var(--linux)">Linux</text>
+      <text x="640" y="22" class="small" style="fill: var(--xnu)">XNU</text>
+      <line x1="450" y1="30" x2="450" y2="395" class="lane"/>
+
+      <g data-step="1"><rect class="box linux" x="40" y="35" width="380" height="45"/>
+        <text x="52" y="54" class="mono">ksys_read → vfs_read → read_iter</text>
+        <text x="52" y="72" class="small">ext4_file_read_iter → generic_file_read_iter</text>
+        <rect class="box xnu" x="480" y="35" width="380" height="45"/>
+        <text x="492" y="54" class="mono">dofileread → vn_read → VNOP_READ</text>
+        <text x="492" y="72" class="small">APFS → cluster_read</text></g>
+
+      <g data-step="2"><path class="arrow" d="M230 80 L230 92"/><path class="arrow" d="M670 80 L670 92"/>
+        <rect class="box linux pulse" x="40" y="92" width="380" height="45"/>
+        <text x="52" y="111" class="mono">filemap_read → filemap_get_pages</text>
+        <text x="52" y="129" class="small">page cache：i_mapping 的 xarray 里找 folio</text>
+        <rect class="box xnu pulse" x="480" y="92" width="380" height="45"/>
+        <text x="492" y="111" class="mono">cluster_read → UBC</text>
+        <text x="492" y="129" class="small">ubc_info → vm_object 里找 vm_page</text></g>
+      <g data-step="2"><path class="arrow flow" d="M420 114 C 440 150, 440 300, 422 342"/>
+        <path class="arrow flow" d="M860 114 C 880 150, 880 300, 862 342"/>
+        <text x="300" y="390" class="small">② 命中：直接跳到 ⑥</text></g>
+
+      <g data-step="3"><path class="arrow" d="M230 137 L230 149"/><path class="arrow" d="M670 137 L670 149"/>
+        <rect class="box linux" x="40" y="149" width="380" height="45"/>
+        <text x="52" y="168" class="mono">readahead → ext4 extent 映射</text>
+        <text x="52" y="186" class="small">把一组 folio 装进 struct bio</text>
+        <rect class="box xnu" x="480" y="149" width="380" height="45"/>
+        <text x="492" y="168" class="mono">cluster_io → VNOP_BLOCKMAP</text>
+        <text x="492" y="186" class="small">UPL 锁住页，生成 buf_t</text></g>
+
+      <g data-step="4"><path class="arrow" d="M230 194 L230 206"/><path class="arrow" d="M670 194 L670 206"/>
+        <rect class="box linux" x="40" y="206" width="380" height="45"/>
+        <text x="52" y="225" class="mono">submit_bio → blk-mq → queue_rq</text>
+        <text x="52" y="243" class="small">virtio_queue_rq（QEMU）/ nvme_queue_rq</text>
+        <rect class="box xnu" x="480" y="206" width="380" height="45"/>
+        <text x="492" y="225" class="mono">VNOP_STRATEGY → spec_strategy</text>
+        <text x="492" y="243" class="small">→ IOMedia → IOBlockStorageDriver → NVMe</text></g>
+
+      <g data-step="5"><path class="arrow" d="M230 251 L230 263"/><path class="arrow" d="M670 251 L670 263"/>
+        <rect class="box linux" x="40" y="263" width="380" height="45"/>
+        <text x="52" y="282" class="mono">DMA → IRQ → bio_endio</text>
+        <text x="52" y="300" class="small">folio uptodate + 解锁，唤醒读者</text>
+        <rect class="box xnu" x="480" y="263" width="380" height="45"/>
+        <text x="492" y="282" class="mono">DMA → 中断 → buf_biodone</text>
+        <text x="492" y="300" class="small">提交 UPL，页有效，唤醒读者</text></g>
+
+      <g data-step="6"><path class="arrow" d="M230 308 L230 320"/><path class="arrow" d="M670 308 L670 320"/>
+        <rect class="box linux" x="40" y="320" width="380" height="45"/>
+        <text x="52" y="339" class="mono">copy_to_user → 返回字节数</text>
+        <text x="52" y="357" class="small">write：只标脏，writeback 线程稍后下发</text>
+        <rect class="box xnu" x="480" y="320" width="380" height="45"/>
+        <text x="492" y="339" class="mono">uiomove → copyout → 返回</text>
+        <text x="492" y="357" class="small">write：cluster_push / pageout 稍后下发</text>
+        <path class="arrow flow" d="M40 342 C 10 342, 10 57, 38 57"/>
+        <path class="arrow flow" d="M480 342 C 455 342, 455 57, 478 57"/></g>
     </svg>
   </div>
 
   <h2 id="lab">动手实验</h2>
   <div class="lab">
-    <ul>
-      <li>Linux（QEMU）：用 <code>strace -f cat /etc/hostname</code> 观察 <code>openat</code>/<code>read</code>/<code>close</code> 序列。</li>
-      <li>Linux（QEMU）：写一个最小的内核模块，在 <code>/proc</code> 下注册一个文件并实现 <code>read</code>。</li>
-      <li>macOS：用 <code>sudo fs_usage -w -f filesys</code> 观察一个程序的文件系统调用，再用 <code>cp -c</code> 创建 APFS clone 并对比 <code>df</code> 的变化。</li>
-      <li>macOS：写一个小程序循环写文件，分别用 <code>fsync</code> 和 <code>fcntl(fd, F_FULLFSYNC)</code> 计时对比。</li>
-    </ul>
+    <h3>Lab A · Linux（Phase 0 的 QEMU 环境）：不用 strace 追系统调用，看页缓存和块层</h3>
+    <ol>
+      <li>打开 ftrace 并重编内核（busybox initramfs 里没有 strace，ftrace 是内核自带的追踪器，不需要任何用户态工具）：<pre>cd linux
+scripts/config -e FTRACE -e FUNCTION_TRACER -e FUNCTION_GRAPH_TRACER -e DYNAMIC_FTRACE -e FTRACE_SYSCALLS
+make LLVM=1 ARCH=arm64 olddefconfig
+grep -E "CONFIG_(FUNCTION_TRACER|FUNCTION_GRAPH_TRACER|FTRACE_SYSCALLS|EXT4_FS|VIRTIO_BLK)=" .config
+make LLVM=1 ARCH=arm64 -j"$(sysctl -n hw.ncpu)" Image modules_prepare</pre>
+        <code>grep</code> 应列出这五项为 <code>=y</code>；缺哪个就用 <code>scripts/config -e</code> 补上再 <code>olddefconfig</code>，以实际输出为准。</li>
+      <li>写一个 <code>/proc</code> 文件模块 <code>lgproc.c</code>，用来观察 VFS 如何把 <code>read</code> 分派到你的代码：<pre>// lgproc.c
+#include &lt;linux/module.h&gt;
+#include &lt;linux/proc_fs.h&gt;
+#include &lt;linux/seq_file.h&gt;
+#include &lt;linux/sched.h&gt;
+#include &lt;linux/jiffies.h&gt;
+
+static int lg_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "hello from %s (pid %d), jiffies=%lu\n",
+		   current-&gt;comm, task_pid_nr(current), jiffies);
+	return 0;
+}
+
+static int __init lgproc_init(void)
+{
+	if (!proc_create_single("lg_hello", 0444, NULL, lg_show))
+		return -ENOMEM;
+	return 0;
+}
+
+static void __exit lgproc_exit(void)
+{
+	remove_proc_entry("lg_hello", NULL);
+}
+module_init(lgproc_init);
+module_exit(lgproc_exit);
+MODULE_LICENSE("GPL");</pre>
+        <code>Makefile</code>：<code>obj-m := lgproc.o</code>，然后 <code>make -C ../linux LLVM=1 ARCH=arm64 M="$PWD" modules</code>（同 Phase 3）。</li>
+      <li>在 macOS 上用容器做一个 64 MB 的 ext4 磁盘镜像：<pre>docker run --platform linux/arm64 --rm -v "$PWD:/w" alpine:3.20 sh -c \
+  'apk add -q e2fsprogs &amp;&amp; dd if=/dev/zero of=/w/disk.img bs=1M count=64 &amp;&amp; mkfs.ext4 -q -F /w/disk.img'</pre>
+        重打 initramfs（把 <code>lgproc.ko</code> 拷进去；busybox 链接列表扩成 <code>sh ls cat echo mount uname dmesg grep head tail sleep insmod rmmod mkdir dd sync wc</code>），启动时挂上这块盘：<pre>qemu-system-aarch64 -M virt -cpu cortex-a72 -smp 2 -m 1G -nographic \
+  -kernel arch/arm64/boot/Image -initrd initramfs/initramfs.cpio.gz \
+  -drive file=disk.img,if=none,format=raw,id=d0 -device virtio-blk-device,drive=d0 \
+  -append "console=ttyAMA0 rdinit=/init"</pre></li>
+      <li>用 syscall 事件代替 strace：<pre>mount -t tracefs none /sys/kernel/tracing
+cd /sys/kernel/tracing
+echo 1 &gt; events/syscalls/sys_enter_openat/enable
+echo 1 &gt; events/syscalls/sys_exit_openat/enable
+echo 1 &gt; events/syscalls/sys_enter_read/enable
+cat /proc/version &gt; /dev/null
+grep -v "^#" trace | tail -20          # 每行：进程名-pid、CPU、时间戳、事件与参数
+echo 0 &gt; events/enable; echo &gt; trace</pre>
+        找到 <code>cat</code> 的那几行 <code>sys_openat(dfd: ffffff9c, filename: …)</code>——<code>ffffff9c</code> 就是 <code>AT_FDCWD</code>（−100）；<code>sys_exit_openat</code> 的返回值就是 fd。</li>
+      <li>用 function_graph 看动画 A 的 Linux 列真实发生的调用：<pre>echo do_sys_openat2 &gt; set_graph_function
+echo 8 &gt; max_graph_depth
+echo function_graph &gt; current_tracer
+cat /proc/version &gt; /dev/null
+echo nop &gt; current_tracer
+grep -v "^#" trace | grep -E "path_openat|link_path_walk|walk_component|lookup_fast|lookup_slow|do_open|vfs_open|fd_install" | head -40
+echo &gt; trace</pre>
+        再看你的模块是怎么被调用到的：<pre>insmod /lgproc.ko
+echo lg_show &gt; set_ftrace_filter
+echo 1 &gt; options/func_stack_trace
+echo function &gt; current_tracer
+cat /proc/lg_hello
+echo nop &gt; current_tracer; echo 0 &gt; options/func_stack_trace; echo &gt; set_ftrace_filter
+grep -v "^#" trace | head -30           # 栈：el0_svc … vfs_read … seq_read_iter → lg_show</pre></li>
+      <li>页缓存命中与块层（动画 B）：<pre>mount -t devtmpfs none /dev; mkdir -p /mnt; mount -t ext4 /dev/vda /mnt
+cat /sys/block/vda/queue/scheduler     # 方括号里是当前 I/O 调度器
+dd if=/dev/urandom of=/mnt/f bs=1M count=4
+grep -E "^(Dirty|Writeback):" /proc/meminfo   # write 返回了，数据还是脏页
+sync; grep -E "^(Dirty|Writeback):" /proc/meminfo
+echo 3 &gt; /proc/sys/vm/drop_caches      # 丢掉干净的页缓存
+echo &gt; trace
+echo 1 &gt; events/block/block_rq_issue/enable
+echo 1 &gt; events/block/block_rq_complete/enable
+cat /mnt/f &gt; /dev/null; grep -c block_rq_issue trace     # 第一次：有 I/O
+echo &gt; trace
+cat /mnt/f &gt; /dev/null; grep -c block_rq_issue trace     # 第二次：0，全部命中页缓存</pre>
+        预期：第一次读有若干条 <code>block_rq_issue</code>（预读会把请求合并成较大的块），第二次为 0。若 <code>events/block</code> 不存在，记下内核配置，不要猜。</li>
+      <li>在源码里找到两个动画的 Linux 列：<pre>grep -n "invoke_syscall\|el0_svc_common" arch/arm64/kernel/syscall.c | head
+grep -n "link_path_walk\|walk_component\|lookup_fast\|lookup_slow\|^static int do_open" fs/namei.c | head -20
+grep -n "^ssize_t filemap_read\|filemap_get_pages" mm/filemap.c | head
+grep -n "virtio_queue_rq" drivers/block/virtio_blk.c | head -3</pre></li>
+    </ol>
+
+    <h3>Lab B · macOS：fs_usage、APFS clone 与 F_FULLFSYNC</h3>
+    <ol>
+      <li>观察真实的文件系统调用（两个终端）：<pre># 终端 1：只看名为 cat 的进程，Ctrl-C 结束
+sudo fs_usage -w -f filesys cat
+# 终端 2
+cat /etc/hosts &gt; /dev/null</pre>
+        能看到 <code>open</code>、<code>fstat64</code>、<code>read</code>、<code>close</code> 等行以及每次调用的耗时；不同 macOS 版本的事件名和列略有差异，以实际输出为准。</li>
+      <li>APFS clone 与空间共享：<pre>cd ~/Desktop &amp;&amp; mkdir -p apfs-lab &amp;&amp; cd apfs-lab
+dd if=/dev/urandom of=big.bin bs=1m count=1024
+df -h .
+cp -c big.bin clone.bin; df -h .        # clone：可用空间几乎不变
+time cp big.bin copy.bin; df -h .       # 普通拷贝：少了约 1 GB，也慢得多
+stat -f "%N inode=%i" big.bin clone.bin
+diskutil apfs list | head -40           # 容器、卷、共享空间
+tmutil listlocalsnapshots /             # 本地快照（可能为空）</pre>
+        clone 和原文件 inode 不同、内容相同，却不占新空间——这就是共享 extent。做完记得 <code>rm big.bin clone.bin copy.bin</code>。</li>
+      <li>测 <code>fsync</code> 与 <code>F_FULLFSYNC</code>：存为 <code>synctest.c</code>：<pre>#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+
+static double now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &amp;ts);
+  return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+int main(int argc, char **argv) {
+  const char *mode = argc &gt; 1 ? argv[1] : "fsync";   /* none | fsync | full | barrier */
+  char buf[4096];
+  int fd = open("synctest.dat", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd &lt; 0) { perror("open"); return 1; }
+  memset(buf, 'x', sizeof buf);
+  double t0 = now();
+  for (int i = 0; i &lt; 200; i++) {
+    if (write(fd, buf, sizeof buf) != (ssize_t)sizeof buf) { perror("write"); return 1; }
+    int r = 0;
+    if (strcmp(mode, "fsync") == 0) r = fsync(fd);
+#ifdef F_FULLFSYNC
+    else if (strcmp(mode, "full") == 0) r = fcntl(fd, F_FULLFSYNC);
+#endif
+#ifdef F_BARRIERFSYNC
+    else if (strcmp(mode, "barrier") == 0) r = fcntl(fd, F_BARRIERFSYNC);
+#endif
+    if (r == -1) { perror(mode); return 1; }
+  }
+  double dt = now() - t0;
+  printf("%-8s 200 x 4 KB: %.3f s  (%.3f ms/op)\n", mode, dt, dt * 1000 / 200);
+  close(fd);
+  unlink("synctest.dat");
+  return 0;
+}</pre>
+        <pre>clang -Wall -O1 -o synctest synctest.c
+for m in none fsync barrier full; do ./synctest $m; done</pre>
+        预期：<code>none</code> 远快于其他；<code>full</code> 明显最慢（具体倍数取决于机器和 SSD，写进日志里而不是背结论）。</li>
+      <li>在 XNU 源码里找到动画 A、B 的 XNU 列：<pre>cd xnu
+grep -n "^unix_syscall(" bsd/dev/arm/systemcalls.c
+grep -n "^open1\|^openat_internal" bsd/vfs/vfs_syscalls.c
+grep -n "^vn_open_auth\|^vn_read" bsd/vfs/vfs_vnops.c
+grep -n "^namei(\|^lookup(" bsd/vfs/vfs_lookup.c
+grep -n "^cache_lookup(\|^cache_lookup_path(\|^cache_enter(" bsd/vfs/vfs_cache.c
+grep -n "^cluster_read(\|^cluster_io(\|^cluster_push(" bsd/vfs/vfs_cluster.c
+grep -n "^struct ubc_info" bsd/sys/ubc_internal.h
+grep -n "^spec_strategy(" bsd/miscfs/specfs/spec_vnops.c
+grep -rn "F_FULLFSYNC\|F_BARRIERFSYNC" bsd/kern/kern_descrip.c | head</pre>
+        没有结果时去掉 <code>^</code> 或改用 <code>grep -rn 名字 bsd</code>，把实际位置记下来。</li>
+    </ol>
+    <div class="note">交付物：Lab A 的 openat 事件两行、function_graph 中 <code>link_path_walk</code> 附近的 10 行、两次读的 <code>block_rq_issue</code> 计数；Lab B 的 <code>df</code> 三次输出和 <code>synctest</code> 四行结果，贴进当天日志；再用 5 行解释「为什么 macOS 上 <code>fsync</code> 返回后断电仍可能丢数据」。</div>
   </div>
 
   <h2 id="quiz">自测</h2>
@@ -105,14 +413,28 @@
       <label><input type="radio" name="q1" value="a"> <code>fsync(fd)</code> 即可</label>
       <label><input type="radio" name="q1" value="b"> <code>sync()</code></label>
       <label><input type="radio" name="q1" value="c"> <code>fcntl(fd, F_FULLFSYNC)</code></label>
-      <div class="why" hidden>macOS 的 fsync 把数据交给设备，但不要求设备清空自己的写缓存；F_FULLFSYNC 额外要求设备 flush，代价更高。</div>
+      <div class="why" hidden>macOS 的 fsync 把数据交给设备，但不要求设备清空自己的写缓存；F_FULLFSYNC 额外要求设备 flush，代价更高。F_BARRIERFSYNC 只保证顺序。</div>
     </div>
     <div class="q" data-answer="a">
       <p>2. Linux 中把「路径名分量」映射到 inode、并被缓存以加速路径查找的对象是？</p>
       <label><input type="radio" name="q2" value="a"> <code>struct dentry</code></label>
       <label><input type="radio" name="q2" value="b"> <code>struct file</code></label>
       <label><input type="radio" name="q2" value="c"> <code>struct super_block</code></label>
-      <div class="why" hidden>dentry 表示目录项（名字 → inode），由 dcache 缓存；file 表示一次打开，super_block 表示一个已挂载的文件系统实例。</div>
+      <div class="why" hidden>dentry 表示目录项（名字 → inode），由 dcache 缓存；file 表示一次打开，super_block 表示一个已挂载的文件系统实例。XNU 没有独立的 dentry，对应功能由 name cache 承担。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>3. 在 Linux 上，一次普通（非 <code>O_DIRECT</code>、非 <code>O_SYNC</code>）的 <code>write()</code> 成功返回时，数据通常在哪里？</p>
+      <label><input type="radio" name="q3" value="a"> 已经写到磁盘介质上</label>
+      <label><input type="radio" name="q3" value="b"> 在页缓存里，被标记为脏页，稍后由回写线程写出</label>
+      <label><input type="radio" name="q3" value="c"> 在设备的写缓存里</label>
+      <div class="why" hidden>buffered write 只把数据拷进页缓存并标脏就返回；回写在超时、脏页比例超限或 fsync/sync 时发生。实验里 <code>/proc/meminfo</code> 的 Dirty 在 sync 前后的变化就是证据。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>4. 在 APFS 上 <code>cp -c big.bin clone.bin</code> 克隆一个 1 GB 文件，<code>df</code> 显示可用空间几乎不变，原因是？</p>
+      <label><input type="radio" name="q4" value="a"> APFS 自动压缩了新文件</label>
+      <label><input type="radio" name="q4" value="b"> 新文件是指向原文件的硬链接</label>
+      <label><input type="radio" name="q4" value="c"> 克隆与原文件共享 extent，写入时才按块复制（copy-on-write）</label>
+      <div class="why" hidden>clone 是两个独立的文件（inode 不同，修改互不影响），但数据块共享并带引用计数；任一方写入时只复制被修改的块。硬链接是同一个 inode，修改会互相可见。</div>
     </div>
     <button type="submit">检查答案</button>
     <div class="result"></div>
@@ -121,12 +443,15 @@
   <h2 id="resources">资料</h2>
   <ul class="res">
     <li><a href="https://www.kernel.org/doc/html/latest/filesystems/vfs.html">Linux kernel docs — Overview of the Linux Virtual File System</a> <span class="lvl">入门，VFS 对象与操作表</span></li>
-    <li><a href="https://www.kernel.org/doc/html/latest/filesystems/path-lookup.html">Linux kernel docs — Pathname lookup</a> <span class="lvl">进阶，namei 全流程</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/filesystems/path-lookup.html">Linux kernel docs — Pathname lookup</a> <span class="lvl">进阶，namei 全流程、RCU-walk 与 REF-walk</span></li>
     <li><a href="https://www.kernel.org/doc/html/latest/filesystems/ext4/index.html">Linux kernel docs — ext4 Data Structures and Algorithms</a> <span class="lvl">查手册，ext4 磁盘格式</span></li>
-    <li><a href="https://developer.apple.com/support/downloads/Apple-File-System-Reference.pdf">Apple File System Reference</a> <span class="lvl">深入，APFS 磁盘格式官方规范</span></li>
-    <li><a href="https://lwn.net/Articles/457667/">LWN — Ensuring data reaches disk</a> <span class="lvl">入门，fsync 语义</span></li>
-    <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl">源码；bsd/vfs/、bsd/kern/ubc_subr.c</span></li>
-    <li>Robert Love, <em>Linux Kernel Development</em>（3rd ed.）<span class="lvl">VFS、块 I/O 章节</span></li>
+    <li><a href="https://docs.kernel.org/block/blk-mq.html">Linux kernel docs — Multi-Queue Block IO Queueing Mechanism (blk-mq)</a> <span class="lvl">进阶，块层多队列设计</span></li>
+    <li><a href="https://docs.kernel.org/trace/ftrace.html">Linux kernel docs — ftrace</a> <span class="lvl">查手册，Lab A 用到的 tracefs 文件与选项</span></li>
+    <li><a href="https://lwn.net/Articles/457667/">LWN — Ensuring data reaches disk</a> <span class="lvl">入门，fsync 语义与各层缓存</span></li>
+    <li><a href="https://developer.apple.com/support/downloads/Apple-File-System-Reference.pdf">Apple File System Reference</a> <span class="lvl">深入，APFS 磁盘格式官方规范（容器、omap、快照、clone）</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/tree/main/bsd/vfs">apple-oss-distributions/xnu — bsd/vfs/</a> <span class="lvl">源码；vfs_lookup.c、vfs_cache.c、vfs_cluster.c、vfs_vnops.c，另见 bsd/kern/ubc_subr.c</span></li>
+    <li>Robert Love, <em>Linux Kernel Development</em>（3rd ed.）<span class="lvl">基础，VFS、页缓存、块 I/O 章节（基于 2.6，细节以现代源码为准）</span></li>
+    <li>Jonathan Levin, <em>*OS Internals</em> Vol. II（Kernel Mode）文件系统章节 <span class="lvl">进阶，XNU VFS、UBC 与 APFS</span></li>
   </ul>
 
   <nav class="pn">

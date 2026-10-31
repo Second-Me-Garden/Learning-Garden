@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Kernel Engineering · Learning Garden</title>
 <link rel="stylesheet" href="../../assets/style.css">
+<script src="../../assets/theme.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -12,10 +13,10 @@
     <a class="brand" href="../../index.html">Learning Garden</a>
     <span class="crumb">Kernel Engineering</span>
     <span class="spacer"></span>
-    <button class="theme" type="button" title="切换明暗">◐</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
-  <h1>Kernel Engineering <span class="en">→ Apple kernel engineer</span></h1>
+  <h1>Kernel Engineering<span class="en">目标：Apple 的 kernel engineer 岗位。九个阶段。</span></h1>
   <p class="lede">目标：具备申请 Apple kernel engineer 岗位所需的内核功底。路线：先用 Linux 把内核基础打牢（公开资料最丰富、能在 QEMU 里随便拆），每一阶段同时对照 XNU（Mach + BSD + IOKit，Apple 的内核不是 Linux），最后一阶段切换到 Apple 路线。</p>
 
   <div class="note">
@@ -77,17 +78,18 @@
 
   <h2>Phases</h2>
   <ol class="phases">
-    <li><span class="n">0</span><span><span class="t"><a href="phase-0-foundations/index.html">Foundations</a></span><br><span class="d">C 系统编程、ARM64 基础（Apple Silicon）、工具链、在 QEMU 里编译并启动 Linux</span></span><span class="st ready">ready</span></li>
-    <li><span class="n">1</span><span><span class="t"><a href="phase-1-boot-and-processes/index.html">Boot &amp; Processes</a></span><br><span class="d">boot chain、进程/线程模型、上下文切换、调度（CFS/EEVDF ↔ Mach scheduler）</span></span><span class="st ready">ready</span></li>
-    <li><span class="n">2</span><span><span class="t"><a href="phase-2-memory/index.html">Memory</a></span><br><span class="d">虚拟内存、ARM64 页表、缺页路径、分配器（buddy/slab ↔ Mach VM/zalloc）</span></span><span class="st ready">ready</span></li>
-    <li><span class="n">3</span><span><span class="t"><a href="phase-3-concurrency-and-ipc/index.html">Concurrency &amp; IPC</a></span><br><span class="d">spinlock/mutex/RCU、内存序；Mach port 与消息</span></span><span class="st">skeleton</span></li>
-    <li><span class="n">4</span><span><span class="t"><a href="phase-4-syscalls-vfs-filesystems/index.html">Syscalls, VFS &amp; Filesystems</a></span><br><span class="d">系统调用入口、VFS 层次、ext4 ↔ APFS、块 I/O</span></span><span class="st">skeleton</span></li>
-    <li><span class="n">5</span><span><span class="t"><a href="phase-5-device-drivers/index.html">Device Drivers</a></span><br><span class="d">Linux driver model / devicetree ↔ IOKit / DriverKit，中断与 DMA</span></span><span class="st">skeleton</span></li>
-    <li><span class="n">6</span><span><span class="t"><a href="phase-6-debugging-and-tooling/index.html">Debugging &amp; Tooling</a></span><br><span class="d">ftrace/perf/kgdb/crash ↔ lldb+KDP/dtrace/panic log；读内核源码的方法</span></span><span class="st">skeleton</span></li>
-    <li><span class="n">7</span><span><span class="t"><a href="phase-7-security-and-hardening/index.html">Security &amp; Hardening</a></span><br><span class="d">KASLR、PAN/PXN、PAC、PPL/SPTM、sandbox、code signing</span></span><span class="st">skeleton</span></li>
-    <li><span class="n">8</span><span><span class="t"><a href="phase-8-xnu-and-apple-track/index.html">XNU &amp; the Apple Track</a></span><br><span class="d">编译 XNU、Darwin 内部阅读计划、作品项目（Linux module + DriverKit driver）、Apple 面试环节</span></span><span class="st">skeleton</span></li>
+    <li data-phase="kernel/phase-0"><span class="n">0</span><span><span class="t"><a href="phase-0-foundations/index.html">Foundations</a></span><br><span class="d">C 系统编程、ARM64 基础（Apple Silicon）、工具链、在 QEMU 里编译并启动 Linux</span></span><span class="st"></span></li>
+    <li data-phase="kernel/phase-1"><span class="n">1</span><span><span class="t"><a href="phase-1-boot-and-processes/index.html">Boot &amp; Processes</a></span><br><span class="d">boot chain、进程/线程模型、上下文切换、调度（CFS/EEVDF ↔ Mach scheduler）</span></span><span class="st"></span></li>
+    <li data-phase="kernel/phase-2"><span class="n">2</span><span><span class="t"><a href="phase-2-memory/index.html">Memory</a></span><br><span class="d">虚拟内存、ARM64 页表、缺页路径、分配器（buddy/slab ↔ Mach VM/zalloc）</span></span><span class="st"></span></li>
+    <li data-phase="kernel/phase-3"><span class="n">3</span><span><span class="t"><a href="phase-3-concurrency-and-ipc/index.html">Concurrency &amp; IPC</a></span><br><span class="d">spinlock/mutex/RCU、内存序；Mach port 与消息</span></span><span class="st"></span></li>
+    <li data-phase="kernel/phase-4"><span class="n">4</span><span><span class="t"><a href="phase-4-syscalls-vfs-filesystems/index.html">Syscalls, VFS &amp; Filesystems</a></span><br><span class="d">系统调用入口、VFS 层次、ext4 ↔ APFS、块 I/O</span></span><span class="st"></span></li>
+    <li data-phase="kernel/phase-5"><span class="n">5</span><span><span class="t"><a href="phase-5-device-drivers/index.html">Device Drivers</a></span><br><span class="d">Linux driver model / devicetree ↔ IOKit / DriverKit，中断与 DMA</span></span><span class="st"></span></li>
+    <li data-phase="kernel/phase-6"><span class="n">6</span><span><span class="t"><a href="phase-6-debugging-and-tooling/index.html">Debugging &amp; Tooling</a></span><br><span class="d">ftrace/perf/kgdb/crash ↔ lldb+KDP/dtrace/panic log；读内核源码的方法</span></span><span class="st"></span></li>
+    <li data-phase="kernel/phase-7"><span class="n">7</span><span><span class="t"><a href="phase-7-security-and-hardening/index.html">Security &amp; Hardening</a></span><br><span class="d">KASLR、PAN/PXN、PAC、PPL/SPTM、sandbox、code signing</span></span><span class="st"></span></li>
+    <li data-phase="kernel/phase-8"><span class="n">8</span><span><span class="t"><a href="phase-8-xnu-and-apple-track/index.html">XNU &amp; the Apple Track</a></span><br><span class="d">编译 XNU、Darwin 内部阅读计划、作品项目（Linux module + DriverKit driver）、Apple 面试环节</span></span><span class="st"></span></li>
   </ol>
 </div>
 <script src="../../assets/diagram.js"></script>
+<script src="../../assets/progress.js"></script>
 </body>
 </html>

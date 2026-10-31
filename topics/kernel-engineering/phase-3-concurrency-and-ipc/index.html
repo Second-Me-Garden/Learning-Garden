@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 3 · Concurrency &amp; IPC · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -16,7 +17,7 @@
     <button class="theme" type="button" title="切换明暗">◐</button>
   </header>
 
-  <p class="meta">Phase 3 / 9 · skeleton — 内容待写</p>
+  <p class="meta">Phase 3 / 9 · 约 1–2 周</p>
   <h1>Concurrency &amp; IPC <span class="en">并发与 IPC：spinlock/mutex/RCU、内存序；Mach port 与消息</span></h1>
   <p class="lede">内核里任何共享数据都可能同时被多个 CPU 和中断处理程序访问，锁、原子操作和内存序决定了代码是否正确。XNU 又是一个以 Mach 消息为骨架的内核：launchd、XPC、IOKit 用户客户端都建立在 Mach port 之上，不懂 port 和 <code>mach_msg</code> 就读不懂 Darwin 的大半代码。</p>
 
@@ -33,72 +34,489 @@
 
   <h2 id="prereq">前置</h2>
   <ul>
-    <li>Phase 0（ARM64 寄存器、<code>DAIF</code>、<code>dmb</code>/<code>dsb</code>/<code>isb</code>）。</li>
+    <li>Phase 0（ARM64 寄存器、<code>DAIF</code>、<code>dmb</code>/<code>dsb</code>/<code>isb</code>）；QEMU 里能启动带 busybox initramfs 的 Linux arm64 内核，并保留那棵编过 <code>Image</code> 的源码树（本阶段要对它编模块）。</li>
     <li>Phase 1（线程、上下文切换、调度——知道「睡眠」是什么意思）。</li>
-    <li>Phase 2（虚拟内存——理解 Mach 消息里的 out-of-line 内存）。</li>
+    <li>Phase 2（虚拟内存——理解 Mach 消息里的 out-of-line 内存为什么能「零拷贝」）。</li>
   </ul>
 
   <h2 id="concepts">核心概念</h2>
 
   <h3>1. spinlock、mutex、rw_semaphore</h3>
-  <p>本节对比忙等锁与可睡眠锁的适用场景，以及持有 spinlock 时为什么不能睡眠。</p>
+  <p>锁分两大类：<strong>忙等</strong>（拿不到就原地转圈）和<strong>可睡眠</strong>（拿不到就把自己挂到等待队列、让出 CPU）。选择标准只有三条：当前上下文能不能睡眠（中断处理程序、持有其他 spinlock 时都不能）；临界区有多长（比两次上下文切换还短，转圈更划算）；读多写少还是读写相当。</p>
+  <p><strong>Linux</strong>：<code>spinlock_t</code> 用 <code>spin_lock</code>/<code>spin_unlock</code>，持锁期间<strong>关抢占</strong>；若同一把锁也会在中断里被拿，进程上下文必须用 <code>spin_lock_irqsave</code> 同时关本地中断，否则中断打进来再拿同一把锁就自锁。arm64 上的实现是 queued spinlock（qspinlock，等待者排成 MCS 队列，避免大量 CPU 抢同一条 cache line），等待时借 <code>smp_cond_load_acquire</code> 用 <code>WFE</code> 省电。<code>struct mutex</code> 可睡眠，但在 owner 正在别的 CPU 上运行时先「乐观自旋」一会儿再睡；<code>struct rw_semaphore</code>（<code>down_read</code>/<code>down_write</code>）允许多读者并发。PREEMPT_RT 内核会把大部分 <code>spinlock_t</code> 换成基于 rt_mutex 的可睡眠锁，真正必须忙等的地方用 <code>raw_spinlock_t</code>。</p>
+  <p><strong>XNU</strong>：对应物是 <code>lck_spin_t</code>（<code>lck_spin_lock</code>，关抢占）、<code>lck_mtx_t</code>（<code>lck_mtx_lock</code>）和 <code>lck_rw_t</code>（<code>lck_rw_lock_shared</code>/<code>lck_rw_lock_exclusive</code>/<code>lck_rw_done</code>）。<code>lck_mtx_t</code> 是<strong>自适应</strong>锁：owner 在运行就自旋，否则阻塞；阻塞时经由 <strong>turnstile</strong>（<code>osfmk/kern/turnstile.c</code>）把等待者的优先级「借」给 owner，即优先级继承——Linux 的普通 <code>struct mutex</code> 没有这一点，只有 rt_mutex 有。注意 <code>lck_rw_lock_shared_to_exclusive</code> 升级失败时会<strong>放掉</strong>已持有的共享锁，调用者必须重新查找状态。</p>
+  <p><strong>为什么持 spinlock 不能睡眠</strong>：持锁时抢占已关，睡眠意味着调度走——别的 CPU 在等这把锁会一直空转；若调度到的线程恰好也要这把锁就死锁。Linux 打开 <code>CONFIG_DEBUG_ATOMIC_SLEEP</code> 后 <code>might_sleep()</code> 会打印 <code>BUG: sleeping function called from invalid context</code>；XNU 在 DEVELOPMENT/DEBUG 内核里对「关抢占时阻塞」也有断言（具体报错文本随版本变化）。</p>
 
   <h3>2. 原子操作与内存序</h3>
-  <p>本节讲 acquire/release、<code>smp_load_acquire</code>/<code>smp_store_release</code>，以及 ARM64 弱内存模型下 <code>dmb ish</code> 的作用。</p>
+  <p>ARM64 是<strong>弱内存模型</strong>：没有依赖关系的两次访存，其他 CPU 观察到的顺序可以和程序顺序不同（x86 是较强的 TSO）。经典的「消息传递」模式：</p>
+  <pre>CPU0:  data = 42;               smp_store_release(&amp;ready, 1);
+CPU1:  if (smp_load_acquire(&amp;ready))   BUG_ON(data != 42);   /* 有了 acquire/release 就不会触发 */</pre>
+  <p><strong>release</strong> 保证它之前的所有读写先于这次写对他人可见；<strong>acquire</strong> 保证它之后的读写不会跑到这次读之前。ARM64 有专门的指令：<code>stlr</code>（store-release）和 <code>ldar</code>（load-acquire），Linux arm64 的 <code>smp_store_release</code>/<code>smp_load_acquire</code> 就编成它们（<code>arch/arm64/include/asm/barrier.h</code>）。需要全屏障时用 <code>dmb ish</code>（inner shareable，覆盖所有 CPU）：<code>smp_mb()</code> = <code>dmb ish</code>，<code>smp_rmb()</code> = <code>dmb ishld</code>，<code>smp_wmb()</code> = <code>dmb ishst</code>。<code>dsb</code> 更强（等前面的访存真正完成，用于 TLB/cache 维护），<code>isb</code> 刷流水线，两者都不是普通并发代码要用的。</p>
+  <p>读改写原子操作：ARMv8.0 用 LL/SC（<code>ldxr</code>/<code>stxr</code> 循环），ARMv8.1 LSE 提供单条指令 <code>ldadd</code>、<code>cas</code>、<code>swp</code>（带 <code>a</code>/<code>l</code>/<code>al</code> 后缀表示 acquire/release）。Linux 在启动时检测 CPU 是否支持 LSE，再用 alternatives 机制把 <code>atomic_*</code> 的实现打补丁成 LSE 版本；Apple M 系列支持 LSE。Linux 接口：<code>atomic_t</code>/<code>atomic_long_t</code>、<code>atomic_inc</code>、<code>atomic_fetch_add</code>、<code>cmpxchg</code>，以及只防编译器撕裂/合并、不加硬件屏障的 <code>READ_ONCE</code>/<code>WRITE_ONCE</code>。</p>
+  <p><strong>XNU</strong> 用 <code>os_atomic_*</code> 宏（<code>libkern/os/atomic_private.h</code> 一带），内存序作为显式参数写在调用里：<code>os_atomic_load(&amp;x, acquire)</code>、<code>os_atomic_store(&amp;x, 1, release)</code>、<code>os_atomic_inc(&amp;n, relaxed)</code>、<code>os_atomic_cmpxchg(&amp;x, old, new, acq_rel)</code>、<code>os_atomic_thread_fence(seq_cst)</code>。本质是 C11 <code>&lt;stdatomic.h&gt;</code> 的包装，内存序命名与 C11 一致——读 XNU 代码时，每个原子操作的语义都直接写在参数里，这一点比 Linux 的命名约定更直白。</p>
 
   <h3>3. RCU（Read-Copy-Update）</h3>
-  <p>本节讲读者无锁、写者复制后等待宽限期（<code>synchronize_rcu</code>/<code>call_rcu</code>）的机制，以及 XNU 中对应的 SMR。</p>
+  <p>场景：一个被<strong>极频繁读、偶尔改</strong>的指针（路由表、配置、进程列表）。读者用任何锁都会让 cache line 在 CPU 间来回弹。RCU 的做法：<strong>读者完全不写共享内存</strong>——<code>rcu_read_lock()</code>，<code>p = rcu_dereference(gp)</code>，用完 <code>rcu_read_unlock()</code>；写者<strong>复制</strong>一份、在副本上修改，用 <code>rcu_assign_pointer(gp, new)</code>（本质是 store-release）一次性换指针。此后进来的读者看到新版本，而换指针之前就进来的读者可能还拿着旧版本——所以旧版本不能立即释放。</p>
+  <p>等待「所有已存在的读者都离开」的这段时间叫<strong>宽限期（grace period）</strong>。写者调 <code>synchronize_rcu()</code> 阻塞等它结束再 <code>kfree(old)</code>；不能阻塞时用 <code>call_rcu(&amp;old-&gt;rcu, cb)</code> 或 <code>kfree_rcu(old, rcu)</code> 登记回调。在非抢占 RCU 里，<code>rcu_read_lock()</code> 只是关抢占，于是「每个 CPU 都至少发生过一次上下文切换、进入 idle 或回到用户态」（<strong>quiescent state</strong>）就足以证明旧读者都结束了——宽限期检测不需要读者做任何事。可抢占 RCU 则让读者在 task 里记一个嵌套计数，代价略高。实现见 <code>kernel/rcu/tree.c</code>；写者之间仍要用普通锁互斥。</p>
+  <p><strong>XNU</strong> 传统上没有 RCU，较新版本引入了 <strong>SMR（safe memory reclamation）</strong>，接口大致在 <code>osfmk/kern/smr.h</code>：读者 <code>smr_enter</code>/<code>smr_leave</code>，用 <code>smr_entered_load</code> 读指针；写者持锁用 <code>smr_serialized_store</code> 发布，<code>smr_synchronize</code> 同步等待或 <code>smr_call</code> 异步回收。机制是<strong>基于序号（epoch）</strong>的：全局写序号递增，每个 CPU 进入读区时记下当时的序号，回收者等所有 CPU 的读序号都越过目标值。思想与 RCU 相同，宽限期的「证据」从「上下文切换」换成了「每 CPU 读序号」。函数名以你检出的 <code>smr.h</code> 为准。</p>
 
   <h3>4. per-CPU 数据</h3>
-  <p>本节讲用 <code>DEFINE_PER_CPU</code>（Linux）与 <code>PERCPU_DATA</code>（XNU）避免共享，以及访问时为什么要关抢占。</p>
+  <p>最好的锁是不需要锁：如果数据可以按 CPU 拆开（统计计数器、每 CPU 空闲对象缓存、运行队列），每个 CPU 只碰自己那份，就没有共享。<strong>Linux</strong> 用 <code>DEFINE_PER_CPU(type, name)</code> 定义，<code>this_cpu_inc(name)</code>、<code>this_cpu_read(name)</code> 访问本 CPU 副本，<code>per_cpu(name, cpu)</code> 访问指定 CPU 的副本，动态分配用 <code>alloc_percpu</code> + <code>per_cpu_ptr</code>。arm64 上「本 CPU 偏移」放在 <code>TPIDR_EL1</code>（VHE 下是 <code>TPIDR_EL2</code>），所以 <code>this_cpu_*</code> 只需一次寄存器读加偏移。</p>
+  <p><strong>为什么要关抢占</strong>：「读本 CPU 副本 → 加一 → 写回」是三步；若中间被抢占并迁移到另一个 CPU，写回就写到了错误的副本、或和原 CPU 上的新线程撞车。单条 <code>this_cpu_inc</code> 是抢占安全的；多步操作要包在 <code>get_cpu_var</code>/<code>put_cpu_var</code> 或 <code>preempt_disable</code>/<code>preempt_enable</code> 里。若中断处理程序也改这份数据，还需要关本地中断。</p>
+  <p><strong>XNU</strong> 有对应的 <code>PERCPU_DATA(name)</code> 声明和 <code>PERCPU_GET(name)</code> 访问（<code>osfmk/kern/percpu.h</code>），以及历史更久的每 CPU 结构 <code>cpu_data_t</code>（<code>getCpuDatap()</code>）和 <code>processor_t</code>（<code>current_processor()</code>）。关抢占用 <code>disable_preemption()</code>/<code>enable_preemption()</code>。arm64 XNU 用 <code>TPIDR_EL1</code> 保存当前线程指针，每 CPU 数据再从线程上找到（大致路径，细节随版本变化）。</p>
 
   <h3>5. 锁正确性检查：lockdep 与 XNU <code>lck_*</code></h3>
-  <p>本节讲 lockdep 如何在运行时发现锁顺序反转，以及 XNU <code>lck_mtx_t</code>/<code>lck_spin_t</code>/<code>lck_rw_t</code> 的接口与锁组。</p>
+  <p>死锁最常见的成因是<strong>锁顺序反转</strong>：路径 1 先 A 后 B，路径 2 先 B 后 A，两条路径同时跑才会卡死——测试里可能永远碰不上。<strong>lockdep</strong>（<code>CONFIG_PROVE_LOCKING</code>）不等死锁真的发生：它把锁按<strong>类</strong>（同一处初始化代码产生的锁属于同一类，靠静态 <code>lock_class_key</code>）归并，记录每个任务当前持有的锁栈；每次加锁就在「已持有类 → 新类」之间加一条依赖边，并检查是否成环。只要两条路径分别<strong>各跑过一次</strong>，就会报 <code>WARNING: possible circular locking dependency detected</code>，附上两条路径的调用栈。它还检查中断安全性：同一类锁既在硬中断里被拿、又在开中断时被拿，就报 <code>inconsistent lock state</code>。代价是明显变慢，只用于调试内核。代码里可用 <code>lockdep_assert_held(&amp;lock)</code> 写下「调用者必须持锁」的契约。</p>
+  <p><strong>XNU</strong> 没有公开的、与 lockdep 等价的锁序证明器。它的锁接口围绕<strong>锁组</strong>：先 <code>lck_grp_alloc_init("name", LCK_GRP_ATTR_NULL)</code> 建组，再 <code>lck_mtx_alloc_init(grp, LCK_ATTR_NULL)</code> 等在组内建锁；较新代码多用静态声明宏（如 <code>LCK_GRP_DECLARE</code>、<code>LCK_MTX_DECLARE</code>）。锁组用于统计和调试归属。正确性主要靠断言：<code>LCK_MTX_ASSERT(lck, LCK_MTX_ASSERT_OWNED)</code> 一类宏在 DEVELOPMENT/DEBUG 内核中生效（Apple 提供的 KDK 含这些内核），以及 DTrace 的 <code>lockstat</code> provider 观察争用。</p>
 
   <h3>6. Mach port 与 <code>mach_msg</code></h3>
-  <p>本节讲 port 作为内核管理的消息队列、port 名字空间，以及 <code>mach_msg</code> 一次调用完成发送和/或接收。</p>
+  <p><strong>port 是内核里的一个对象</strong>（<code>struct ipc_port</code>，<code>osfmk/ipc/ipc_port.h</code>），本质是一个带权限控制的<strong>消息队列</strong>（<code>ipc_mqueue</code>）。用户态永远拿不到 port 指针，只拿到一个 32 位<strong>名字</strong>（<code>mach_port_name_t</code>）。每个 task 有自己的 <strong>IPC 名字空间</strong> <code>ipc_space</code>，内部是 <code>ipc_entry</code> 表：名字 → (port 指针, 持有哪些权限, 引用计数)。同一个 port 在 task A 里叫 <code>0x1103</code>、在 task B 里叫 <code>0x0f03</code> 完全正常——名字只在本 task 有意义，和文件描述符的思路一样。</p>
+  <p>收发只有一个系统调用：<code>mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify)</code>。<code>option</code> 含 <code>MACH_SEND_MSG</code> 则先发，含 <code>MACH_RCV_MSG</code> 则再收，两者都有就是「发请求并等回复」的一次 RPC。消息以 <code>mach_msg_header_t</code> 开头：<code>msgh_bits</code>（远端/本地端口各用什么方式传递权限）、<code>msgh_size</code>、<code>msgh_remote_port</code>（发往哪里）、<code>msgh_local_port</code>（回复端口）、<code>msgh_id</code>。<code>MACH_MSGH_BITS_COMPLEX</code> 置位时，正文里可以带<strong>描述符</strong>：port 描述符（传递权限）和 <strong>out-of-line（OOL）内存</strong>描述符——大块数据不复制，而是在内核里变成 <code>vm_map_copy</code>，接收时按 copy-on-write 映射进对方地址空间（Phase 2 的 COW 在这里派上用场）。</p>
+  <p>内核里的大致路径：arm64 上 <code>svc #0x80</code>、<code>x16</code> 为负数表示 Mach trap，<code>mach_msg_trap</code> 是 −31 号；进入 <code>osfmk/ipc/mach_msg.c</code> 后，消息被拷进内核的 <code>ipc_kmsg</code>，<code>ipc_kmsg_copyin</code> 把名字翻译成 port 指针并处理权限，<code>ipc_kmsg_send</code> → <code>ipc_mqueue_send</code> 入队（或直接交给正在等待的接收者），接收侧 <code>ipc_mqueue_receive</code> 出队，<code>ipc_kmsg_copyout</code> 把指针翻译成接收方的名字，最后拷回用户缓冲区。较新的 XNU（macOS 13 起）新增了 <code>mach_msg2_trap</code>，内部函数也有重命名，以源码为准。port 的消息队列有长度上限（<code>qlimit</code>，默认值较小），满了发送方阻塞或按超时返回。</p>
+  <div class="note">很多 port 背后不是用户进程，而是<strong>内核对象</strong>（kobject）：task port、thread port、host port、IOKit 的 user client。对这些 port 发消息，等于调用内核服务；接口由 MIG（Mach Interface Generator）从 <code>.defs</code> 文件生成收发桩代码。所以 <code>task_info</code>、<code>mach_vm_allocate</code> 这些「函数」其实都是 Mach 消息。</div>
 
   <h3>7. port rights 与 XPC</h3>
-  <p>本节讲 receive/send/send-once 三种权限如何在消息中传递，以及 XPC 和 launchd 服务查找如何建立在这些权限之上。</p>
+  <p>权限有三种：<strong>receive right</strong>——一个 port 只有一个，持有者才能从队列取消息；<strong>send right</strong>——可以有很多，带引用计数；<strong>send-once right</strong>——只能发一条消息，发完即消失，用于回复（内核保证：要么收到回复，要么在 send-once right 被销毁时收到一条 send-once 通知，接收方不会永远等）。在 <code>msgh_bits</code> 或 port 描述符里用 <code>MACH_MSG_TYPE_MAKE_SEND</code>（由 receive right 造一个 send right）、<code>MACH_MSG_TYPE_COPY_SEND</code>（复制自己的 send right）、<code>MACH_MSG_TYPE_MOVE_SEND</code>（转交）、<code>MACH_MSG_TYPE_MAKE_SEND_ONCE</code>、<code>MACH_MSG_TYPE_MOVE_RECEIVE</code> 指定传递方式。receive right 被销毁后，其他 task 手里的 send right 变成 <strong>dead name</strong>；可以注册 <code>MACH_NOTIFY_DEAD_NAME</code>、<code>MACH_NOTIFY_NO_SENDERS</code> 通知来感知对端死亡或无人引用。</p>
+  <p>这是一个<strong>capability 系统</strong>：能向谁发消息，完全取决于你手里有没有它的 send right，而 right 只能通过消息传递获得。那第一个 right 从哪来？每个 task 创建时都有一个 <strong>bootstrap port</strong>（special port），指向 launchd。服务端在 launchd 的 plist 里声明 <code>MachServices</code>，客户端 <code>bootstrap_look_up(bootstrap_port, "com.example.svc", &amp;port)</code> 拿到 send right。launchd 还能<strong>按需启动</strong>：服务进程不存在时先替它持有 receive right，第一条消息到来再拉起进程并把 receive right 交给它。</p>
+  <p><strong>XPC</strong>（libxpc）是这一切的现代封装：<code>xpc_connection_create_mach_service</code> 走同一套 bootstrap 查找，消息是序列化成 Mach 消息的 XPC 字典。安全检查依赖内核附加在接收消息尾部的 <strong>trailer</strong>：接收时请求 <code>MACH_RCV_TRAILER_AUDIT</code>，内核会填入发送方的 <strong>audit token</strong>（pid、uid、pid 版本号等），这是内核写的、发送方无法伪造的身份——服务端据此查代码签名和 entitlement。用 pid 做检查有 pid 复用竞争，审计 token 才是正确的依据。</p>
 
   <h3>8. 对照：Linux IPC（pipe、futex、signal）</h3>
-  <p>本节以 pipe、futex（对照 XNU 的 ulock）、signal 为例，说明 Linux 在「无统一消息原语」下如何组合出 IPC。</p>
+  <p>Linux 没有一个统一的消息原语，而是按用途组合：<strong>pipe</strong>（<code>fs/pipe.c</code>，<code>pipe_inode_info</code> 里一圈 <code>pipe_buffer</code>，默认 16 页，可用 <code>F_SETPIPE_SZ</code> 调整）传字节流；<strong>UNIX domain socket</strong> 传报文，并能用 <code>SCM_RIGHTS</code> 附带文件描述符——这是 Linux 里最接近「在消息中传递 port right」的东西；文件描述符本身就是 capability。服务发现不在内核，由 systemd socket activation、D-Bus 在用户态完成。Android 的 <strong>binder</strong>（<code>drivers/android/binder.c</code>）是 Linux 上设计最接近 Mach IPC 的机制：对象引用、RPC、发送方身份。</p>
+  <p><strong>futex</strong>（<code>kernel/futex/</code>）是「用户态快速锁」：无竞争时 pthread mutex 只在用户态做一次 CAS，不进内核；有竞争才 <code>futex(uaddr, FUTEX_WAIT, val)</code>——内核按 <code>uaddr</code> 散列到等待桶，确认 <code>*uaddr</code> 仍等于 <code>val</code> 才睡，避免丢失唤醒；解锁方 <code>FUTEX_WAKE</code>。XNU 的对应物是私有系统调用 <strong>ulock</strong>（<code>__ulock_wait</code>/<code>__ulock_wake</code>，<code>bsd/kern/sys_ulock.c</code>），<code>os_unfair_lock</code> 建立在它之上：锁字里存的是 owner 线程的 port 名字，于是内核知道该把优先级继承给谁（又是 turnstile）。macOS 14.4 起还有公开的 <code>os_sync_wait_on_address</code> 系列。</p>
+  <p><strong>signal</strong>：Linux 里硬件异常（如非法访存）直接变成 <code>SIGSEGV</code> 挂到线程上，返回用户态前投递。XNU 先把它变成一条 <strong>Mach 异常消息</strong>（<code>EXC_BAD_ACCESS</code> 等），按 thread → task → host 的顺序发往注册的异常 port（调试器、崩溃报告器在这里接管）；没人处理才由 BSD 层（<code>bsd/uxkern/ux_exception.c</code> 一带）转换成 UNIX 信号。这就是 Mach 设计的取舍：一个通用、带权限的消息原语承担几乎所有跨边界通信，换来统一的安全模型和可插拔的服务，代价是每次交互的固定开销和复杂得多的权限记账。</p>
 
   <h2 id="compare">对照表</h2>
   <div class="table-wrap">
   <table class="cmp">
     <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
-    <tr><td>自旋锁</td><td><code>spinlock_t</code></td><td><code>lck_spin_t</code></td></tr>
-    <tr><td>可睡眠互斥锁</td><td><code>struct mutex</code></td><td><code>lck_mtx_t</code></td></tr>
-    <tr><td>读写锁</td><td><code>struct rw_semaphore</code></td><td><code>lck_rw_t</code></td></tr>
-    <tr><td>原子操作</td><td><code>atomic_t</code>、<code>smp_load_acquire</code></td><td><code>os_atomic_*</code> 宏</td></tr>
-    <tr><td>用户态快速锁</td><td>futex</td><td>ulock（<code>__ulock_wait</code>/<code>__ulock_wake</code>）</td></tr>
-    <tr><td>消息 IPC 原语</td><td>pipe / UNIX socket</td><td>Mach port + <code>mach_msg</code></td></tr>
+    <tr><td>自旋锁</td><td><code>spinlock_t</code>（arm64：qspinlock）、<code>raw_spinlock_t</code></td><td><code>lck_spin_t</code></td></tr>
+    <tr><td>可睡眠互斥锁</td><td><code>struct mutex</code>（乐观自旋，无 PI）；<code>rt_mutex</code> 有 PI</td><td><code>lck_mtx_t</code>（自适应，turnstile 优先级继承）</td></tr>
+    <tr><td>读写锁</td><td><code>struct rw_semaphore</code>、<code>rwlock_t</code></td><td><code>lck_rw_t</code></td></tr>
+    <tr><td>原子操作</td><td><code>atomic_t</code>、<code>cmpxchg</code>、<code>READ_ONCE</code>/<code>WRITE_ONCE</code></td><td><code>os_atomic_*</code> 宏（内存序作参数）</td></tr>
+    <tr><td>acquire / release</td><td><code>smp_load_acquire</code> / <code>smp_store_release</code> → <code>ldar</code>/<code>stlr</code></td><td><code>os_atomic_load(p, acquire)</code> / <code>os_atomic_store(p, v, release)</code></td></tr>
+    <tr><td>读多写少的延迟回收</td><td>RCU：<code>rcu_read_lock</code>、<code>synchronize_rcu</code>、<code>call_rcu</code></td><td>SMR：<code>smr_enter</code>/<code>smr_leave</code>、<code>smr_synchronize</code>、<code>smr_call</code></td></tr>
+    <tr><td>per-CPU 数据</td><td><code>DEFINE_PER_CPU</code>、<code>this_cpu_*</code></td><td><code>PERCPU_DATA</code>/<code>PERCPU_GET</code>、<code>cpu_data_t</code></td></tr>
+    <tr><td>锁正确性检查</td><td>lockdep（<code>CONFIG_PROVE_LOCKING</code>）、<code>lockdep_assert_held</code></td><td><code>LCK_MTX_ASSERT</code> 等断言（DEBUG/DEVELOPMENT 内核）、锁组统计</td></tr>
+    <tr><td>用户态快速锁</td><td>futex</td><td>ulock（<code>__ulock_wait</code>/<code>__ulock_wake</code>）→ <code>os_unfair_lock</code></td></tr>
+    <tr><td>消息 IPC 原语</td><td>pipe / UNIX socket（binder 仅 Android）</td><td>Mach port + <code>mach_msg</code></td></tr>
+    <tr><td>在消息中传递能力</td><td><code>SCM_RIGHTS</code> 传 fd</td><td>port 描述符传 send / receive / send-once right</td></tr>
+    <tr><td>大块数据</td><td>共享内存（<code>memfd</code> + <code>mmap</code>）、<code>vmsplice</code></td><td>OOL 内存描述符（<code>vm_map_copy</code>，COW）</td></tr>
+    <tr><td>服务发现</td><td>用户态：systemd socket activation、D-Bus</td><td>bootstrap port → launchd（<code>bootstrap_look_up</code>）、XPC</td></tr>
+    <tr><td>发送方身份</td><td><code>SO_PEERCRED</code>、<code>SCM_CREDENTIALS</code></td><td>消息 trailer 中的 audit token</td></tr>
+    <tr><td>硬件异常通知</td><td>直接投递 signal</td><td>Mach 异常消息 → 异常 port，无人处理再转 signal</td></tr>
   </table>
   </div>
 
-  <h2 id="diagram">动画图解：一次 mach_msg 发送与接收（占位）</h2>
+  <h2 id="diagram">动画图解</h2>
+
+  <h3>A · 一次 mach_msg 发送与接收</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 200"
-         data-captions='["（占位）本阶段动画待制作：将逐步展示发送方用 send right 调用 mach_msg、消息进入 port 队列、持有 receive right 的接收方取出消息的全过程。"]'>
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
+         data-captions='["全图：上半是用户态的两个 task，下半是 XNU 内核。左边 task A 持有 port P 的 send right，右边 task B 持有 P 的 receive right；中间是消息在内核里的形态 ipc_kmsg 和 port P 的消息队列。",
+           "① A 在用户态准备消息：msgh_remote_port = 0x1103（A 名字空间里指向 P 的 send right），bits 用 COPY_SEND；msgh_local_port = A 自己的回复端口 R，bits 用 MAKE_SEND_ONCE。名字只在 A 的 ipc_space 里有意义。",
+           "② A 调 mach_msg(MACH_SEND_MSG | MACH_RCV_MSG)：svc #0x80，x16 = -31 即 mach_msg_trap（新版本还有 mach_msg2_trap）。内核把用户缓冲区里的消息拷进一个内核 ipc_kmsg。",
+           "③ ipc_kmsg_copyin：查 A 的 ipc_space，把名字 0x1103 翻译成 port P 的指针并加一个 send 引用；从 R 的 receive right 造出一个 send-once right。正文里若有 port 描述符或 OOL 内存，也在这一步转换（OOL 变成 vm_map_copy）。",
+           "④ ipc_kmsg_send → ipc_mqueue_send：kmsg 挂进 P 的消息队列。若 B 正阻塞在接收上，直接交给它并唤醒；若队列已满（超过 qlimit），A 阻塞或按超时返回。",
+           "⑤ B 的 mach_msg(MACH_RCV_MSG) 从 P 出队；ipc_kmsg_copyout 在 B 的 ipc_space 里给 send-once right 分配新名字 0x1a07。B 收到的头部里 remote 与 local 互换：remote = 0x1a07（回复用），local = 0x0f03（P 在 B 中的名字）。内核在尾部追加 trailer，可含 audit token。",
+           "⑥ B 处理后向 0x1a07 发回复：send-once right 用掉即消失，回复进入 R 的队列；A 的 mach_msg 一直在 MACH_RCV_MSG 等 R，此刻拿到回复返回。这就是 MIG 生成的 RPC 桩代码做的事。"]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <rect class="box" x="200" y="60" width="500" height="80"/>
-      <text x="230" y="106">mach_msg：发送方 → port 队列 → 接收方</text>
+      <rect x="10" y="30" width="880" height="125" rx="8" style="fill: none; stroke: var(--line); stroke-dasharray: 4 4"/>
+      <text x="20" y="22" class="small">EL0 · 用户态</text>
+      <rect x="10" y="170" width="880" height="225" rx="8" style="fill: none; stroke: var(--line); stroke-dasharray: 4 4"/>
+      <text x="20" y="187" class="small">EL1 · XNU 内核（osfmk/ipc/）</text>
+
+      <!-- step 1: sender user + space -->
+      <g data-step="1 2 3"><rect class="box xnu" x="20" y="45" width="270" height="100"/>
+        <text x="32" y="66">task A（发送方）</text>
+        <text x="32" y="88" class="mono">mach_msg_header_t</text>
+        <text x="32" y="108" class="small">remote = 0x1103  COPY_SEND</text>
+        <text x="32" y="124" class="small">local  = 0x1207 (R)  MAKE_SEND_ONCE</text>
+        <text x="32" y="140" class="small">msgh_id = 0x4242，正文 …</text></g>
+      <g data-step="1 3"><rect class="box" x="20" y="200" width="270" height="85"/>
+        <text x="32" y="220" class="mono">ipc_space (A)</text>
+        <text x="32" y="242" class="small">0x1103 → SEND → port P</text>
+        <text x="32" y="260" class="small">0x1207 → RECEIVE → port R</text>
+        <text x="32" y="278" class="small">ipc_entry：名字 → 指针 + 权限 + 引用</text></g>
+
+      <!-- step 2: trap + kmsg -->
+      <g data-step="2 3 4"><rect class="box" x="315" y="200" width="270" height="70"/>
+        <text x="327" y="220" class="mono">ipc_kmsg</text>
+        <text x="327" y="240" class="small">remote → &amp;P (+1 send)</text>
+        <text x="327" y="258" class="small">local  → &amp;R (send-once)</text></g>
+      <g data-step="2"><path class="arrow" d="M290 120 C 330 130, 360 160, 380 200"/>
+        <text x="330" y="150" class="small">svc #0x80, x16 = -31</text></g>
+
+      <!-- step 3: copyin translation -->
+      <g data-step="3"><path class="arrow" d="M290 240 L315 240"/>
+        <text x="30" y="300" class="small">ipc_kmsg_copyin：名字 → port 指针</text></g>
+
+      <!-- step 4: port queue -->
+      <g data-step="4 5"><rect class="box pulse" x="315" y="300" width="270" height="85"/>
+        <text x="327" y="320" class="mono">ipc_port P · ipc_mqueue</text>
+        <rect x="327" y="332" width="50" height="22" style="fill: none; stroke: var(--ink-3)"/>
+        <rect x="383" y="332" width="50" height="22" style="fill: none; stroke: var(--ink-3)"/>
+        <rect x="439" y="332" width="50" height="22" style="fill: none; stroke: var(--accent)"/>
+        <text x="444" y="348" class="small">新 kmsg</text>
+        <text x="327" y="375" class="small">满了（qlimit）→ 发送方阻塞或超时</text></g>
+      <g data-step="4"><path class="arrow flow" d="M450 270 L450 300"/></g>
+
+      <!-- step 5: receiver -->
+      <g data-step="5 6"><rect class="box xnu" x="610" y="45" width="270" height="100"/>
+        <text x="622" y="66">task B（接收方）</text>
+        <text x="622" y="88" class="mono">mach_msg(MACH_RCV_MSG)</text>
+        <text x="622" y="108" class="small">收到 remote = 0x1a07（回复用）</text>
+        <text x="622" y="124" class="small">收到 local  = 0x0f03（P）</text>
+        <text x="622" y="140" class="small">尾部 trailer：audit token</text></g>
+      <g data-step="5"><rect class="box" x="610" y="200" width="270" height="85"/>
+        <text x="622" y="220" class="mono">ipc_space (B)</text>
+        <text x="622" y="242" class="small">0x0f03 → RECEIVE → port P</text>
+        <text x="622" y="260" class="small">0x1a07 → SEND_ONCE → port R（新）</text>
+        <text x="622" y="278" class="small">ipc_kmsg_copyout：指针 → 名字</text>
+        <path class="arrow flow" d="M585 340 C 620 340, 640 310, 680 285"/>
+        <path class="arrow flow" d="M745 200 L745 145"/></g>
+
+      <!-- step 6: reply -->
+      <g data-step="6"><path class="arrow flow" d="M610 70 C 500 20, 400 20, 290 70"/>
+        <text x="370" y="40" class="small">回复经 send-once right → R 的队列 → A</text>
+        <rect class="box" x="315" y="70" width="270" height="55"/>
+        <text x="327" y="92" class="small">send-once 用后即焚；若 B 不回复就退出，</text>
+        <text x="327" y="112" class="small">A 会收到 send-once 通知而不是永远等</text></g>
+    </svg>
+  </div>
+
+  <h3>B · RCU 宽限期（Linux ↔ XNU SMR）</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
+         data-captions='["全图：左边是 Linux 上三个 CPU 的时间线（时间向右），下方是共享指针 gp 指向的版本；右列是 XNU SMR 在同一步做的事。目标：在不让读者加锁的前提下，安全地释放旧版本 A。",
+           "① CPU1 上的读者进入读区：rcu_read_lock()，p = rcu_dereference(gp) 拿到版本 A。读者不写任何共享内存。XNU：smr_enter，用 smr_entered_load 读指针。",
+           "② CPU0 上的写者复制 A 得到 B 并修改，然后 rcu_assign_pointer(gp, B)——本质是 store-release，保证 B 的内容先于指针可见。之后进入读区的读者（CPU2）看到 B，但 CPU1 手里仍是 A。XNU：持写者锁 smr_serialized_store。",
+           "③ 写者调 synchronize_rcu()（或 call_rcu 登记回调后立即返回）：宽限期开始。它不关心 CPU2 这种之后才来的读者，只等开始时已存在的读者。XNU：smr_synchronize 或 smr_call，全局写序号前进。",
+           "④ 每个 CPU 都经过一次 quiescent state：CPU2 发生上下文切换，CPU1 读者 rcu_read_unlock 后切换，CPU0 自己阻塞时也切换。非抢占 RCU 里读区内不会切换，所以每 CPU 一次切换就证明旧读者都已离开。XNU：等所有 CPU 的读序号都越过目标，或已不在读区。",
+           "⑤ 宽限期结束：再没有任何读者可能持有 A，synchronize_rcu 返回，写者 kfree(A)；call_rcu 的回调则在 softirq 或 rcuo 内核线程里执行。XNU：smr_synchronize 返回或 smr_call 的回调执行。读者全程零锁、零写，代价全部由写者承担。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="200" y="22" class="small" style="fill: var(--linux)">Linux RCU</text>
+      <text x="700" y="22" class="small" style="fill: var(--xnu)">XNU SMR</text>
+      <line x1="615" y1="30" x2="615" y2="395" class="lane"/>
+
+      <!-- CPU lanes -->
+      <text x="14" y="84" class="small">CPU0 写者</text>
+      <line x1="80" y1="80" x2="595" y2="80" class="lane"/>
+      <text x="14" y="154" class="small">CPU1 读者</text>
+      <line x1="80" y1="150" x2="595" y2="150" class="lane"/>
+      <text x="14" y="224" class="small">CPU2</text>
+      <line x1="80" y1="220" x2="595" y2="220" class="lane"/>
+      <path class="arrow" d="M80 250 L595 250"/>
+      <text x="540" y="244" class="small">时间 →</text>
+
+      <!-- step 1: reader on CPU1 holds A -->
+      <g data-step="1 2 3 4"><rect class="box linux" x="95" y="135" width="250" height="30"/>
+        <text x="103" y="155" class="mono">rcu_read_lock … 用 A …</text></g>
+      <g data-step="1"><rect class="box xnu" x="630" y="45" width="255" height="50"/>
+        <text x="640" y="66" class="mono">smr_enter(smr)</text>
+        <text x="640" y="86" class="small">p = smr_entered_load(&amp;gp)</text></g>
+
+      <!-- step 2: publish B -->
+      <g data-step="2"><rect class="box linux" x="130" y="65" width="150" height="30"/>
+        <text x="138" y="85" class="mono">assign(gp, B)</text>
+        <rect class="box linux" x="200" y="205" width="110" height="30"/>
+        <text x="208" y="225" class="mono">读到 B</text></g>
+      <g data-step="2"><rect class="box xnu" x="630" y="105" width="255" height="50"/>
+        <text x="640" y="126" class="mono">smr_serialized_store</text>
+        <text x="640" y="146" class="small">写者之间仍需普通锁互斥</text></g>
+
+      <!-- step 3: grace period begins -->
+      <g data-step="3 4 5"><line x1="290" y1="55" x2="290" y2="240" style="stroke: var(--accent); stroke-dasharray: 5 4"/>
+        <text x="250" y="50" class="small">宽限期开始</text></g>
+      <g data-step="3"><rect class="box linux" x="295" y="65" width="130" height="30"/>
+        <text x="303" y="85" class="mono">synchronize_rcu</text></g>
+      <g data-step="3"><rect class="box xnu" x="630" y="165" width="255" height="50"/>
+        <text x="640" y="186" class="mono">smr_synchronize / smr_call</text>
+        <text x="640" y="206" class="small">全局写序号前进，记下目标值</text></g>
+
+      <!-- step 4: quiescent states -->
+      <g data-step="4"><circle cx="330" cy="220" r="8" class="box pulse"/>
+        <text x="320" y="205" class="small">QS</text>
+        <circle cx="380" cy="150" r="8" class="box pulse"/>
+        <text x="370" y="135" class="small">QS</text>
+        <circle cx="445" cy="80" r="8" class="box pulse"/>
+        <text x="436" y="62" class="small">QS</text>
+        <text x="300" y="185" class="small">上下文切换 / idle / 回用户态</text></g>
+      <g data-step="4"><rect class="box xnu" x="630" y="225" width="255" height="50"/>
+        <text x="640" y="246" class="mono">smr_leave(smr)</text>
+        <text x="640" y="266" class="small">各 CPU 读序号越过目标</text></g>
+
+      <!-- step 5: grace period ends, free -->
+      <g data-step="5"><line x1="470" y1="55" x2="470" y2="240" style="stroke: var(--accent); stroke-dasharray: 5 4"/>
+        <text x="475" y="50" class="small">宽限期结束</text>
+        <rect class="box linux" x="478" y="65" width="110" height="30"/>
+        <text x="490" y="85" class="mono">kfree(A)</text>
+        <path class="arrow flow" d="M533 95 C 520 200, 260 260, 240 320"/></g>
+      <g data-step="5"><rect class="box xnu" x="630" y="285" width="255" height="50"/>
+        <text x="640" y="306" class="mono">回调执行 / 返回</text>
+        <text x="640" y="326" class="small">释放旧对象</text></g>
+
+      <!-- memory state -->
+      <g data-step="1 2 5"><rect class="box" x="40" y="300" width="80" height="40"/>
+        <text x="58" y="325" class="mono">gp</text>
+        <path class="arrow" d="M120 320 L180 320"/>
+        <rect class="box" x="180" y="300" width="120" height="40"/>
+        <text x="190" y="325" class="mono">版本 A</text>
+        <rect class="box" x="340" y="300" width="120" height="40"/>
+        <text x="350" y="325" class="mono">版本 B</text>
+        <path class="arrow flow" d="M80 340 C 120 380, 360 380, 400 342"/>
+        <text x="130" y="390" class="small">② 之后 gp → B；A 要等到 ⑤ 才能释放</text></g>
+      <text x="630" y="370" class="small">思想相同：RCU 以上下文切换为证据，</text>
+      <text x="630" y="388" class="small">SMR 以每 CPU 读序号为证据。</text>
     </svg>
   </div>
 
   <h2 id="lab">动手实验</h2>
   <div class="lab">
-    <ul>
-      <li>Linux（QEMU）：写一个内核模块，两个 kthread 无锁地累加同一计数器，再分别用 <code>spinlock_t</code> 和 <code>atomic_t</code> 修正，对比结果。</li>
-      <li>Linux（QEMU）：打开 <code>CONFIG_PROVE_LOCKING</code>，故意以相反顺序获取两把锁，读 lockdep 报告。</li>
-      <li>macOS：用 <code>mach_port_allocate</code> + <code>mach_msg</code> 写一个单进程收发消息的小程序。</li>
-      <li>macOS：用 <code>lsmp -p &lt;pid&gt;</code> 查看一个进程持有的 port 和权限类型。</li>
-    </ul>
+    <h3>Lab A · Linux（Phase 0 的 QEMU 环境）：竞态、spinlock、atomic、RCU、lockdep</h3>
+    <ol>
+      <li>新建目录 <code>lab3/</code>，写三个模块。<code>race.c</code>：两个 kthread 各把同一个计数器加 100 万次，<code>mode</code> 参数选择无保护 / spinlock / atomic：<pre>// race.c
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/spinlock.h&gt;
+#include &lt;linux/atomic.h&gt;
+#include &lt;linux/completion.h&gt;
+#include &lt;linux/ktime.h&gt;
+
+static int mode;                         /* 0 = 无保护, 1 = spinlock, 2 = atomic */
+module_param(mode, int, 0444);
+#define LOOPS 1000000
+
+static long plain;
+static atomic_long_t acnt = ATOMIC_LONG_INIT(0);
+static DEFINE_SPINLOCK(lock);
+static struct completion done[2];
+
+static int worker(void *arg)
+{
+	int i;
+
+	for (i = 0; i &lt; LOOPS; i++) {
+		if (mode == 1) {
+			spin_lock(&amp;lock);
+			plain++;
+			spin_unlock(&amp;lock);
+		} else if (mode == 2) {
+			atomic_long_inc(&amp;acnt);
+		} else {
+			WRITE_ONCE(plain, READ_ONCE(plain) + 1);   /* 读-加-写，三步之间可被另一 CPU 插入 */
+		}
+	}
+	kthread_complete_and_exit(arg, 0);
+}
+
+static int __init race_init(void)
+{
+	ktime_t t0 = ktime_get();
+	struct task_struct *t;
+	int i, started = 0, ret = 0;
+
+	for (i = 0; i &lt; 2; i++) {
+		init_completion(&amp;done[i]);
+		t = kthread_run(worker, &amp;done[i], "race/%d", i);
+		if (IS_ERR(t)) { ret = PTR_ERR(t); break; }
+		started++;
+	}
+	for (i = 0; i &lt; started; i++)
+		wait_for_completion(&amp;done[i]);
+	if (ret)
+		return ret;
+	pr_info("race: mode=%d expected=%d got=%ld in %lld us\n", mode, 2 * LOOPS,
+		mode == 2 ? atomic_long_read(&amp;acnt) : plain,
+		ktime_us_delta(ktime_get(), t0));
+	return 0;
+}
+
+static void __exit race_exit(void) { }
+module_init(race_init);
+module_exit(race_exit);
+MODULE_LICENSE("GPL");</pre>
+        <code>rcudemo.c</code>：一个读者 kthread 不停 <code>rcu_read_lock</code>/<code>rcu_dereference</code>，初始化函数三次发布新版本并测量 <code>synchronize_rcu</code> 的耗时：<pre>// rcudemo.c
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/rcupdate.h&gt;
+#include &lt;linux/slab.h&gt;
+#include &lt;linux/ktime.h&gt;
+#include &lt;linux/sched.h&gt;
+
+struct cfg { int v; };
+static struct cfg __rcu *gp;
+static struct task_struct *rd;
+
+static int reader(void *unused)
+{
+	long sum = 0;
+
+	while (!kthread_should_stop()) {
+		struct cfg *c;
+
+		rcu_read_lock();
+		c = rcu_dereference(gp);
+		if (c)
+			sum += c-&gt;v;
+		rcu_read_unlock();
+		cond_resched();                     /* 读区外让出 CPU：这正是一个 quiescent state */
+	}
+	pr_info("rcudemo: reader stop, sum=%ld\n", sum);
+	return 0;
+}
+
+static int __init rcudemo_init(void)
+{
+	struct cfg *n, *old;
+	ktime_t t0;
+	int i;
+
+	rd = kthread_run(reader, NULL, "rcu_reader");
+	if (IS_ERR(rd))
+		return PTR_ERR(rd);
+	for (i = 1; i &lt;= 3; i++) {
+		n = kmalloc(sizeof(*n), GFP_KERNEL);
+		if (!n)
+			break;
+		n-&gt;v = i;
+		old = rcu_dereference_protected(gp, 1);   /* 只有本函数在写 */
+		rcu_assign_pointer(gp, n);
+		t0 = ktime_get();
+		synchronize_rcu();
+		pr_info("rcudemo: published v=%d, grace period %lld us\n", i, ktime_us_delta(ktime_get(), t0));
+		kfree(old);
+	}
+	return 0;
+}
+
+static void __exit rcudemo_exit(void)
+{
+	struct cfg *old;
+
+	kthread_stop(rd);
+	old = rcu_dereference_protected(gp, 1);
+	RCU_INIT_POINTER(gp, NULL);
+	synchronize_rcu();
+	kfree(old);
+}
+module_init(rcudemo_init);
+module_exit(rcudemo_exit);
+MODULE_LICENSE("GPL");</pre>
+        <code>abba.c</code>：同一个线程先 A→B、再 B→A 各拿一次锁。它<strong>不会</strong>真的死锁，但 lockdep 会报：<pre>// abba.c
+#include &lt;linux/module.h&gt;
+#include &lt;linux/mutex.h&gt;
+
+static DEFINE_MUTEX(a);
+static DEFINE_MUTEX(b);
+
+static int __init abba_init(void)
+{
+	mutex_lock(&amp;a); mutex_lock(&amp;b); mutex_unlock(&amp;b); mutex_unlock(&amp;a);   /* 路径 1：A → B */
+	mutex_lock(&amp;b); mutex_lock(&amp;a); mutex_unlock(&amp;a); mutex_unlock(&amp;b);   /* 路径 2：B → A */
+	return 0;
+}
+static void __exit abba_exit(void) { }
+module_init(abba_init);
+module_exit(abba_exit);
+MODULE_LICENSE("GPL");</pre>
+        <code>Makefile</code> 只有一行：<code>obj-m := race.o rcudemo.o abba.o</code></li>
+      <li>打开 lockdep 并重编内核（在 Phase 0 的 <code>linux/</code> 树里；<code>scripts/config</code> 是内核自带脚本）：<pre>scripts/config -e PROVE_LOCKING -e DEBUG_ATOMIC_SLEEP
+make LLVM=1 ARCH=arm64 olddefconfig
+make LLVM=1 ARCH=arm64 -j"$(sysctl -n hw.ncpu)" Image modules_prepare
+cd ../lab3 &amp;&amp; make -C ../linux LLVM=1 ARCH=arm64 M="$PWD" modules</pre>
+        模块必须用编 <code>Image</code> 的同一棵树、同一套编译器编（vermagic 要一致）。若 macOS 宿主上 <code>modpost</code> 等宿主工具编不过，就在 Linux 容器里对同一棵树重做 <code>Image</code> 和模块，记下报错，不要混用两套编译器的产物。</li>
+      <li>重打 Phase 0 的 initramfs：<code>docker run</code> 加 <code>-v "$PWD/lab3:/w"</code>，在 <code>cd /r</code> 前加 <code>cp /w/*.ko /r/ &amp;&amp;</code>，busybox 链接列表扩成 <code>sh ls cat echo mount uname dmesg grep head sleep insmod rmmod lsmod</code>。启动时给两个 CPU，竞态才看得见：<pre>qemu-system-aarch64 -M virt -cpu cortex-a72 -smp 2 -m 1G -nographic \
+  -kernel arch/arm64/boot/Image -initrd initramfs/initramfs.cpio.gz \
+  -append "console=ttyAMA0 rdinit=/init"</pre></li>
+      <li>在 guest 里：<pre>for m in 0 1 2; do insmod /race.ko mode=$m; rmmod race; done; dmesg | grep race:
+insmod /rcudemo.ko; sleep 1; rmmod rcudemo; dmesg | grep rcudemo
+insmod /abba.ko; dmesg | grep -A30 "circular locking"</pre>
+        预期：<code>mode=0</code> 的 <code>got</code> 明显小于 2000000（丢失更新），<code>mode=1</code>、<code>2</code> 正好 2000000，记下三者耗时；<code>rcudemo</code> 的宽限期通常在毫秒级——比一次加锁贵几个数量级，这是写者付出的代价；<code>abba</code> 打出 <code>possible circular locking dependency detected</code> 和两条依赖链。</li>
+      <li>在源码里找到动画 B 的 Linux 列：<pre>grep -n "^void synchronize_rcu\|^void call_rcu" kernel/rcu/tree.c
+grep -n "define rcu_assign_pointer\|define rcu_dereference(" include/linux/rcupdate.h
+grep -n "__smp_load_acquire\|__smp_store_release\|ldar\|stlr" arch/arm64/include/asm/barrier.h | head</pre></li>
+    </ol>
+
+    <h3>Lab B · macOS：手写一次 mach_msg，再看 port 和源码</h3>
+    <ol>
+      <li>存为 <code>machmsg.c</code>：给自己分配一个 receive right、造一个 send right、发一条消息再收回来，并请求 audit trailer：<pre>#include &lt;mach/mach.h&gt;
+#include &lt;bsm/libbsm.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+
+typedef struct {
+  mach_msg_header_t header;
+  int value;
+  char text[36];                               /* 24 + 4 + 36 = 64 字节，保持对齐 */
+} send_msg_t;
+
+typedef struct {
+  send_msg_t body;
+  mach_msg_audit_trailer_t trailer;           /* 内核追加在消息尾部 */
+} recv_msg_t;
+
+static int check(kern_return_t kr, const char *what) {
+  if (kr != KERN_SUCCESS) { fprintf(stderr, "%s: %s (0x%x)\n", what, mach_error_string(kr), kr); return 1; }
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  mach_port_t port;
+  if (check(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &amp;port), "allocate")) return 1;
+  if (check(mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND), "insert_right")) return 1;
+  printf("pid=%d port name=0x%x\n", getpid(), port);
+
+  send_msg_t m;
+  memset(&amp;m, 0, sizeof m);
+  m.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+  m.header.msgh_size = sizeof m;
+  m.header.msgh_remote_port = port;
+  m.header.msgh_local_port = MACH_PORT_NULL;
+  m.header.msgh_id = 0x4242;
+  m.value = 7;
+  strlcpy(m.text, "hello, port", sizeof m.text);
+  if (check(mach_msg(&amp;m.header, MACH_SEND_MSG, sizeof m, 0, MACH_PORT_NULL,
+                     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL), "send")) return 1;
+
+  recv_msg_t r;
+  memset(&amp;r, 0, sizeof r);
+  if (check(mach_msg(&amp;r.body.header,
+                     MACH_RCV_MSG | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |
+                     MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),
+                     0, sizeof r, port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL), "receive")) return 1;
+  printf("got id=0x%x size=%u value=%d text=%s local=0x%x sender pid=%d\n",
+         r.body.header.msgh_id, r.body.header.msgh_size, r.body.value, r.body.text,
+         r.body.header.msgh_local_port, audit_token_to_pid(r.trailer.msgh_audit));
+
+  if (argc &gt; 1) { printf("sleeping 30s for lsmp...\n"); fflush(stdout); sleep(30); }
+  return 0;
+}</pre>
+        编译运行：<pre>clang -Wall -O1 -o machmsg machmsg.c -lbsm
+./machmsg</pre>
+        预期：<code>size=64</code>（不含 trailer），<code>local</code> 等于你的 port 名字，<code>sender pid</code> 就是自己。试着把发送的 <code>MACH_MSG_TYPE_COPY_SEND</code> 改成 <code>MACH_MSG_TYPE_MOVE_SEND</code> 连发两次，第二次会因为 send right 已被转走而报错——看它报什么。</li>
+      <li>看一个进程的 port 表（<code>lsmp</code> 看别的进程需要 root）：<pre>./machmsg wait &amp;
+sleep 1; sudo lsmp -p $! | head -40</pre>
+        找到你的 port 名字那一行，确认它同时有 receive 和 send 权限；再看看列表里 bootstrap、task-self 之类的条目。</li>
+      <li>在 XNU 源码里找到动画 A 和概念里的符号（沿用 Phase 0 克隆的 <code>xnu</code>）：<pre>cd xnu
+grep -n "^mach_msg_trap\|^mach_msg_overwrite_trap\|^mach_msg2_trap" osfmk/ipc/mach_msg.c
+grep -n "^ipc_kmsg_copyin\|^ipc_kmsg_send\|^ipc_kmsg_copyout" osfmk/ipc/ipc_kmsg.c | head
+grep -n "^ipc_mqueue_send\|^ipc_mqueue_receive" osfmk/ipc/ipc_mqueue.c
+grep -n "smr_enter\|smr_synchronize\|smr_call" osfmk/kern/smr.h | head
+grep -rn "ulock_wait" bsd/kern/sys_ulock.c | head -5
+grep -rn "define LCK_MTX_DECLARE\|define LCK_GRP_DECLARE" osfmk/kern/ | head
+grep -n "^handle_ux_exception" bsd/uxkern/ux_exception.c</pre>
+        <code>ipc_kmsg_*</code> 在新版本里拆分和改名较多，没有结果就去掉 <code>^</code>、换成 <code>grep -rn 名字 osfmk/ipc</code>，把实际位置记下来。</li>
+    </ol>
+    <div class="note">交付物：<code>race</code> 三种模式的计数和耗时、<code>rcudemo</code> 的宽限期数字、lockdep 报告的头 10 行、<code>machmsg</code> 的输出，贴进当天日志；再用自己的话写 5 行：「为什么 RCU 读者不需要原子操作，而 <code>mode=0</code> 的计数会丢」。</div>
   </div>
 
   <h2 id="quiz">自测</h2>
@@ -108,14 +526,28 @@
       <label><input type="radio" name="q1" value="a"> 没有问题，调度器会自动释放锁</label>
       <label><input type="radio" name="q1" value="b"> 当前线程睡眠后其他 CPU 会一直自旋等锁，且持有 spinlock 时抢占已关闭，可能死锁</label>
       <label><input type="radio" name="q1" value="c"> 只会影响性能，不影响正确性</label>
-      <div class="why" hidden>spinlock 的设计前提是临界区短且不睡眠；持锁期间抢占被关闭，睡眠会导致等锁的 CPU 空转甚至死锁。要睡眠请用 mutex。</div>
+      <div class="why" hidden>spinlock 的设计前提是临界区短且不睡眠；持锁期间抢占被关闭，睡眠会导致等锁的 CPU 空转甚至死锁。要睡眠请用 mutex（或改用 <code>GFP_ATOMIC</code> 分配）。</div>
     </div>
     <div class="q" data-answer="a">
       <p>2. 一个 Mach port 的 receive right 最多可以同时被几个 task 持有？</p>
       <label><input type="radio" name="q2" value="a"> 1 个</label>
       <label><input type="radio" name="q2" value="b"> 2 个</label>
       <label><input type="radio" name="q2" value="c"> 不限</label>
-      <div class="why" hidden>每个 port 只有一个 receive right（单一接收者）；send right 可以有很多个，分布在不同 task 中。</div>
+      <div class="why" hidden>每个 port 只有一个 receive right（单一接收者），可以用 <code>MACH_MSG_TYPE_MOVE_RECEIVE</code> 转交但不能复制；send right 可以有很多个，分布在不同 task 中。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>3. 在 ARM64 上，Linux 的 <code>smp_store_release(&amp;ready, 1)</code> 通常编译成什么？</p>
+      <label><input type="radio" name="q3" value="a"> 普通 <code>str</code>，ARM64 是强内存模型不需要额外指令</label>
+      <label><input type="radio" name="q3" value="b"> <code>isb</code> 后接 <code>str</code></label>
+      <label><input type="radio" name="q3" value="c"> <code>stlr</code>（store-release）</label>
+      <div class="why" hidden>ARM64 是弱内存模型，release 语义由专门的 <code>stlr</code> 指令提供，对应的 acquire 读是 <code>ldar</code>。<code>isb</code> 只刷新指令流水线，不提供数据访存的顺序保证。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>4. RCU 写者 <code>rcu_assign_pointer(gp, new)</code> 之后调 <code>synchronize_rcu()</code>，它在等什么？</p>
+      <label><input type="radio" name="q4" value="a"> 等所有读者（包括之后才进入读区的）都退出</label>
+      <label><input type="radio" name="q4" value="b"> 等调用时已经在读区里的读者都退出，即一个宽限期结束</label>
+      <label><input type="radio" name="q4" value="c"> 等其他 CPU 把新指针写回内存</label>
+      <div class="why" hidden>之后进入读区的读者只能看到新版本，不会引用旧对象，所以不必等它们；宽限期只覆盖已存在的读者。否则在读者源源不断的系统上写者会永远等下去。</div>
     </div>
     <button type="submit">检查答案</button>
     <div class="result"></div>
@@ -124,12 +556,15 @@
   <h2 id="resources">资料</h2>
   <ul class="res">
     <li><a href="https://www.kernel.org/doc/html/latest/locking/index.html">Linux kernel docs — Locking</a> <span class="lvl">入门，各类锁的官方说明</span></li>
+    <li><a href="https://docs.kernel.org/locking/lockdep-design.html">Linux kernel docs — Runtime locking correctness validator（lockdep 设计）</a> <span class="lvl">进阶，锁类、依赖图、报告格式</span></li>
     <li><a href="https://www.kernel.org/doc/Documentation/memory-barriers.txt">Linux kernel — memory-barriers.txt</a> <span class="lvl">进阶，内存屏障权威文档</span></li>
     <li><a href="https://lwn.net/Articles/262464/">LWN — What is RCU, Fundamentally?</a> <span class="lvl">入门，RCU 经典讲解</span></li>
+    <li><a href="https://docs.kernel.org/RCU/whatisRCU.html">Linux kernel docs — What is RCU?</a> <span class="lvl">进阶，API 与使用规则</span></li>
     <li><a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">Paul McKenney — Is Parallel Programming Hard, And, If So, What Can You Do About It?</a> <span class="lvl">深入，并发与 RCU 全书</span></li>
     <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual (Arm ARM) — B2 The AArch64 Application Level Memory Model</a> <span class="lvl">权威，ARM64 内存序与屏障</span></li>
-    <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl">源码；osfmk/ipc/、osfmk/kern/locks.c</span></li>
-    <li>Jonathan Levin, <em>*OS Internals</em> Vol. II <span class="lvl">深入，Mach IPC 章节</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/tree/main/osfmk/ipc">apple-oss-distributions/xnu — osfmk/ipc/</a> <span class="lvl">源码；ipc_kmsg.c、ipc_mqueue.c、mach_msg.c，另见 osfmk/kern/locks.c、smr.h</span></li>
+    <li><a href="https://developer.apple.com/documentation/xpc">Apple Developer — XPC</a> <span class="lvl">查手册，XPC 连接与服务</span></li>
+    <li>Jonathan Levin, <em>*OS Internals</em> Vol. I（User Mode）IPC 章节 + Vol. II（Kernel Mode）<span class="lvl">深入，Mach IPC、launchd、XPC 最系统的讲解</span></li>
   </ul>
 
   <nav class="pn">

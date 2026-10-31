@@ -78,16 +78,13 @@
 
   // Theme toggle (optional button.theme in the header). Persists per browser.
   const KEY = 'lg-theme';
-  try {
-    const saved = localStorage.getItem(KEY);
-    if (saved === 'dark' || saved === 'light') document.documentElement.dataset.theme = saved;
-  } catch (_) {}
+  // Saved theme is applied before first paint by assets/theme.js (loaded in <head>).
   document.addEventListener('click', (e) => {
     const b = e.target.closest('button.theme');
     if (!b) return;
-    const cur = document.documentElement.dataset.theme;
-    const next = cur === 'dark' ? 'light' : cur === 'light' ? '' : (matchMedia('(prefers-color-scheme: dark)').matches ? 'light' : 'dark');
-    if (next) document.documentElement.dataset.theme = next; else delete document.documentElement.dataset.theme;
-    try { next ? localStorage.setItem(KEY, next) : localStorage.removeItem(KEY); } catch (_) {}
+    const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem(KEY, next); } catch (_) {}
   });
 })();

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phase 6 · Debugging &amp; Tooling · Kernel Engineering</title>
 <link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -16,7 +17,7 @@
     <button class="theme" type="button" title="切换明暗">◐</button>
   </header>
 
-  <p class="meta">Phase 6 / 9 · skeleton — 内容待写</p>
+  <p class="meta">Phase 6 / 9 · 约 1–2 周</p>
   <h1>Debugging &amp; Tooling <span class="en">调试与工具：ftrace/perf/kgdb/crash ↔ lldb+KDP/dtrace/panic log；读内核源码的方法</span></h1>
   <p class="lede">内核工程师的大部分时间不是在写新代码，而是在读代码、追踪问题和分析崩溃。Apple 的内核面试通常包含调试环节，团队日常也离不开 panic log 分析和两机调试；这一阶段把 Linux 与 macOS 两边的工具箱配齐。</p>
 
@@ -33,68 +34,304 @@
 
   <h2 id="prereq">前置</h2>
   <ul>
-    <li>Phase 0（在 QEMU 中编译并启动 Linux、ARM64 寄存器）。</li>
-    <li>Phase 1–5（调试需要知道被调试的子系统在做什么；可与 Phase 3–5 交叉进行）。</li>
+    <li><a href="../phase-0-foundations/index.html">Phase 0</a>：在 QEMU 中编译并启动 Linux（本阶段直接复用 Lab A 的 <code>Image</code> 和 busybox initramfs）、ARM64 寄存器与异常。</li>
+    <li>Phase 1–5：调试需要知道被调试的子系统在做什么；本阶段可与 Phase 3–5 交叉进行。Phase 2 的缺页路径是读 oops 的最好练习素材。</li>
+    <li>macOS 一侧：能用 <code>sudo</code>；装了 Xcode（不只是 Command Line Tools）才有 <code>xctrace</code> 和 Instruments。</li>
   </ul>
 
   <h2 id="concepts">核心概念</h2>
 
   <h3>1. 高效读内核源码</h3>
-  <p>本节讲 cscope/ctags、clangd + <code>compile_commands.json</code>（Linux 用 <code>scripts/clang-tools/gen_compile_commands.py</code> 生成）以及在线交叉索引的用法。</p>
+  <p>内核源码太大，不能「从头读」。有效的读法是<strong>从入口追数据结构</strong>：先找到用户态能触发的入口（系统调用表、ioctl、fault handler），沿调用链往下，每遇到一个结构体就去看它在哪里分配、谁持有引用、谁加锁。工具只是让「跳到定义 / 列出调用者」这两个动作足够快。</p>
+  <p><strong>Linux</strong>：顶层 Makefile 自带 <code>make tags</code>、<code>make cscope</code>、<code>make gtags</code> 目标（交叉构建时记得带同样的 <code>ARCH=arm64</code>，否则只索引 x86 的 arch 代码）。更准的是 clangd：构建一次后 <code>make LLVM=1 ARCH=arm64 compile_commands.json</code>（底层是 <code>scripts/clang-tools/gen_compile_commands.py</code>，读构建产生的 <code>.cmd</code> 文件），编辑器里的 clangd 就能按<em>真实的 .config</em> 解析宏和 <code>#ifdef</code>。不想本地建索引时用在线交叉索引 Elixir（<code>elixir.bootlin.com</code>），可以按版本切换。Linux 有完整 git 历史：<code>git log -S 符号名</code> 找引入/删除某符号的提交，<code>git blame</code> + 提交信息往往直接告诉你「为什么这样写」，提交信息里的 <code>Link:</code> 还会指向邮件列表上的讨论。</p>
+  <p><strong>XNU</strong>：仓库 README 同样给了 <code>make tags</code> / <code>make TAGS</code> / <code>make cscope</code>。XNU 构建不直接产出 <code>compile_commands.json</code>，要 clangd 可以用通用工具 Bear 包一层 make（<code>bear -- make …</code>，大致做法，前提是你能构建成功，见 Phase 8）。没有索引时，XNU 的代码风格本身帮你：函数定义把返回类型单独放一行，所以 <code>grep -rn "^vm_fault(" osfmk/</code> 能直接定位定义。区别在历史：<code>apple-oss-distributions/xnu</code> 只按 macOS 版本发布<strong>快照</strong>（tag 形如 <code>xnu-12377.121.6</code>），没有逐提交的信息——想知道「为什么」，只能对比相邻 tag 的 diff 再结合 <code>doc/</code> 目录下的设计说明。</p>
+  <div class="note">读两个内核时的通用顺序：系统调用表（Linux <code>include/uapi/asm-generic/unistd.h</code>，XNU <code>bsd/kern/syscalls.master</code>）→ 入口处理（Phase 0 的异常向量）→ 子系统主函数 → 数据结构的生命周期（分配、引用计数、释放）。</div>
 
   <h3>2. 打印式调试：<code>printk</code> ↔ <code>os_log</code></h3>
-  <p>本节讲日志级别、<code>dmesg</code>、dynamic debug，以及 XNU 内核日志如何进入统一日志系统（<code>log show</code>）。</p>
+  <p><strong>Linux</strong>：<code>printk</code> 写进内核的环形缓冲区，再按级别决定是否同步打到控制台。级别 0–7 从 <code>KERN_EMERG</code> 到 <code>KERN_DEBUG</code>，日常用 <code>pr_err</code>/<code>pr_info</code>/<code>pr_debug</code>，驱动用带设备名的 <code>dev_err</code> 等。<code>/proc/sys/kernel/printk</code> 的第一个数是控制台级别（低于它的数值才上控制台），启动参数 <code>loglevel=</code>、<code>ignore_loglevel</code> 控制同一件事；用户态用 <code>dmesg</code>（<code>-w</code> 跟随，<code>-l err</code> 过滤）读缓冲区。</p>
+  <p><strong>dynamic debug</strong>（<code>CONFIG_DYNAMIC_DEBUG</code>）让每个 <code>pr_debug</code> 调用点都能在运行时单独开关：写 <code>&lt;debugfs&gt;/dynamic_debug/control</code>（无 debugfs 时是 <code>/proc/dynamic_debug/control</code>），例如 <code>echo 'file fault.c +p'</code>。高频路径里 printk 本身太慢、还会改变时序，可用 <code>trace_printk</code> 写进 ftrace 缓冲区。</p>
+  <p><strong>XNU</strong> 有三条打印路径：<code>printf</code>（内核版，进内核消息缓冲区，<code>sudo dmesg</code> 可读）；<code>kprintf</code>（<code>pexpert/arm/pe_kprintf.c</code>，走串口/调试通道，需要相应 boot-arg 才输出）；以及 <code>os_log</code> 系列（<code>libkern/os/log.h</code>：<code>os_log</code>、<code>os_log_info</code>、<code>os_log_debug</code>、<code>os_log_error</code>），通过 firehose 缓冲区交给用户态 <code>logd</code>，进入<strong>统一日志系统</strong>。IOKit 驱动常用 <code>IOLog</code>。读取用 <code>log show</code> / <code>log stream</code> 加谓词，如 <code>--predicate 'process == "kernel"'</code>。统一日志默认把动态字符串参数显示为 <code>&lt;private&gt;</code>，格式串里写 <code>%{public}s</code> 才会明文记录——这是隐私设计，不是 bug。</p>
+  <div class="note">zsh（macOS 默认 shell）有一个同名的内建命令 <code>log</code>，直接敲 <code>log show</code> 会报 <code>too many arguments</code>。本页一律写 <code>/usr/bin/log</code>。</div>
 
   <h3>3. 追踪与性能分析</h3>
-  <p>本节对比 Linux 的 ftrace、perf、eBPF 与 macOS 的 dtrace、kperf/ktrace、Instruments。</p>
+  <p><strong>ftrace</strong> 是 Linux 内建的追踪框架，界面就是 tracefs（<code>/sys/kernel/tracing</code>）里的文件：<code>current_tracer</code> 选 <code>function</code>（记录每个被调用的函数）或 <code>function_graph</code>（记录进入/返回，画出带耗时的调用树）；<code>set_ftrace_filter</code> / <code>set_graph_function</code> 限定范围；<code>events/</code> 下是静态 tracepoint；结果在 <code>trace</code> / <code>trace_pipe</code>。原理：编译时每个函数开头留一个可修补的位置，<code>DYNAMIC_FTRACE</code> 平时把它保持为 NOP，打开追踪时才改写成跳转，所以关掉时几乎零开销。<code>trace-cmd</code> 是它的命令行前端。</p>
+  <p><strong>perf</strong> 回答「时间花在哪」：<code>perf stat</code> 读硬件/软件计数器，<code>perf record -g</code> 按频率采样调用栈，<code>perf report</code> / 火焰图汇总。<strong>eBPF</strong> 则是可编程追踪：把经过内核 verifier 校验的小程序挂到 kprobe、tracepoint、perf 事件上，在内核里就地聚合，<code>bpftrace</code> 提供 awk 风格的一行脚本。</p>
+  <p><strong>macOS</strong>：<strong>dtrace</strong> 是 eBPF 的前辈，D 脚本挂在 provider 上（<code>syscall</code>、<code>fbt</code> 函数边界、<code>proc</code>、<code>profile</code>……）；但在 SIP 打开时它会提示 <code>system integrity protection is on, some features will not be available</code>，内核函数级的 <code>fbt</code> 等能力受限。Apple 自己的主力是 <strong>kdebug + kperf</strong>：内核里遍布 <code>KDBG</code> 事件点（类似 tracepoint，<code>bsd/kern/kdebug.c</code>），<code>osfmk/kperf/</code> 负责按定时器或事件采样调用栈和计数器。命令行入口是 <code>ktrace</code>（<code>ktrace trace</code> 看事件流，<code>ktrace artrace</code> 录一份可用 Instruments 打开的系统级 trace，<code>--kperf=</code> 指定采样器，如 <code>kstack</code>、<code>ustack</code>），图形入口是 Instruments（命令行 <code>xctrace</code>，需要完整 Xcode）。轻量的现场快照用 <code>sample</code>（单进程）和 <code>spindump</code>（全系统，含内核栈）。</p>
 
   <h3>4. 交互式调试器</h3>
-  <p>本节讲 QEMU gdbstub（<code>-s -S</code>）与 kgdb，以及 macOS 上用 lldb 通过 KDP 连接目标机的两机调试。</p>
+  <p><strong>QEMU gdbstub</strong>：<code>-s</code> 是 <code>-gdb tcp::1234</code> 的简写，<code>-S</code> 让虚拟 CPU 在第一条指令前停住。gdb 用 GDB Remote Serial Protocol（RSP）通过 TCP 读写寄存器和内存、设断点——被调试的是<em>整台虚拟机</em>，内核毫不知情，所以从第一条指令起就能调。要点：内核要带完整调试信息（arm64 <code>defconfig</code> 默认开了 <code>CONFIG_DEBUG_INFO_REDUCED</code>，要关掉）、开 <code>CONFIG_GDB_SCRIPTS</code> 并 <code>make scripts_gdb</code>，命令行加 <code>nokaslr</code>（否则符号地址对不上；内核文档对直接 <code>-kernel</code> 启动的建议是干脆关掉 <code>CONFIG_RANDOMIZE_BASE</code>）。断在 <code>start_kernel</code> 这种 MMU 打开前后的地方用 <code>hbreak</code>（硬件断点），软件断点要往内存里写 <code>brk</code>，地址未映射时写不进去。<code>vmlinux-gdb.py</code> 提供 <code>lx-symbols</code>、<code>lx-dmesg</code>、<code>lx-ps</code> 等辅助命令。</p>
+  <p><strong>kgdb</strong> 是内核<em>自带</em>的调试桩（<code>CONFIG_KGDB</code>），用于真机：通过串口（<code>kgdboc=ttyAMA0,115200</code>，加 <code>kgdbwait</code> 则启动时等待）与 host 上的 gdb 通信，运行中用 <code>echo g &gt; /proc/sysrq-trigger</code> 进入。代价是调试器本身依赖内核状态，内核坏得太厉害时就进不去。</p>
+  <p><strong>XNU 两机调试</strong>：被调试的「target Mac」跑 KDK 里的 development 内核，通过 boot-arg <code>debug=</code> 打开调试标志（位定义在 <code>osfmk/kern/debug.h</code>：如 <code>DB_NMI 0x4</code>、<code>DB_ARP 0x40</code>、<code>DB_KERN_DUMP_ON_PANIC 0x400</code>）。当它 panic 或收到 NMI 时停下等待调试器；「host Mac」上的 lldb 用 <code>kdp-remote &lt;ip&gt;</code> 通过 <strong>KDP</strong>（Kernel Debugging Protocol，UDP 41139，<code>osfmk/kdp/kdp_protocol.h</code> 里的 <code>KDP_CONNECT</code>、<code>KDP_READREGS</code>、<code>KDP_READMEM64</code>、<code>KDP_BREAKPOINT64_SET</code>……）连上。KDK 的 dSYM 里带着 <code>tools/lldbmacros/</code> 那套 Python 宏，提供 <code>showalltasks</code>、<code>showallstacks</code>、<code>paniclog</code>、<code>showbootargs</code> 等命令。Apple Silicon 上改 boot-args、引导非默认内核都要先在 recoveryOS 里降低安全级别（Reduced Security）；具体步骤随 macOS 版本变化，以 KDK 自带的说明为准。没有第二台 Mac 时，可以对 macOS 虚拟机（XNU 的 <code>VMAPPLE</code> 机型配置）练习，大致路径。</p>
+  <div class="note">两种模式要分清：QEMU gdbstub 和 KDP 都是<strong>停机调试</strong>（stop-mode），连上后整台机器冻结；ftrace、perf、dtrace、ktrace 是<strong>不停机观察</strong>。生产问题几乎都只能用后者 + 崩溃转储。</div>
 
   <h3>5. 崩溃分析</h3>
-  <p>本节讲 Linux oops/panic 信息、kdump + <code>crash</code> 工具，以及 macOS panic 日志的结构与 kernel core dump。</p>
+  <p><strong>Linux oops</strong>：内核态访问出错且查不到异常修复表时，arm64 打印 <code>Unable to handle kernel NULL pointer dereference at virtual address …</code>（或 paging request），随后 <code>Internal error: Oops</code>、寄存器（<code>pc</code>、<code>lr</code>、<code>sp</code>、x0–x29）、<code>Call trace:</code>（每帧形如 <code>func+0x24/0x80</code>，即函数内偏移/函数长度）、<code>Tainted:</code> 标志（加载过专有模块、之前已有 warning 等）。oops 默认只杀掉当前任务，<code>panic_on_oops=1</code> 才升级为 <code>Kernel panic - not syncing</code>；arm64 panic 时还打印 <code>Kernel Offset: 0x… from 0x…</code>（KASLR 偏移）。<code>scripts/faddr2line vmlinux func+0x24/0x80</code> 和 <code>scripts/decode_stacktrace.sh vmlinux &lt; oops.txt</code> 把「符号+偏移」翻译成源码行——因为是相对函数的偏移，KASLR 不影响它。</p>
+  <p><strong>kdump</strong>：启动参数 <code>crashkernel=</code> 预留一块内存，用 <code>kexec -p</code> 预先装入一个「捕获内核」；panic 时直接跳进它（不经固件），原内核的内存以 <code>/proc/vmcore</code>（ELF core 格式）呈现，<code>makedumpfile</code> 过滤压缩后保存。分析用 <code>crash vmlinux vmcore</code>：<code>bt</code>、<code>log</code>、<code>ps</code>、<code>kmem</code>、<code>struct</code>——相当于对已死的内核跑一个调试器。</p>
+  <p><strong>macOS panic</strong>：XNU 在 <code>osfmk/kern/debug.c</code> 里生成 panic log：第一行 <code>panic(cpu N caller 0x…): </code> + panic 字符串（如 arm64 内核数据访问异常的 <code>Kernel data abort.</code>）；之后有 <code>Kernel version</code>、<code>Kernel slide</code>、<code>Kernel text base</code>、出事的任务（<code>Panicked task</code>）和以 <code>lr: 0x… fp: 0x…</code> 逐帧列出的回溯（<code>osfmk/arm/model_dep.c</code>）。日志先存在保留区域，重启后写成 <code>/Library/Logs/DiagnosticReports/</code> 下的 <code>.panic</code> 文件（Console 的 Crash Reports 也能看到）。回溯里是<em>滑动后</em>的运行地址：减去 <code>Kernel slide</code> 才能对上 KDK 里未滑动的符号；或者让工具替你做（<code>atos -l</code>、lldb 的 <code>target modules load --slide</code>）。</p>
+  <p><strong>kernel core</strong>：设置 <code>DB_KERN_DUMP_ON_PANIC</code>（0x400）和 <code>_panicd_ip=</code> 后，panic 的机器会把整个内核 core 通过网络发给另一台运行 <code>kdumpd</code>（<code>/usr/libexec/kdumpd</code>，UDP 1069，默认存到 <code>/var/tmp/PanicDumps</code>）的 Mac；之后 <code>lldb -c core</code> 配上 KDK 符号和 lldbmacros 分析（大致路径，网络与本地 core 的支持随硬件和版本变化）。</p>
 
   <h3>6. 二分定位</h3>
-  <p>本节讲用 <code>git bisect</code>（含 <code>git bisect run</code> 自动化）在内核版本之间定位引入回归的提交。</p>
+  <p>「v6.11 好的，v6.12 坏了」——两者之间有一万多个提交。<code>git bisect</code> 是二分查找：每步检出中点、你判断好坏，约 log<sub>2</sub>(N) 步收敛（1 万个提交约 14 步）。内核里每一步都要重新编译和启动，所以<strong>自动化</strong>才是关键：<code>git bisect run ./test.sh</code>，脚本返回 0 = good，1–127（125 除外）= bad，<strong>125 = skip</strong>（这个提交编不过或测不了）。QEMU + initramfs 的好处在这里体现：一个「编译 → 启动 → 跑复现 → 根据串口输出判好坏」的脚本几分钟一轮。</p>
+  <p>两个常见坑：bisect 过程中 <code>.config</code> 会随 Kconfig 变化，用 <code>make olddefconfig</code> 保持一致；问题偶发时，测试脚本要重复多次才敢判 good，否则会二分到错误的提交。<strong>XNU</strong> 外部只有按发布的快照，无法逐提交二分；你能做的是先在 macOS 版本之间缩小到「哪一次发布引入」，再对那两个 tag 做 <code>git diff xnu-A xnu-B -- osfmk/vm/</code> 一类的定向比对（推断：Apple 内部有完整历史，可以真正二分）。</p>
 
   <h3>7. 写最小复现</h3>
-  <p>本节讲如何把一个偶发问题缩成可在 QEMU 中稳定重现的小程序或模块，以及 syzkaller 生成的复现程序长什么样。</p>
+  <p>一个好的复现程序：<strong>单文件、无依赖、确定性、几秒内触发</strong>，在 QEMU 里用带 KASAN 的内核跑（KASAN 在越界/释放后使用的<em>第一时间</em>报告，而不是等到很久以后的随机崩溃）。缩小的方法是反复删：删一个系统调用、一个线程、一个参数，看还能不能触发；多线程竞态用 <code>sched_setaffinity</code> 绑核、循环放大窗口。</p>
+  <p>syzkaller 的 C 复现程序是很好的范本：它直接 <code>syscall(__NR_xxx, …)</code> 绕过 libc，把参数放在固定地址（常见 <code>mmap(0x20000000, …)</code> 映射出的区域），用很多小线程和循环重复竞态；syzbot 的 dashboard（<code>syzkaller.appspot.com</code>）上每个 bug 都附带复现程序、内核配置和 KASAN 报告，可以拿来练习「读报告 → 本地复现 → 定位」。syzkaller 也有 Darwin 目标（仓库 <code>docs/darwin/</code>），XNU 侧对应的是 KASAN 内核配置（XNU 的 <code>SUPPORTED_KERNEL_CONFIGS</code> 里有 <code>KASAN</code>）。</p>
 
   <h2 id="compare">对照表</h2>
   <div class="table-wrap">
   <table class="cmp">
     <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">macOS / XNU</th></tr>
-    <tr><td>内核打印</td><td><code>printk</code> / <code>dmesg</code></td><td><code>printf</code> / <code>os_log</code> → <code>log show</code></td></tr>
-    <tr><td>函数级追踪</td><td>ftrace</td><td>dtrace（<code>fbt</code> provider）</td></tr>
-    <tr><td>性能采样</td><td>perf</td><td>kperf / Instruments</td></tr>
+    <tr><td>源码索引</td><td><code>make tags/cscope/gtags</code>；<code>make compile_commands.json</code> + clangd；Elixir</td><td>README 的 <code>make tags/cscope</code>；clangd 需自己生成编译数据库</td></tr>
+    <tr><td>历史</td><td>完整 git 历史，<code>git log -S</code>、<code>git blame</code>、邮件列表</td><td>按 macOS 版本发布的快照 tag，比对相邻 tag</td></tr>
+    <tr><td>内核打印</td><td><code>printk</code> / <code>pr_*</code> → <code>dmesg</code></td><td><code>printf</code> / <code>IOLog</code> / <code>os_log</code> → <code>/usr/bin/log show</code>、<code>sudo dmesg</code></td></tr>
+    <tr><td>运行时开关调试输出</td><td>dynamic debug（<code>dynamic_debug/control</code>）</td><td><code>os_log_debug</code> + 日志配置 / 谓词过滤</td></tr>
+    <tr><td>函数级追踪</td><td>ftrace（<code>function</code>、<code>function_graph</code>）</td><td>dtrace <code>fbt</code>（SIP 打开时受限）</td></tr>
+    <tr><td>静态事件点</td><td>tracepoint（<code>events/</code>），<code>trace-cmd</code></td><td>kdebug（<code>KDBG</code>），<code>ktrace trace</code></td></tr>
+    <tr><td>性能采样</td><td><code>perf record/report</code></td><td>kperf：<code>ktrace artrace --kperf=…</code>、Instruments / <code>xctrace</code></td></tr>
     <tr><td>可编程追踪</td><td>eBPF / bpftrace</td><td>dtrace D 脚本</td></tr>
-    <tr><td>源码级调试</td><td>gdb + QEMU gdbstub / kgdb</td><td>lldb + KDP（<code>kdp-remote</code>）</td></tr>
-    <tr><td>崩溃转储分析</td><td>kdump + <code>crash</code></td><td>panic log + kernel core + KDK 符号</td></tr>
+    <tr><td>源码级调试</td><td>gdb + QEMU gdbstub（RSP/TCP）；真机 kgdb</td><td>lldb + KDP（<code>kdp-remote</code>，UDP 41139）</td></tr>
+    <tr><td>调试辅助脚本</td><td><code>scripts/gdb/</code>：<code>lx-dmesg</code>、<code>lx-ps</code>、<code>lx-symbols</code></td><td><code>tools/lldbmacros/</code>：<code>showalltasks</code>、<code>showallstacks</code>、<code>paniclog</code></td></tr>
+    <tr><td>崩溃信息</td><td>oops：<code>Call trace:</code>、<code>Tainted:</code>、<code>Kernel Offset</code></td><td><code>.panic</code>：panic 字符串、<code>lr/fp</code> 回溯、<code>Kernel slide</code></td></tr>
+    <tr><td>崩溃转储</td><td>kdump（<code>crashkernel=</code> + <code>kexec -p</code>）→ <code>crash</code></td><td>网络 core → <code>kdumpd</code> → <code>lldb -c</code></td></tr>
+    <tr><td>符号</td><td>同一次构建的 <code>vmlinux</code> / 发行版 debuginfo 包</td><td>与 build 号精确匹配的 KDK（<code>kernel.*.dSYM</code>）</td></tr>
+    <tr><td>内存错误检测</td><td>KASAN、KFENCE、KMSAN</td><td>KASAN 内核配置</td></tr>
   </table>
   </div>
 
-  <h2 id="diagram">动画图解：两机调试——lldb 经 KDP 连接目标机（占位）</h2>
+  <h2 id="diagram">动画图解</h2>
+
+  <h3>A · 两机调试：gdb ⇄ QEMU gdbstub ↔ lldb ⇄ KDP</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 200"
-         data-captions='["（占位）本阶段动画待制作：将逐步展示 Linux 侧 gdb 连 QEMU gdbstub、macOS 侧 host 上的 lldb 通过 KDP 连接停在调试器中的目标机，并加载 KDK 符号查看回溯。"]'>
+    <svg data-diagram viewBox="0 0 900 410" data-interval="2400"
+         data-captions='["全图：左边 Linux，host 上的 gdb 通过 RSP 连 QEMU 内置的 gdbstub；右边 XNU，host Mac 上的 lldb 通过 KDP 连另一台 target Mac 的内核。两者都是停机调试。按「播放」逐步走。",
+           "① 准备目标。Linux：QEMU 加 -s -S 启动，-s 在 TCP 1234 开 gdbstub，-S 让 vCPU 停在第一条指令前；命令行带 nokaslr。XNU：target Mac 装 KDK 的 development 内核，boot-args 里 debug= 打开调试标志（如 DB_NMI 0x4、DB_ARP 0x40），Apple Silicon 上需先降为 Reduced Security。",
+           "② host 加载符号。Linux：gdb vmlinux 读 DWARF，make scripts_gdb 生成的 vmlinux-gdb.py 提供 lx-* 命令。XNU：lldb 打开与 target 完全同一 build 的 KDK 内核，dSYM 里的 Python 宏（tools/lldbmacros）随之加载。",
+           "③ 建立连接。Linux：target remote :1234，vCPU 早已停住，直接连上。XNU：target 必须先停下——panic 或 NMI 后它进入调试器等待连接；host 执行 kdp-remote 加 target 的 IP。",
+           "④ 线上协议。RSP 是 TCP 上的文本包：g 读全部寄存器、m 读内存、Z1 设硬件断点。KDP 是 UDP 41139 上的请求/应答：KDP_CONNECT、KDP_READREGS、KDP_READMEM64、KDP_BREAKPOINT64_SET（osfmk/kdp/kdp_protocol.h）。",
+           "⑤ 检查现场。Linux：hbreak start_kernel，continue，命中后 bt、info registers；内核起来后 lx-dmesg、lx-ps。XNU：bt、showallstacks、showalltasks、paniclog——整台 target 冻结在调试器里。",
+           "⑥ 恢复或断开。continue 让目标继续跑，detach 断开。QEMU 恢复全部 vCPU；KDP 断开后 target 继续运行，或按 debug 标志的设定重启。"]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <rect class="box" x="200" y="60" width="500" height="80"/>
-      <text x="230" y="106">两机调试：host lldb ⇄ KDP ⇄ target 内核</text>
+      <text x="170" y="20" class="small" style="fill: var(--linux)">Linux · gdb ⇄ QEMU</text>
+      <text x="610" y="20" class="small" style="fill: var(--xnu)">XNU · lldb ⇄ KDP</text>
+      <line x1="450" y1="28" x2="450" y2="404" class="lane"/>
+
+      <!-- endpoints -->
+      <g data-step="2 3 4 5"><rect class="box linux" x="20" y="32" width="170" height="62"/>
+        <text x="30" y="54" class="mono">host · gdb vmlinux</text>
+        <text x="30" y="74" class="small">DWARF + vmlinux-gdb.py</text></g>
+      <g data-step="1 3 4 5 6"><rect class="box linux" x="262" y="32" width="174" height="62"/>
+        <text x="272" y="54" class="mono">QEMU virt -s -S</text>
+        <text x="272" y="74" class="small">gdbstub · tcp:1234</text></g>
+      <g data-step="3 4"><path class="arrow flow" d="M192 63 L260 63"/>
+        <text x="200" y="56" class="small">RSP</text></g>
+      <g data-step="2 3 4 5"><rect class="box xnu" x="464" y="32" width="170" height="62"/>
+        <text x="474" y="54" class="mono">host Mac · lldb</text>
+        <text x="474" y="74" class="small">KDK dSYM + lldbmacros</text></g>
+      <g data-step="1 3 4 5 6"><rect class="box xnu" x="706" y="32" width="174" height="62"/>
+        <text x="716" y="54" class="mono">target Mac</text>
+        <text x="716" y="74" class="small">development 内核 + debug=</text></g>
+      <g data-step="3 4"><path class="arrow flow" d="M636 63 L704 63"/>
+        <text x="644" y="56" class="small">KDP</text></g>
+
+      <!-- step rows -->
+      <g data-step="1"><rect class="box linux" x="20" y="108" width="416" height="44"/>
+        <text x="30" y="126" class="mono">qemu-system-aarch64 … -s -S -append "… nokaslr"</text>
+        <text x="30" y="144" class="small">vCPU 停在第一条指令前；-s = -gdb tcp::1234</text></g>
+      <g data-step="1"><rect class="box xnu" x="464" y="108" width="416" height="44"/>
+        <text x="474" y="126" class="mono">boot-args: debug=0x44 …</text>
+        <text x="474" y="144" class="small">KDK 的 development 内核；Apple Silicon 先降为 Reduced Security</text></g>
+
+      <g data-step="2"><rect class="box linux" x="20" y="156" width="416" height="44"/>
+        <text x="30" y="174" class="mono">$ gdb vmlinux</text>
+        <text x="30" y="192" class="small">需关 DEBUG_INFO_REDUCED、开 GDB_SCRIPTS；make scripts_gdb</text></g>
+      <g data-step="2"><rect class="box xnu" x="464" y="156" width="416" height="44"/>
+        <text x="474" y="174" class="mono">$ lldb kernel.development.t6000</text>
+        <text x="474" y="192" class="small">必须与 target 同一 build；宏来自 dSYM（tools/lldbmacros）</text></g>
+
+      <g data-step="3"><rect class="box linux" x="20" y="204" width="416" height="44"/>
+        <text x="30" y="222" class="mono">(gdb) target remote :1234</text>
+        <text x="30" y="240" class="small">目标早已停住，直接连上</text></g>
+      <g data-step="3"><rect class="box xnu" x="464" y="204" width="416" height="44"/>
+        <text x="474" y="222" class="mono">(lldb) kdp-remote 192.168.1.20</text>
+        <text x="474" y="240" class="small">target 须先停下：panic 或 NMI 后等待调试器</text></g>
+
+      <g data-step="4"><rect class="box linux" x="20" y="252" width="416" height="44"/>
+        <text x="30" y="270" class="mono">$g   $m addr,len   $Z1,addr,4</text>
+        <text x="30" y="288" class="small">RSP：TCP 上的文本包（读寄存器 / 读内存 / 硬件断点）</text></g>
+      <g data-step="4"><rect class="box xnu" x="464" y="252" width="416" height="44"/>
+        <text x="474" y="270" class="mono">KDP_READREGS / KDP_READMEM64</text>
+        <text x="474" y="288" class="small">UDP 41139 上的请求/应答（osfmk/kdp/）</text></g>
+
+      <g data-step="5"><rect class="box linux pulse" x="20" y="300" width="416" height="44"/>
+        <text x="30" y="318" class="mono">hbreak start_kernel ; c ; bt ; lx-dmesg</text>
+        <text x="30" y="336" class="small">MMU 打开前后用硬件断点；软件断点写不进未映射地址</text></g>
+      <g data-step="5"><rect class="box xnu pulse" x="464" y="300" width="416" height="44"/>
+        <text x="474" y="318" class="mono">bt ; showallstacks ; paniclog</text>
+        <text x="474" y="336" class="small">整台 target 冻结在调试器里</text></g>
+
+      <g data-step="6"><rect class="box" x="20" y="348" width="416" height="44"/>
+        <text x="30" y="366" class="mono">(gdb) continue | detach</text>
+        <text x="30" y="384" class="small">QEMU 恢复全部 vCPU</text>
+        <rect class="box" x="464" y="348" width="416" height="44"/>
+        <text x="474" y="366" class="mono">(lldb) continue | detach</text>
+        <text x="474" y="384" class="small">target 继续运行或按 debug 标志重启</text>
+        <path class="arrow flow" d="M10 370 L10 72 L18 72"/>
+        <path class="arrow flow" d="M890 370 L890 72 L882 72"/></g>
+    </svg>
+  </div>
+
+  <h3>B · 从 panic 到符号化：kdump/crash ↔ panic log/KDK</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
+         data-captions='["全图：同一类事故——内核解引用了坏指针——在两个系统里怎样从崩溃一路变成可读的源码行。左列 Linux，右列 XNU，自上而下 6 步。",
+           "① 出事。Linux arm64：do_page_fault 查不到修复表，打印 Unable to handle kernel NULL pointer dereference，随后 die 产生 Oops；panic_on_oops=1 时升级为 panic。XNU：sleh.c 处理内核数据异常，调用 panic_with_thread_kernel_state，panic 字符串为 Kernel data abort.",
+           "② 留下文字记录。Linux：寄存器、Call trace（func+偏移/长度）、Tainted、panic 时的 Kernel Offset 写进 printk 缓冲区和串口。XNU：panic log 包含 panic(cpu N caller …)、Kernel version、Kernel slide、Kernel text base 和 lr/fp 回溯，重启后存成 DiagnosticReports 下的 .panic 文件。",
+           "③ 留下整机内存（可选）。Linux：kdump 用 crashkernel= 预留内存、kexec -p 预装捕获内核；panic 时跳过去，原内存以 /proc/vmcore 呈现，makedumpfile 压缩保存。XNU：debug 标志含 DB_KERN_DUMP_ON_PANIC 0x400 并设置 _panicd_ip 时，把 core 经网络发给另一台 Mac 上的 kdumpd（UDP 1069，大致路径）。",
+           "④ 找到对得上的符号。Linux：必须是同一次构建的 vmlinux（带 DWARF），发行版内核装对应 debuginfo 包。XNU：KDK 必须与 macOS build 号完全一致，里面有各 SoC 的 kernel 与 dSYM；用 UUID 核对。",
+           "⑤ 处理地址随机化。Linux：Call trace 本来就是函数加偏移，faddr2line 或 decode_stacktrace.sh 直接换算成源码行，不受 KASLR 影响；crash 从 vmcoreinfo 读偏移。XNU：回溯里是滑动后的运行地址，减去 Kernel slide 才是 KDK 里的地址；atos -l 或 lldb target modules load --slide 可代劳。",
+           "⑥ 分析。Linux：crash vmlinux vmcore，用 bt、log、ps、kmem 查看所有任务和内存。XNU：lldb -c core 加 KDK 符号，用同一套 lldbmacros：paniclog、showallstacks、showalltasks。只有 panic log 没有 core 时，就靠第 ⑤ 步的符号化回溯加源码推理。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="200" y="20" class="small" style="fill: var(--linux)">Linux</text>
+      <text x="645" y="20" class="small" style="fill: var(--xnu)">XNU</text>
+      <line x1="450" y1="28" x2="450" y2="396" class="lane"/>
+
+      <g data-step="1"><rect class="box linux" x="20" y="30" width="416" height="48"/>
+        <text x="30" y="50" class="mono">Unable to handle kernel NULL pointer …</text>
+        <text x="30" y="68" class="small">die() → Oops；panic_on_oops=1 → Kernel panic - not syncing</text></g>
+      <g data-step="1"><rect class="box xnu" x="464" y="30" width="416" height="48"/>
+        <text x="474" y="50" class="mono">panic(cpu 0 caller 0x…): Kernel data abort.</text>
+        <text x="474" y="68" class="small">osfmk/arm64/sleh.c → panic_with_thread_kernel_state</text></g>
+
+      <g data-step="2"><path class="arrow" d="M228 78 L228 90"/><path class="arrow" d="M672 78 L672 90"/>
+        <rect class="box linux" x="20" y="90" width="416" height="48"/>
+        <text x="30" y="110" class="mono">pc / lr / sp · Call trace: · Kernel Offset</text>
+        <text x="30" y="128" class="small">printk 缓冲区 + 串口；每帧 func+0x24/0x80</text>
+        <rect class="box xnu" x="464" y="90" width="416" height="48"/>
+        <text x="474" y="110" class="mono">Kernel slide · text base · lr: … fp: …</text>
+        <text x="474" y="128" class="small">重启后 → /Library/Logs/DiagnosticReports/*.panic</text></g>
+
+      <g data-step="3"><path class="arrow" d="M228 138 L228 150"/><path class="arrow" d="M672 138 L672 150"/>
+        <rect class="box linux" x="20" y="150" width="416" height="48"/>
+        <text x="30" y="170" class="mono">kexec -p → 捕获内核 → /proc/vmcore</text>
+        <text x="30" y="188" class="small">crashkernel= 预留；makedumpfile 压缩保存</text>
+        <rect class="box xnu" x="464" y="150" width="416" height="48"/>
+        <text x="474" y="170" class="mono">debug=0x400 … _panicd_ip= → kdumpd</text>
+        <text x="474" y="188" class="small">网络 core，UDP 1069，存到 /var/tmp/PanicDumps（大致）</text>
+        <path class="arrow flow" d="M436 174 C 448 174, 452 174, 462 174"/></g>
+
+      <g data-step="4"><path class="arrow" d="M228 198 L228 210"/><path class="arrow" d="M672 198 L672 210"/>
+        <rect class="box linux pulse" x="20" y="210" width="416" height="48"/>
+        <text x="30" y="230" class="mono">vmlinux（同一次构建，带 DWARF）</text>
+        <text x="30" y="248" class="small">发行版：debuginfo 包；System.map 只有符号没有行号</text>
+        <rect class="box xnu pulse" x="464" y="210" width="416" height="48"/>
+        <text x="474" y="230" class="mono">/Library/Developer/KDKs/KDK_….kdk</text>
+        <text x="474" y="248" class="small">与 build 号完全一致；kernel.*.dSYM，按 UUID 核对</text></g>
+
+      <g data-step="5"><path class="arrow" d="M228 258 L228 270"/><path class="arrow" d="M672 258 L672 270"/>
+        <rect class="box linux" x="20" y="270" width="416" height="48"/>
+        <text x="30" y="290" class="mono">scripts/faddr2line vmlinux func+0x24/0x80</text>
+        <text x="30" y="308" class="small">符号+偏移，不受 KASLR 影响 → file.c:123</text>
+        <rect class="box xnu" x="464" y="270" width="416" height="48"/>
+        <text x="474" y="290" class="mono">未滑动地址 = lr − Kernel slide</text>
+        <text x="474" y="308" class="small">atos -l … 或 lldb target modules load --slide</text></g>
+
+      <g data-step="6"><path class="arrow" d="M228 318 L228 330"/><path class="arrow" d="M672 318 L672 330"/>
+        <rect class="box" x="20" y="330" width="416" height="48"/>
+        <text x="30" y="350" class="mono">crash vmlinux vmcore → bt · log · ps · kmem</text>
+        <text x="30" y="368" class="small">对已停止的内核跑调试器</text>
+        <rect class="box" x="464" y="330" width="416" height="48"/>
+        <text x="474" y="350" class="mono">lldb -c core → paniclog · showallstacks</text>
+        <text x="474" y="368" class="small">与两机调试同一套 lldbmacros</text>
+        <path class="arrow flow" d="M10 354 L10 54 L18 54"/>
+        <path class="arrow flow" d="M890 354 L890 54 L882 54"/></g>
     </svg>
   </div>
 
   <h2 id="lab">动手实验</h2>
   <div class="lab">
-    <ul>
-      <li>Linux（QEMU）：用 <code>-s -S</code> 启动 QEMU，<code>gdb vmlinux</code> 后 <code>target remote :1234</code>，在 <code>start_kernel</code> 下断点。</li>
-      <li>Linux（QEMU）：在 <code>/sys/kernel/tracing</code> 下启用 <code>function_graph</code> tracer，追踪一次 <code>openat</code> 的调用树。</li>
-      <li>macOS：在 Console 或 <code>/Library/Logs/DiagnosticReports/</code> 中找一份历史 panic 报告，标出 panic 字符串、回溯与内核版本。</li>
-      <li>任意：在内核树上用 <code>git bisect</code> 走一遍（可用人为制造的回归练习）。</li>
-    </ul>
+    <h3>Lab A · QEMU Linux：ftrace、gdb、读一次 oops</h3>
+    <ol>
+      <li>把 Phase 0 的内核重新配置成「可调试」版本（arm64 <code>defconfig</code> 默认关着 ftrace、开着 <code>DEBUG_INFO_REDUCED</code>）：<pre>cd linux
+./scripts/config -d DEBUG_INFO_REDUCED -e GDB_SCRIPTS \
+  -e FTRACE -e FUNCTION_TRACER -e FUNCTION_GRAPH_TRACER -e DYNAMIC_FTRACE \
+  -e DYNAMIC_DEBUG
+make LLVM=1 ARCH=arm64 olddefconfig
+grep -E "DEBUG_INFO_REDUCED|GDB_SCRIPTS|FUNCTION_GRAPH_TRACER|DYNAMIC_DEBUG=" .config
+make LLVM=1 ARCH=arm64 -j"$(sysctl -n hw.ncpu)" Image scripts_gdb
+make LLVM=1 ARCH=arm64 compile_commands.json     # 顺便给 clangd 用</pre>
+        <code>grep</code> 那一行要看到 <code>GDB_SCRIPTS=y</code>、<code>FUNCTION_GRAPH_TRACER=y</code>，且 <code>DEBUG_INFO_REDUCED</code> 是 <code>is not set</code>；若某项被 <code>olddefconfig</code> 抹掉，说明有依赖没满足，用 <code>make LLVM=1 ARCH=arm64 menuconfig</code> 搜索该选项看依赖。</li>
+      <li>用 Phase 2 的 initramfs（busybox 链接里有 <code>grep head sleep</code>）正常启动，然后在 guest 里用 ftrace 画出一次 <code>openat</code> 的调用树：<pre>mount -t tracefs nodev /sys/kernel/tracing
+cd /sys/kernel/tracing
+cat available_tracers                        # 应含 function function_graph nop
+grep openat available_filter_functions       # arm64 的系统调用入口通常是 __arm64_sys_openat
+echo __arm64_sys_openat &gt; set_graph_function
+echo function_graph &gt; current_tracer
+echo 1 &gt; tracing_on; cat /proc/version &gt; /dev/null; echo 0 &gt; tracing_on
+head -80 trace                               # 带缩进和耗时的调用树：getname → do_filp_open → path_openat …
+echo nop &gt; current_tracer; echo &gt; set_graph_function</pre>
+        如果 <code>grep</code> 给出的名字不同，就用它给的那个；不要照抄。把调用树和 Phase 4 的 VFS 路径对照着读。</li>
+      <li>dynamic debug 与 oops：<pre>mount -t debugfs none /sys/kernel/debug
+grep -c . /sys/kernel/debug/dynamic_debug/control    # 可单独开关的 pr_debug 调用点数量
+echo c &gt; /proc/sysrq-trigger                          # 故意让内核崩溃（只在 QEMU 里做！）</pre>
+        串口上会出现完整的 oops / panic：找出 <code>pc</code>、<code>Call trace:</code> 第一帧、<code>Kernel Offset</code>（因为 <code>defconfig</code> 开了 <code>CONFIG_RANDOMIZE_BASE</code>）。回到 macOS，把第一帧喂给 <code>./scripts/faddr2line vmlinux 那一帧的func+0x../0x..</code>，应该指向 <code>drivers/tty/sysrq.c</code> 里的 <code>sysrq_handle_crash</code> 附近。</li>
+      <li>gdb 单步内核。终端 1（注意 <code>-s -S</code> 和 <code>nokaslr</code>）：<pre>qemu-system-aarch64 -M virt -cpu cortex-a72 -m 1G -nographic -s -S \
+  -kernel arch/arm64/boot/Image -initrd initramfs/initramfs.cpio.gz \
+  -append "console=ttyAMA0 rdinit=/init nokaslr"</pre>
+        终端 2：Homebrew 的 gdb 不支持 Apple Silicon 主机，在 arm64 Linux 容器里跑原生 gdb，经 <code>host.docker.internal</code> 连回宿主机的 1234 端口：<pre>docker run --platform linux/arm64 -it --rm -v "$PWD:/linux" -w /linux debian:bookworm bash -c \
+  'apt-get update -qq &amp;&amp; apt-get install -y -qq gdb python3 &gt;/dev/null &amp;&amp; \
+   gdb -iex "add-auto-load-safe-path /linux" vmlinux'
+(gdb) target remote host.docker.internal:1234
+(gdb) hbreak start_kernel
+(gdb) continue
+(gdb) bt
+(gdb) info registers pc sp
+(gdb) next                    # 单步几行 start_kernel
+(gdb) continue                # 等 shell 起来后按 Ctrl-C 停住
+(gdb) lx-dmesg
+(gdb) lx-ps</pre>
+        常见问题：<code>lx-*</code> 不存在 → <code>vmlinux-gdb.py</code> 没被自动加载（检查 <code>make scripts_gdb</code> 和 safe-path）；断点不命中 → 忘了 <code>nokaslr</code>；源码路径显示为宿主机路径 → <code>set substitute-path /你的/宿主机/linux /linux</code>。不想用容器也可以用宿主机的 lldb：<code>lldb vmlinux</code> → <code>gdb-remote 1234</code> → <code>breakpoint set -H -n start_kernel</code>（没有 <code>lx-*</code> 辅助命令）。</li>
+      <li>perf 需要完整的用户态，busybox initramfs 里没有。在任意 arm64 Linux 虚拟机或真机（Debian：<code>sudo apt install linux-perf</code>；Ubuntu：<code>linux-tools-$(uname -r)</code>）上：<pre>perf stat -e task-clock,context-switches,page-faults -- ls -R /usr &gt; /dev/null
+sudo perf record -g -a -- sleep 5
+sudo perf report --stdio | head -60
+sudo bpftrace -e 'kprobe:do_filp_open { @[comm] = count(); }'   # Ctrl-C 后打印每个进程的 open 次数</pre>
+        虚拟机若没有暴露 PMU，<code>perf stat</code> 会把 <code>cycles</code> 等硬件事件标成 <code>&lt;not supported&gt;</code>，这时改用软件事件 <code>-e cpu-clock</code>。</li>
+    </ol>
+
+    <h3>Lab B · macOS：统一日志、ktrace/kperf、dtrace 与 panic 报告</h3>
+    <ol>
+      <li>启动参数与版本——之后找 KDK 要用 build 号：<pre>sysctl kern.bootargs              # 正常机器上通常为空
+nvram boot-args 2&gt;&amp;1               # 未设置时会报 data was not found
+sysctl kern.version kern.osversion # osversion 就是 build 号，如 26B123
+csrutil status</pre></li>
+      <li>统一日志里的内核消息（注意用全路径，避开 zsh 的内建 <code>log</code>）：<pre>/usr/bin/log show --last 10m --predicate 'process == "kernel"' --style compact | tail -30
+/usr/bin/log show --last 10m --predicate 'process == "kernel" AND eventMessage CONTAINS "Sandbox"' --style compact | tail -5
+/usr/bin/log stream --predicate 'process == "kernel"' --style compact     # Ctrl-C 结束
+sudo dmesg | tail -20</pre>
+        第二条会看到 Sandbox 内核扩展记录的 <code>deny(1) …</code>——这是 MACF 策略在内核里拒绝操作留下的痕迹，Phase 7 会讲。</li>
+      <li>ktrace / kperf：录 5 秒系统级 trace，按 1 ms 采内核栈和用户栈：<pre>sudo ktrace artrace -t 5s --kperf=kstack,ustack@1ms -o /tmp/sys.atrc
+open /tmp/sys.atrc                  # 用 Instruments 打开（需要 Xcode）
+sudo ktrace machine                 # 机器信息
+man ktrace                          # FILTER / SAMPLING DESCRIPTIONS 两节说明了语法</pre>
+        只装了 Command Line Tools 时，<code>xcrun xctrace</code> 会报「requires Xcode」；装了 Xcode 后可以 <code>xcrun xctrace record --template 'Time Profiler' --time-limit 5s --launch -- /bin/ls -R /usr</code>。更轻量的替代：<code>sample &lt;pid&gt; 3</code>、<code>sudo spindump &lt;pid&gt; 3</code>。</li>
+      <li>dtrace 与 SIP：<pre>sudo dtrace -n 'syscall::open*:entry { @[execname] = count(); }'   # 跑几秒后 Ctrl-C</pre>
+        SIP 打开时第一行会是 <code>dtrace: system integrity protection is on, some features will not be available</code>：对受保护进程和内核 <code>fbt</code> 的追踪受限，你自己编译的程序通常还能追。完全放开需要在 recoveryOS 里改 SIP 配置——这会降低整机安全性，只在专门的测试机上做，本实验不需要。</li>
+      <li>panic 报告：<pre>ls -lt /Library/Logs/DiagnosticReports/ | grep -i panic | head</pre>
+        有的话打开最新一份，标出 <code>panic(cpu … caller …)</code> 后的字符串、<code>Kernel version</code>、<code>Kernel slide</code>、<code>Kernel text base</code>、<code>Panicked task</code> 和 <code>lr:</code> 回溯；没有的话在 Console → Crash Reports 里找，或者用网上公开的 panic log 练习。若已装了匹配 build 号的 KDK（<code>/Library/Developer/KDKs/</code>），试着符号化前几帧：<pre>KDK=$(ls -d /Library/Developer/KDKs/*.kdk | tail -1)
+ls "$KDK/System/Library/Kernels/"        # 找到与你的 SoC 对应的 kernel.release.tXXXX 及其 .dSYM
+atos -o "$KDK/System/Library/Kernels/kernel.release.tXXXX.dSYM" -arch arm64e \
+     -l &lt;Kernel text base&gt; &lt;lr1&gt; &lt;lr2&gt; &lt;lr3&gt;</pre>
+        结果对不上时，用 lldb 显式给 slide：<code>lldb kernel.release.tXXXX</code> → <code>target modules load --file kernel.release.tXXXX --slide &lt;Kernel slide&gt;</code> → <code>image lookup -a &lt;lr&gt;</code>。kernelcache 的布局随版本变化，<code>-l</code> 填哪个基址以实际能对上的为准。</li>
+    </ol>
+    <div class="note">交付物：Lab A 的 <code>function_graph</code> 调用树前 30 行 + <code>faddr2line</code> 的输出；Lab B 的一段内核 Sandbox 日志 + 一份 panic 报告的字段标注（或 KDK 符号化结果）。再写 5 行：gdbstub 与 KDP 各自「谁在被调试、谁提供调试桩、连接前目标必须处于什么状态」。</div>
   </div>
 
   <h2 id="quiz">自测</h2>
@@ -104,14 +341,28 @@
       <label><input type="radio" name="q1" value="a"> 约 100 次</label>
       <label><input type="radio" name="q1" value="b"> 约 10 次</label>
       <label><input type="radio" name="q1" value="c"> 约 500 次</label>
-      <div class="why" hidden>bisect 是二分查找，次数约为 log2(1000) ≈ 10。</div>
+      <div class="why" hidden>bisect 是二分查找，次数约为 log2(1000) ≈ 10。测不了的提交让脚本返回 125（skip），会多花几步但不影响正确性。</div>
     </div>
     <div class="q" data-answer="a">
       <p>2. QEMU 启动参数 <code>-s -S</code> 的作用是？</p>
       <label><input type="radio" name="q2" value="a"> 在 TCP 端口 1234 开启 gdbstub，并在启动时暂停 CPU 等待调试器</label>
       <label><input type="radio" name="q2" value="b"> 开启串口并静默输出</label>
       <label><input type="radio" name="q2" value="c"> 生成内核 core dump</label>
-      <div class="why" hidden>-s 是 -gdb tcp::1234 的简写；-S 让 CPU 在启动时停住，直到调试器发出 continue。</div>
+      <div class="why" hidden>-s 是 -gdb tcp::1234 的简写；-S 让 CPU 在启动时停住，直到调试器发出 continue。调试桩在 QEMU 里，所以从内核第一条指令起就能调。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>3. macOS panic 报告回溯里的 <code>lr</code> 地址，为什么不能直接拿去 KDK 的内核符号里查？</p>
+      <label><input type="radio" name="q3" value="a"> 因为这些地址被 PAC 签过名，必须先去掉签名</label>
+      <label><input type="radio" name="q3" value="b"> 因为 panic 报告里只记录了用户态地址</label>
+      <label><input type="radio" name="q3" value="c"> 因为它们是 KASLR 滑动后的运行地址，要减去报告里的 <code>Kernel slide</code>（或让 atos / lldb 按 slide 加载）才能对上 KDK 中未滑动的符号</label>
+      <div class="why" hidden>XNU 启动时整体随机滑动内核；panic log 同时记下 Kernel slide 和 Kernel text base 就是为了事后符号化。还要保证 KDK 与 build 号完全一致。Linux oops 的 Call trace 写的是函数加偏移，所以不受 KASLR 影响。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>4. 在 SIP 打开的 Mac 上运行 <code>sudo dtrace …</code>，最可能出现什么情况？</p>
+      <label><input type="radio" name="q4" value="a"> 完全无法运行，dtrace 已从 macOS 中移除</label>
+      <label><input type="radio" name="q4" value="b"> 能运行，但提示 system integrity protection is on, some features will not be available，内核与受保护进程的追踪受限</label>
+      <label><input type="radio" name="q4" value="c"> 与关闭 SIP 时完全相同</label>
+      <div class="why" hidden>dtrace 仍在系统里，但 SIP 限制了它能看到的东西。Apple 自己更常用 kdebug/kperf（ktrace、Instruments），这些在 SIP 打开时可以正常使用。</div>
     </div>
     <button type="submit">检查答案</button>
     <div class="result"></div>
@@ -119,13 +370,16 @@
 
   <h2 id="resources">资料</h2>
   <ul class="res">
-    <li><a href="https://www.kernel.org/doc/html/latest/trace/ftrace.html">Linux kernel docs — ftrace - Function Tracer</a> <span class="lvl">查手册，ftrace 全部功能</span></li>
-    <li><a href="https://www.kernel.org/doc/html/latest/dev-tools/gdb-kernel-debugging.html">Linux kernel docs — Debugging kernel and modules via gdb</a> <span class="lvl">入门，QEMU + gdb</span></li>
-    <li><a href="https://www.kernel.org/doc/html/latest/admin-guide/bug-hunting.html">Linux kernel docs — Bug hunting</a> <span class="lvl">入门，读 oops</span></li>
-    <li><a href="https://www.kernel.org/doc/html/latest/admin-guide/bug-bisect.html">Linux kernel docs — Bisecting a bug</a> <span class="lvl">入门，内核 bisect</span></li>
-    <li><a href="https://www.brendangregg.com/perf.html">Brendan Gregg — Linux perf Examples</a> <span class="lvl">实战，perf 用法合集</span></li>
-    <li><a href="https://ebpf.io/">ebpf.io</a> <span class="lvl">入门，eBPF 概览</span></li>
-    <li><a href="https://lldb.llvm.org/">LLDB documentation</a> <span class="lvl">查手册，lldb 命令</span></li>
+    <li><a href="https://docs.kernel.org/trace/ftrace.html">Linux kernel docs — ftrace - Function Tracer</a> <span class="lvl">查手册，ftrace 全部功能（Lab A 第 2 步）</span></li>
+    <li><a href="https://docs.kernel.org/process/debugging/gdb-kernel-debugging.html">Linux kernel docs — Debugging kernel and modules via gdb</a> · <a href="https://docs.kernel.org/process/debugging/kgdb.html">kgdb</a> <span class="lvl">入门，QEMU + gdb 与 lx-* 命令；真机 kgdb</span></li>
+    <li><a href="https://docs.kernel.org/admin-guide/bug-hunting.html">Linux kernel docs — Bug hunting</a> <span class="lvl">入门，读 oops、faddr2line</span></li>
+    <li><a href="https://docs.kernel.org/admin-guide/bug-bisect.html">Linux kernel docs — Bisecting a bug</a> <span class="lvl">入门，内核 bisect</span></li>
+    <li><a href="https://docs.kernel.org/admin-guide/kdump/kdump.html">Linux kernel docs — Documentation for Kdump</a> · <a href="https://crash-utility.github.io/">crash utility</a> <span class="lvl">进阶，崩溃转储与离线分析</span></li>
+    <li><a href="https://www.brendangregg.com/perf.html">Brendan Gregg — Linux perf Examples</a> · <a href="https://ebpf.io/">ebpf.io</a> <span class="lvl">实战，perf 与 eBPF</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/tree/main/tools/lldbmacros">xnu/tools/lldbmacros</a> · <a href="https://github.com/apple-oss-distributions/xnu/blob/main/doc/debugging/debugging.md">doc/debugging/debugging.md</a> <span class="lvl">源码，XNU 调试宏与官方调试说明</span></li>
+    <li><a href="https://lldb.llvm.org/">LLDB documentation</a> <span class="lvl">查手册，lldb 命令（kdp-remote、gdb-remote、target modules load）</span></li>
+    <li><a href="https://github.com/google/syzkaller/blob/master/docs/reproducing_crashes.md">syzkaller — Reproducing crashes</a> · <a href="https://syzkaller.appspot.com/upstream">syzbot dashboard</a> <span class="lvl">实战，复现程序与 KASAN 报告范本</span></li>
+    <li><a href="https://elixir.bootlin.com/linux/latest/source">Elixir Cross Referencer</a> <span class="lvl">工具，在线跳转定义与引用；本地用 cscope / clangd</span></li>
   </ul>
 
   <nav class="pn">

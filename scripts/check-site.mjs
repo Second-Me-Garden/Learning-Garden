@@ -31,6 +31,8 @@ for (const page of pages) {
     if (!fs.existsSync(path.resolve(dir, target))) problems.push(`${rel}: missing ${target}`);
   }
 
+  if (!/<script src="[./]*assets\/theme\.js"><\/script>\s*<\/head>/.test(html)) problems.push(`${rel}: assets/theme.js not loaded in <head>`);
+
   // phase pages
   if (/\/phase-\d+-[^/]+\/index\.html$/.test(page)) {
     const diagrams = html.match(/<svg[^>]*\bdata-diagram\b/g) || [];
