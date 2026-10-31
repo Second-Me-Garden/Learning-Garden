@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 5 · TF2, Robot Description &amp; Simulation · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page">Phase 5 · TF2, Robot Description &amp; Simulation</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 5 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 5 / 8 · about 1–2 weeks</p>
+  <h1>TF2, Robot Description, Simulation <span class="en" lang="zh-CN">TF2、机器人描述与仿真：坐标系约定、tf2 树与时间、URDF 与 xacro、RViz2、Gazebo Harmonic、ros_gz_bridge、差速驱动</span><span class="en" lang="en">Frame conventions, the tf2 tree and time, URDF and xacro, RViz2, Gazebo Harmonic, ros_gz_bridge, differential drive</span></h1>
+  <p class="lede" lang="zh-CN">前四个阶段的节点只交换「数据」。从这一阶段开始，数据有了「位置」：一帧激光扫描是在雷达的坐标系里测的，控制器要的却是它在机器人底盘、在地图里的位置。tf2 负责回答「在时刻 t，坐标系 A 里的这一点在坐标系 B 里是哪里」；URDF 把机器人的连杆和关节写下来，<code>robot_state_publisher</code> 据此发布 tf；Gazebo Harmonic 再把这台机器人放进一个有物理、有传感器的世界，经 <code>ros_gz_bridge</code> 接回 ROS 话题。本页的重点是几处机制：查变换为什么要带时间、缓冲区插值的是什么，<code>use_sim_time</code> 为什么存在、缺了它会坏在哪里，桥到底转换了什么，以及 odom → base_link 这条变换在仿真里是谁发的。</p>
+  <p class="lede" lang="en">The nodes of the first four phases only exchange data. From this phase on, data has a place: a laser scan is measured in the lidar’s frame, but the controller wants it relative to the robot base and to the map. tf2 answers “at time t, where is this point of frame A in frame B”; URDF writes down the robot’s links and joints, and <code>robot_state_publisher</code> publishes tf from it; Gazebo Harmonic then puts the robot into a world with physics and sensors and connects it back to ROS topics through <code>ros_gz_bridge</code>. The page concentrates on a few mechanisms: why a transform lookup needs a time and what the buffer interpolates, why <code>use_sim_time</code> exists and what breaks without it, what the bridge actually converts, and who publishes the odom → base_link transform in simulation.</p>
+
+  <div class="note" lang="zh-CN"><strong>状态说明：</strong>本页的 URDF、世界文件、launch 文件和命令是 2026-10-31 依据 Jazzy 文档、Gazebo Harmonic 文档和 <code>ros_gz</code>、<code>gz-sim</code> 源码（jazzy 与 gz-sim8 分支）拼装的，<strong>没有在实验容器里实际运行过</strong>。用到的 apt 包当天都在 noble arm64 索引里查到。Gazebo 系统插件的名字和参数、桥的写法以当时文档为准，下文标了「查文档」的地方尤其如此。</div>
+  <div class="note" lang="en"><strong>Status:</strong> the URDF, world file, launch file and commands on this page were assembled on 2026-10-31 from the Jazzy docs, the Gazebo Harmonic docs and the <code>ros_gz</code> and <code>gz-sim</code> sources (jazzy and gz-sim8 branches), and <strong>have not been run in the lab container</strong>. Every apt package used was found in the noble arm64 index that day. Gazebo system plugin names and parameters and the bridge syntax follow the docs of that date; this holds especially where the text says “check the docs”.</div>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">按 REP 103 说出机器人坐标轴的方向，按 REP 105 说出 map、odom、base_link 各自的含义、谁发布它们之间的变换、哪一个会跳变。</li>
+      <li lang="en">State the robot axis directions of REP 103, and from REP 105 say what map, odom and base_link mean, who publishes the transforms between them, and which one can jump.</li>
+      <li lang="zh-CN">解释 tf2 缓冲区里存的是什么、<code>lookup_transform(target, source, time)</code> 在给定时刻怎样沿树组合变换并插值，以及「extrapolation into the future」报错从哪里来。</li>
+      <li lang="en">Explain what the tf2 buffer stores, how <code>lookup_transform(target, source, time)</code> composes and interpolates transforms along the tree at a given time, and where the “extrapolation into the future” error comes from.</li>
+      <li lang="zh-CN">说清 <code>use_sim_time</code> 和 <code>/clock</code> 的作用，并预言一个忘了打开它的节点在仿真里会出什么错。</li>
+      <li lang="en">Explain what <code>use_sim_time</code> and <code>/clock</code> do, and predict what goes wrong for a node in simulation that forgot to turn it on.</li>
+      <li lang="zh-CN">写一个带 xacro 宏的两轮机器人 URDF，用 <code>robot_state_publisher</code> 在 RViz2 里显示，并写一个 tf2 listener 查它的变换。</li>
+      <li lang="en">Write a two-wheel robot URDF with a xacro macro, display it in RViz2 with <code>robot_state_publisher</code>, and write a tf2 listener that looks up its transforms.</li>
+      <li lang="zh-CN">把它放进 Gazebo Harmonic，配上差速驱动和激光雷达，用 <code>ros_gz_bridge</code> 接通 <code>/cmd_vel</code> 和 <code>/scan</code>，用键盘开着走。</li>
+      <li lang="en">Put it into Gazebo Harmonic with differential drive and a lidar, connect <code>/cmd_vel</code> and <code>/scan</code> through <code>ros_gz_bridge</code>, and drive it with the keyboard.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../lab-setup/index.html">实验环境</a> 的容器和 noVNC 桌面（<code>http://localhost:6080/vnc.html</code>）：RViz2 和 Gazebo 都在那个桌面里开，用 <code>LIBGL_ALWAYS_SOFTWARE=1</code> 软件渲染；Gazebo 图形界面打不开时，退回 <code>gz sim -s</code> 无头运行，只用 RViz2 看。</li>
+    <li lang="en">The container and noVNC desktop from <a href="../lab-setup/index.html">Lab environment</a> (<code>http://localhost:6080/vnc.html</code>): RViz2 and Gazebo both open in that desktop and render in software with <code>LIBGL_ALWAYS_SOFTWARE=1</code>; when the Gazebo GUI will not open, fall back to headless <code>gz sim -s</code> and view with RViz2 only.</li>
+    <li lang="zh-CN"><a href="../phase-3-middleware-and-qos/index.html">Phase 3</a> 的 durability：<code>/tf_static</code> 和 <code>/robot_description</code> 用 transient_local，所以晚启动的 RViz2 也能拿到它们。</li>
+    <li lang="en">Durability from <a href="../phase-3-middleware-and-qos/index.html">Phase 3</a>: <code>/tf_static</code> and <code>/robot_description</code> use transient_local, which is why an RViz2 started later still gets them.</li>
+    <li lang="zh-CN"><a href="../phase-4-launch-lifecycle-composition/index.html">Phase 4</a> 的 launch 文件和参数：Lab A 用一个 Python launch 文件把 xacro 的输出交给 <code>robot_state_publisher</code>。</li>
+    <li lang="en">Launch files and parameters from <a href="../phase-4-launch-lifecycle-composition/index.html">Phase 4</a>: Lab A uses a Python launch file to hand the xacro output to <code>robot_state_publisher</code>.</li>
+    <li lang="zh-CN">一点刚体几何：一个位姿是平移加旋转；旋转在 ROS 里用四元数（x, y, z, w）表示；两个变换可以首尾相接组合。</li>
+    <li lang="en">A little rigid-body geometry: a pose is a translation plus a rotation; ROS represents rotations as quaternions (x, y, z, w); two transforms can be composed end to end.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 坐标系约定：REP 103 与 REP 105</h3><h3 lang="en">1. Frame conventions: REP 103 and REP 105</h3>
+  <p lang="zh-CN">两个人写的节点要能对上，先得对坐标轴达成一致。<strong>REP 103</strong> 规定：坐标系都是右手系；相对机器人本体，<strong>x 向前、y 向左、z 向上</strong>；单位用米、弧度、秒。所以一台机器人「向前开」就是沿自己的 +x，「左转」就是绕 +z 的正角速度，<code>/cmd_vel</code> 里的 <code>linear.x</code> 和 <code>angular.z</code> 正是这个意思。</p>
+  <p lang="en">Before nodes written by different people can fit together, they must agree on the axes. <strong>REP 103</strong> says: all frames are right-handed; relative to the robot body, <strong>x forward, y left, z up</strong>; units are metres, radians and seconds. So “drive forward” means along the robot’s own +x, and “turn left” means a positive angular velocity about +z, which is exactly what <code>linear.x</code> and <code>angular.z</code> in <code>/cmd_vel</code> mean.</p>
+  <p lang="zh-CN"><strong>REP 105</strong> 规定移动机器人的几个标准坐标系，排成一条链 <code>earth</code> → <code>map</code> → <code>odom</code> → <code>base_link</code>（本课程用不到 earth）：</p>
+  <p lang="en"><strong>REP 105</strong> defines the standard frames of a mobile robot as one chain, <code>earth</code> → <code>map</code> → <code>odom</code> → <code>base_link</code> (this course does not need earth):</p>
+  <ul>
+    <li lang="zh-CN"><code>base_link</code>：固定在机器人底盘上，随机器人一起动。传感器的坐标系（如 <code>lidar</code>）挂在它下面。</li>
+    <li lang="en"><code>base_link</code>: rigidly attached to the robot base and moving with it. Sensor frames such as <code>lidar</code> hang below it.</li>
+    <li lang="zh-CN"><code>odom</code>：世界固定的坐标系，机器人在里面的位姿由里程计（轮子编码器、视觉里程计、IMU）积分出来。REP 105 要求它<strong>连续</strong>：位姿平滑变化、不跳变；代价是误差随时间累积、会漂移。所以它适合短时间的局部控制，不适合当长期参考。</li>
+    <li lang="en"><code>odom</code>: a world-fixed frame in which the robot’s pose is integrated from odometry (wheel encoders, visual odometry, an IMU). REP 105 requires it to be <strong>continuous</strong>: the pose evolves smoothly without jumps; the price is that error accumulates and it drifts. So it is good for short-term local control and poor as a long-term reference.</li>
+    <li lang="zh-CN"><code>map</code>：同样是世界固定的坐标系，机器人在里面的位姿由定位模块根据传感器观测反复重算，<strong>不漂移，但可以跳变</strong>：新观测到来时，位姿可能一下子挪一段。所以它适合当长期全局参考，不适合直接拿来做局部控制。</li>
+    <li lang="en"><code>map</code>: also world-fixed; the robot’s pose in it is recomputed again and again by a localization component from sensor observations, so it <strong>does not drift but can jump</strong>: when new observations arrive, the pose may move suddenly. So it is a good long-term global reference and a poor frame for local control.</li>
+  </ul>
+  <p lang="zh-CN"><strong>谁发布哪一段</strong>：tf 是一棵树，每个坐标系只能有一个父坐标系。所以 REP 105 规定 <code>map</code> 是 <code>odom</code> 的父、<code>odom</code> 是 <code>base_link</code> 的父：里程计（本页是 Gazebo 的差速驱动插件，概念 7）发布 odom → base_link；定位模块（Phase 6 的 AMCL 或 SLAM）不直接发 map → base_link，而是算出 map → odom 这一段「修正量」来发。这样两边各管一段，互不覆盖；也正因为如此，跳变只发生在 map → odom 上，控制器在 odom 里看到的轨迹始终是平滑的。</p>
+  <p lang="en"><strong>Who publishes which link</strong>: tf is a tree, and each frame may have only one parent. So REP 105 makes <code>map</code> the parent of <code>odom</code> and <code>odom</code> the parent of <code>base_link</code>: odometry (on this page, Gazebo’s differential-drive plugin, concept 7) publishes odom → base_link; the localization component (AMCL or SLAM in Phase 6) does not publish map → base_link directly, but computes and publishes the correction map → odom. Each side owns one link and neither overwrites the other; and for the same reason, jumps happen only on map → odom, while the trajectory a controller sees in odom stays smooth.</p>
+  <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲 TF 与坐标系的章节；原文 <a href="https://www.ros.org/reps/rep-0103.html">REP 103</a> 与 <a href="https://www.ros.org/reps/rep-0105.html">REP 105</a>。</p>
+  <p lang="en">Further reading: the chapter on TF and coordinate frames in Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>; the original <a href="https://www.ros.org/reps/rep-0103.html">REP 103</a> and <a href="https://www.ros.org/reps/rep-0105.html">REP 105</a>.</p>
+
+  <h3 lang="zh-CN">2. tf2 树、广播者与监听者，以及查变换为什么要带时间</h3><h3 lang="en">2. The tf2 tree, broadcasters and listeners, and why a lookup needs a time</h3>
+  <p lang="zh-CN">tf2 不是一个中心服务器，而是两个普通话题加每个进程里的一份缓冲区：</p>
+  <p lang="en">tf2 is not a central server; it is two ordinary topics plus one buffer inside each process:</p>
+  <ul>
+    <li lang="zh-CN"><strong>动态变换</strong>走 <code>/tf</code>：会随时间变的边，比如 odom → base_link、轮子的转角。发布者用 <code>tf2_ros::TransformBroadcaster</code>（Python 是 <code>tf2_ros.TransformBroadcaster</code>），每条 <code>TransformStamped</code> 带一个时间戳、一个父坐标系 <code>header.frame_id</code> 和一个子坐标系 <code>child_frame_id</code>。</li>
+    <li lang="en"><strong>Dynamic transforms</strong> go on <code>/tf</code>: links that change over time, such as odom → base_link or a wheel’s angle. Publishers use <code>tf2_ros::TransformBroadcaster</code> (<code>tf2_ros.TransformBroadcaster</code> in Python), and every <code>TransformStamped</code> carries a timestamp, a parent frame <code>header.frame_id</code> and a child frame <code>child_frame_id</code>.</li>
+    <li lang="zh-CN"><strong>静态变换</strong>走 <code>/tf_static</code>：永远不变的边，比如 base_link → lidar。发布者用 <code>StaticTransformBroadcaster</code>，只发一次；话题是 transient_local，晚加入的监听者也能拿到（Phase 3 概念 4）。命令行也能发：<code>ros2 run tf2_ros static_transform_publisher --x 0.1 --frame-id base_link --child-frame-id lidar</code>。</li>
+    <li lang="en"><strong>Static transforms</strong> go on <code>/tf_static</code>: links that never change, such as base_link → lidar. Publishers use <code>StaticTransformBroadcaster</code> and send once; the topic is transient_local, so late-joining listeners still receive it (Phase 3 concept 4). The command line can publish one too: <code>ros2 run tf2_ros static_transform_publisher --x 0.1 --frame-id base_link --child-frame-id lidar</code>.</li>
+    <li lang="zh-CN"><strong>监听者</strong>：<code>tf2_ros::Buffer</code> 加 <code>TransformListener</code>。listener 订阅这两个话题，把收到的每条边按时间存进 Buffer；你的代码只和 Buffer 打交道，调用 <code>lookupTransform(target, source, time)</code>（Python 是 <code>lookup_transform</code>）。结果是 source 坐标系在 target 坐标系里的位姿，也就是「把 source 里的数据变到 target 里」用的那个变换。</li>
+    <li lang="en"><strong>Listeners</strong>: a <code>tf2_ros::Buffer</code> plus a <code>TransformListener</code>. The listener subscribes to both topics and stores every link it receives in the Buffer by time; your code deals only with the Buffer, calling <code>lookupTransform(target, source, time)</code> (<code>lookup_transform</code> in Python). The result is the pose of the source frame in the target frame, that is, the transform that takes data from source into target.</li>
+  </ul>
+  <p lang="zh-CN"><strong>为什么要带时间</strong>：机器人在动。一帧激光扫描在 12.35 秒测得，等它到你的回调已经是 12.40 秒；这 50 ms 里底盘可能转了几度。要把这帧扫描放进 odom，用的必须是 <strong>12.35 秒那一刻</strong> 的 odom → base_link，而不是「现在」的。所以每条传感器消息都带 <code>header.stamp</code>，查变换时就用这个时间。用错时刻的后果是：机器人转弯时，墙在地图里被画成弯的或重影的。</p>
+  <p lang="en"><strong>Why a time is needed</strong>: the robot moves. A laser scan is measured at 12.35 s and reaches your callback at 12.40 s; in those 50 ms the base may have turned several degrees. To put the scan into odom you must use odom → base_link <strong>at 12.35 s</strong>, not “now”. That is why every sensor message carries <code>header.stamp</code>, and the lookup uses that time. Use the wrong instant and, while the robot turns, walls are drawn bent or doubled in the map.</p>
+  <p lang="zh-CN"><strong>缓冲区存了什么、插值的是什么</strong>：Buffer 为树上的每一条动态边保存一段按时间排序的样本，默认保留 <strong>10 秒</strong>（Jazzy 的 tf2 源码和教程，2026-10-31 核对）。查询时刻 t 时，tf2 先在树上找出从 source 到 target 的路径，再对路径上的<strong>每一条边</strong>分别取 t 时刻的值：t 正好落在两个样本之间，就在这两个样本之间插值——平移做线性插值，旋转做四元数球面插值（slerp）；静态边对任何时刻都返回同一个值。最后把各边首尾组合起来。注意 tf2 只<strong>内插</strong>不外推：</p>
+  <p lang="en"><strong>What the buffer stores and what it interpolates</strong>: for every dynamic link in the tree, the Buffer keeps a time-ordered series of samples, by default for <strong>10 seconds</strong> (Jazzy tf2 source and tutorial, checked 2026-10-31). To look up time t, tf2 first finds the path from source to target in the tree, then takes the value at t on <strong>each link</strong> of the path separately: when t falls between two samples, it interpolates between those two — linear interpolation for translation, quaternion spherical interpolation (slerp) for rotation; a static link returns the same value for any time. Finally it composes the links end to end. Note that tf2 only <strong>interpolates</strong> and never extrapolates:</p>
+  <ul>
+    <li lang="zh-CN">t 晚于某条边的最新样本：报 <code>Lookup would require extrapolation into the future</code>，并给出请求时刻和最新数据时刻。最常见的原因是你用了「现在」，而那条边的下一个样本还在路上。办法是给 lookup 加一个超时，让它等几十毫秒。</li>
+    <li lang="en">t later than a link’s newest sample: it raises <code>Lookup would require extrapolation into the future</code>, giving the requested time and the time of the latest data. The usual cause is asking for “now” while that link’s next sample is still in flight. The fix is to give the lookup a timeout so it waits a few tens of milliseconds.</li>
+    <li lang="zh-CN">t 早于缓冲区里最旧的样本（超过 10 秒前）：报 extrapolation into the past。</li>
+    <li lang="en">t earlier than the oldest sample in the buffer (more than 10 seconds ago): it raises extrapolation into the past.</li>
+    <li lang="zh-CN">t = 0（C++ 的 <code>tf2::TimePointZero</code>，Python 的 <code>rclpy.time.Time()</code>）不是「1970 年」，而是「最新可用」：tf2 取路径上所有边都有数据的最晚共同时刻。它方便调试，但对传感器数据不对，因为那不是测量的时刻。</li>
+    <li lang="en">t = 0 (<code>tf2::TimePointZero</code> in C++, <code>rclpy.time.Time()</code> in Python) does not mean 1970; it means “latest available”: tf2 takes the latest time at which every link on the path has data. It is handy for debugging but wrong for sensor data, because it is not the time of the measurement.</li>
+  </ul>
+  <div class="note" lang="zh-CN">两个查错工具：<code>ros2 run tf2_tools view_frames</code> 听几秒 tf，生成一份 PDF 画出整棵树，每条边标着发布者和频率；<code>ros2 run tf2_ros tf2_echo map base_link</code> 持续打印 base_link 在 map 里的位姿（第一个参数是 target，第二个是 source，和 lookup 的顺序一样）。树断开时，view_frames 里会看到两棵互不相连的树。</div>
+  <div class="note" lang="en">Two debugging tools: <code>ros2 run tf2_tools view_frames</code> listens to tf for a few seconds and writes a PDF of the whole tree, with each link labelled by its publisher and rate; <code>ros2 run tf2_ros tf2_echo map base_link</code> keeps printing the pose of base_link in map (the first argument is the target and the second the source, in the same order as a lookup). When the tree is broken, view_frames shows two trees that do not connect.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲 TF 的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Tf2.html">About tf2</a>、教程 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Learning-About-Tf2-And-Time-Cpp.html">Learning about tf2 and time</a> 与 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Debugging-Tf2-Problems.html">Debugging tf2 problems</a>。</p>
+  <p lang="en">Further reading: the chapter on TF in Renard, <em>ROS 2 From Scratch</em>; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Tf2.html">About tf2</a> and the tutorials <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Learning-About-Tf2-And-Time-Cpp.html">Learning about tf2 and time</a> and <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Debugging-Tf2-Problems.html">Debugging tf2 problems</a>.</p>
+
+  <h3 lang="zh-CN">3. 仿真时间：<code>use_sim_time</code> 与 <code>/clock</code></h3><h3 lang="en">3. Simulation time: <code>use_sim_time</code> and <code>/clock</code></h3>
+  <p lang="zh-CN">仿真器的时间和墙上的时间不是一回事。Gazebo 每一步物理推进固定的仿真时长，但每一步花多少真实时间取决于 CPU；在实验容器里用 llvmpipe 软件渲染激光雷达，仿真很可能比真实时间慢（Gazebo 界面上显示的 real time factor 小于 1），你也可以随时暂停它。传感器消息的时间戳、差速驱动发出的 tf，都用<strong>仿真时间</strong>打戳，是从仿真开始算起的几十、几百秒。</p>
+  <p lang="en">Simulator time is not wall-clock time. Each Gazebo physics step advances a fixed amount of simulated time, but how much real time a step takes depends on the CPU; with the lidar rendered by llvmpipe in the lab container, the simulation will likely run slower than real time (the real time factor shown in the Gazebo GUI is below 1), and you can pause it at any moment. Sensor message timestamps and the tf from the differential drive are all stamped in <strong>simulation time</strong>: tens or hundreds of seconds since the simulation started.</p>
+  <p lang="zh-CN"><strong>机制</strong>：仿真器把自己的时钟发布在 <code>/clock</code> 话题上（类型 <code>rosgraph_msgs/msg/Clock</code>，本页由桥从 Gazebo 转过来）。每个 ROS 节点都有一个内置参数 <code>use_sim_time</code>，默认 false；设为 true 后，这个节点的 ROS 时钟不再读系统时间，而是订阅 <code>/clock</code>，<code>now()</code> 返回收到的最新仿真时刻。按节点时钟走的定时器（<code>create_timer</code>）也跟着仿真时间走，仿真暂停它就停；<code>create_wall_timer</code> 则仍按真实时间。</p>
+  <p lang="en"><strong>Mechanism</strong>: the simulator publishes its clock on the <code>/clock</code> topic (type <code>rosgraph_msgs/msg/Clock</code>; on this page the bridge forwards it from Gazebo). Every ROS node has a built-in parameter <code>use_sim_time</code>, false by default; set to true, the node’s ROS clock stops reading system time, subscribes to <code>/clock</code> instead, and <code>now()</code> returns the latest simulated instant received. Timers that run on the node clock (<code>create_timer</code>) follow simulation time too and stop when the simulation pauses; <code>create_wall_timer</code> still runs on real time.</p>
+  <p lang="zh-CN"><strong>缺了它会坏在哪里</strong>：假设 RViz2 忘了设 <code>use_sim_time</code>。它的「现在」是 Unix 时间，约 17 亿秒；而缓冲区里 odom → base_link 的样本都打着「第 120 秒」这样的仿真时间戳。RViz2 按自己的「现在」去查变换，请求时刻比最新样本晚了十几亿秒，就是概念 2 里的 extrapolation into the future；激光扫描的显示会因为找不到对应时刻的变换而丢弃消息，机器人模型显示报错。反过来也一样：你的节点用墙上时间给自己发的消息打戳，别的节点在仿真时间里查不到它。所以规则很简单：<strong>仿真时，系统里每一个节点都设 <code>use_sim_time:=true</code></strong>，包括 <code>robot_state_publisher</code>、RViz2 和你自己写的节点。</p>
+  <p lang="en"><strong>What breaks without it</strong>: suppose RViz2 forgot to set <code>use_sim_time</code>. Its “now” is Unix time, about 1.7 billion seconds, while the odom → base_link samples in the buffer carry simulated stamps such as “second 120”. RViz2 looks up transforms at its own “now”, a requested time over a billion seconds after the newest sample: that is the extrapolation into the future of concept 2; the laser scan display drops messages because it cannot find a transform for their time, and the robot model display shows errors. It works the other way too: a node that stamps its own messages with wall time cannot be looked up by other nodes running in simulation time. So the rule is simple: <strong>in simulation, set <code>use_sim_time:=true</code> on every node in the system</strong>, including <code>robot_state_publisher</code>, RViz2 and your own nodes.</p>
+  <div class="note" lang="zh-CN">设了 <code>use_sim_time</code> 但还没收到第一条 <code>/clock</code> 时，<code>now()</code> 大致返回 0（推断，具体行为查 rclcpp 和 rclpy 的文档）。所以启动顺序是：先起仿真器和 <code>/clock</code> 的桥，再起其他节点；否则早启动的节点会先用 0 时刻打几条戳。</div>
+  <div class="note" lang="en">With <code>use_sim_time</code> set but before the first <code>/clock</code> message arrives, <code>now()</code> returns roughly 0 (inference; check the rclcpp and rclpy docs for the exact behaviour). So the start-up order is: simulator and the <code>/clock</code> bridge first, then the other nodes; otherwise a node started early stamps a few messages at time 0.</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 Gazebo 仿真的章节；设计文章 <a href="https://design.ros2.org/articles/clock_and_time.html">Clock and Time</a>（ROS 时间、系统时间、稳定时间的区别和 <code>/clock</code> 的设计）。</p>
+  <p lang="en">Further reading: the chapters on simulation with Gazebo in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>; the design article <a href="https://design.ros2.org/articles/clock_and_time.html">Clock and Time</a> (ROS time, system time and steady time, and the design of <code>/clock</code>).</p>
+
+  <h3 lang="zh-CN">4. URDF 与 xacro，<code>robot_state_publisher</code>，RViz2</h3><h3 lang="en">4. URDF and xacro, <code>robot_state_publisher</code>, RViz2</h3>
+  <p lang="zh-CN"><strong>URDF</strong>（Unified Robot Description Format）是一份 XML，根元素 <code>&lt;robot&gt;</code>，里面两种东西：</p>
+  <p lang="en"><strong>URDF</strong> (Unified Robot Description Format) is an XML file with root element <code>&lt;robot&gt;</code>, holding two kinds of things:</p>
+  <ul>
+    <li lang="zh-CN"><code>&lt;link&gt;</code>：一个刚体。<code>&lt;visual&gt;</code> 是给人看的形状，<code>&lt;collision&gt;</code> 是物理引擎算碰撞用的形状（通常更简单），<code>&lt;inertial&gt;</code> 是质量和惯性张量。RViz2 只要 visual；仿真器三样都要，缺了 inertial 的 link 在 Gazebo 里不会按你想的那样动。</li>
+    <li lang="en"><code>&lt;link&gt;</code>: one rigid body. <code>&lt;visual&gt;</code> is the shape people see, <code>&lt;collision&gt;</code> the shape the physics engine uses for contacts (usually simpler), and <code>&lt;inertial&gt;</code> the mass and inertia tensor. RViz2 needs only the visual; a simulator needs all three, and a link without inertial does not move the way you expect in Gazebo.</li>
+    <li lang="zh-CN"><code>&lt;joint&gt;</code>：连接一个父 link 和一个子 link。<code>&lt;origin xyz rpy&gt;</code> 是关节零位时子 link 在父 link 里的位姿；<code>type</code> 决定能怎么动：<code>fixed</code> 不动（雷达支架），<code>continuous</code> 绕 <code>&lt;axis&gt;</code> 无限转（轮子），<code>revolute</code> 绕轴在上下限之间转（机械臂关节）。</li>
+    <li lang="en"><code>&lt;joint&gt;</code>: connects one parent link to one child link. <code>&lt;origin xyz rpy&gt;</code> is the child’s pose in the parent when the joint is at zero; <code>type</code> says how it moves: <code>fixed</code> does not move (a lidar mount), <code>continuous</code> spins without limit about its <code>&lt;axis&gt;</code> (a wheel), <code>revolute</code> turns about the axis between limits (an arm joint).</li>
+  </ul>
+  <p lang="zh-CN">每个 link 一个坐标系、每个 joint 一条边，所以一份 URDF 天然就是一棵 tf 树。<strong>xacro</strong> 是 XML 的宏处理器：<code>&lt;xacro:property&gt;</code> 定义常量，<code>&lt;xacro:macro&gt;</code> 定义可带参数的片段（左右两个轮子写一次），<code>${...}</code> 里能做算术，<code>&lt;xacro:arg&gt;</code> 和 <code>&lt;xacro:if&gt;</code> 按命令行参数开关一段内容。<code>xacro robot.urdf.xacro</code> 把它展开成普通 URDF 打到标准输出。</p>
+  <p lang="en">One frame per link and one tree edge per joint, so a URDF is a tf tree by construction. <strong>xacro</strong> is a macro processor for XML: <code>&lt;xacro:property&gt;</code> defines constants, <code>&lt;xacro:macro&gt;</code> defines parameterised fragments (write the left and right wheel once), <code>${...}</code> evaluates arithmetic, and <code>&lt;xacro:arg&gt;</code> with <code>&lt;xacro:if&gt;</code> switches a section on or off by a command-line argument. <code>xacro robot.urdf.xacro</code> expands it into a plain URDF on standard output.</p>
+  <p lang="zh-CN"><strong><code>robot_state_publisher</code> 做什么</strong>：它从参数 <code>robot_description</code> 读入 URDF 字符串（启动时必须给，否则起不来），然后：</p>
+  <p lang="en"><strong>What <code>robot_state_publisher</code> does</strong>: it reads the URDF string from the parameter <code>robot_description</code> (which must be set at start-up, or the node fails to start), and then:</p>
+  <ul>
+    <li lang="zh-CN">所有 <code>fixed</code> 关节在启动时往 <code>/tf_static</code> 发一次；</li>
+    <li lang="en">publishes every <code>fixed</code> joint once on <code>/tf_static</code> at start-up;</li>
+    <li lang="zh-CN">可动关节（continuous、revolute）的变换取决于关节角，它订阅 <code>/joint_states</code>（<code>sensor_msgs/msg/JointState</code>），每收到新的关节角就算出对应变换发到 <code>/tf</code>（频率上限由 <code>publish_frequency</code> 参数决定，默认 20 Hz）；</li>
+    <li lang="en">for movable joints (continuous, revolute) the transform depends on the joint angle, so it subscribes to <code>/joint_states</code> (<code>sensor_msgs/msg/JointState</code>) and, for each new set of angles, computes the transforms and publishes them on <code>/tf</code> (capped by the <code>publish_frequency</code> parameter, 20 Hz by default);</li>
+    <li lang="zh-CN">把 URDF 原文再发到 <code>/robot_description</code> 话题上（transient_local），RViz2 的 RobotModel 显示和 Gazebo 的生成工具都从这里读。</li>
+    <li lang="en">republishes the URDF text on the <code>/robot_description</code> topic (transient_local), which RViz2’s RobotModel display and Gazebo’s spawn tool read.</li>
+  </ul>
+  <p lang="zh-CN">这就解释了一个常见现象：底盘和雷达显示正常，轮子却报「没有变换」。fixed 关节走的是 <code>/tf_static</code>，不需要任何人；轮子是 continuous 关节，没人发 <code>/joint_states</code>，<code>robot_state_publisher</code> 就算不出它们。真机上 <code>/joint_states</code> 来自电机驱动，仿真里来自 Gazebo（概念 7），只想在 RViz2 里看模型时，用 <code>joint_state_publisher_gui</code> 拖滑条手动给。</p>
+  <p lang="en">This explains a common sight: the base and lidar display fine, but the wheels report “no transform”. Fixed joints go through <code>/tf_static</code> and need nobody; the wheels are continuous joints, and with nobody publishing <code>/joint_states</code>, <code>robot_state_publisher</code> cannot compute them. On a real robot <code>/joint_states</code> comes from the motor drivers, in simulation from Gazebo (concept 7); when you only want to view the model in RViz2, <code>joint_state_publisher_gui</code> provides it by hand with sliders.</p>
+  <p lang="zh-CN"><strong>RViz2</strong> 是一个 tf2 监听者加一组显示插件。它有一个 Fixed Frame（全局参考坐标系），每个显示把自己的数据按消息时间戳变换到这个坐标系里画出来：<strong>RobotModel</strong> 画 URDF 的每个 link，<strong>TF</strong> 画每个坐标系的三色轴（红 x、绿 y、蓝 z），<strong>LaserScan</strong> 画 <code>/scan</code> 的点。某个显示变红报错时，几乎总是两件事之一：它要的坐标系在树里接不到 Fixed Frame，或者它请求的时刻缓冲区里没有。</p>
+  <p lang="en"><strong>RViz2</strong> is a tf2 listener plus a set of display plugins. It has a Fixed Frame (the global reference frame), and each display transforms its data into that frame by the message timestamp and draws it: <strong>RobotModel</strong> draws each URDF link, <strong>TF</strong> draws each frame’s three coloured axes (red x, green y, blue z), and <strong>LaserScan</strong> draws the points of <code>/scan</code>. When a display turns red with an error, it is almost always one of two things: the frame it needs does not connect to the Fixed Frame in the tree, or the buffer has no data for the time it asked for.</p>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲用 URDF 和 xacro 建模的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/URDF-Main.html">URDF 教程</a>、<a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-Xacro-to-Clean-Up-a-URDF-File.html">Using Xacro</a>、<a href="https://github.com/ros/robot_state_publisher">robot_state_publisher</a> 的 README。</p>
+  <p lang="en">Further reading: the chapters on modelling with URDF and xacro in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/URDF-Main.html">URDF tutorials</a>, <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-Xacro-to-Clean-Up-a-URDF-File.html">Using Xacro</a>, and the <a href="https://github.com/ros/robot_state_publisher">robot_state_publisher</a> README.</p>
+
+  <h3 lang="zh-CN">5. Gazebo Harmonic：SDF 世界、系统插件、仿真传感器</h3><h3 lang="en">5. Gazebo Harmonic: SDF worlds, system plugins, simulated sensors</h3>
+  <p lang="zh-CN">Gazebo Harmonic 是 Jazzy 推荐配套的仿真器，实验镜像里的 <code>ros-jazzy-ros-gz</code> 通过 ROS 的 vendor 包把它装了进来。它读 <strong>SDF</strong>（Simulation Description Format）：<code>&lt;world&gt;</code> 里放灯光、地面、若干 <code>&lt;model&gt;</code> 和若干 <code>&lt;plugin&gt;</code>；model 里是 link、joint、sensor，和 URDF 很像，但多了世界、物理、插件这些 URDF 没有的东西（对照表）。<code>gz sim world.sdf</code> 启动服务器和图形界面，<code>-r</code> 表示一启动就开始跑，<code>-s</code> 表示只起服务器、不开界面。</p>
+  <p lang="en">Gazebo Harmonic is the simulator recommended for Jazzy; <code>ros-jazzy-ros-gz</code> in the lab image installs it through the ROS vendor packages. It reads <strong>SDF</strong> (Simulation Description Format): a <code>&lt;world&gt;</code> holds lights, a ground, several <code>&lt;model&gt;</code>s and several <code>&lt;plugin&gt;</code>s; a model holds links, joints and sensors much like URDF, plus world, physics and plugins, which URDF lacks (see the comparison table). <code>gz sim world.sdf</code> starts the server and the GUI; <code>-r</code> runs the simulation on start, and <code>-s</code> starts only the server, without the GUI.</p>
+  <p lang="zh-CN"><strong>系统插件</strong>：Gazebo 的服务器本身几乎什么都不做，物理、传感器、差速驱动都是一个个「system」，编成共享库、在 SDF 里用 <code>&lt;plugin filename="…" name="…"&gt;</code> 加载。2026-10-31 的 Harmonic 教程里用到的几个（名字查文档）：<code>gz-sim-physics-system</code>（物理）、<code>gz-sim-user-commands-system</code>（接收生成模型等命令）、<code>gz-sim-scene-broadcaster-system</code>（把场景发给界面）、<code>gz-sim-sensors-system</code>（渲染类传感器，带 <code>&lt;render_engine&gt;ogre2&lt;/render_engine&gt;</code>）。一个容易踩的坑：Gazebo 自带的 <code>empty.sdf</code> 只加载了物理、用户命令、场景广播和接触这几个，<strong>没有 Sensors 系统</strong>，你挂上去的激光雷达不会出任何数据。所以 Lab B 自己写一个世界文件。</p>
+  <p lang="en"><strong>System plugins</strong>: the Gazebo server itself does almost nothing; physics, sensors and differential drive are each a “system”, built as a shared library and loaded in SDF with <code>&lt;plugin filename="…" name="…"&gt;</code>. The ones used in the Harmonic tutorials as of 2026-10-31 (names: check the docs): <code>gz-sim-physics-system</code> (physics), <code>gz-sim-user-commands-system</code> (accepts commands such as spawning models), <code>gz-sim-scene-broadcaster-system</code> (sends the scene to the GUI), and <code>gz-sim-sensors-system</code> (rendering-based sensors, with <code>&lt;render_engine&gt;ogre2&lt;/render_engine&gt;</code>). An easy trap: Gazebo’s bundled <code>empty.sdf</code> loads only physics, user commands, scene broadcaster and contact, <strong>with no Sensors system</strong>, so a lidar attached to your robot produces no data at all. That is why Lab B writes its own world file.</p>
+  <p lang="zh-CN"><strong>仿真传感器怎么出数据</strong>：激光雷达在 SDF 里是 <code>&lt;sensor type="gpu_lidar"&gt;</code>，配上采样数、角度范围、量程和 <code>&lt;update_rate&gt;</code>。Sensors 系统按这个频率，用渲染引擎从雷达的位置朝每个角度「看」一次场景，读出最近表面的距离，填进一条 <code>gz.msgs.LaserScan</code>，发到 SDF 里 <code>&lt;topic&gt;</code> 指定的 Gazebo 话题上。相机（<code>camera</code>）同理，渲染出一幅图；IMU（<code>imu</code>，由 <code>gz-sim-imu-system</code> 处理）不需要渲染，直接从物理引擎读加速度和角速度。所以在软件渲染的容器里，雷达和相机会是最吃 CPU 的部分。</p>
+  <p lang="en"><strong>How a simulated sensor produces data</strong>: in SDF a lidar is a <code>&lt;sensor type="gpu_lidar"&gt;</code> with its sample count, angle range, range limits and <code>&lt;update_rate&gt;</code>. At that rate the Sensors system uses the rendering engine to “look” at the scene from the lidar’s position at each angle, reads the distance to the nearest surface, fills a <code>gz.msgs.LaserScan</code> and publishes it on the Gazebo topic named by the SDF <code>&lt;topic&gt;</code>. A camera (<code>camera</code>) works the same way and renders an image; an IMU (<code>imu</code>, handled by <code>gz-sim-imu-system</code>) needs no rendering and reads acceleration and angular velocity straight from the physics engine. So in the software-rendered container, lidar and cameras will be the most CPU-hungry part.</p>
+  <div class="note" lang="zh-CN">和 Kernel Engineering 的连接：仿真里的传感器插件，替代的是 <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Kernel Engineering Phase 5</a> 里的设备驱动那一整条链。一台真的激光雷达接在 USB 串口或以太网上：数据到达时设备触发中断，内核驱动的上半部和下半部把字节搬进缓冲区（可能经过 DMA），再经字符设备（如 <code>/dev/ttyUSB0</code>）或 UDP socket 交给用户态的 ROS 驱动节点，由它解析成 <code>LaserScan</code> 发布（具体走哪条路取决于雷达型号，属推断）。在 Gazebo 里，这一切都换成了 Sensors 系统里的一次渲染查询：没有中断、没有 DMA、没有驱动代码。好处是可重复；代价是驱动层的问题——中断延迟、缓冲区溢出、串口丢字节、驱动 bug——仿真里一个也看不到。SDF 能给传感器加噪声模型（写法查文档），但那只模拟测量误差，不模拟驱动。</div>
+  <div class="note" lang="en">The connection to Kernel Engineering: a sensor plugin in simulation stands in for the whole device-driver chain of <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Kernel Engineering Phase 5</a>. A real lidar sits on USB serial or Ethernet: when data arrives the device raises an interrupt, the kernel driver’s top and bottom halves move the bytes into a buffer (possibly via DMA), and a character device (such as <code>/dev/ttyUSB0</code>) or a UDP socket hands them to a user-space ROS driver node, which parses them into a <code>LaserScan</code> and publishes it (which path depends on the lidar model; inference). In Gazebo all of this becomes one rendering query inside the Sensors system: no interrupt, no DMA, no driver code. The gain is repeatability; the cost is that driver-level problems — interrupt latency, buffer overruns, bytes lost on a serial line, driver bugs — never show up in simulation. SDF can add a noise model to a sensor (syntax: check the docs), but that models measurement error, not the driver.</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 Gazebo 仿真的章节；官方 <a href="https://gazebosim.org/docs/harmonic/sdf_worlds/">SDF worlds</a>、<a href="https://gazebosim.org/docs/harmonic/sensors/">Sensors</a> 教程与 <a href="http://sdformat.org/spec/">SDFormat 规范</a>。</p>
+  <p lang="en">Further reading: the chapters on simulation with Gazebo in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>; the official <a href="https://gazebosim.org/docs/harmonic/sdf_worlds/">SDF worlds</a> and <a href="https://gazebosim.org/docs/harmonic/sensors/">Sensors</a> tutorials and the <a href="http://sdformat.org/spec/">SDFormat specification</a>.</p>
+
+  <h3 lang="zh-CN">6. <code>ros_gz_bridge</code>：它转换什么，为什么两边类型必须对上</h3><h3 lang="en">6. <code>ros_gz_bridge</code>: what it converts, and why the types must match on both sides</h3>
+  <p lang="zh-CN">Gazebo 不说 DDS。它有自己的通信库 gz-transport 和自己的消息类型（<code>gz.msgs.*</code>，Protobuf 定义），话题空间和 ROS 完全分开：Gazebo 里有一个 <code>/scan</code>，ROS 里不会自动出现 <code>/scan</code>。<code>ros_gz_bridge</code> 的 <code>parameter_bridge</code> 是一个同时加入两边的进程：对你声明的每一个话题，它在一边订阅、把消息逐字段拷进另一边的类型、在另一边发布。命令行写法是「话题名 @ ROS 类型 方向符 Gazebo 类型」：</p>
+  <p lang="en">Gazebo does not speak DDS. It has its own communication library, gz-transport, its own message types (<code>gz.msgs.*</code>, defined in Protobuf), and a topic space completely separate from ROS: a <code>/scan</code> in Gazebo does not make a <code>/scan</code> appear in ROS. The <code>parameter_bridge</code> of <code>ros_gz_bridge</code> is one process that joins both sides: for each topic you declare, it subscribes on one side, copies the message field by field into the other side’s type, and publishes there. The command-line form is “topic name @ ROS type, direction sign, Gazebo type”:</p>
+<pre data-lang="sh">ros2 run ros_gz_bridge parameter_bridge \
+  /scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan \
+  /cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist
+# 方向符：@ 双向，[ 只从 Gazebo 到 ROS，] 只从 ROS 到 Gazebo（parameter_bridge 的帮助文字，jazzy 分支）</pre>
+  <p lang="zh-CN"><strong>为什么类型必须两边都对</strong>：桥只认识一张固定的「ROS 类型 ↔ Gazebo 类型」对照表（README 里列着，例如 <code>sensor_msgs/msg/LaserScan</code> ↔ <code>gz.msgs.LaserScan</code>、<code>tf2_msgs/msg/TFMessage</code> ↔ <code>gz.msgs.Pose_V</code>），每一对都有一段手写的转换代码。你声明的那一对，决定了它在 ROS 一侧用什么类型建发布者或订阅者，在 Gazebo 一侧用什么类型。两侧又各自只和<strong>同类型</strong>的端点相连：ROS 里，一个类型不同的发布者在发现时就不会和桥的订阅者匹配（Phase 3 概念 3）；Gazebo 里，插件订阅的话题如果收到别的类型也不会处理。所以任何一侧对不上，结果都是「不报错、没数据」。最典型的是 <code>teleop_twist_keyboard</code> 设了 <code>stamped:=true</code>：它改发 <code>TwistStamped</code>，而桥声明的是 <code>Twist</code>，机器人纹丝不动。</p>
+  <p lang="en"><strong>Why the types must match on both sides</strong>: the bridge knows only one fixed table of “ROS type ↔ Gazebo type” pairs (listed in the README, for example <code>sensor_msgs/msg/LaserScan</code> ↔ <code>gz.msgs.LaserScan</code> and <code>tf2_msgs/msg/TFMessage</code> ↔ <code>gz.msgs.Pose_V</code>), each with a hand-written conversion. The pair you declare decides which type the bridge uses for its publisher or subscription on the ROS side and which type on the Gazebo side. Each side then connects only to endpoints of the <strong>same type</strong>: in ROS, a publisher of a different type never matches the bridge’s subscription at discovery (Phase 3 concept 3); in Gazebo, a plugin does not handle a message of another type on its topic. So a mismatch on either side ends the same way: no error, no data. The classic case is <code>teleop_twist_keyboard</code> with <code>stamped:=true</code>: it then publishes <code>TwistStamped</code>, the bridge declared <code>Twist</code>, and the robot does not move.</p>
+  <p lang="zh-CN">桥只转换内容，不改时间戳和坐标系名：Gazebo 消息头里的时间（仿真时间）和 <code>frame_id</code> 原样进入 ROS 消息（除非打开 <code>override_timestamps_with_wall_time</code> 之类的选项，查 README）。所以两件事要在 Gazebo 一侧就做对：<code>/clock</code> 要桥过来，让 ROS 节点能用 <code>use_sim_time</code>；传感器消息的 <code>frame_id</code> 要和 URDF 里的 link 名一致，否则 RViz2 在 tf 树里找不到它。Harmonic 的传感器可以用 <code>&lt;gz_frame_id&gt;</code> 指定这个名字（gz-sensors8 源码里读这个元素；写法查文档）。话题多了可以写成 YAML 配置文件，用 <code>-p config_file:=…</code> 加载，格式查 README。</p>
+  <p lang="en">The bridge converts content only; it does not change timestamps or frame names: the time in the Gazebo message header (simulation time) and its <code>frame_id</code> go into the ROS message unchanged (unless an option such as <code>override_timestamps_with_wall_time</code> is enabled; see the README). So two things must be right on the Gazebo side: <code>/clock</code> must be bridged so ROS nodes can use <code>use_sim_time</code>; and the <code>frame_id</code> of sensor messages must equal the link name in the URDF, or RViz2 cannot find it in the tf tree. Harmonic sensors can set this name with <code>&lt;gz_frame_id&gt;</code> (the gz-sensors8 source reads this element; syntax: check the docs). With many topics you can write a YAML configuration file and load it with <code>-p config_file:=…</code>; for the format, see the README.</p>
+  <p lang="zh-CN"><strong>生成模型</strong>：<code>ros2 run ros_gz_sim create -topic robot_description -name bot</code> 从 ROS 话题 <code>/robot_description</code>（就是 <code>robot_state_publisher</code> 发的那份 URDF）读出机器人描述，请 Gazebo 把它加进正在运行的世界。Gazebo 加载 URDF 时，由 libsdformat 在内部把它转成 SDF。也可以用 <code>ros2 launch ros_gz_sim gz_sim.launch.py gz_args:="-r world.sdf"</code> 从 ROS 的 launch 体系里启动 Gazebo 本身。</p>
+  <p lang="en"><strong>Spawning</strong>: <code>ros2 run ros_gz_sim create -topic robot_description -name bot</code> reads the robot description from the ROS topic <code>/robot_description</code> (the very URDF that <code>robot_state_publisher</code> publishes) and asks Gazebo to add it to the running world. When Gazebo loads a URDF, libsdformat converts it to SDF internally. You can also start Gazebo itself from the ROS launch system with <code>ros2 launch ros_gz_sim gz_sim.launch.py gz_args:="-r world.sdf"</code>.</p>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 Gazebo 与 ROS 2 集成的部分；官方 <a href="https://gazebosim.org/docs/harmonic/ros2_integration/">ROS 2 integration overview</a>、<a href="https://gazebosim.org/docs/harmonic/ros2_spawn_model/">Use ROS 2 to spawn a Gazebo model</a> 与 <a href="https://github.com/gazebosim/ros_gz/tree/jazzy/ros_gz_bridge">ros_gz_bridge 的 README</a>（类型对照表、方向、YAML 配置）。</p>
+  <p lang="en">Further reading: the parts of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on integrating Gazebo with ROS 2; the official <a href="https://gazebosim.org/docs/harmonic/ros2_integration/">ROS 2 integration overview</a>, <a href="https://gazebosim.org/docs/harmonic/ros2_spawn_model/">Use ROS 2 to spawn a Gazebo model</a> and the <a href="https://github.com/gazebosim/ros_gz/tree/jazzy/ros_gz_bridge">ros_gz_bridge README</a> (type table, directions, YAML configuration).</p>
+
+  <h3 lang="zh-CN">7. 差速驱动插件：odom → base_link 从哪里来</h3><h3 lang="en">7. The differential-drive plugin: where odom → base_link comes from</h3>
+  <p lang="zh-CN">两轮差速机器人靠左右轮的速度差转弯：给定线速度 v 和角速度 ω，左右轮的线速度分别是 v − ω·L/2 和 v + ω·L/2（L 是轮距），除以轮半径就是轮子的角速度。Gazebo 的 DiffDrive 系统（<code>gz-sim-diff-drive-system</code>，名字查文档）把这件事双向都做了：</p>
+  <p lang="en">A two-wheel differential-drive robot turns by the speed difference between its left and right wheels: given a linear velocity v and angular velocity ω, the wheels’ linear speeds are v − ω·L/2 and v + ω·L/2 (L is the wheel separation), and dividing by the wheel radius gives each wheel’s angular velocity. Gazebo’s DiffDrive system (<code>gz-sim-diff-drive-system</code>; name: check the docs) does this in both directions:</p>
+  <ul>
+    <li lang="zh-CN"><strong>输入</strong>：订阅一个 <code>gz.msgs.Twist</code> 话题（<code>&lt;topic&gt;</code>，不设时默认是 <code>/model/&lt;模型名&gt;/cmd_vel</code>），按上面的公式给 <code>&lt;left_joint&gt;</code> 和 <code>&lt;right_joint&gt;</code> 设速度，由物理引擎去转轮子。</li>
+    <li lang="en"><strong>Input</strong>: subscribes to a <code>gz.msgs.Twist</code> topic (<code>&lt;topic&gt;</code>, default <code>/model/&lt;model name&gt;/cmd_vel</code>) and sets the velocities of <code>&lt;left_joint&gt;</code> and <code>&lt;right_joint&gt;</code> by the formula above; the physics engine turns the wheels.</li>
+    <li lang="zh-CN"><strong>输出</strong>：反过来从两个轮子实际转过的角度积分出底盘位姿，也就是<strong>轮式里程计</strong>，以 <code>&lt;odom_publish_frequency&gt;</code>（默认 50 Hz）发两样东西：一条 <code>gz.msgs.Odometry</code> 到 <code>&lt;odom_topic&gt;</code>（默认 <code>/model/&lt;模型名&gt;/odometry</code>），以及同一个位姿作为一条变换、以 <code>gz.msgs.Pose_V</code> 发到 <code>&lt;tf_topic&gt;</code>（默认 <code>/model/&lt;模型名&gt;/tf</code>）。桥把后者转成 <code>tf2_msgs/msg/TFMessage</code> 接到 ROS 的 <code>/tf</code> 上，它就是 tf 树里的 odom → base_link。</li>
+    <li lang="en"><strong>Output</strong>: in the other direction it integrates the base pose from how far the two wheels actually turned — <strong>wheel odometry</strong> — and at <code>&lt;odom_publish_frequency&gt;</code> (default 50 Hz) publishes two things: a <code>gz.msgs.Odometry</code> on <code>&lt;odom_topic&gt;</code> (default <code>/model/&lt;model name&gt;/odometry</code>), and the same pose as a transform, a <code>gz.msgs.Pose_V</code>, on <code>&lt;tf_topic&gt;</code> (default <code>/model/&lt;model name&gt;/tf</code>). The bridge turns the latter into a <code>tf2_msgs/msg/TFMessage</code> on ROS <code>/tf</code>, and that is the odom → base_link of the tf tree.</li>
+  </ul>
+  <p lang="zh-CN"><strong>一处必须改的默认值</strong>：DiffDrive 发出的这条变换，父坐标系默认叫 <code>&lt;模型名&gt;/odom</code>，子坐标系默认叫 <code>&lt;模型名&gt;/&lt;link 名&gt;</code>（gz-sim8 的 <code>DiffDrive.hh</code> 注释，2026-10-31 核对）。如果不改，ROS 里会出现一条 <code>bot/odom</code> → <code>bot/base_link</code>，和 URDF 里的 <code>base_link</code> 是两棵不相连的树。所以 Lab B 用 <code>&lt;frame_id&gt;odom&lt;/frame_id&gt;</code> 和 <code>&lt;child_frame_id&gt;base_link&lt;/child_frame_id&gt;</code> 把它们改成 REP 105 的名字。轮子自己的转角则由另一个系统 JointStatePublisher（<code>gz-sim-joint-state-publisher-system</code>）发出，经桥变成 <code>/joint_states</code>，<code>robot_state_publisher</code> 再算出轮子的 tf——和 Lab A 里滑条做的事一样，只是来源换成了仿真器。</p>
+  <p lang="en"><strong>One default that must change</strong>: the transform DiffDrive publishes has a parent frame named <code>&lt;model name&gt;/odom</code> and a child frame named <code>&lt;model name&gt;/&lt;link name&gt;</code> by default (comments in gz-sim8 <code>DiffDrive.hh</code>, checked 2026-10-31). Left alone, ROS gets a <code>bot/odom</code> → <code>bot/base_link</code> link, a tree that does not connect to the URDF’s <code>base_link</code>. So Lab B renames them to the REP 105 names with <code>&lt;frame_id&gt;odom&lt;/frame_id&gt;</code> and <code>&lt;child_frame_id&gt;base_link&lt;/child_frame_id&gt;</code>. The wheels’ own angles come from another system, JointStatePublisher (<code>gz-sim-joint-state-publisher-system</code>), which the bridge turns into <code>/joint_states</code>, from which <code>robot_state_publisher</code> computes the wheel tf — the same job as the sliders in Lab A, with the simulator as the source.</p>
+  <div class="note" lang="zh-CN">Phase 6 会换一种做法：用 ros2_control 的 <code>diff_drive_controller</code> 代替这个 Gazebo 插件，odom → base_link 改由控制器在 ROS 一侧发布。两种做法不要同时开，否则 odom → base_link 有两个发布者，tf 会在两个值之间来回跳。</div>
+  <div class="note" lang="en">Phase 6 takes another route: ros2_control’s <code>diff_drive_controller</code> replaces this Gazebo plugin, and odom → base_link is published by the controller on the ROS side. Do not run both at once, or odom → base_link gets two publishers and tf jumps back and forth between their values.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲在 Gazebo 里仿真自定义机器人的章节；官方 <a href="https://gazebosim.org/docs/harmonic/moving_robot/">Moving the robot</a> 教程与 <a href="https://github.com/gazebosim/gz-sim/blob/gz-sim8/src/systems/diff_drive/DiffDrive.hh">DiffDrive.hh</a>（每个参数和默认值的权威来源）。</p>
+  <p lang="en">Further reading: the chapters on simulating a custom robot in Gazebo in Renard, <em>ROS 2 From Scratch</em>; the official <a href="https://gazebosim.org/docs/harmonic/moving_robot/">Moving the robot</a> tutorial and <a href="https://github.com/gazebosim/gz-sim/blob/gz-sim8/src/systems/diff_drive/DiffDrive.hh">DiffDrive.hh</a> (the authoritative list of parameters and defaults).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：URDF ↔ SDF</h2><h2 id="compare-en" lang="en">Comparison: URDF ↔ SDF</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">方面</span><span lang="en">Aspect</span></th><th class="ros"><span lang="zh-CN">URDF（ROS 一侧）</span><span lang="en">URDF (ROS side)</span></th><th class="gz"><span lang="zh-CN">SDF（Gazebo 一侧）</span><span lang="en">SDF (Gazebo side)</span></th></tr>
+    <tr><td><span lang="zh-CN">描述范围</span><span lang="en">Scope</span></td><td><span lang="zh-CN">一台机器人：link 和 joint</span><span lang="en">One robot: links and joints</span></td><td><span lang="zh-CN">整个世界：多个模型、灯光、地面、物理设置、插件</span><span lang="en">A whole world: several models, lights, ground, physics settings, plugins</span></td></tr>
+    <tr><td><span lang="zh-CN">结构</span><span lang="en">Structure</span></td><td><span lang="zh-CN">必须是一棵树：每个 link 只有一个父 link，所以直接对应 tf 树</span><span lang="en">Must be a tree: each link has one parent, so it maps directly onto the tf tree</span></td><td><span lang="zh-CN">模型内的关节不限于树（大致，闭链的支持程度查 SDF 规范）</span><span lang="en">Joints inside a model are not limited to a tree (approximate; check the SDF spec for closed-chain support)</span></td></tr>
+    <tr><td><span lang="zh-CN">位姿写法</span><span lang="en">Poses</span></td><td><span lang="zh-CN">joint 的 <code>&lt;origin xyz rpy&gt;</code>：子 link 相对父 link</span><span lang="en">The joint’s <code>&lt;origin xyz rpy&gt;</code>: the child relative to the parent</span></td><td><span lang="zh-CN">任何元素的 <code>&lt;pose relative_to="…"&gt;</code>，可以相对任意命名坐标系</span><span lang="en"><code>&lt;pose relative_to="…"&gt;</code> on any element, relative to any named frame</span></td></tr>
+    <tr><td><span lang="zh-CN">传感器与插件</span><span lang="en">Sensors and plugins</span></td><td><span lang="zh-CN">不在 URDF 标准里；放在 <code>&lt;gazebo&gt;</code> 扩展标签中，转换时原样搬进 SDF</span><span lang="en">Not part of the URDF standard; placed in <code>&lt;gazebo&gt;</code> extension tags and carried into SDF on conversion</span></td><td><span lang="zh-CN">原生的 <code>&lt;sensor&gt;</code>、<code>&lt;plugin&gt;</code></span><span lang="en">Native <code>&lt;sensor&gt;</code> and <code>&lt;plugin&gt;</code></span></td></tr>
+    <tr><td><span lang="zh-CN">物理属性</span><span lang="en">Physical properties</span></td><td><span lang="zh-CN"><code>&lt;inertial&gt;</code>、<code>&lt;collision&gt;</code>；摩擦等要写进 <code>&lt;gazebo&gt;</code> 标签</span><span lang="en"><code>&lt;inertial&gt;</code>, <code>&lt;collision&gt;</code>; friction and the like go into <code>&lt;gazebo&gt;</code> tags</span></td><td><span lang="zh-CN">原生的惯性、碰撞、表面摩擦与接触参数</span><span lang="en">Native inertia, collision, surface friction and contact parameters</span></td></tr>
+    <tr><td><span lang="zh-CN">谁读它</span><span lang="en">Who reads it</span></td><td><span lang="zh-CN"><code>robot_state_publisher</code>、RViz2，以及 Phase 6 的 ros2_control</span><span lang="en"><code>robot_state_publisher</code>, RViz2, and ros2_control in Phase 6</span></td><td><span lang="zh-CN">Gazebo（经 libsdformat）</span><span lang="en">Gazebo (through libsdformat)</span></td></tr>
+    <tr><td><span lang="zh-CN">两者之间</span><span lang="en">Between them</span></td><td><span lang="zh-CN">Gazebo 加载时由 libsdformat 转成 SDF；<code>fixed</code> 关节默认被合并（lump），子 link 并进父 link</span><span lang="en">Gazebo converts it to SDF with libsdformat on load; <code>fixed</code> joints are merged (lumped) by default, folding the child link into its parent</span></td><td><span lang="zh-CN"><code>gz sdf -p robot.urdf</code> 打印转换结果，用来检查合并后的样子</span><span lang="en"><code>gz sdf -p robot.urdf</code> prints the converted result, to check what the merge produced</span></td></tr>
+    <tr><td><span lang="zh-CN">本页的文件</span><span lang="en">This page’s files</span></td><td><code>bot.urdf.xacro</code></td><td><code>world.sdf</code></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) tf 树与一次给定时刻的查询</h3><h3 lang="en">(a) The tf tree and one lookup at a given time</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
+         data-captions='["全图：左边是 tf 树 map → odom → base_link → lidar，右边是 tf2 缓冲区里每条边的样本随时间的分布。按「播放」看一次查询怎样在给定时刻沿树取值。",
+           "第 1 步，map → odom：由定位模块（Phase 6 的 AMCL 或 SLAM）发布，是对里程计漂移的修正。按 REP 105，机器人在 map 里的位姿可以跳变，所以跳变只出现在这一条边上。图里假设它是 5 Hz。",
+           "第 2 步，odom → base_link：仿真里由 Gazebo 的 DiffDrive 系统从轮子转角积分出来，经桥发到 /tf，默认 50 Hz。它连续、不跳变，但会漂移。",
+           "第 3 步，base_link → lidar：URDF 里的 fixed 关节，robot_state_publisher 启动时往 /tf_static 发一次。静态边不分时刻，任何 t 都返回同一个值。",
+           "第 4 步，一次查询：lookup_transform(map, lidar, t)，t 取激光扫描的时间戳 12.35 秒。tf2 先找出从 lidar 到 map 的路径，再对路径上每条边分别取 t 时刻的值。",
+           "第 5 步，插值：odom → base_link 在 12.34 和 12.36 两个样本之间插值，map → odom 在 12.20 和 12.40 之间插值；平移线性，旋转 slerp。三条边在同一个 t 上组合，就是雷达在 map 里的位姿。",
+           "第 6 步，查不到的时刻：t = 12.45 晚于 odom → base_link 的最新样本 12.38，tf2 不外推，报 extrapolation into the future；给 lookup 加超时可以等新样本到来。t = 0 表示最新可用，取各边共同的最晚时刻，这里是 12.38。"]'
+         data-captions-en='["The whole picture: on the left the tf tree map → odom → base_link → lidar, on the right how the samples of each link are spread over time in the tf2 buffer. Press Play to see how one lookup takes values along the tree at a given time.",
+           "Step 1, map → odom: published by the localization component (AMCL or SLAM in Phase 6) as a correction for odometry drift. Under REP 105 the robot pose in map may jump, so jumps occur only on this link. The diagram assumes 5 Hz.",
+           "Step 2, odom → base_link: in simulation, integrated from the wheel angles by the Gazebo DiffDrive system and sent through the bridge on /tf, 50 Hz by default. It is continuous and never jumps, but it drifts.",
+           "Step 3, base_link → lidar: a fixed joint in the URDF, published once on /tf_static by robot_state_publisher at start-up. A static link does not depend on time and returns the same value for any t.",
+           "Step 4, one lookup: lookup_transform(map, lidar, t) with t set to the scan timestamp, 12.35 s. tf2 first finds the path from lidar to map, then takes the value of each link on the path at time t.",
+           "Step 5, interpolation: odom → base_link is interpolated between its samples at 12.34 and 12.36, and map → odom between 12.20 and 12.40; translation linearly, rotation by slerp. The three links composed at the same t give the lidar pose in map.",
+           "Step 6, times that cannot be served: t = 12.45 is after the newest odom → base_link sample at 12.38, and tf2 does not extrapolate, so it raises extrapolation into the future; a lookup timeout waits for the next sample. t = 0 means latest available: the latest time common to every link, here 12.38."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="22" class="small" style="fill: var(--ros)" lang="zh-CN">tf 树（父 → 子）</text><text x="30" y="22" class="small" style="fill: var(--ros)" lang="en">tf tree (parent → child)</text>
+      <text x="370" y="22" class="small" style="fill: var(--ros)" lang="zh-CN">tf2 Buffer：每条边一串带时间戳的样本</text><text x="370" y="22" class="small" style="fill: var(--ros)" lang="en">tf2 Buffer: a series of stamped samples per link</text>
+      <line x1="345" y1="30" x2="345" y2="410" class="lane"/>
+
+      <rect class="box ros" x="30" y="36" width="200" height="36"/>
+      <text x="44" y="59" class="mono">map</text>
+      <text x="100" y="59" class="small" lang="zh-CN">全局 · 可跳变</text><text x="100" y="59" class="small" lang="en">global · may jump</text>
+      <rect class="box ros" x="30" y="120" width="200" height="36"/>
+      <text x="44" y="143" class="mono">odom</text>
+      <text x="100" y="143" class="small" lang="zh-CN">里程计 · 连续</text><text x="100" y="143" class="small" lang="en">odometry · continuous</text>
+      <rect class="box ros" x="30" y="204" width="200" height="36"/>
+      <text x="44" y="227" class="mono">base_link</text>
+      <text x="130" y="227" class="small" lang="zh-CN">底盘</text><text x="130" y="227" class="small" lang="en">robot base</text>
+      <rect class="box ros" x="30" y="288" width="200" height="36"/>
+      <text x="44" y="311" class="mono">lidar</text>
+      <text x="100" y="311" class="small" lang="zh-CN">雷达</text><text x="100" y="311" class="small" lang="en">lidar sensor</text>
+
+      <line x1="370" y1="300" x2="870" y2="300" style="stroke: var(--ink-3); stroke-width: 1"/>
+      <text x="370" y="316" class="small" text-anchor="middle">12.0</text>
+      <text x="470" y="316" class="small" text-anchor="middle">12.1</text>
+      <text x="570" y="316" class="small" text-anchor="middle">12.2</text>
+      <text x="670" y="316" class="small" text-anchor="middle">12.3</text>
+      <text x="770" y="316" class="small" text-anchor="middle">12.4</text>
+      <text x="862" y="316" class="small" text-anchor="middle">12.5 s</text>
+
+      <g data-step="1"><path class="arrow" d="M110 72 L110 118"/>
+        <text x="124" y="92" class="small" lang="zh-CN">map → odom：定位模块发布</text><text x="124" y="92" class="small" lang="en">map → odom: from localization</text>
+        <text x="124" y="108" class="small" lang="zh-CN">图中 5 Hz · Phase 6</text><text x="124" y="108" class="small" lang="en">5 Hz here · Phase 6</text>
+        <text x="370" y="84" class="small" lang="zh-CN">map → odom · 5 Hz</text><text x="370" y="84" class="small" lang="en">map → odom · 5 Hz</text>
+        <line x1="370" y1="96" x2="870" y2="96" style="stroke: var(--line); stroke-width: 1"/>
+        <circle cx="370" cy="96" r="4" style="fill: var(--ros)"/><circle cx="570" cy="96" r="4" style="fill: var(--ros)"/><circle cx="770" cy="96" r="4" style="fill: var(--ros)"/></g>
+
+      <g data-step="2"><path class="arrow" d="M110 156 L110 202"/>
+        <text x="124" y="176" class="small" lang="zh-CN">odom → base_link：DiffDrive</text><text x="124" y="176" class="small" lang="en">odom → base_link: DiffDrive</text>
+        <text x="124" y="192" class="small" lang="zh-CN">经桥到 /tf · 50 Hz</text><text x="124" y="192" class="small" lang="en">via the bridge on /tf · 50 Hz</text>
+        <text x="370" y="166" class="small" lang="zh-CN">odom → base_link · 50 Hz，最新样本 12.38</text><text x="370" y="166" class="small" lang="en">odom → base_link · 50 Hz, newest sample 12.38</text>
+        <line x1="370" y1="180" x2="870" y2="180" style="stroke: var(--line); stroke-width: 1"/>
+        <circle cx="370" cy="180" r="3" style="fill: var(--ros)"/><circle cx="390" cy="180" r="3" style="fill: var(--ros)"/><circle cx="410" cy="180" r="3" style="fill: var(--ros)"/><circle cx="430" cy="180" r="3" style="fill: var(--ros)"/><circle cx="450" cy="180" r="3" style="fill: var(--ros)"/><circle cx="470" cy="180" r="3" style="fill: var(--ros)"/><circle cx="490" cy="180" r="3" style="fill: var(--ros)"/><circle cx="510" cy="180" r="3" style="fill: var(--ros)"/><circle cx="530" cy="180" r="3" style="fill: var(--ros)"/><circle cx="550" cy="180" r="3" style="fill: var(--ros)"/><circle cx="570" cy="180" r="3" style="fill: var(--ros)"/><circle cx="590" cy="180" r="3" style="fill: var(--ros)"/><circle cx="610" cy="180" r="3" style="fill: var(--ros)"/><circle cx="630" cy="180" r="3" style="fill: var(--ros)"/><circle cx="650" cy="180" r="3" style="fill: var(--ros)"/><circle cx="670" cy="180" r="3" style="fill: var(--ros)"/><circle cx="690" cy="180" r="3" style="fill: var(--ros)"/><circle cx="710" cy="180" r="3" style="fill: var(--ros)"/><circle cx="730" cy="180" r="3" style="fill: var(--ros)"/><circle cx="750" cy="180" r="3" style="fill: var(--ros)"/></g>
+
+      <g data-step="3"><path class="arrow" d="M110 240 L110 286"/>
+        <text x="124" y="260" class="small" lang="zh-CN">base_link → lidar：fixed 关节</text><text x="124" y="260" class="small" lang="en">base_link → lidar: fixed joint</text>
+        <text x="124" y="276" class="small">robot_state_publisher · /tf_static</text>
+        <text x="370" y="250" class="small" lang="zh-CN">base_link → lidar · 静态，任何时刻都有效</text><text x="370" y="250" class="small" lang="en">base_link → lidar · static, valid at any time</text>
+        <rect x="370" y="261" width="500" height="6" style="fill: var(--ros); opacity: 0.55"/></g>
+
+      <g data-step="4"><text x="370" y="46" class="mono">lookup_transform(map, lidar, t = 12.35)</text>
+        <path d="M720 56 L720 300" style="stroke: var(--accent); stroke-width: 1.8; stroke-dasharray: 5 4; fill: none"/></g>
+
+      <g data-step="5"><circle cx="570" cy="96" r="8" style="fill: none; stroke: var(--accent); stroke-width: 1.6"/>
+        <circle cx="770" cy="96" r="8" style="fill: none; stroke: var(--accent); stroke-width: 1.6"/>
+        <circle cx="710" cy="180" r="7" style="fill: none; stroke: var(--accent); stroke-width: 1.6"/>
+        <circle cx="730" cy="180" r="7" style="fill: none; stroke: var(--accent); stroke-width: 1.6"/>
+        <circle cx="720" cy="96" r="4" style="fill: var(--accent)"/><circle cx="720" cy="180" r="4" style="fill: var(--accent)"/><circle cx="720" cy="264" r="4" style="fill: var(--accent)"/>
+        <text x="370" y="342" class="small" lang="zh-CN">每条边在 t 两侧的样本之间插值：平移线性，旋转 slerp</text><text x="370" y="342" class="small" lang="en">each link interpolates between the samples either side of t: lerp and slerp</text>
+        <text x="370" y="358" class="small" lang="zh-CN">结果 = 三条边在同一个 t 上依次组合</text><text x="370" y="358" class="small" lang="en">result = the three links composed at the same t</text></g>
+
+      <g data-step="6"><path d="M820 56 L820 300" style="stroke: var(--gz); stroke-width: 1.8; stroke-dasharray: 5 4; fill: none"/>
+        <text x="826" y="46" class="small" style="fill: var(--gz)">12.45</text>
+        <text x="370" y="386" class="small" style="fill: var(--gz)" lang="zh-CN">t = 12.45 晚于最新样本 12.38：extrapolation into the future</text><text x="370" y="386" class="small" style="fill: var(--gz)" lang="en">t = 12.45 is past the newest sample (12.38): extrapolation into the future</text>
+        <text x="370" y="402" class="small" lang="zh-CN">t = 0 表示最新可用：取各边共同的最晚时刻 12.38</text><text x="370" y="402" class="small" lang="en">t = 0 means latest available: the latest common time, 12.38</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 仿真闭环：Gazebo → 桥 → ROS 话题 → 控制器 → /cmd_vel → 回到 Gazebo</h3><h3 lang="en">(b) The simulation loop: Gazebo → bridge → ROS topics → controller → /cmd_vel → back to Gazebo</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
+         data-captions='["全图：左边是 Gazebo 服务器里的几个系统，中间是 ros_gz_bridge，右边是 ROS 2 的话题和节点。按「播放」沿闭环走一圈：物理推进，传感器出数据，过桥，控制器发指令，再过桥回到轮子。",
+           "第 1 步，Physics 每一步推进固定的仿真时长，仿真时钟随之前进，发在 Gazebo 的 /clock 上。桥把它转成 rosgraph_msgs/Clock，设了 use_sim_time 的节点都按它计时。",
+           "第 2 步，Sensors 系统按 update_rate 用渲染引擎从雷达位置朝每个角度看一次场景，得到距离，发成 gz.msgs.LaserScan。容器里这一步用 llvmpipe 在 CPU 上做，最耗时。",
+           "第 3 步，桥把 gz.msgs.LaserScan 逐字段转成 sensor_msgs/msg/LaserScan，发到 ROS 的 /scan。时间戳是仿真时间，frame_id 原样保留，所以要在 SDF 里用 gz_frame_id 设成 URDF 里的 lidar。",
+           "第 4 步，DiffDrive 从轮子实际转角积分出里程计，发 Odometry 和一条 odom → base_link 变换；JointStatePublisher 发轮子关节角。桥把它们转成 /odom、/tf 和 /joint_states，robot_state_publisher 再算出轮子的 tf。",
+           "第 5 步，控制器在 ROS 一侧发布 /cmd_vel。本页是 teleop_twist_keyboard，默认发 geometry_msgs/msg/Twist。Phase 6 换成 Nav2 时，要再核对它发的是 Twist 还是 TwistStamped。",
+           "第 6 步，桥按 ] 方向把 Twist 转成 gz.msgs.Twist 送进 Gazebo。DiffDrive 换算出左右轮速度交给物理引擎，下一步物理推进时机器人动起来，环路闭合。",
+           "第 7 步，消费者：RViz2 和你的 tf2 listener 都要设 use_sim_time:=true，按 /clock 计时，按消息时间戳查 tf。桥只转换声明过的类型对，任何一侧类型对不上，结果都是不报错、没数据。"]'
+         data-captions-en='["The whole picture: on the left the systems inside the Gazebo server, in the middle ros_gz_bridge, on the right the ROS 2 topics and nodes. Press Play to go once round the loop: physics steps, a sensor produces data, it crosses the bridge, a controller sends a command, and that crosses back to the wheels.",
+           "Step 1, Physics advances a fixed amount of simulated time each step, and the simulation clock moves with it, published on the Gazebo /clock. The bridge turns it into rosgraph_msgs/Clock, and every node with use_sim_time keeps time by it.",
+           "Step 2, at its update_rate the Sensors system uses the rendering engine to look at the scene from the lidar at each angle, gets the distances and publishes a gz.msgs.LaserScan. In the container this runs on the CPU through llvmpipe and is the most expensive step.",
+           "Step 3, the bridge copies gz.msgs.LaserScan field by field into sensor_msgs/msg/LaserScan and publishes it on ROS /scan. The stamp is simulation time and the frame_id is kept as is, so set it in SDF with gz_frame_id to the URDF link lidar.",
+           "Step 4, DiffDrive integrates odometry from the actual wheel angles and publishes Odometry plus an odom → base_link transform; JointStatePublisher publishes the wheel joint angles. The bridge turns them into /odom, /tf and /joint_states, and robot_state_publisher computes the wheel tf.",
+           "Step 5, a controller on the ROS side publishes /cmd_vel. On this page it is teleop_twist_keyboard, which publishes geometry_msgs/msg/Twist by default. When Phase 6 switches to Nav2, check again whether it publishes Twist or TwistStamped.",
+           "Step 6, the bridge, in the ] direction, turns Twist into gz.msgs.Twist and sends it into Gazebo. DiffDrive converts it into left and right wheel speeds for the physics engine; on the next physics step the robot moves, and the loop is closed.",
+           "Step 7, the consumers: RViz2 and your tf2 listener both need use_sim_time:=true, keep time by /clock and look up tf by message stamp. The bridge converts only the declared type pairs; a type mismatch on either side means no error and no data."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="24" class="small" style="fill: var(--gz)" lang="zh-CN">Gazebo 服务器（gz-transport）</text><text x="20" y="24" class="small" style="fill: var(--gz)" lang="en">Gazebo server (gz-transport)</text>
+      <text x="320" y="24" class="small">ros_gz_bridge · parameter_bridge</text>
+      <text x="575" y="24" class="small" style="fill: var(--ros)" lang="zh-CN">ROS 2 图（DDS）</text><text x="575" y="24" class="small" style="fill: var(--ros)" lang="en">ROS 2 graph (DDS)</text>
+      <rect class="box gz" x="20" y="34" width="280" height="376"/>
+      <rect class="box" x="320" y="34" width="210" height="376"/>
+
+      <g data-step="4 6"><rect class="box" x="34" y="44" width="252" height="96"/>
+        <text x="46" y="64" class="mono">DiffDrive</text>
+        <text x="46" y="84" class="small" lang="zh-CN">收 /cmd_vel → 左右轮速度</text><text x="46" y="84" class="small" lang="en">takes /cmd_vel → wheel speeds</text>
+        <text x="46" y="102" class="small" lang="zh-CN">积分轮子转角 → 里程计</text><text x="46" y="102" class="small" lang="en">integrates wheel angles → odometry</text>
+        <text x="46" y="120" class="small" lang="zh-CN">发 /odom 与 /tf（odom → base_link）</text><text x="46" y="120" class="small" lang="en">sends /odom, /tf (odom → base_link)</text></g>
+
+      <g data-step="1"><rect class="box" x="34" y="150" width="252" height="50"/>
+        <text x="46" y="170" class="mono">Physics</text>
+        <text x="46" y="188" class="small" lang="zh-CN">每步推进固定的仿真时长</text><text x="46" y="188" class="small" lang="en">each step advances fixed sim time</text>
+        <rect class="box" x="34" y="330" width="252" height="70"/>
+        <text x="46" y="352" class="mono">/clock</text>
+        <text x="46" y="370" class="small" lang="zh-CN">仿真时钟 · gz.msgs.Clock</text><text x="46" y="370" class="small" lang="en">simulation clock · gz.msgs.Clock</text>
+        <text x="46" y="388" class="small" lang="zh-CN">比真实时间慢也没关系</text><text x="46" y="388" class="small" lang="en">may run slower than real time</text>
+        <path class="arrow" d="M288 360 L318 360"/>
+        <text x="332" y="364" class="small">[ gz.msgs.Clock → Clock</text>
+        <path class="arrow" d="M532 360 L573 360"/>
+        <rect class="box ros" x="575" y="330" width="305" height="70"/>
+        <text x="587" y="352" class="mono">/clock · rosgraph_msgs/Clock</text>
+        <text x="587" y="370" class="small" lang="zh-CN">设了 use_sim_time 的节点的 now()</text><text x="587" y="370" class="small" lang="en">now() of every use_sim_time node</text>
+        <text x="587" y="388" class="small" lang="zh-CN">先起仿真和这座桥</text><text x="587" y="388" class="small" lang="en">start the sim and this bridge first</text></g>
+
+      <g data-step="2"><rect class="box" x="34" y="210" width="252" height="50"/>
+        <text x="46" y="230" class="mono">Sensors · gpu_lidar</text>
+        <text x="46" y="248" class="small" lang="zh-CN">渲染场景 → 距离 → gz /scan</text><text x="46" y="248" class="small" lang="en">renders the scene → ranges → gz /scan</text></g>
+
+      <g data-step="3"><path class="arrow" d="M288 235 L318 235"/>
+        <text x="332" y="239" class="small">[ gz.msgs.LaserScan → LaserScan</text>
+        <path class="arrow" d="M532 235 L573 235"/>
+        <rect class="box ros" x="575" y="210" width="305" height="50"/>
+        <text x="587" y="230" class="mono">/scan · LaserScan</text>
+        <text x="587" y="248" class="small" lang="zh-CN">frame_id = lidar（gz_frame_id）</text><text x="587" y="248" class="small" lang="en">frame_id = lidar (gz_frame_id)</text></g>
+
+      <g data-step="4"><path class="arrow" d="M288 120 L318 120"/>
+        <text x="332" y="114" class="small">[ gz.msgs.Odometry → Odometry</text>
+        <text x="332" y="130" class="small">[ gz.msgs.Pose_V → TFMessage</text>
+        <path class="arrow" d="M532 120 L573 120"/>
+        <rect class="box ros" x="575" y="98" width="305" height="46"/>
+        <text x="587" y="116" class="mono">/odom · /tf</text>
+        <text x="587" y="134" class="small" lang="zh-CN">Odometry · TFMessage（odom → base_link）</text><text x="587" y="134" class="small" lang="en">Odometry · TFMessage (odom → base_link)</text>
+        <rect class="box" x="34" y="270" width="252" height="50"/>
+        <text x="46" y="290" class="mono">JointStatePublisher</text>
+        <text x="46" y="308" class="small" lang="zh-CN">轮子关节角 → gz /joint_states</text><text x="46" y="308" class="small" lang="en">wheel joint angles → gz /joint_states</text>
+        <path class="arrow" d="M288 295 L318 295"/>
+        <text x="332" y="299" class="small">[ gz.msgs.Model → JointState</text>
+        <path class="arrow" d="M532 295 L573 295"/>
+        <rect class="box ros" x="575" y="270" width="305" height="50"/>
+        <text x="587" y="290" class="mono">/joint_states</text>
+        <text x="587" y="308" class="small" lang="zh-CN">→ robot_state_publisher → 轮子的 /tf</text><text x="587" y="308" class="small" lang="en">→ robot_state_publisher → wheel /tf</text></g>
+
+      <g data-step="5"><rect class="box ros" x="575" y="44" width="305" height="46"/>
+        <text x="587" y="64" class="mono">teleop_twist_keyboard</text>
+        <text x="587" y="82" class="small" lang="zh-CN">发布 /cmd_vel · Twist</text><text x="587" y="82" class="small" lang="en">publishes /cmd_vel · Twist</text></g>
+
+      <g data-step="6"><path class="arrow" d="M573 67 L533 67"/>
+        <text x="332" y="72" class="small">] Twist → gz.msgs.Twist</text>
+        <path class="arrow" d="M318 72 L288 72"/></g>
+
+      <g data-step="7"><text x="332" y="176" class="small" lang="zh-CN">只转换声明过的类型对</text><text x="332" y="176" class="small" lang="en">converts declared pairs only</text>
+        <text x="332" y="192" class="small" lang="zh-CN">两侧类型都要对上</text><text x="332" y="192" class="small" lang="en">types must match on both sides</text>
+        <rect class="box ros" x="575" y="150" width="305" height="50"/>
+        <text x="587" y="170" class="mono">RViz2 · tf2 listener</text>
+        <text x="587" y="188" class="small" lang="zh-CN">use_sim_time:=true · 按时间戳查 tf</text><text x="587" y="188" class="small" lang="en">use_sim_time:=true · tf looked up by stamp</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 两轮机器人的 URDF，在 RViz2 里看它，再写一个 tf2 listener</h3><h3 lang="en">Lab A · A two-wheel robot URDF, viewed in RViz2, plus a tf2 listener</h3>
+    <ol>
+      <li><span lang="zh-CN">在宿主上 <code>./lab.sh up</code>，浏览器打开 <code>http://localhost:6080/vnc.html</code>。本实验要开 RViz2，所以命令都在 noVNC 桌面的终端里跑（那里有 <code>DISPLAY=:1</code>）；每个终端先 source underlay。装上实验镜像里可能没有的几个包，建一个放在命名卷里的目录：</span><span lang="en">On the host run <code>./lab.sh up</code> and open <code>http://localhost:6080/vnc.html</code> in the browser. This lab opens RViz2, so run the commands in terminals of the noVNC desktop (which have <code>DISPLAY=:1</code>), sourcing the underlay in each. Install a few packages the lab image may lack, and make a directory on the named volume:</span><pre data-lang="sh">source /opt/ros/jazzy/setup.bash
+apt-get update &amp;&amp; apt-get install -y ros-jazzy-joint-state-publisher-gui ros-jazzy-xacro ros-jazzy-tf2-tools
+mkdir -p /root/ws/p5 &amp;&amp; cd /root/ws/p5</pre></li>
+      <li><span lang="zh-CN">写机器人描述：一个长方体底盘、两个用同一个 xacro 宏生成的轮子（continuous 关节）、一个万向球和一个雷达（都是 fixed 关节）。尺寸按 REP 103：x 向前、y 向左、z 向上；base_link 的原点在底盘中心：</span><span lang="en">Write the robot description: a box base, two wheels generated by one xacro macro (continuous joints), a caster ball and a lidar (both fixed joints). Dimensions follow REP 103: x forward, y left, z up; the base_link origin is at the centre of the base:</span><pre data-lang="xml" data-file="bot.urdf.xacro">&lt;?xml version="1.0"?&gt;
+&lt;!-- bot.urdf.xacro: a two-wheel differential-drive robot with a lidar --&gt;
+&lt;robot name="bot" xmlns:xacro="http://www.ros.org/wiki/xacro"&gt;
+  &lt;xacro:arg name="sim" default="false"/&gt;
+  &lt;xacro:property name="wheel_r" value="0.05"/&gt;
+  &lt;xacro:property name="wheel_w" value="0.03"/&gt;
+  &lt;xacro:property name="wheel_y" value="0.115"/&gt;   &lt;!-- 轮距 L = 2 × 0.115 = 0.23 m --&gt;
+
+  &lt;link name="base_link"&gt;
+    &lt;visual&gt;&lt;geometry&gt;&lt;box size="0.30 0.20 0.08"/&gt;&lt;/geometry&gt;&lt;/visual&gt;
+    &lt;collision&gt;&lt;geometry&gt;&lt;box size="0.30 0.20 0.08"/&gt;&lt;/geometry&gt;&lt;/collision&gt;
+    &lt;inertial&gt;
+      &lt;mass value="2.0"/&gt;
+      &lt;!-- 实心长方体：ixx = m(y²+z²)/12，依此类推 --&gt;
+      &lt;inertia ixx="0.0077" ixy="0" ixz="0" iyy="0.0161" iyz="0" izz="0.0217"/&gt;
+    &lt;/inertial&gt;
+  &lt;/link&gt;
+
+  &lt;xacro:macro name="wheel" params="side y"&gt;
+    &lt;link name="${side}_wheel"&gt;
+      &lt;visual&gt;&lt;geometry&gt;&lt;cylinder radius="${wheel_r}" length="${wheel_w}"/&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;collision&gt;&lt;geometry&gt;&lt;cylinder radius="${wheel_r}" length="${wheel_w}"/&gt;&lt;/geometry&gt;&lt;/collision&gt;
+      &lt;inertial&gt;
+        &lt;mass value="0.2"/&gt;
+        &lt;inertia ixx="0.00014" ixy="0" ixz="0" iyy="0.00014" iyz="0" izz="0.00025"/&gt;
+      &lt;/inertial&gt;
+    &lt;/link&gt;
+    &lt;!-- 绕 x 转 -90°：圆柱的 z 轴（转轴）对准机器人的 +y --&gt;
+    &lt;joint name="${side}_wheel_joint" type="continuous"&gt;
+      &lt;parent link="base_link"/&gt;
+      &lt;child link="${side}_wheel"/&gt;
+      &lt;origin xyz="0 ${y} -0.01" rpy="-1.5708 0 0"/&gt;
+      &lt;axis xyz="0 0 1"/&gt;
+    &lt;/joint&gt;
+  &lt;/xacro:macro&gt;
+  &lt;xacro:wheel side="left" y="${wheel_y}"/&gt;
+  &lt;xacro:wheel side="right" y="${-wheel_y}"/&gt;
+
+  &lt;!-- 前方的万向球：底部与轮子同高（z = -0.06） --&gt;
+  &lt;link name="caster"&gt;
+    &lt;visual&gt;&lt;geometry&gt;&lt;sphere radius="0.02"/&gt;&lt;/geometry&gt;&lt;/visual&gt;
+    &lt;collision&gt;&lt;geometry&gt;&lt;sphere radius="0.02"/&gt;&lt;/geometry&gt;&lt;/collision&gt;
+    &lt;inertial&gt;
+      &lt;mass value="0.05"/&gt;
+      &lt;inertia ixx="0.000008" ixy="0" ixz="0" iyy="0.000008" iyz="0" izz="0.000008"/&gt;
+    &lt;/inertial&gt;
+  &lt;/link&gt;
+  &lt;joint name="caster_joint" type="fixed"&gt;
+    &lt;parent link="base_link"/&gt;&lt;child link="caster"/&gt;
+    &lt;origin xyz="0.11 0 -0.04"/&gt;
+  &lt;/joint&gt;
+
+  &lt;link name="lidar"&gt;
+    &lt;visual&gt;&lt;geometry&gt;&lt;cylinder radius="0.03" length="0.04"/&gt;&lt;/geometry&gt;&lt;/visual&gt;
+    &lt;collision&gt;&lt;geometry&gt;&lt;cylinder radius="0.03" length="0.04"/&gt;&lt;/geometry&gt;&lt;/collision&gt;
+    &lt;inertial&gt;
+      &lt;mass value="0.1"/&gt;
+      &lt;inertia ixx="0.00004" ixy="0" ixz="0" iyy="0.00004" iyz="0" izz="0.000045"/&gt;
+    &lt;/inertial&gt;
+  &lt;/link&gt;
+  &lt;joint name="lidar_joint" type="fixed"&gt;
+    &lt;parent link="base_link"/&gt;&lt;child link="lidar"/&gt;
+    &lt;origin xyz="0.08 0 0.06"/&gt;
+  &lt;/joint&gt;
+
+  &lt;!-- Lab B 在这里加入 &lt;xacro:if value="$(arg sim)"&gt; … &lt;/xacro:if&gt; --&gt;
+&lt;/robot&gt;</pre></li>
+      <li><span lang="zh-CN">展开 xacro，数一数 link，再看 Gazebo 会把它转成什么：两个 fixed 关节的子 link 会被并进 base_link，这就是对照表最后一行说的合并：</span><span lang="en">Expand the xacro, count the links, and see what Gazebo will turn it into: the child links of the two fixed joints are folded into base_link, the merge described in the last rows of the comparison table:</span><pre data-lang="sh">xacro bot.urdf.xacro &gt; /tmp/bot.urdf
+grep -c '&lt;link ' /tmp/bot.urdf                 # 5：base_link、两个轮子、caster、lidar
+gz sdf -p /tmp/bot.urdf | grep '&lt;link '         # 转成 SDF 后剩几个 link？</pre></li>
+      <li><span lang="zh-CN">写一个 launch 文件，把 xacro 的输出作为 <code>robot_description</code> 参数交给 <code>robot_state_publisher</code>。<code>sim</code> 和 <code>use_sim_time</code> 两个参数 Lab B 才用：</span><span lang="en">Write a launch file that hands the xacro output to <code>robot_state_publisher</code> as its <code>robot_description</code> parameter. The <code>sim</code> and <code>use_sim_time</code> arguments are for Lab B:</span><pre data-lang="py" data-file="view.launch.py"># view.launch.py: robot_state_publisher with the xacro output as robot_description
+import os
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import Command, LaunchConfiguration
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def generate_launch_description():
+    sim = LaunchConfiguration('sim')
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    description = ParameterValue(
+        Command(['xacro ', os.path.join(HERE, 'bot.urdf.xacro'), ' sim:=', sim]),
+        value_type=str)
+    return LaunchDescription([
+        DeclareLaunchArgument('sim', default_value='false'),
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        Node(package='robot_state_publisher', executable='robot_state_publisher',
+             parameters=[{'robot_description': description,
+                          'use_sim_time': ParameterValue(use_sim_time, value_type=bool)}]),
+    ])</pre></li>
+      <li><span lang="zh-CN">三个终端分别启动 <code>robot_state_publisher</code>、关节滑条和 RViz2。在 RViz2 里把 Fixed Frame 设为 <code>base_link</code>，Add 一个 RobotModel（Description Topic 选 <code>/robot_description</code>）和一个 TF。拖动滑条，轮子应当跟着转：</span><span lang="en">In three terminals start <code>robot_state_publisher</code>, the joint sliders and RViz2. In RViz2 set Fixed Frame to <code>base_link</code>, and Add a RobotModel (Description Topic <code>/robot_description</code>) and a TF display. Move a slider and the wheel should turn with it:</span><pre data-lang="sh">ros2 launch ./view.launch.py                                   # 终端 1
+ros2 run joint_state_publisher_gui joint_state_publisher_gui   # 终端 2
+rviz2                                                          # 终端 3</pre></li>
+      <li><span lang="zh-CN">用工具看树。<code>tf2_echo base_link lidar</code> 打印 lidar 在 base_link 里的位姿，应当是 (0.08, 0, 0.06)，也就是 URDF 里 <code>lidar_joint</code> 的 origin。<code>/tf_static</code> 要用 transient_local 订阅才能收到早已发过的那一条：</span><span lang="en">Look at the tree with the tools. <code>tf2_echo base_link lidar</code> prints the pose of lidar in base_link, which should be (0.08, 0, 0.06), the origin of <code>lidar_joint</code> in the URDF. <code>/tf_static</code> must be subscribed with transient_local to receive the message that was sent long ago:</span><pre data-lang="sh">ros2 run tf2_tools view_frames                 # 生成 frames_*.pdf，在桌面里打开
+ros2 run tf2_ros tf2_echo base_link lidar
+ros2 topic echo --once --qos-reliability reliable --qos-durability transient_local /tf_static
+ros2 topic hz /tf                              # 轮子的变换，频率上限是 publish_frequency</pre></li>
+      <li><span lang="zh-CN">故意弄坏它：在终端 2 按 Ctrl+C 停掉滑条，等几秒，看 RViz2 里 RobotModel 下的两个轮子变成什么状态，记下报错原文；底盘、万向球和雷达为什么不受影响？再启动滑条，看它恢复。</span><span lang="en">Break it on purpose: stop the sliders with Ctrl+C in terminal 2, wait a few seconds, see what state the two wheels under RobotModel in RViz2 go into, and record the exact error text; why are the base, caster and lidar unaffected? Start the sliders again and watch it recover.</span></li>
+      <li><span lang="zh-CN">写 tf2 listener：同一条变换，用四种时刻各查一次。静态边和「最新可用」应当总能查到；「现在」大多会报 extrapolation into the future；加了 0.2 秒超时后应当能查到；「20 秒前」超出 10 秒缓存，报 extrapolation into the past：</span><span lang="en">Write the tf2 listener: look up the same transform at four different times. The static link and “latest available” should always succeed; “now” will mostly raise extrapolation into the future; with a 0.2 s timeout it should succeed; “20 s ago” is beyond the 10 s cache and raises extrapolation into the past:</span><pre data-lang="py" data-file="tf_probe.py"># tf_probe.py: look up the same transforms at different times, once per second
+import rclpy
+from rclpy.duration import Duration
+from rclpy.node import Node
+from rclpy.time import Time
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
+
+TARGET, SOURCE = 'base_link', 'left_wheel'   # Lab B：改成 'odom', 'base_link'
+
+
+class TfProbe(Node):
+    def __init__(self):
+        super().__init__('tf_probe')
+        self.buffer = Buffer()                       # 默认缓存 10 秒
+        # spin_thread=True：listener 在自己的线程里收 /tf，
+        # 否则下面带超时的 lookup 会挡住同一个执行器，永远等不到新数据
+        self.listener = TransformListener(self.buffer, self, spin_thread=True)
+        self.timer = self.create_timer(1.0, self.tick)
+
+    def show(self, label, target, source, when, timeout=Duration()):
+        try:
+            t = self.buffer.lookup_transform(target, source, when, timeout)
+        except TransformException as ex:
+            self.get_logger().warn(f'{label}: {ex}')
+            return
+        p, q, s = t.transform.translation, t.transform.rotation, t.header.stamp
+        self.get_logger().info(
+            f'{label}: {source} in {target} @ {s.sec}.{s.nanosec:09d} '
+            f'xyz=({p.x:.3f}, {p.y:.3f}, {p.z:.3f}) '
+            f'q=({q.x:.3f}, {q.y:.3f}, {q.z:.3f}, {q.w:.3f})')
+
+    def tick(self):
+        now = self.get_clock().now()
+        self.show('static, latest', 'base_link', 'lidar', Time())
+        self.show('dynamic, latest', TARGET, SOURCE, Time())
+        self.show('dynamic, now', TARGET, SOURCE, now)
+        self.show('dynamic, now + wait', TARGET, SOURCE, now, Duration(seconds=0.2))
+        self.show('dynamic, 20 s ago', TARGET, SOURCE, now - Duration(seconds=20.0))
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(TfProbe())
+
+
+if __name__ == '__main__':
+    main()</pre></li>
+      <li><span lang="zh-CN">运行它，拖动滑条，看 <code>dynamic</code> 几行的四元数怎样变化；再停掉滑条，看「最新可用」那一行的时间戳是否还在前进：</span><span lang="en">Run it, move a slider, and watch how the quaternion in the <code>dynamic</code> lines changes; then stop the sliders and see whether the timestamp of the “latest available” line still advances:</span><pre data-lang="sh">python3 tf_probe.py</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 放进 Gazebo Harmonic：差速驱动、激光雷达、桥、键盘遥控</h3><h3 lang="en">Lab B · Into Gazebo Harmonic: differential drive, lidar, bridge, keyboard teleoperation</h3>
+    <ol>
+      <li><span lang="zh-CN">停掉 Lab A 的所有节点。把下面这段插进 <code>bot.urdf.xacro</code> 里那行注释的位置（<code>&lt;/robot&gt;</code> 之前）。它只在 <code>sim:=true</code> 时展开，所以 Lab A 的用法不变。插件与传感器的名字和元素取自 2026-10-31 的 Harmonic 教程和 gz-sim8、gz-sensors8 源码，查文档；万向球的 <code>mu1</code>、<code>mu2</code> 写法尤其要核对：</span><span lang="en">Stop every node from Lab A. Insert the block below into <code>bot.urdf.xacro</code> where the comment is (before <code>&lt;/robot&gt;</code>). It expands only with <code>sim:=true</code>, so Lab A keeps working as before. The plugin and sensor names and elements come from the Harmonic tutorials and the gz-sim8 and gz-sensors8 sources as of 2026-10-31: check the docs, and check the caster’s <code>mu1</code> and <code>mu2</code> syntax in particular:</span><pre data-lang="xml" data-file="bot.urdf.xacro（插入）">  &lt;!-- 只在 xacro bot.urdf.xacro sim:=true 时展开 --&gt;
+  &lt;xacro:if value="$(arg sim)"&gt;
+    &lt;gazebo&gt;
+      &lt;plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive"&gt;
+        &lt;left_joint&gt;left_wheel_joint&lt;/left_joint&gt;
+        &lt;right_joint&gt;right_wheel_joint&lt;/right_joint&gt;
+        &lt;wheel_separation&gt;0.23&lt;/wheel_separation&gt;
+        &lt;wheel_radius&gt;0.05&lt;/wheel_radius&gt;
+        &lt;topic&gt;/cmd_vel&lt;/topic&gt;
+        &lt;odom_topic&gt;/odom&lt;/odom_topic&gt;
+        &lt;tf_topic&gt;/tf&lt;/tf_topic&gt;
+        &lt;frame_id&gt;odom&lt;/frame_id&gt;               &lt;!-- 默认是 bot/odom --&gt;
+        &lt;child_frame_id&gt;base_link&lt;/child_frame_id&gt; &lt;!-- 默认是 bot/base_link --&gt;
+        &lt;odom_publish_frequency&gt;50&lt;/odom_publish_frequency&gt;
+      &lt;/plugin&gt;
+      &lt;plugin filename="gz-sim-joint-state-publisher-system"
+              name="gz::sim::systems::JointStatePublisher"&gt;
+        &lt;topic&gt;/joint_states&lt;/topic&gt;
+      &lt;/plugin&gt;
+    &lt;/gazebo&gt;
+    &lt;!-- lidar 是 fixed 关节，转换时会并进 base_link；传感器跟着搬过去 --&gt;
+    &lt;gazebo reference="lidar"&gt;
+      &lt;sensor name="lidar" type="gpu_lidar"&gt;
+        &lt;topic&gt;/scan&lt;/topic&gt;
+        &lt;gz_frame_id&gt;lidar&lt;/gz_frame_id&gt;
+        &lt;update_rate&gt;10&lt;/update_rate&gt;
+        &lt;ray&gt;
+          &lt;scan&gt;&lt;horizontal&gt;
+            &lt;samples&gt;360&lt;/samples&gt;&lt;resolution&gt;1&lt;/resolution&gt;
+            &lt;min_angle&gt;-3.14159&lt;/min_angle&gt;&lt;max_angle&gt;3.14159&lt;/max_angle&gt;
+          &lt;/horizontal&gt;&lt;/scan&gt;
+          &lt;range&gt;&lt;min&gt;0.08&lt;/min&gt;&lt;max&gt;8.0&lt;/max&gt;&lt;resolution&gt;0.01&lt;/resolution&gt;&lt;/range&gt;
+        &lt;/ray&gt;
+        &lt;always_on&gt;1&lt;/always_on&gt;
+        &lt;visualize&gt;true&lt;/visualize&gt;
+      &lt;/sensor&gt;
+    &lt;/gazebo&gt;
+    &lt;gazebo reference="caster"&gt;&lt;mu1&gt;0.0&lt;/mu1&gt;&lt;mu2&gt;0.0&lt;/mu2&gt;&lt;/gazebo&gt;
+  &lt;/xacro:if&gt;</pre></li>
+      <li><span lang="zh-CN">写世界文件。<code>empty.sdf</code> 没有 Sensors 系统，所以自己写一个带四个系统、一面墙的世界：</span><span lang="en">Write the world file. <code>empty.sdf</code> has no Sensors system, so write a world of your own with four systems and one wall:</span><pre data-lang="xml" data-file="world.sdf">&lt;?xml version="1.0"?&gt;
+&lt;!-- world.sdf: ground, light, one wall; the four systems this lab needs --&gt;
+&lt;sdf version="1.9"&gt;
+  &lt;world name="p5"&gt;
+    &lt;plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/&gt;
+    &lt;plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/&gt;
+    &lt;plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/&gt;
+    &lt;plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"&gt;
+      &lt;render_engine&gt;ogre2&lt;/render_engine&gt;
+    &lt;/plugin&gt;
+
+    &lt;light type="directional" name="sun"&gt;
+      &lt;cast_shadows&gt;false&lt;/cast_shadows&gt;
+      &lt;pose&gt;0 0 10 0 0 0&lt;/pose&gt;
+      &lt;direction&gt;-0.5 0.1 -0.9&lt;/direction&gt;
+    &lt;/light&gt;
+
+    &lt;model name="ground"&gt;
+      &lt;static&gt;true&lt;/static&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;plane&gt;&lt;normal&gt;0 0 1&lt;/normal&gt;&lt;size&gt;20 20&lt;/size&gt;&lt;/plane&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;plane&gt;&lt;normal&gt;0 0 1&lt;/normal&gt;&lt;size&gt;20 20&lt;/size&gt;&lt;/plane&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;
+    &lt;/model&gt;
+
+    &lt;model name="wall"&gt;
+      &lt;static&gt;true&lt;/static&gt;
+      &lt;pose&gt;2 0 0.25 0 0 0&lt;/pose&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.2 2 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.2 2 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;
+    &lt;/model&gt;
+  &lt;/world&gt;
+&lt;/sdf&gt;</pre></li>
+      <li><span lang="zh-CN">按「仿真器和时钟先起」的顺序启动。终端 1 起 Gazebo（图形界面打不开时用第二行无头运行，雷达仍要渲染，若无头时没有 <code>/scan</code> 数据，查 Gazebo 文档里的 headless rendering 选项）；终端 2 起桥：</span><span lang="en">Start in the order “simulator and clock first”. Terminal 1 starts Gazebo (when the GUI will not open, run headless with the second line; the lidar still needs rendering, so if there is no <code>/scan</code> data when headless, check the headless rendering option in the Gazebo docs); terminal 2 starts the bridge:</span><pre data-lang="sh"># 终端 1
+gz sim -r world.sdf
+# gz sim -s -r world.sdf                       # 备选：只起服务器
+# 终端 2：[ 从 Gazebo 到 ROS，] 从 ROS 到 Gazebo
+ros2 run ros_gz_bridge parameter_bridge \
+  /clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock \
+  /cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist \
+  /scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan \
+  /odom@nav_msgs/msg/Odometry[gz.msgs.Odometry \
+  /tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V \
+  /joint_states@sensor_msgs/msg/JointState[gz.msgs.Model</pre></li>
+      <li><span lang="zh-CN">终端 3 用仿真模式起 <code>robot_state_publisher</code>，终端 4 把机器人生成进世界 <code>p5</code>（z 抬高 7 cm，轮子底部在 base_link 下 6 cm）。生成工具从 <code>/robot_description</code> 读 URDF，那是 transient_local 话题，所以晚启动也读得到：</span><span lang="en">Terminal 3 starts <code>robot_state_publisher</code> in simulation mode, and terminal 4 spawns the robot into world <code>p5</code> (raised 7 cm; the wheel bottoms are 6 cm below base_link). The spawn tool reads the URDF from <code>/robot_description</code>, a transient_local topic, so it works even when started later:</span><pre data-lang="sh">ros2 launch ./view.launch.py sim:=true use_sim_time:=true            # 终端 3
+ros2 run ros_gz_sim create -world p5 -topic robot_description -name bot -z 0.07   # 终端 4</pre></li>
+      <li><span lang="zh-CN">检查两边的话题和树。Gazebo 一侧和 ROS 一侧各有一份话题列表；树的根应当是 <code>odom</code>，而不是 <code>bot/odom</code>。可选：发一条恒等的 map → odom 静态变换，把 REP 105 的链补齐，就是动画 (a) 的那棵树：</span><span lang="en">Check the topics on both sides and the tree. The Gazebo side and the ROS side each have their own topic list; the root of the tree should be <code>odom</code>, not <code>bot/odom</code>. Optional: publish an identity map → odom static transform to complete the REP 105 chain, which gives the tree of diagram (a):</span><pre data-lang="sh">gz topic -l                                    # Gazebo 的话题：/scan、/odom、/tf、/joint_states、/clock……
+ros2 topic list
+ros2 topic echo --once /clock
+ros2 topic hz /scan                            # 软件渲染下可能低于 10 Hz
+ros2 run tf2_ros tf2_echo odom base_link
+ros2 run tf2_ros static_transform_publisher --frame-id map --child-frame-id odom --ros-args -p use_sim_time:=true
+ros2 run tf2_tools view_frames --ros-args -p use_sim_time:=true</pre></li>
+      <li><span lang="zh-CN">终端 5 用仿真时间起 RViz2：Fixed Frame 设 <code>odom</code>，Add RobotModel、TF 和 LaserScan（Topic 选 <code>/scan</code>）。墙应当在雷达前方约 1.9 米处显示为一排点：</span><span lang="en">Terminal 5 starts RViz2 on simulation time: set Fixed Frame to <code>odom</code>, and Add RobotModel, TF and LaserScan (Topic <code>/scan</code>). The wall should appear as a row of points about 1.9 m ahead of the lidar:</span><pre data-lang="sh">rviz2 --ros-args -p use_sim_time:=true</pre></li>
+      <li><span lang="zh-CN">终端 6 用键盘开车（这个终端要有键盘焦点；按键说明会打印出来）。开向墙，看 RViz2 里扫描点和 odom 里的轨迹；再在 Gazebo 里看同一台机器人。听一下 <code>/cmd_vel</code> 上到底有谁：</span><span lang="en">Terminal 6 drives with the keyboard (this terminal needs keyboard focus; it prints the key bindings). Drive towards the wall and watch the scan points and the trajectory in odom in RViz2; then watch the same robot in Gazebo. Check who is actually on <code>/cmd_vel</code>:</span><pre data-lang="sh">ros2 run teleop_twist_keyboard teleop_twist_keyboard     # 终端 6
+ros2 topic info -v /cmd_vel                             # 一个 teleop 发布者、一个桥的订阅者，类型都是 Twist</pre></li>
+      <li><span lang="zh-CN">用仿真时间运行 Lab A 的 listener：先把 <code>tf_probe.py</code> 顶部的 <code>TARGET, SOURCE</code> 改成 <code>'odom', 'base_link'</code>，开车时看「最新可用」和「现在 + 等待」两行的位姿；再暂停 Gazebo，看时间戳是否停住：</span><span lang="en">Run the Lab A listener on simulation time: first change <code>TARGET, SOURCE</code> at the top of <code>tf_probe.py</code> to <code>'odom', 'base_link'</code>, and while driving watch the poses in the “latest available” and “now + wait” lines; then pause Gazebo and see whether the timestamps stop:</span><pre data-lang="sh">python3 tf_probe.py --ros-args -p use_sim_time:=true</pre></li>
+      <li><span lang="zh-CN">故意弄坏两次。第一次：另开一个<strong>不带</strong> <code>use_sim_time</code> 的 RViz2，加同样的显示，记下 LaserScan 和 RobotModel 的报错原文，对照概念 3 解释原因。第二次：停掉 teleop，用 <code>stamped:=true</code> 重开，机器人应当不再响应；用 <code>ros2 topic info -v /cmd_vel</code> 看两个端点的类型（输出格式以实际为准），对照概念 6 解释：</span><span lang="en">Break it twice on purpose. First: open a second RViz2 <strong>without</strong> <code>use_sim_time</code>, add the same displays, record the exact error text of LaserScan and RobotModel, and explain it with concept 3. Second: stop teleop and restart it with <code>stamped:=true</code>; the robot should stop responding; look at the types of the two endpoints with <code>ros2 topic info -v /cmd_vel</code> (go by the actual output format), and explain it with concept 6:</span><pre data-lang="sh">rviz2                                                    # 不带 use_sim_time
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=true
+ros2 topic info -v /cmd_vel</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>frames_*.pdf</code> 截图、<code>tf2_echo base_link lidar</code> 的一行输出、停掉滑条后轮子的报错原文、<code>tf_probe.py</code> 四种时刻各一行输出（标出哪几行报错、报的是 future 还是 past），以及 <code>gz sdf -p</code> 之后剩下的 link 名；Lab B 的 <code>gz topic -l</code> 与 <code>ros2 topic list</code>、<code>view_frames</code> 生成的树（根是 <code>odom</code> 还是 <code>map</code>）、RViz2 里看到墙的截图、两次故意弄坏时的报错或 <code>ros2 topic info -v</code> 输出，以及你用自己的话写的「这台仿真机器人的 odom → base_link 是谁算的、经过了哪几步才到 RViz2」（10 行以内）。</div>
+    <div class="note" lang="en">Deliverables: from Lab A, a screenshot of <code>frames_*.pdf</code>, one line of <code>tf2_echo base_link lidar</code> output, the exact wheel error after stopping the sliders, one output line of <code>tf_probe.py</code> per lookup time (mark which lines failed and whether with future or past), and the link names left after <code>gz sdf -p</code>; from Lab B, <code>gz topic -l</code> and <code>ros2 topic list</code>, the tree from <code>view_frames</code> (is the root <code>odom</code> or <code>map</code>?), a screenshot of the wall in RViz2, the errors or <code>ros2 topic info -v</code> output from the two deliberate breakages, and your own account of “who computes this simulated robot’s odom → base_link, and which steps it passes through to reach RViz2” (10 lines or fewer).</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/phase-5">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 一帧激光扫描的时间戳是 12.35 秒。缓冲区里 odom → base_link 有 12.34 和 12.36 两个样本，base_link → lidar 是静态的。<code>lookup_transform('odom', 'lidar', 12.35)</code> 会怎样？</p>
+      <p lang="en">1. A laser scan is stamped 12.35 s. The buffer holds odom → base_link samples at 12.34 and 12.36, and base_link → lidar is static. What does <code>lookup_transform('odom', 'lidar', 12.35)</code> do?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">取离 12.35 最近的那个样本（12.34 或 12.36），再接上静态边</span><span lang="en">Takes the sample nearest 12.35 (12.34 or 12.36) and chains on the static link</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">在 12.34 和 12.36 之间插值 odom → base_link（平移线性、旋转 slerp），再与静态的 base_link → lidar 组合</span><span lang="en">Interpolates odom → base_link between 12.34 and 12.36 (translation linearly, rotation by slerp) and composes it with the static base_link → lidar</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">报错，因为静态边没有 12.35 这个时刻的样本</span><span lang="en">Raises an error, because the static link has no sample at 12.35</span></label>
+      <div class="why" hidden><span lang="zh-CN">tf2 对路径上每条动态边在请求时刻两侧的样本之间插值，静态边对任何时刻都有效，最后组合。a 错在 tf2 不是取最近样本，而是插值。c 错在静态边不看时间，只有动态边会因时刻超出范围而报 extrapolation。</span><span lang="en">tf2 interpolates each dynamic link on the path between the samples either side of the requested time, treats static links as valid at any time, and composes the result. a is wrong because tf2 interpolates rather than taking the nearest sample. c is wrong because static links ignore time; only dynamic links raise extrapolation errors when the time is out of range.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. Gazebo 和其他节点都用 <code>use_sim_time:=true</code> 运行，只有 RViz2 忘了设。最可能看到什么？</p>
+      <p lang="en">2. Gazebo and all other nodes run with <code>use_sim_time:=true</code>; only RViz2 forgot it. What are you most likely to see?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">一切正常，只是显示稍有延迟，因为 RViz2 只是一个看的工具</span><span lang="en">Everything works, just with slightly delayed display, because RViz2 only views</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">RViz2 收不到 <code>/scan</code>，因为它和桥的 QoS 不兼容</span><span lang="en">RViz2 receives no <code>/scan</code>, because its QoS is incompatible with the bridge</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">RViz2 按墙上时间（约 17 亿秒）去查只有仿真时间戳的变换，报 extrapolation，激光扫描被丢弃</span><span lang="en">RViz2 looks up, at wall time (about 1.7 billion seconds), transforms that carry only simulation stamps, gets extrapolation errors, and drops the scans</span></label>
+      <div class="why" hidden><span lang="zh-CN">RViz2 本身是 tf2 监听者，用自己的时钟查变换；它的「现在」比缓冲区里最新的仿真样本晚了十几亿秒。a 错在 RViz2 不只是看，它要按时刻查 tf。b 混淆了两件事：<code>use_sim_time</code> 不影响 QoS 匹配，消息照样能收到，只是变换查不到。</span><span lang="en">RViz2 is itself a tf2 listener and looks up transforms with its own clock; its “now” is over a billion seconds past the newest simulated sample in the buffer. a is wrong because RViz2 does more than view: it looks up tf at given times. b confuses two things: <code>use_sim_time</code> does not affect QoS matching; messages still arrive, only the transforms cannot be found.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 桥声明的是 <code>/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist</code>，而 teleop 以 <code>stamped:=true</code> 运行。机器人不动。原因是？</p>
+      <p lang="en">3. The bridge declares <code>/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist</code>, and teleop runs with <code>stamped:=true</code>. The robot does not move. Why?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">teleop 发的是 <code>TwistStamped</code>，桥在 ROS 一侧订阅的是 <code>Twist</code>，类型不同的端点不会匹配，消息根本进不了桥</span><span lang="en">teleop publishes <code>TwistStamped</code> while the bridge subscribes to <code>Twist</code> on the ROS side; endpoints of different types never match, so nothing enters the bridge</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">方向符 <code>]</code> 写反了，应当用 <code>[</code></span><span lang="en">The direction sign <code>]</code> is backwards; it should be <code>[</code></span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">桥会自动把 <code>TwistStamped</code> 转成 <code>Twist</code>，问题一定出在 DiffDrive 的轮距参数</span><span lang="en">The bridge converts <code>TwistStamped</code> to <code>Twist</code> automatically, so the problem must be DiffDrive’s wheel separation</span></label>
+      <div class="why" hidden><span lang="zh-CN">桥只转换声明过的那一对类型，ROS 一侧的订阅者是 <code>Twist</code>，<code>TwistStamped</code> 的发布者与它不匹配，不报错也没数据。b 错在 <code>]</code> 正是「从 ROS 到 Gazebo」，指令就该这个方向。c 错在桥不做类型之间的猜测转换；而且换回 <code>stamped:=false</code> 后机器人能动，说明轮距不是原因。</span><span lang="en">The bridge converts only the declared type pair; its ROS-side subscription is <code>Twist</code>, and a <code>TwistStamped</code> publisher does not match it: no error, no data. b is wrong because <code>]</code> is exactly “ROS to Gazebo”, the right direction for commands. c is wrong because the bridge does not guess conversions between types; and with <code>stamped:=false</code> the robot moves, so the wheel separation is not the cause.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 在 RViz2 里，底盘和雷达显示正常，两个轮子却报没有变换。最可能缺了什么？</p>
+      <p lang="en">4. In RViz2 the base and lidar display fine, but both wheels report no transform. What is most likely missing?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN"><code>/tf_static</code>：订阅者没有用 transient_local</span><span lang="en"><code>/tf_static</code>: the subscription does not use transient_local</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN"><code>/joint_states</code>：轮子是 continuous 关节，没有关节角，<code>robot_state_publisher</code> 就算不出它们的变换</span><span lang="en"><code>/joint_states</code>: the wheels are continuous joints, and without joint angles <code>robot_state_publisher</code> cannot compute their transforms</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN"><code>robot_description</code> 参数：URDF 没有传给 <code>robot_state_publisher</code></span><span lang="en">The <code>robot_description</code> parameter: the URDF was not passed to <code>robot_state_publisher</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">fixed 关节（雷达、万向球）走 <code>/tf_static</code>，不依赖任何人；continuous 关节的变换取决于关节角，要有人发 <code>/joint_states</code>：Lab A 里是滑条，Lab B 里是 Gazebo 的 JointStatePublisher。a 错在雷达也走 <code>/tf_static</code> 却显示正常。c 错在没有 <code>robot_description</code> 时 <code>robot_state_publisher</code> 根本起不来，底盘也不会显示。</span><span lang="en">Fixed joints (lidar, caster) go through <code>/tf_static</code> and depend on nobody; continuous joints depend on the joint angle, so someone must publish <code>/joint_states</code>: the sliders in Lab A, Gazebo’s JointStatePublisher in Lab B. a is wrong because the lidar also uses <code>/tf_static</code> and displays fine. c is wrong because without <code>robot_description</code>, <code>robot_state_publisher</code> does not start at all and the base would not display either.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://www.ros.org/reps/rep-0103.html">REP 103</a> · <a href="https://www.ros.org/reps/rep-0105.html">REP 105</a> <span class="lvl" lang="zh-CN">原始规范，概念 1：坐标轴、单位、map、odom、base_link 的含义与父子关系</span><span class="lvl" lang="en">The original specifications, concept 1: axes, units, and the meaning and parentage of map, odom and base_link</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Tf2.html">About tf2</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Tf2-Main.html">tf2 tutorials</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Writing-A-Tf2-Listener-Py.html">Writing a listener (Python)</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Learning-About-Tf2-And-Time-Cpp.html">Learning about tf2 and time</a> <span class="lvl" lang="zh-CN">官方，概念 2、动画 (a) 与 Lab A 的 listener：广播者、监听者、时间、超时、默认 10 秒缓存</span><span class="lvl" lang="en">Official, concept 2, diagram (a) and the Lab A listener: broadcasters, listeners, time, timeouts, the default 10 s cache</span></li>
+    <li><a href="https://github.com/ros2/geometry2">github.com/ros2/geometry2</a> <span class="lvl" lang="zh-CN">源码，进阶：<code>tf2/src/cache.cpp</code> 里的插值与 extrapolation 报错，<code>buffer_core.cpp</code> 里 t = 0 的处理</span><span class="lvl" lang="en">Source, advanced: interpolation and the extrapolation errors in <code>tf2/src/cache.cpp</code>, and the handling of t = 0 in <code>buffer_core.cpp</code></span></li>
+    <li><a href="https://design.ros2.org/articles/clock_and_time.html">Clock and Time</a> <span class="lvl" lang="zh-CN">设计文章，概念 3：ROS 时间、<code>/clock</code> 与 <code>use_sim_time</code> 的来由</span><span class="lvl" lang="en">Design article, concept 3: ROS time, <code>/clock</code>, and why <code>use_sim_time</code> exists</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/URDF-Main.html">URDF tutorials</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-Xacro-to-Clean-Up-a-URDF-File.html">Using Xacro</a> · <a href="https://wiki.ros.org/urdf/XML">URDF XML specification</a> · <a href="https://github.com/ros/robot_state_publisher">robot_state_publisher</a> <span class="lvl" lang="zh-CN">官方与源码，概念 4 与 Lab A：link、joint、xacro 宏、<code>robot_state_publisher</code> 的话题和参数</span><span class="lvl" lang="en">Official docs and source, concept 4 and Lab A: links, joints, xacro macros, the topics and parameters of <code>robot_state_publisher</code></span></li>
+    <li><a href="https://gazebosim.org/docs/harmonic/getstarted/">Gazebo Harmonic: Getting started</a> · <a href="https://gazebosim.org/docs/harmonic/sdf_worlds/">SDF worlds</a> · <a href="https://gazebosim.org/docs/harmonic/sensors/">Sensors</a> · <a href="https://gazebosim.org/docs/harmonic/moving_robot/">Moving the robot</a> · <a href="http://sdformat.org/spec/">SDFormat specification</a> <span class="lvl" lang="zh-CN">官方，概念 5、7 与 Lab B 的世界文件：系统插件、gpu_lidar、DiffDrive</span><span class="lvl" lang="en">Official, concepts 5 and 7 and the Lab B world file: system plugins, gpu_lidar, DiffDrive</span></li>
+    <li><a href="https://gazebosim.org/docs/harmonic/ros2_integration/">ROS 2 integration overview</a> · <a href="https://gazebosim.org/docs/harmonic/ros2_spawn_model/">Spawn a Gazebo model from ROS 2</a> · <a href="https://github.com/gazebosim/ros_gz/tree/jazzy/ros_gz_bridge">ros_gz_bridge README</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Simulators/Gazebo/Gazebo.html">Setting up a robot simulation (Gazebo)</a> <span class="lvl" lang="zh-CN">官方，概念 6 与 Lab B：桥的语法与类型对照表、生成模型、ROS 文档里的 Gazebo 入门</span><span class="lvl" lang="en">Official, concept 6 and Lab B: bridge syntax and type table, spawning models, the Gazebo introduction in the ROS docs</span></li>
+    <li><a href="https://github.com/gazebosim/gz-sim/blob/gz-sim8/src/systems/diff_drive/DiffDrive.hh">DiffDrive.hh</a> · <a href="https://github.com/ros2/teleop_twist_keyboard">teleop_twist_keyboard</a> <span class="lvl" lang="zh-CN">源码，概念 7 与 Lab B：DiffDrive 的全部参数与默认坐标系名；teleop 的 <code>stamped</code> 参数</span><span class="lvl" lang="en">Source, concept 7 and Lab B: every DiffDrive parameter and its default frame names; teleop’s <code>stamped</code> parameter</span></li>
+    <li>Edouard Renard, <em>ROS 2 From Scratch</em> <span class="lvl" lang="zh-CN">入门到中级，基于 Jazzy，TF、URDF 与 Gazebo 的章节一步步建一台自定义机器人，适合配合两个实验</span><span class="lvl" lang="en">Beginner to intermediate, based on Jazzy; its chapters on TF, URDF and Gazebo build a custom robot step by step and pair well with both labs</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024（11 月）, ISBN 9781835881408. <span class="lvl">讲 TF、用 URDF 和 xacro 描述机器人、在 Gazebo 里仿真自定义机器人的章节，对应概念 2、4、6、7 与两个实验；基于 Jazzy</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024 (November), ISBN 9781835881408. <span class="lvl">The chapters on TF, describing a robot with URDF and xacro, and simulating a custom robot in Gazebo; match concepts 2, 4, 6 and 7 and both labs; based on Jazzy</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025（6 月）, ISBN 9781032851501（第 1 版 2022, ISBN 9781032267203）. <span class="lvl">讲 TF 与坐标系、在仿真器里运行机器人的章节，对应概念 1、2、3</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025 (June), ISBN 9781032851501 (1st ed. 2022, ISBN 9781032267203). <span class="lvl">The chapters on TF and coordinate frames and on running a robot in simulation; match concepts 1, 2 and 3</span></li>
+    <li lang="zh-CN">Lentin Joseph &amp; Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025（7 月）. <span class="lvl">讲用 URDF 和 xacro 建模、用 Gazebo 仿真机器人的章节，对应概念 3 到 7；基于 Jazzy</span></li>
+    <li lang="en">Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025 (July). <span class="lvl">The chapters on modelling with URDF and xacro and on simulating robots with Gazebo; match concepts 3 to 7; based on Jazzy</span></li>
+    <li lang="zh-CN">Morgan Quigley, Brian Gerkey &amp; William D. Smart, 《Programming Robots with ROS》, O’Reilly, 2015. <span class="lvl">讲 tf 与 URDF 机器人描述的章节，对应概念 1、2、4；基于 ROS 1，命令和 API 已过时，但坐标系树、按时间查变换和 URDF 的概念在 ROS 2 里依然成立</span></li>
+    <li lang="en">Morgan Quigley, Brian Gerkey &amp; William D. Smart, <em>Programming Robots with ROS</em>, O’Reilly, 2015. <span class="lvl">The chapters on tf and on URDF robot descriptions; match concepts 1, 2 and 4; written for ROS 1, so commands and APIs are outdated, but the frame tree, time-stamped lookups and URDF concepts still hold in ROS 2</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-4-launch-lifecycle-composition/index.html">← Phase 4 · Launch, Lifecycle &amp; Composition</a>
+    <a href="../phase-6-control-and-navigation/index.html">Phase 6 · Control &amp; Navigation →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
