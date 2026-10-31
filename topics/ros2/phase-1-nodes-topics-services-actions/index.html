@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 1 · Nodes, Topics, Services &amp; Actions · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page">Phase 1 · Nodes, Topics, Services &amp; Actions</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 1 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 1 / 8 · about 1–2 weeks</p>
+  <h1>Nodes, Topics, Services, Actions <span class="en" lang="zh-CN">节点、话题、服务、动作：ROS graph、接口、参数，以及 rclcpp 与 rclpy 两种写法</span><span class="en" lang="en">The ROS graph, interfaces, parameters, and the rclcpp and rclpy ways of writing them</span></h1>
+  <p class="lede" lang="zh-CN">Phase 0 看的是别人写好的 talker 和 listener；这一阶段自己写。先讲节点和 graph，再讲三种通信方式各自解决什么问题：<strong>话题</strong>是匿名、多对多的数据流，<strong>服务</strong>是一问一答，<strong>动作</strong>是可以中途取消、会持续汇报进度的长任务——而且动作本身就是用三个服务加两个话题拼出来的。接着讲消息类型从 <code>.msg</code> 文件到 C++ 和 Python 代码的生成过程、参数怎么声明和校验，最后用 Python 和 C++ 各写一遍同一个节点，对照两种客户端库的写法。</p>
+  <p class="lede" lang="en">Phase 0 looked at a talker and listener someone else wrote; this phase writes your own. It starts with nodes and the graph, then what each of the three ways of communicating is for: a <strong>topic</strong> is an anonymous, many-to-many data stream, a <strong>service</strong> is one request and one reply, and an <strong>action</strong> is a long task that reports progress and can be cancelled midway — and an action is itself assembled from three services and two topics. Then it covers how a message type goes from a <code>.msg</code> file to generated C++ and Python code, how parameters are declared and validated, and finally writes the same node once in Python and once in C++ to compare the two client libraries.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">用 rclpy 和 rclcpp 各写一对 publisher / subscription，用 colcon 构建，并让 Python 发布、C++ 接收。</li>
+      <li lang="en">Write a publisher / subscription pair in both rclpy and rclcpp, build them with colcon, and have Python publish while C++ receives.</li>
+      <li lang="zh-CN">建一个自定义接口包（<code>.msg</code> 和 <code>.srv</code>），说出 <code>rosidl_default_generators</code>、<code>rosidl_default_runtime</code> 和 <code>rosidl_interface_packages</code> 各自的作用。</li>
+      <li lang="en">Create a custom interface package (<code>.msg</code> and <code>.srv</code>), and say what <code>rosidl_default_generators</code>, <code>rosidl_default_runtime</code> and <code>rosidl_interface_packages</code> each do.</li>
+      <li lang="zh-CN">判断一个需求该用话题、服务还是动作，并说明理由。</li>
+      <li lang="en">Decide whether a requirement calls for a topic, a service or an action, and justify the choice.</li>
+      <li lang="zh-CN">说出一个动作由哪三个服务和哪两个话题组成，画出从发送目标、反馈、取消到拿到结果的完整时序。</li>
+      <li lang="en">Name the three services and two topics an action is made of, and draw the full sequence from sending a goal through feedback and cancel to receiving the result.</li>
+      <li lang="zh-CN">声明参数、从 YAML 加载、用 <code>ros2 param</code> 读写，并用回调拒绝一个非法的设置。</li>
+      <li lang="en">Declare parameters, load them from YAML, read and write them with <code>ros2 param</code>, and reject an invalid set with a callback.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN">完成 <a href="../phase-0-foundations/index.html">Phase 0</a>：会在容器里 source underlay 和 overlay，建过 <code>~/ws</code> 并用 colcon 构建过一个包。</li>
+    <li lang="en">Finish <a href="../phase-0-foundations/index.html">Phase 0</a>: you can source the underlay and an overlay in the container, and you have created <code>~/ws</code> and built a package in it with colcon.</li>
+    <li lang="zh-CN">Python 3 的类、继承和 f-string；C++ 的类、lambda、<code>std::shared_ptr</code> 和 <code>std::chrono</code> 字面量（<code>500ms</code>）。</li>
+    <li lang="en">Python 3 classes, inheritance and f-strings; C++ classes, lambdas, <code>std::shared_ptr</code> and <code>std::chrono</code> literals (<code>500ms</code>).</li>
+    <li lang="zh-CN">读得懂一个最小的 <code>CMakeLists.txt</code>（<code>find_package</code>、<code>add_executable</code>、<code>install</code>）。</li>
+    <li lang="en">You can read a minimal <code>CMakeLists.txt</code> (<code>find_package</code>, <code>add_executable</code>, <code>install</code>).</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 节点与 graph</h3><h3 lang="en">1. Nodes and the graph</h3>
+  <p lang="zh-CN"><strong>节点</strong>是 graph 里一个有名字的参与者，负责一件边界清楚的事（读一个传感器、跑一个控制器）。在代码里它是一个对象：rclpy 里继承 <code>rclpy.node.Node</code>，rclcpp 里继承 <code>rclcpp::Node</code>。节点通过它创建的 publisher、subscription、service、client 和 action 与别人相连；这些连接和节点一起构成 <strong>ROS graph</strong>。节点不是进程：一个进程里可以有多个节点，Phase 4 的组合（composition）就是这样做的。</p>
+  <p lang="en">A <strong>node</strong> is a named participant in the graph that does one well-bounded job (read a sensor, run a controller). In code it is an object: in rclpy you subclass <code>rclpy.node.Node</code>, in rclcpp <code>rclcpp::Node</code>. A node connects to others through the publishers, subscriptions, services, clients and actions it creates; those connections together with the nodes form the <strong>ROS graph</strong>. A node is not a process: one process can hold several nodes, which is exactly what composition does in Phase 4.</p>
+  <p lang="zh-CN">名字的机制：节点有名字和命名空间，话题、服务名可以是绝对的（<code>/chatter</code>）、相对的（<code>chatter</code>，前面拼上节点的命名空间）或私有的（<code>~/status</code>，前面拼上节点的完整名字）。运行时可以不改代码地重映射：<code>--ros-args -r chatter:=/robot1/chatter</code> 改一个名字，<code>-r __node:=my_talker</code> 改节点名，<code>-r __ns:=/robot1</code> 改命名空间。正因为相对名字跟着命名空间走，同一个节点才能在一台机器上为两个机器人各起一份。</p>
+  <p lang="en">How names work: a node has a name and a namespace, and topic and service names can be absolute (<code>/chatter</code>), relative (<code>chatter</code>, prefixed with the node’s namespace) or private (<code>~/status</code>, prefixed with the node’s full name). At run time you can remap without changing code: <code>--ros-args -r chatter:=/robot1/chatter</code> changes one name, <code>-r __node:=my_talker</code> changes the node name, and <code>-r __ns:=/robot1</code> changes the namespace. Because relative names follow the namespace, the same node can be started once per robot on one machine.</p>
+  <div class="note" lang="zh-CN">节点和 DDS 的对应关系：从 Foxy 起，一个进程（准确说是一个 rcl context）只创建<strong>一个</strong> DDS participant，不论里面有几个节点；节点名本身通过一个隐藏话题（大致是 <code>/ros_discovery_info</code>）向别人通告，<code>ros2 node list</code> 就是读这个信息拼出来的。所以 Phase 0 里 <code>ss</code> 看到的端口数量跟进程数有关，跟节点数无关。细节以 rmw 实现为准。</div>
+  <div class="note" lang="en">How nodes map to DDS: since Foxy, one process (strictly, one rcl context) creates <strong>one</strong> DDS participant no matter how many nodes it holds; node names themselves are announced to others on a hidden topic (approximately <code>/ros_discovery_info</code>), and <code>ros2 node list</code> is assembled from that information. So the number of ports you saw with <code>ss</code> in Phase 0 depends on the number of processes, not of nodes. The details depend on the rmw implementation.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲编写第一个节点的章节（Python 与 C++ 并列）；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Nodes.html">Nodes</a> 与 <a href="https://design.ros2.org/articles/topic_and_service_names.html">Topic and service name mapping to DDS</a>。</p>
+  <p lang="en">Further reading: the chapter on writing a first node in Renard, <em>ROS 2 From Scratch</em> (Python and C++ side by side); the official <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Nodes.html">Nodes</a> and <a href="https://design.ros2.org/articles/topic_and_service_names.html">Topic and service name mapping to DDS</a>.</p>
+
+  <h3 lang="zh-CN">2. 话题：publisher 与 subscription</h3><h3 lang="en">2. Topics: publishers and subscriptions</h3>
+  <p lang="zh-CN">话题是一个有名字、有类型的数据通道。publisher 不知道谁在听，subscription 不知道谁在说；同一个话题可以有任意多个发布者和订阅者，名字和类型一致、QoS 兼容就连上。适合周期性的、丢一条也不要紧的数据：传感器读数、状态、<code>/cmd_vel</code>。</p>
+  <p lang="en">A topic is a named, typed data channel. A publisher does not know who is listening and a subscription does not know who is speaking; a topic can have any number of publishers and subscribers, and they connect when name and type match and the QoS is compatible. It suits periodic data where losing one message does not matter: sensor readings, state, <code>/cmd_vel</code>.</p>
+  <ul>
+    <li lang="zh-CN"><code>create_publisher(String, 'topic', 10)</code> 里的 <code>10</code> 是 QoS 的历史深度（KEEP_LAST 10）：中间件最多为这个 writer 保留 10 条还没送达的消息，满了就丢最旧的。完整 QoS 在 Phase 3。</li>
+    <li lang="en">The <code>10</code> in <code>create_publisher(String, 'topic', 10)</code> is the QoS history depth (KEEP_LAST 10): the middleware keeps at most 10 not-yet-delivered messages for this writer and drops the oldest when full. Full QoS is in Phase 3.</li>
+    <li lang="zh-CN"><code>publish()</code> 把消息交给中间件后就返回，不等订阅者处理。订阅者的回调不是在消息到达时立刻被调用，而是在你的线程执行 <code>spin</code> 时由执行器（executor）从等待集合里取出来调用；不 spin，回调永远不会跑（Phase 2 细讲）。</li>
+    <li lang="en"><code>publish()</code> returns once it has handed the message to the middleware; it does not wait for subscribers. A subscriber’s callback is not called the moment a message arrives; the executor calls it when your thread is inside <code>spin</code> and picks the ready entity out of the wait set. Without spin, no callback ever runs (Phase 2 goes into detail).</li>
+  </ul>
+  <p lang="zh-CN"><strong>回调拿到的是副本还是借来的内存</strong>：跨进程时，消息以 CDR 字节穿过 socket 或共享内存，接收端的 rmw 把字节反序列化进一个<em>新分配</em>的消息对象，再交给你的回调。所以你拿到的是自己的副本，可以留着、可以改，发布端之后再改它自己的对象也影响不到你。rclpy 还要多一步：把 C 结构体转换成 Python 对象，又是一次复制。rclcpp 的回调可以按 <code>const T &amp;</code>、<code>std::unique_ptr&lt;T&gt;</code> 或 <code>std::shared_ptr&lt;const T&gt;</code> 等签名接收，签名决定了你能不能接管或修改这条消息。避免复制有两条路：同进程内的进程内通信（Phase 4，发布 <code>unique_ptr</code> 时把所有权直接移交给订阅者），以及 <strong>loaned message</strong>：发布者向中间件借一块内存（<code>borrow_loaned_message()</code>），原地填好再发布，订阅者拿到的是同一块内存的视图。后者只在 rmw 支持、类型是定长纯数据时可用，Phase 3 再讲，细节请查文档。</p>
+  <p lang="en"><strong>Does the callback receive a copy or borrowed memory?</strong> Across processes, the message crosses a socket or shared memory as CDR bytes, and the receiving rmw deserializes those bytes into a <em>freshly allocated</em> message object before handing it to your callback. So what you get is your own copy: you may keep it or modify it, and the publisher changing its own object afterwards cannot affect you. rclpy adds one more step, converting the C struct into a Python object, which is another copy. An rclcpp callback can accept the message as <code>const T &amp;</code>, <code>std::unique_ptr&lt;T&gt;</code> or <code>std::shared_ptr&lt;const T&gt;</code>, among other signatures, and the signature decides whether you may take ownership of or modify it. There are two ways to avoid the copy: intra-process communication inside one process (Phase 4; publishing a <code>unique_ptr</code> hands ownership straight to the subscriber), and a <strong>loaned message</strong>: the publisher borrows memory from the middleware (<code>borrow_loaned_message()</code>), fills it in place and publishes it, and the subscriber gets a view of that same memory. The latter works only when the rmw supports it and the type is fixed-size plain data; Phase 3 covers it, and for the details check the docs.</p>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲话题的章节；Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲第一批节点与话题通信的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Topics.html">Topics</a>。</p>
+  <p lang="en">Further reading: the chapter on topics in Renard, <em>ROS 2 From Scratch</em>; the chapters on first nodes and topic communication in Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Topics.html">Topics</a>.</p>
+
+  <h3 lang="zh-CN">3. 接口：.msg、.srv、.action 与 IDL</h3><h3 lang="en">3. Interfaces: .msg, .srv, .action and IDL</h3>
+  <p lang="zh-CN">ROS 2 的消息类型叫<strong>接口</strong>，写在三种文本文件里：</p>
+  <p lang="en">ROS 2 message types are called <strong>interfaces</strong>, written in three kinds of text file:</p>
+  <ul>
+    <li lang="zh-CN"><code>.msg</code>：一组字段，每行「类型 名字」，例如 <code>int64 num</code>。</li>
+    <li lang="en"><code>.msg</code>: a list of fields, one “type name” per line, for example <code>int64 num</code>.</li>
+    <li lang="zh-CN"><code>.srv</code>：请求和响应两部分，用一行 <code>---</code> 隔开。</li>
+    <li lang="en"><code>.srv</code>: a request part and a response part separated by a line of <code>---</code>.</li>
+    <li lang="zh-CN"><code>.action</code>：目标、结果、反馈三部分，按这个顺序用两行 <code>---</code> 隔开。</li>
+    <li lang="en"><code>.action</code>: goal, result and feedback parts, in that order, separated by two <code>---</code> lines.</li>
+  </ul>
+  <p lang="zh-CN">字段类型有 <code>bool</code>、<code>int8</code> 到 <code>int64</code>、<code>uint8</code> 到 <code>uint64</code>、<code>float32</code>、<code>float64</code>、<code>string</code>，别的消息类型（<code>geometry_msgs/Point</code>），以及数组：不定长 <code>int32[]</code>、定长 <code>int32[3]</code>、有上界 <code>int32[&lt;=5]</code>。还可以写常量（<code>int32 MAX=10</code>）和默认值（<code>int32 x 5</code>）。</p>
+  <p lang="en">Field types include <code>bool</code>, <code>int8</code> to <code>int64</code>, <code>uint8</code> to <code>uint64</code>, <code>float32</code>, <code>float64</code>, <code>string</code>, other message types (<code>geometry_msgs/Point</code>), and arrays: unbounded <code>int32[]</code>, fixed <code>int32[3]</code> and bounded <code>int32[&lt;=5]</code>. You can also write constants (<code>int32 MAX=10</code>) and default values (<code>int32 x 5</code>).</p>
+  <p lang="zh-CN"><strong>从文件到代码</strong>：构建接口包时，rosidl 先把 <code>.msg</code>、<code>.srv</code>、<code>.action</code> 转成 OMG IDL（<code>.idl</code>）这一种中间表示，再由各个生成器从 IDL 生成 C 结构体、C++ 类、Python 类，以及每个中间件需要的 <strong>typesupport</strong>（告诉 rmw 怎么把这个类型序列化成 CDR）。生成器是插件：接口包在 <code>package.xml</code> 里只依赖 <code>rosidl_default_generators</code>（构建时）和 <code>rosidl_default_runtime</code>（运行时），并声明 <code>&lt;member_of_group&gt;rosidl_interface_packages&lt;/member_of_group&gt;</code>，表示「我是接口包」，让构建工具把它排在用它的包前面。接口包必须是 <code>ament_cmake</code> 类型，哪怕只有 Python 节点用它。</p>
+  <p lang="en"><strong>From file to code</strong>: when an interface package is built, rosidl first converts the <code>.msg</code>, <code>.srv</code> and <code>.action</code> files into a single intermediate form, OMG IDL (<code>.idl</code>); generators then produce from the IDL the C structs, C++ classes, Python classes, and the <strong>typesupport</strong> each middleware needs (which tells the rmw how to serialize this type into CDR). The generators are plugins: in <code>package.xml</code> the interface package depends only on <code>rosidl_default_generators</code> (at build time) and <code>rosidl_default_runtime</code> (at run time), and declares <code>&lt;member_of_group&gt;rosidl_interface_packages&lt;/member_of_group&gt;</code>, which says “I am an interface package” so that the build tools order it before the packages that use it. An interface package must be of type <code>ament_cmake</code>, even if only Python nodes use it.</p>
+  <p lang="zh-CN">完整类型名是 <code>包名/msg/类型名</code>，例如 <code>std_msgs/msg/String</code>；<code>ros2 interface show</code> 打印定义，<code>ros2 interface list</code> 列出所有已装的接口。官方建议尽量复用现有接口（<code>std_msgs</code>、<code>geometry_msgs</code>、<code>sensor_msgs</code>……），只有语义真的不同时才自定义；把接口放在单独的包里，节点包依赖它。</p>
+  <p lang="en">The full type name is <code>package/msg/Type</code>, for example <code>std_msgs/msg/String</code>; <code>ros2 interface show</code> prints a definition and <code>ros2 interface list</code> lists every installed interface. The official advice is to reuse existing interfaces (<code>std_msgs</code>, <code>geometry_msgs</code>, <code>sensor_msgs</code>…) where possible and define your own only when the meaning really differs; keep interfaces in a separate package that node packages depend on.</p>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲自定义接口的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Interfaces.html">Interfaces</a> 与 <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Custom-ROS2-Interfaces.html">Creating custom msg and srv files</a>。</p>
+  <p lang="en">Further reading: the chapter on custom interfaces in Renard, <em>ROS 2 From Scratch</em>; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Interfaces.html">Interfaces</a> and <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Custom-ROS2-Interfaces.html">Creating custom msg and srv files</a>.</p>
+
+  <h3 lang="zh-CN">4. 服务：一问一答</h3><h3 lang="en">4. Services: one request, one reply</h3>
+  <p lang="zh-CN">服务是请求 / 响应：client 发一个请求，server 的回调算出响应并返回。适合短的、需要确认结果的操作：查询一个值、切换一个模式、触发一次标定。一个服务名应该只有一个 server（多个 server 同名时哪个回答是不确定的），client 可以有很多个。</p>
+  <p lang="en">A service is request / response: a client sends a request, and the server’s callback computes a response and returns it. It suits short operations whose outcome you need to confirm: query a value, switch a mode, trigger a calibration. A service name should have exactly one server (with several servers of the same name, which one answers is undefined); there can be many clients.</p>
+  <p lang="zh-CN"><strong>底下是什么</strong>：在基于 DDS 的 rmw 里，一个服务大致就是两个话题，一个承载请求、一个承载响应（Fast DDS 下名字大致是 <code>rq/add_two_intsRequest</code> 和 <code>rr/add_two_intsReply</code>）。每个请求带上 client 的身份和一个序列号，server 回复时原样带回，client 端据此把响应交给等待它的那个 future，其他 client 看到的响应会被丢掉。所以服务不是一条「连接」，只是两个话题加一套配对规则。</p>
+  <p lang="en"><strong>What lies underneath</strong>: in DDS-based rmw implementations a service is roughly two topics, one carrying requests and one carrying responses (under Fast DDS the names are approximately <code>rq/add_two_intsRequest</code> and <code>rr/add_two_intsReply</code>). Each request carries the client’s identity and a sequence number, which the server copies back into its reply; the client side uses them to hand the response to the future waiting for it, and responses meant for other clients are dropped. So a service is not a “connection”, just two topics plus a pairing rule.</p>
+  <div class="note" lang="zh-CN">client 的调用是异步的：rclpy 的 <code>call_async()</code> 和 rclcpp 的 <code>async_send_request()</code> 立即返回一个 future，响应要等执行器 spin 时才会被处理并填进去。在 <code>main</code> 里用 <code>spin_until_future_complete</code> 等它没问题；但如果在<em>另一个回调里</em>同步地等这个 future，而执行器是单线程的，处理响应的那个线程正是被你堵住的线程，于是永远等不到——这就是 Phase 2 要讲的死锁。</div>
+  <div class="note" lang="en">A client call is asynchronous: rclpy’s <code>call_async()</code> and rclcpp’s <code>async_send_request()</code> return a future at once, and the response is processed and filled in only when the executor spins. Waiting for it with <code>spin_until_future_complete</code> in <code>main</code> is fine; but if you wait for that future synchronously <em>inside another callback</em> on a single-threaded executor, the thread that would process the response is exactly the thread you are blocking, so the wait never ends — the deadlock Phase 2 covers.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲服务的章节；Quigley 等《Programming Robots with ROS》讲服务的章节（ROS 1，但请求 / 响应的设计取舍不变）；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Services.html">Services</a>。</p>
+  <p lang="en">Further reading: the chapter on services in Renard, <em>ROS 2 From Scratch</em>; the chapter on services in Quigley et al., <em>Programming Robots with ROS</em> (ROS 1, but the request / response design trade-offs are unchanged); the official <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Services.html">Services</a>.</p>
+
+  <h3 lang="zh-CN">5. 动作：可取消、有反馈的长任务</h3><h3 lang="en">5. Actions: long tasks with feedback and cancel</h3>
+  <p lang="zh-CN">「走到厨房」要几十秒，中途你想知道进度，也可能改主意。用服务做不到：一个请求只有一个响应，而且不能撤回。<strong>动作</strong>就是为此设计的：client 发一个<strong>目标</strong>（goal），server 接受后开始执行，期间不断发<strong>反馈</strong>（feedback），结束时给出<strong>结果</strong>（result）；任何时候 client 都可以请求<strong>取消</strong>（cancel）。Nav2 的 <code>NavigateToPose</code> 就是一个动作（Phase 6）。</p>
+  <p lang="en">“Go to the kitchen” takes tens of seconds; you want progress along the way, and you may change your mind. A service cannot do this: one request gets exactly one response and cannot be withdrawn. An <strong>action</strong> is designed for it: the client sends a <strong>goal</strong>, the server accepts it and starts executing, sends <strong>feedback</strong> repeatedly, and gives a <strong>result</strong> at the end; at any time the client may request a <strong>cancel</strong>. Nav2’s <code>NavigateToPose</code> is an action (Phase 6).</p>
+  <p lang="zh-CN"><strong>动作是用什么拼出来的</strong>：一个名为 <code>/fibonacci</code> 的动作在 graph 里是三个隐藏服务加两个隐藏话题，都挂在 <code>/fibonacci/_action/</code> 下：</p>
+  <p lang="en"><strong>What an action is built from</strong>: an action named <code>/fibonacci</code> is, in the graph, three hidden services plus two hidden topics, all under <code>/fibonacci/_action/</code>:</p>
+  <ol>
+    <li lang="zh-CN"><code>send_goal</code>（服务）：请求里是 client 生成的 goal ID（一个 UUID）和目标本身；响应只说接受还是拒绝，加一个时间戳。server 的 goal 回调在这里做决定。</li>
+    <li lang="en"><code>send_goal</code> (service): the request holds a goal ID generated by the client (a UUID) and the goal itself; the response only says accepted or rejected, plus a timestamp. The server’s goal callback makes the decision here.</li>
+    <li lang="zh-CN"><code>get_result</code>（服务）：client 一拿到「已接受」就带着 goal ID 发出这个请求，server 先不回答，直到这个目标到达终态（SUCCEEDED、ABORTED 或 CANCELED）才把状态和结果一起回复。这是一种长轮询。</li>
+    <li lang="en"><code>get_result</code> (service): as soon as the client sees “accepted” it sends this request with the goal ID; the server does not answer until the goal reaches a terminal state (SUCCEEDED, ABORTED or CANCELED), and then replies with the status and the result together. It is a form of long polling.</li>
+    <li lang="zh-CN"><code>cancel_goal</code>（服务）：请求取消一个或多个目标；server 的 cancel 回调决定接受与否。接受只是把目标置为 CANCELING，真正停下来要靠执行代码自己检查并调用 <code>canceled()</code>。</li>
+    <li lang="en"><code>cancel_goal</code> (service): asks to cancel one or more goals; the server’s cancel callback decides whether to accept. Accepting only moves the goal to CANCELING; actually stopping depends on the executing code checking for it and calling <code>canceled()</code>.</li>
+    <li lang="zh-CN"><code>feedback</code>（话题）：server 发布，带 goal ID；每个 client 只处理属于自己目标的那些。</li>
+    <li lang="en"><code>feedback</code> (topic): published by the server, tagged with the goal ID; each client handles only the ones for its own goals.</li>
+    <li lang="zh-CN"><code>status</code>（话题）：server 发布当前所有目标的状态列表（ACCEPTED、EXECUTING、CANCELING 和三种终态）。</li>
+    <li lang="en"><code>status</code> (topic): the server publishes the status list of all its current goals (ACCEPTED, EXECUTING, CANCELING and the three terminal states).</li>
+  </ol>
+  <p lang="zh-CN">所以动作没有自己的传输机制，<code>ros2 action</code> 和 <code>rclcpp_action</code>、<code>rclpy.action</code> 只是把这五个实体和目标状态机包装成一个对象。两种库的分工略有不同：<code>rclpy.action.ActionServer</code> 接受目标后替你调用 <code>execute_callback</code>；<code>rclcpp_action</code> 的 server 只调用 <code>handle_goal</code>、<code>handle_cancel</code> 和 <code>handle_accepted</code>，长时间的执行要你在 <code>handle_accepted</code> 里自己开线程或交给执行器，否则会堵住 spin（官方 C++ 教程就是开一个 <code>std::thread</code>）。</p>
+  <p lang="en">So an action has no transport of its own; <code>ros2 action</code>, <code>rclcpp_action</code> and <code>rclpy.action</code> merely wrap these five entities and the goal state machine into one object. The two libraries divide the work slightly differently: <code>rclpy.action.ActionServer</code> calls your <code>execute_callback</code> for you after accepting a goal; the <code>rclcpp_action</code> server calls only <code>handle_goal</code>, <code>handle_cancel</code> and <code>handle_accepted</code>, and the long-running execution is yours to start in <code>handle_accepted</code> on a thread of your own or through the executor, or it blocks spin (the official C++ tutorial starts a <code>std::thread</code>).</p>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲动作的章节；Quigley 等《Programming Robots with ROS》讲 actionlib 的章节（ROS 1 的前身，目标、反馈、结果、取消的概念相同）；设计文章 <a href="https://design.ros2.org/articles/actions.html">Actions</a>。</p>
+  <p lang="en">Further reading: the chapter on actions in Renard, <em>ROS 2 From Scratch</em>; the chapter on actionlib in Quigley et al., <em>Programming Robots with ROS</em> (the ROS 1 predecessor, with the same goal, feedback, result and cancel concepts); the design article <a href="https://design.ros2.org/articles/actions.html">Actions</a>.</p>
+
+  <h3 lang="zh-CN">6. 参数：节点自己持有的配置</h3><h3 lang="en">6. Parameters: configuration held by each node</h3>
+  <p lang="zh-CN">ROS 2 没有全局参数服务器，参数属于各自的节点。机制分四步：</p>
+  <p lang="en">ROS 2 has no global parameter server; parameters belong to their own node. The mechanism has four parts:</p>
+  <ol>
+    <li lang="zh-CN"><strong>声明</strong>：<code>declare_parameter('my_parameter', 'world')</code> 给出名字和默认值，默认值同时确定了类型。默认情况下未声明的参数不能被设置，类型声明后也不能改：给一个 string 参数设整数会被拒绝。</li>
+    <li lang="en"><strong>Declare</strong>: <code>declare_parameter('my_parameter', 'world')</code> gives the name and a default value, and the default also fixes the type. By default, undeclared parameters cannot be set, and a declared type cannot change: setting an integer on a string parameter is rejected.</li>
+    <li lang="zh-CN"><strong>覆盖</strong>：启动时用 <code>--ros-args -p name:=value</code> 或 <code>--ros-args --params-file file.yaml</code> 给的值，会在声明那一刻替换默认值。YAML 顶层是节点名（<code>/**</code> 匹配所有节点），下一层固定是 <code>ros__parameters</code>。</li>
+    <li lang="en"><strong>Override</strong>: values given at start-up with <code>--ros-args -p name:=value</code> or <code>--ros-args --params-file file.yaml</code> replace the default at the moment of declaration. The top level of the YAML is the node name (<code>/**</code> matches every node), and the next level is always <code>ros__parameters</code>.</li>
+    <li lang="zh-CN"><strong>远程读写</strong>：每个节点自动提供一组服务，<code>~/list_parameters</code>、<code>~/get_parameters</code>、<code>~/set_parameters</code>、<code>~/describe_parameters</code> 等。<code>ros2 param list/get/set/dump</code> 只是这些服务的客户端；你在 Phase 0 里看到 talker 有一串参数服务就是这个原因。</li>
+    <li lang="en"><strong>Remote read and write</strong>: every node automatically offers a set of services, <code>~/list_parameters</code>, <code>~/get_parameters</code>, <code>~/set_parameters</code>, <code>~/describe_parameters</code> and others. <code>ros2 param list/get/set/dump</code> is just a client of these services; that is why the talker in Phase 0 had a row of parameter services.</li>
+    <li lang="zh-CN"><strong>校验与通知</strong>：一次设置请求到达后，节点先把待设的参数列表交给每个用 <code>add_on_set_parameters_callback</code> 注册的回调。只要有一个回调返回 <code>SetParametersResult(successful=False, reason=…)</code>，整次设置就被拒绝，值保持不变，<code>reason</code> 原样回到调用者（<code>ros2 param set</code> 会打印它）。全部通过后才真正写入，并在 <code>/parameter_events</code> 话题上发布一条变更事件，别的节点可以订阅它来跟进。</li>
+    <li lang="en"><strong>Validation and notification</strong>: when a set request arrives, the node first hands the list of parameters to be set to every callback registered with <code>add_on_set_parameters_callback</code>. If any callback returns <code>SetParametersResult(successful=False, reason=…)</code>, the whole set is rejected, the values stay unchanged, and the <code>reason</code> goes back to the caller unchanged (<code>ros2 param set</code> prints it). Only when all pass are the values written, and a change event is published on the <code>/parameter_events</code> topic, which other nodes may subscribe to in order to follow along.</li>
+  </ol>
+  <div class="note" lang="zh-CN">on-set 回调只该<em>校验</em>，不该在里面改节点状态：它运行时设置还没生效，后面的回调还可能拒绝。要在值变了之后做事（例如按新频率重建定时器），较新的发行版另有「设置后」回调（rclcpp 大致叫 <code>add_post_set_parameters_callback</code>），或者订阅 <code>/parameter_events</code>；Jazzy 上的可用性请查文档。rclcpp 的 <code>add_on_set_parameters_callback</code> 返回一个句柄，句柄被销毁回调就注销了，所以要存成成员变量。</div>
+  <div class="note" lang="en">An on-set callback should only <em>validate</em>, not change node state: when it runs the set has not taken effect, and a later callback may still reject it. To act after a value has changed (for example rebuild a timer at the new rate), newer distributions also have a “post-set” callback (in rclcpp approximately <code>add_post_set_parameters_callback</code>), or you can subscribe to <code>/parameter_events</code>; check the docs for availability on Jazzy. rclcpp’s <code>add_on_set_parameters_callback</code> returns a handle and the callback is unregistered when the handle is destroyed, so store it as a member variable.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲参数的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Parameters.html">Parameters</a> 与 <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Using-Parameters-In-A-Class-Python.html">Using parameters in a class (Python)</a>。</p>
+  <p lang="en">Further reading: the chapter on parameters in Renard, <em>ROS 2 From Scratch</em>; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Parameters.html">Parameters</a> and <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Using-Parameters-In-A-Class-Python.html">Using parameters in a class (Python)</a>.</p>
+
+  <h3 lang="zh-CN">7. rclcpp 与 rclpy：同一套概念，两种写法</h3><h3 lang="en">7. rclcpp and rclpy: one set of concepts, two ways to write it</h3>
+  <p lang="zh-CN">两种库都建在 rcl 之上，所以概念一一对应，线上互通：Python 发布、C++ 订阅完全没问题（Lab A 会验证）。差别在语言和运行时：rclcpp 用模板在编译期确定消息类型（<code>create_publisher&lt;std_msgs::msg::String&gt;</code>），rclpy 把类型当参数传进去（<code>create_publisher(String, …)</code>）；rclcpp 的定时器用 <code>std::chrono</code> 时长，rclpy 用秒数；C++ 包用 <code>ament_cmake</code>，可执行文件靠 <code>add_executable</code> 和 <code>install(TARGETS …)</code> 安装，Python 包用 <code>ament_python</code>，可执行文件是 <code>setup.py</code> 里的 <code>console_scripts</code> 入口。性能上，rclpy 的每条消息都要在 C 和 Python 之间转换，Python 回调还受 GIL 限制，所以高频、低延迟、实时的节点通常用 C++，工具、编排和原型用 Python。</p>
+  <p lang="en">Both libraries sit on rcl, so the concepts correspond one to one and interoperate on the wire: publishing from Python and subscribing from C++ just works (Lab A checks it). The differences are in language and runtime: rclcpp fixes the message type at compile time with templates (<code>create_publisher&lt;std_msgs::msg::String&gt;</code>), rclpy passes the type as an argument (<code>create_publisher(String, …)</code>); rclcpp timers take <code>std::chrono</code> durations, rclpy takes seconds; C++ packages use <code>ament_cmake</code> and install executables with <code>add_executable</code> and <code>install(TARGETS …)</code>, Python packages use <code>ament_python</code> and an executable is a <code>console_scripts</code> entry in <code>setup.py</code>. On performance, every rclpy message is converted between C and Python and Python callbacks are bound by the GIL, so high-rate, low-latency and real-time nodes are usually C++, while tools, orchestration and prototypes are Python.</p>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》全书 Python 与 C++ 并列的写法；Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲用 C++ 和 Python 编写 ROS 2 程序的章节。</p>
+  <p lang="en">Further reading: Renard, <em>ROS 2 From Scratch</em>, which writes every example in Python and C++ side by side; the chapters on writing ROS 2 programs in C++ and Python in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：rclcpp ↔ rclpy（同一个节点）</h2><h2 id="compare-en" lang="en">Comparison: rclcpp ↔ rclpy (the same node)</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th class="ros"><span lang="zh-CN">rclcpp（C++17）</span><span lang="en">rclcpp (C++17)</span></th><th class="gz"><span lang="zh-CN">rclpy（Python 3.12）</span><span lang="en">rclpy (Python 3.12)</span></th></tr>
+    <tr><td><span lang="zh-CN">初始化与关闭</span><span lang="en">Init and shutdown</span></td><td><code>rclcpp::init(argc, argv)</code> · <code>rclcpp::shutdown()</code></td><td><code>rclpy.init()</code> · <code>rclpy.shutdown()</code></td></tr>
+    <tr><td><span lang="zh-CN">节点类</span><span lang="en">Node class</span></td><td><span lang="zh-CN">继承 <code>rclcpp::Node</code>，构造函数里 <code>Node("name")</code></span><span lang="en">subclass <code>rclcpp::Node</code>, <code>Node("name")</code> in the constructor</span></td><td><span lang="zh-CN">继承 <code>Node</code>，<code>super().__init__('name')</code></span><span lang="en">subclass <code>Node</code>, <code>super().__init__('name')</code></span></td></tr>
+    <tr><td><span lang="zh-CN">发布者</span><span lang="en">Publisher</span></td><td><code>create_publisher&lt;std_msgs::msg::String&gt;("topic", 10)</code></td><td><code>create_publisher(String, 'topic', 10)</code></td></tr>
+    <tr><td><span lang="zh-CN">订阅与回调参数</span><span lang="en">Subscription and callback argument</span></td><td><span lang="zh-CN"><code>create_subscription&lt;T&gt;("topic", 10, cb)</code>；回调可收 <code>const T &amp;</code>、<code>T::UniquePtr</code>、<code>T::ConstSharedPtr</code> 等</span><span lang="en"><code>create_subscription&lt;T&gt;("topic", 10, cb)</code>; the callback may take <code>const T &amp;</code>, <code>T::UniquePtr</code>, <code>T::ConstSharedPtr</code> and others</span></td><td><span lang="zh-CN"><code>create_subscription(String, 'topic', cb, 10)</code>；回调收到一个新的 Python 对象</span><span lang="en"><code>create_subscription(String, 'topic', cb, 10)</code>; the callback receives a new Python object</span></td></tr>
+    <tr><td><span lang="zh-CN">定时器</span><span lang="en">Timer</span></td><td><code>create_wall_timer(500ms, cb)</code></td><td><span lang="zh-CN"><code>create_timer(0.5, cb)</code>（秒）</span><span lang="en"><code>create_timer(0.5, cb)</code> (seconds)</span></td></tr>
+    <tr><td><span lang="zh-CN">进入事件循环</span><span lang="en">Enter the event loop</span></td><td><code>rclcpp::spin(std::make_shared&lt;MyNode&gt;())</code></td><td><code>rclpy.spin(node)</code></td></tr>
+    <tr><td><span lang="zh-CN">服务端</span><span lang="en">Service server</span></td><td><span lang="zh-CN"><code>create_service&lt;AddTwoInts&gt;("add_two_ints", cb)</code>；回调填写传入的 response 指针</span><span lang="en"><code>create_service&lt;AddTwoInts&gt;("add_two_ints", cb)</code>; the callback fills in the response pointer it is given</span></td><td><span lang="zh-CN"><code>create_service(AddTwoInts, 'add_two_ints', cb)</code>；回调填好 response 并 return</span><span lang="en"><code>create_service(AddTwoInts, 'add_two_ints', cb)</code>; the callback fills in the response and returns it</span></td></tr>
+    <tr><td><span lang="zh-CN">客户端调用</span><span lang="en">Client call</span></td><td><span lang="zh-CN"><code>async_send_request(req)</code> 返回 future</span><span lang="en"><code>async_send_request(req)</code> returns a future</span></td><td><span lang="zh-CN"><code>call_async(req)</code> 返回 <code>Future</code></span><span lang="en"><code>call_async(req)</code> returns a <code>Future</code></span></td></tr>
+    <tr><td><span lang="zh-CN">动作服务端</span><span lang="en">Action server</span></td><td><span lang="zh-CN"><code>rclcpp_action::create_server&lt;Fibonacci&gt;(…)</code> 加 <code>handle_goal</code>、<code>handle_cancel</code>、<code>handle_accepted</code>；执行由你在 <code>handle_accepted</code> 里启动</span><span lang="en"><code>rclcpp_action::create_server&lt;Fibonacci&gt;(…)</code> with <code>handle_goal</code>, <code>handle_cancel</code>, <code>handle_accepted</code>; you start the execution in <code>handle_accepted</code></span></td><td><span lang="zh-CN"><code>ActionServer(self, Fibonacci, 'fibonacci', execute_callback)</code>，可选 <code>goal_callback</code>、<code>cancel_callback</code>；库替你调用执行回调</span><span lang="en"><code>ActionServer(self, Fibonacci, 'fibonacci', execute_callback)</code>, optional <code>goal_callback</code> and <code>cancel_callback</code>; the library calls the execute callback for you</span></td></tr>
+    <tr><td><span lang="zh-CN">参数</span><span lang="en">Parameters</span></td><td><code>declare_parameter("p", "world")</code> · <code>get_parameter("p").as_string()</code></td><td><code>declare_parameter('p', 'world')</code> · <code>get_parameter('p').value</code></td></tr>
+    <tr><td><span lang="zh-CN">参数校验回调</span><span lang="en">Parameter validation callback</span></td><td><span lang="zh-CN"><code>add_on_set_parameters_callback(cb)</code>，返回的句柄必须保存</span><span lang="en"><code>add_on_set_parameters_callback(cb)</code>; the returned handle must be kept</span></td><td><span lang="zh-CN"><code>add_on_set_parameters_callback(cb)</code>，回调返回 <code>SetParametersResult</code></span><span lang="en"><code>add_on_set_parameters_callback(cb)</code>; the callback returns <code>SetParametersResult</code></span></td></tr>
+    <tr><td><span lang="zh-CN">构建与安装</span><span lang="en">Build and install</span></td><td><span lang="zh-CN"><code>ament_cmake</code>：<code>add_executable</code> + <code>install(TARGETS … DESTINATION lib/${PROJECT_NAME})</code></span><span lang="en"><code>ament_cmake</code>: <code>add_executable</code> + <code>install(TARGETS … DESTINATION lib/${PROJECT_NAME})</code></span></td><td><span lang="zh-CN"><code>ament_python</code>：<code>setup.py</code> 的 <code>console_scripts</code> 入口</span><span lang="en"><code>ament_python</code>: <code>console_scripts</code> entries in <code>setup.py</code></span></td></tr>
+    <tr><td><span lang="zh-CN">改代码之后</span><span lang="en">After editing code</span></td><td><span lang="zh-CN">必须重新 <code>colcon build</code></span><span lang="en">you must run <code>colcon build</code> again</span></td><td><span lang="zh-CN">用了 <code>--symlink-install</code> 就不必重建（改 <code>setup.py</code> 除外）</span><span lang="en">no rebuild with <code>--symlink-install</code> (except after editing <code>setup.py</code>)</span></td></tr>
+    <tr><td><span lang="zh-CN">性能与线程</span><span lang="en">Performance and threads</span></td><td><span lang="zh-CN">原生线程，可控内存分配，适合高频和实时</span><span lang="en">native threads, controllable allocation, suited to high rates and real time</span></td><td><span lang="zh-CN">每条消息在 C 与 Python 间转换，回调受 GIL 限制，延迟更高</span><span lang="en">every message converted between C and Python, callbacks bound by the GIL, higher latency</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) graph：两个节点、一个话题、一个服务、一个动作</h3><h3 lang="en">(a) The graph: two nodes, one topic, one service, one action</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2400"
+         data-captions='["全图：左边的 /client_node 和右边的 /server_node 之间有三种连接，从上到下是话题、服务和动作。箭头方向就是消息流动的方向。按「播放」逐个看。",
+           "第 1 步，两个节点：它们可以在同一个进程里，也可以在两台机器上，代码完全一样。每个节点通过自己创建的 publisher、client 等实体接入 graph，彼此靠 DDS 发现找到对方。",
+           "第 2 步，话题 /chatter：publisher 发布 std_msgs/msg/String，消息只朝一个方向流。发布者不知道有谁在听，可以有任意多个订阅者；订阅者的回调在 spin 时被调用，拿到的是反序列化出来的副本。",
+           "第 3 步，服务 /add_two_ints 的请求：client 发出 a 和 b，请求里带着 client 的身份和序列号。在 DDS 上它其实走的是一个请求话题。",
+           "第 4 步，服务的响应：server 的回调算出 sum，响应带回同一个序列号，沿响应话题回到 client，填进它正在等的 future。一问一答，请求不能撤回。",
+           "第 5 步，动作 /fibonacci 的目标：client 通过隐藏服务 send_goal 发送 goal ID 和 order，server 的 goal 回调决定接受或拒绝。接受后 client 立即发出 get_result 请求等待最终结果。",
+           "第 6 步，反馈：执行期间 server 在隐藏话题 feedback 上发布带 goal ID 的部分序列，另有 status 话题报告每个目标的状态。client 随时可以通过 cancel_goal 服务请求取消。",
+           "第 7 步，结果：目标到达终态后，server 才回复早已发出的 get_result 请求，带上终态和完整序列。动作没有自己的传输机制，就是三个服务加两个话题。"]'
+         data-captions-en='["The whole picture: between /client_node on the left and /server_node on the right there are three kinds of connection, from top to bottom a topic, a service and an action. The arrows point the way the messages flow. Press Play to go through them one by one.",
+           "Step 1, two nodes: they may share one process or sit on two machines, with exactly the same code. Each node joins the graph through the publishers, clients and other entities it creates, and they find each other through DDS discovery.",
+           "Step 2, the topic /chatter: the publisher publishes std_msgs/msg/String, and messages flow one way only. The publisher does not know who listens and there may be any number of subscribers; a subscriber callback runs during spin and receives a deserialized copy.",
+           "Step 3, the request of the service /add_two_ints: the client sends a and b, and the request carries the client identity and a sequence number. On DDS it actually travels on a request topic.",
+           "Step 4, the service response: the server callback computes sum, and the response carries the same sequence number back along a response topic to the client, completing the future it is waiting on. One request, one reply, and a request cannot be withdrawn.",
+           "Step 5, the goal of the action /fibonacci: the client sends a goal ID and order through the hidden service send_goal, and the server goal callback accepts or rejects it. Once accepted, the client immediately sends a get_result request to wait for the final result.",
+           "Step 6, feedback: while executing, the server publishes partial sequences tagged with the goal ID on the hidden topic feedback, and a status topic reports the state of every goal. At any time the client may ask to cancel through the cancel_goal service.",
+           "Step 7, the result: only when the goal reaches a terminal state does the server answer the get_result request sent long before, with the terminal state and the full sequence. An action has no transport of its own; it is three services plus two topics."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="340" y="24" class="small" style="fill: var(--ros)" lang="zh-CN">graph 里的连接</text><text x="340" y="24" class="small" style="fill: var(--ros)" lang="en">connections in the graph</text>
+
+      <g data-step="1"><rect class="box ros" x="30" y="40" width="200" height="360"/>
+        <text x="45" y="64" class="mono">/client_node</text>
+        <text x="45" y="102" class="small">publisher</text>
+        <text x="45" y="120" class="mono">create_publisher</text>
+        <text x="45" y="190" class="small">service client</text>
+        <text x="45" y="208" class="mono">create_client</text>
+        <text x="45" y="322" class="small">action client</text>
+        <text x="45" y="358" class="mono">ActionClient</text>
+        <rect class="box gz" x="670" y="40" width="200" height="360"/>
+        <text x="685" y="64" class="mono">/server_node</text>
+        <text x="685" y="102" class="small">subscription</text>
+        <text x="685" y="120" class="mono">create_subscription</text>
+        <text x="685" y="190" class="small">service server</text>
+        <text x="685" y="208" class="mono">create_service</text>
+        <text x="685" y="322" class="small">action server</text>
+        <text x="685" y="358" class="mono">ActionServer</text></g>
+
+      <g data-step="2"><rect class="box ros" x="340" y="58" width="220" height="54"/>
+        <text x="352" y="80" class="mono" lang="zh-CN">话题 /chatter</text><text x="352" y="80" class="mono" lang="en">topic /chatter</text>
+        <text x="352" y="100" class="small">std_msgs/msg/String</text>
+        <path class="arrow flow" d="M232 85 L336 85"/>
+        <path class="arrow flow" d="M562 85 L666 85"/>
+        <text x="242" y="78" class="small" lang="zh-CN">publish</text><text x="242" y="78" class="small" lang="en">publish</text>
+        <text x="574" y="78" class="small" lang="zh-CN">回调</text><text x="574" y="78" class="small" lang="en">callback</text></g>
+
+      <g data-step="3 4"><rect class="box ros" x="340" y="160" width="220" height="64"/>
+        <text x="352" y="184" class="mono" lang="zh-CN">服务 /add_two_ints</text><text x="352" y="184" class="mono" lang="en">service /add_two_ints</text>
+        <text x="352" y="206" class="small">example_interfaces/srv/AddTwoInts</text></g>
+      <g data-step="3"><path class="arrow" d="M232 172 L336 172"/>
+        <path class="arrow" d="M562 172 L666 172"/>
+        <text x="242" y="165" class="small" lang="zh-CN">请求 a, b</text><text x="242" y="165" class="small" lang="en">request a, b</text></g>
+      <g data-step="4"><path class="arrow" d="M666 212 L562 212"/>
+        <path class="arrow" d="M336 212 L232 212"/>
+        <text x="242" y="230" class="small" lang="zh-CN">响应 sum</text><text x="242" y="230" class="small" lang="en">response sum</text></g>
+
+      <g data-step="5 6 7"><rect class="box gz" x="340" y="272" width="220" height="128"/>
+        <text x="352" y="294" class="mono" lang="zh-CN">动作 /fibonacci</text><text x="352" y="294" class="mono" lang="en">action /fibonacci</text>
+        <text x="352" y="314" class="small" lang="zh-CN">服务：send_goal、get_result、</text><text x="352" y="314" class="small" lang="en">services: send_goal, get_result,</text>
+        <text x="352" y="331" class="small">cancel_goal</text>
+        <text x="352" y="353" class="small" lang="zh-CN">话题：feedback、status</text><text x="352" y="353" class="small" lang="en">topics: feedback, status</text>
+        <text x="352" y="385" class="small">/fibonacci/_action/…</text></g>
+      <g data-step="5"><path class="arrow" d="M232 300 L336 300"/>
+        <path class="arrow" d="M562 300 L666 300"/>
+        <text x="242" y="293" class="small" lang="zh-CN">目标 order</text><text x="242" y="293" class="small" lang="en">goal order</text></g>
+      <g data-step="6"><path class="arrow flow" d="M666 340 L562 340"/>
+        <path class="arrow flow" d="M336 340 L232 340"/>
+        <text x="242" y="333" class="small" lang="zh-CN">反馈</text><text x="242" y="333" class="small" lang="en">feedback</text></g>
+      <g data-step="7"><path class="arrow" d="M666 375 L562 375"/>
+        <path class="arrow" d="M336 375 L232 375"/>
+        <text x="242" y="368" class="small" lang="zh-CN">结果</text><text x="242" y="368" class="small" lang="en">result</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 一个动作的一生：目标、反馈、取消、结果</h3><h3 lang="en">(b) The life of an action: goal, feedback, cancel, result</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：左边是 action client，中间是 action server，时间自上而下。右边一列是 server 端这个目标的状态。这一次 client 在中途取消了目标。按「播放」逐条看。",
+           "第 1 步，send_goal 请求：client 生成一个 UUID 作为 goal ID，连同 order = 5 一起发出。goal ID 让同一个 server 能同时区分多个目标。",
+           "第 2 步，send_goal 响应：server 的 goal 回调接受了目标，响应只有 accepted = true 和一个时间戳。目标状态变为 ACCEPTED，执行开始后变为 EXECUTING。如果回调拒绝，流程到此结束。",
+           "第 3 步，get_result 请求：client 一得知目标被接受，就带着 goal ID 发出这个请求。server 暂不回答，请求一直挂着，直到目标到达终态。",
+           "第 4 步，反馈：执行回调每算出一项就在 feedback 话题上发布一次部分序列，带着 goal ID。status 话题同时报告 EXECUTING。反馈是话题，丢一条不会影响结果。",
+           "第 5 步，取消：client 通过 cancel_goal 服务请求取消，server 的 cancel 回调接受，目标进入 CANCELING。此时执行并没有停，要等执行代码检查 is_cancel_requested 并调用 canceled。",
+           "第 6 步，结果：执行代码调用 canceled 后目标进入终态 CANCELED，server 这才回复第 3 步挂起的 get_result，带上终态和已算出的部分序列。没取消时终态是 SUCCEEDED，出错时是 ABORTED。"]'
+         data-captions-en='["The whole picture: the action client is on the left, the action server in the middle, and time runs downwards. The right-hand column is the state of this goal on the server. This time the client cancels the goal midway. Press Play to go message by message.",
+           "Step 1, the send_goal request: the client generates a UUID as the goal ID and sends it together with order = 5. The goal ID lets one server tell several goals apart at the same time.",
+           "Step 2, the send_goal response: the server goal callback has accepted the goal, and the response holds only accepted = true and a timestamp. The goal state becomes ACCEPTED, then EXECUTING once execution starts. Had the callback rejected it, the flow would end here.",
+           "Step 3, the get_result request: as soon as the client learns the goal was accepted, it sends this request with the goal ID. The server does not answer yet; the request stays pending until the goal reaches a terminal state.",
+           "Step 4, feedback: each time the execute callback computes a term, it publishes the partial sequence on the feedback topic, tagged with the goal ID. The status topic reports EXECUTING meanwhile. Feedback is a topic, so losing one message does not affect the result.",
+           "Step 5, cancel: the client asks to cancel through the cancel_goal service, the server cancel callback accepts, and the goal enters CANCELING. Execution has not stopped yet; that waits for the executing code to check is_cancel_requested and call canceled.",
+           "Step 6, the result: once the executing code calls canceled, the goal enters the terminal state CANCELED, and only now does the server answer the get_result request pending since step 3, with the terminal state and the partial sequence computed so far. Without a cancel the terminal state is SUCCEEDED, and on an error ABORTED."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box ros" x="30" y="20" width="170" height="34"/>
+      <text x="45" y="42" class="mono">action client</text>
+      <rect class="box gz" x="480" y="20" width="170" height="34"/>
+      <text x="495" y="42" class="mono">action server</text>
+      <text x="690" y="42" class="small" style="fill: var(--gz)" lang="zh-CN">server 端目标状态</text><text x="690" y="42" class="small" style="fill: var(--gz)" lang="en">goal state on the server</text>
+      <line x1="115" y1="58" x2="115" y2="410" class="lane"/>
+      <line x1="565" y1="58" x2="565" y2="410" class="lane"/>
+      <line x1="670" y1="30" x2="670" y2="410" class="lane"/>
+
+      <g data-step="1"><path class="arrow" d="M118 85 L560 85"/>
+        <text x="135" y="78" class="mono">send_goal: goal_id=UUID, order=5</text></g>
+
+      <g data-step="2"><path class="arrow" d="M560 120 L120 120"/>
+        <text x="135" y="113" class="mono">accepted=true, stamp</text>
+        <rect class="box gz" x="685" y="98" width="190" height="40"/>
+        <text x="697" y="123" class="mono">ACCEPTED → EXECUTING</text></g>
+
+      <g data-step="3"><path class="arrow" d="M118 160 L560 160"/>
+        <text x="135" y="153" class="mono">get_result: goal_id</text>
+        <text x="135" y="176" class="small" lang="zh-CN">server 暂不回答，请求挂起</text><text x="135" y="176" class="small" lang="en">server holds the reply; request stays pending</text></g>
+
+      <g data-step="4"><path class="arrow flow" d="M560 205 L120 205"/>
+        <text x="135" y="198" class="mono">feedback: [0, 1, 1]</text>
+        <path class="arrow flow" d="M560 240 L120 240"/>
+        <text x="135" y="233" class="mono">feedback: [0, 1, 1, 2]</text>
+        <rect class="box gz" x="685" y="198" width="190" height="40"/>
+        <text x="697" y="223" class="mono">status: EXECUTING</text></g>
+
+      <g data-step="5"><path class="arrow" d="M118 285 L560 285"/>
+        <text x="135" y="278" class="mono">cancel_goal: goal_id</text>
+        <path class="arrow" d="M560 315 L120 315"/>
+        <text x="135" y="308" class="small" lang="zh-CN">cancel 回调接受；执行仍在运行</text><text x="135" y="308" class="small" lang="en">cancel callback accepts; execution still running</text>
+        <rect class="box gz" x="685" y="280" width="190" height="40"/>
+        <text x="697" y="305" class="mono">CANCELING</text></g>
+
+      <g data-step="6"><path class="arrow" d="M560 370 L120 370"/>
+        <text x="135" y="363" class="mono">result: CANCELED, [0, 1, 1, 2]</text>
+        <text x="135" y="392" class="small" lang="zh-CN">回复第 3 步挂起的 get_result</text><text x="135" y="392" class="small" lang="en">answers the get_result pending since step 3</text>
+        <rect class="box gz" x="685" y="350" width="190" height="52"/>
+        <text x="697" y="372" class="mono">CANCELED</text>
+        <text x="697" y="392" class="small" lang="zh-CN">或 SUCCEEDED / ABORTED</text><text x="697" y="392" class="small" lang="en">or SUCCEEDED / ABORTED</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · Python 与 C++ 的 publisher / subscriber，加一个自定义消息包</h3><h3 lang="en">Lab A · A publisher / subscriber in Python and C++, plus a custom message package</h3>
+    <ol>
+      <li><span lang="zh-CN">在容器里建 Python 包。代码按官方教程「Writing a simple publisher and subscriber (Python)」，这里只留骨架：</span><span lang="en">In the container, create the Python package. The code follows the official tutorial “Writing a simple publisher and subscriber (Python)”, trimmed to the skeleton here:</span><pre data-lang="sh">source /opt/ros/jazzy/setup.bash
+cd ~/ws/src
+ros2 pkg create --build-type ament_python --license Apache-2.0 py_pubsub --dependencies rclpy std_msgs</pre></li>
+      <li><span lang="zh-CN">写发布者。<code>create_timer</code> 每 0.5 秒调用一次回调，回调里新建并发布一条消息：</span><span lang="en">Write the publisher. <code>create_timer</code> calls the callback every 0.5 seconds, and the callback creates and publishes a message:</span><pre data-lang="py" data-file="py_pubsub/py_pubsub/publisher_member_function.py">import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+
+class MinimalPublisher(Node):
+    def __init__(self):
+        super().__init__('minimal_publisher')
+        self.publisher_ = self.create_publisher(String, 'topic', 10)
+        self.timer = self.create_timer(0.5, self.timer_callback)
+        self.i = 0
+
+    def timer_callback(self):
+        msg = String()
+        msg.data = f'Hello World: {self.i}'
+        self.publisher_.publish(msg)
+        self.get_logger().info(f'Publishing: "{msg.data}"')
+        self.i += 1
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = MinimalPublisher()
+    rclpy.spin(node)        # 在这里等待并分派回调，直到 Ctrl+C
+    node.destroy_node()
+    rclpy.shutdown()</pre></li>
+      <li><span lang="zh-CN">写订阅者，并在 <code>setup.py</code> 里注册两个入口：</span><span lang="en">Write the subscriber, and register both entry points in <code>setup.py</code>:</span><pre data-lang="py" data-file="py_pubsub/py_pubsub/subscriber_member_function.py">import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+
+class MinimalSubscriber(Node):
+    def __init__(self):
+        super().__init__('minimal_subscriber')
+        self.subscription = self.create_subscription(
+            String, 'topic', self.listener_callback, 10)
+
+    def listener_callback(self, msg):
+        # msg 是反序列化出来的新对象，属于你
+        self.get_logger().info(f'I heard: "{msg.data}"')
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = MinimalSubscriber()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()</pre><pre data-lang="py" data-file="py_pubsub/setup.py">    entry_points={
+        'console_scripts': [
+            'talker = py_pubsub.publisher_member_function:main',
+            'listener = py_pubsub.subscriber_member_function:main',
+        ],
+    },</pre></li>
+      <li><span lang="zh-CN">构建并在两个终端里运行（每个新终端都要 source underlay 和 overlay）：</span><span lang="en">Build and run in two terminals (every new terminal sources the underlay and the overlay):</span><pre data-lang="sh">cd ~/ws
+colcon build --symlink-install --packages-select py_pubsub
+# 新终端 1
+source /opt/ros/jazzy/setup.bash &amp;&amp; source ~/ws/install/setup.bash
+ros2 run py_pubsub talker
+# 新终端 2
+source /opt/ros/jazzy/setup.bash &amp;&amp; source ~/ws/install/setup.bash
+ros2 run py_pubsub listener</pre></li>
+      <li><span lang="zh-CN">建 C++ 包，按官方教程「Writing a simple publisher and subscriber (C++)」写发布者；订阅者结构相同，用 <code>create_subscription&lt;std_msgs::msg::String&gt;</code>：</span><span lang="en">Create the C++ package and write the publisher following the official tutorial “Writing a simple publisher and subscriber (C++)”; the subscriber has the same structure and uses <code>create_subscription&lt;std_msgs::msg::String&gt;</code>:</span><pre data-lang="sh">cd ~/ws/src
+ros2 pkg create --build-type ament_cmake --license Apache-2.0 cpp_pubsub --dependencies rclcpp std_msgs</pre><pre data-lang="cpp" data-file="cpp_pubsub/src/publisher_member_function.cpp">#include &lt;chrono&gt;
+#include &lt;memory&gt;
+#include &lt;string&gt;
+
+#include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/string.hpp"
+
+using namespace std::chrono_literals;
+
+class MinimalPublisher : public rclcpp::Node
+{
+public:
+  MinimalPublisher() : Node("minimal_publisher"), count_(0)
+  {
+    publisher_ = this-&gt;create_publisher&lt;std_msgs::msg::String&gt;("topic", 10);
+    timer_ = this-&gt;create_wall_timer(500ms, [this]() {
+      auto message = std_msgs::msg::String();
+      message.data = "Hello, world! " + std::to_string(count_++);
+      RCLCPP_INFO(this-&gt;get_logger(), "Publishing: '%s'", message.data.c_str());
+      publisher_-&gt;publish(message);
+    });
+  }
+
+private:
+  rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Publisher&lt;std_msgs::msg::String&gt;::SharedPtr publisher_;
+  size_t count_;
+};
+
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared&lt;MinimalPublisher&gt;());
+  rclcpp::shutdown();
+  return 0;
+}</pre><pre data-lang="cpp" data-file="cpp_pubsub/src/subscriber_member_function.cpp">#include &lt;memory&gt;
+
+#include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/string.hpp"
+
+class MinimalSubscriber : public rclcpp::Node
+{
+public:
+  MinimalSubscriber() : Node("minimal_subscriber")
+  {
+    subscription_ = this-&gt;create_subscription&lt;std_msgs::msg::String&gt;(
+      "topic", 10,
+      [this](const std_msgs::msg::String &amp; msg) {
+        RCLCPP_INFO(this-&gt;get_logger(), "I heard: '%s'", msg.data.c_str());
+      });
+  }
+
+private:
+  rclcpp::Subscription&lt;std_msgs::msg::String&gt;::SharedPtr subscription_;
+};
+
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared&lt;MinimalSubscriber&gt;());
+  rclcpp::shutdown();
+  return 0;
+}</pre></li>
+      <li><span lang="zh-CN">在 <code>CMakeLists.txt</code> 的 <code>ament_package()</code> 之前加上可执行文件和安装规则，然后构建：</span><span lang="en">Add the executables and install rules to <code>CMakeLists.txt</code> before <code>ament_package()</code>, then build:</span><pre data-lang="cmake" data-file="cpp_pubsub/CMakeLists.txt">find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+
+add_executable(talker src/publisher_member_function.cpp)
+ament_target_dependencies(talker rclcpp std_msgs)
+add_executable(listener src/subscriber_member_function.cpp)
+ament_target_dependencies(listener rclcpp std_msgs)
+
+install(TARGETS talker listener
+  DESTINATION lib/${PROJECT_NAME})</pre><pre data-lang="sh">cd ~/ws
+colcon build --symlink-install --packages-select cpp_pubsub</pre></li>
+      <li><span lang="zh-CN">跨语言：Python 发布、C++ 订阅，同一个话题名 <code>topic</code>。再用命令行看 graph：</span><span lang="en">Across languages: Python publishes, C++ subscribes, on the same topic name <code>topic</code>. Then inspect the graph from the command line:</span><pre data-lang="sh">ros2 run py_pubsub talker            # 终端 1
+ros2 run cpp_pubsub listener         # 终端 2：照样收到
+ros2 topic info /topic -v            # 终端 3：一个发布者、一个订阅者及其 QoS
+ros2 run cpp_pubsub listener --ros-args -r topic:=/other   # 重映射后收不到</pre></li>
+      <li><span lang="zh-CN">建自定义接口包。按官方教程「Creating custom msg and srv files」，接口包必须是 <code>ament_cmake</code>：</span><span lang="en">Create a custom interface package. Following the official tutorial “Creating custom msg and srv files”, an interface package must be <code>ament_cmake</code>:</span><pre data-lang="sh">cd ~/ws/src
+ros2 pkg create --build-type ament_cmake --license Apache-2.0 tutorial_interfaces
+mkdir -p tutorial_interfaces/msg tutorial_interfaces/srv
+printf 'int64 num\n' &gt; tutorial_interfaces/msg/Num.msg
+printf 'int64 a\nint64 b\nint64 c\n---\nint64 sum\n' &gt; tutorial_interfaces/srv/AddThreeInts.srv</pre><pre data-lang="cmake" data-file="tutorial_interfaces/CMakeLists.txt">find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/Num.msg"
+  "srv/AddThreeInts.srv"
+)</pre><pre data-lang="xml" data-file="tutorial_interfaces/package.xml">&lt;buildtool_depend&gt;rosidl_default_generators&lt;/buildtool_depend&gt;
+&lt;exec_depend&gt;rosidl_default_runtime&lt;/exec_depend&gt;
+&lt;member_of_group&gt;rosidl_interface_packages&lt;/member_of_group&gt;</pre></li>
+      <li><span lang="zh-CN">构建、查看定义，再不写代码地发一条、收一条。生成的 <code>.idl</code> 大致装在 <code>install/tutorial_interfaces/share/tutorial_interfaces/msg/</code> 下，以实际输出为准：</span><span lang="en">Build it, look at the definitions, then send and receive one message without writing code. The generated <code>.idl</code> is installed approximately under <code>install/tutorial_interfaces/share/tutorial_interfaces/msg/</code>; go by the real output:</span><pre data-lang="sh">cd ~/ws
+colcon build --packages-select tutorial_interfaces
+source install/setup.bash
+ros2 interface show tutorial_interfaces/msg/Num
+ros2 interface show tutorial_interfaces/srv/AddThreeInts
+ls install/tutorial_interfaces/share/tutorial_interfaces/msg/
+ros2 topic echo /num tutorial_interfaces/msg/Num &amp;
+ros2 topic pub --once /num tutorial_interfaces/msg/Num "{num: 42}"</pre></li>
+      <li><span lang="zh-CN">练习：把 <code>py_pubsub</code> 的发布者改成发布 <code>tutorial_interfaces/msg/Num</code>。需要在它的 <code>package.xml</code> 里加 <code>&lt;exec_depend&gt;tutorial_interfaces&lt;/exec_depend&gt;</code>，并把 import 改成 <code>from tutorial_interfaces.msg import Num</code>。</span><span lang="en">Exercise: change the <code>py_pubsub</code> publisher to publish <code>tutorial_interfaces/msg/Num</code>. You need to add <code>&lt;exec_depend&gt;tutorial_interfaces&lt;/exec_depend&gt;</code> to its <code>package.xml</code> and change the import to <code>from tutorial_interfaces.msg import Num</code>.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 服务与客户端、Fibonacci 动作、YAML 参数</h3><h3 lang="en">Lab B · A service and client, the Fibonacci action, parameters from YAML</h3>
+    <ol>
+      <li><span lang="zh-CN">按官方教程「Writing a simple service and client (Python)」建包并写 server 和 client。client 用 <code>call_async</code>，在 <code>main</code> 里用 <code>spin_until_future_complete</code> 等结果：</span><span lang="en">Following the official tutorial “Writing a simple service and client (Python)”, create the package and write the server and client. The client uses <code>call_async</code> and waits for the result with <code>spin_until_future_complete</code> in <code>main</code>:</span><pre data-lang="sh">cd ~/ws/src
+ros2 pkg create --build-type ament_python --license Apache-2.0 py_srvcli --dependencies rclpy example_interfaces</pre><pre data-lang="py" data-file="py_srvcli/py_srvcli/service_member_function.py">import rclpy
+from rclpy.node import Node
+from example_interfaces.srv import AddTwoInts
+
+
+class MinimalService(Node):
+    def __init__(self):
+        super().__init__('minimal_service')
+        self.srv = self.create_service(AddTwoInts, 'add_two_ints', self.add_two_ints_callback)
+
+    def add_two_ints_callback(self, request, response):
+        response.sum = request.a + request.b
+        self.get_logger().info(f'Incoming request a: {request.a} b: {request.b}')
+        return response
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(MinimalService())
+    rclpy.shutdown()</pre><pre data-lang="py" data-file="py_srvcli/py_srvcli/client_member_function.py">import sys
+
+import rclpy
+from rclpy.node import Node
+from example_interfaces.srv import AddTwoInts
+
+
+class MinimalClientAsync(Node):
+    def __init__(self):
+        super().__init__('minimal_client_async')
+        self.cli = self.create_client(AddTwoInts, 'add_two_ints')
+        while not self.cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('service not available, waiting again...')
+
+    def send_request(self, a, b):
+        req = AddTwoInts.Request()
+        req.a, req.b = a, b
+        return self.cli.call_async(req)      # 立即返回 future
+
+
+def main():
+    rclpy.init()
+    node = MinimalClientAsync()
+    future = node.send_request(int(sys.argv[1]), int(sys.argv[2]))
+    rclpy.spin_until_future_complete(node, future)   # 在 main 里等，不在回调里等
+    node.get_logger().info(f'Result: {future.result().sum}')
+    node.destroy_node()
+    rclpy.shutdown()</pre><pre data-lang="py" data-file="py_srvcli/setup.py">        'console_scripts': [
+            'service = py_srvcli.service_member_function:main',
+            'client = py_srvcli.client_member_function:main',
+        ],</pre></li>
+      <li><span lang="zh-CN">构建运行，再用命令行直接调用服务，并找出底下的请求和响应话题（隐藏话题的显示方式随 rmw 不同，以实际输出为准）：</span><span lang="en">Build and run, then call the service directly from the command line and look for the request and response topics underneath (how hidden topics show up depends on the rmw; go by the real output):</span><pre data-lang="sh">cd ~/ws &amp;&amp; colcon build --symlink-install --packages-select py_srvcli
+source install/setup.bash
+ros2 run py_srvcli service &amp;
+ros2 run py_srvcli client 2 3                       # Result: 5
+ros2 service list -t
+ros2 service call /add_two_ints example_interfaces/srv/AddTwoInts "{a: 2, b: 3}"
+ros2 topic list --include-hidden-topics</pre></li>
+      <li><span lang="zh-CN">Fibonacci 动作。官方教程「Writing an action server and client」用的 <code>Fibonacci</code> 类型在 <code>action_tutorials_interfaces</code> 里，先确认它已安装（desktop 镜像里大致已有；没有就装 <code>ros-jazzy-action-tutorials-interfaces</code>，包名以 apt 搜索结果为准）：</span><span lang="en">The Fibonacci action. The <code>Fibonacci</code> type used by the official tutorial “Writing an action server and client” lives in <code>action_tutorials_interfaces</code>; first make sure it is installed (the desktop image approximately has it already; otherwise install <code>ros-jazzy-action-tutorials-interfaces</code>, going by what an apt search shows):</span><pre data-lang="sh">ros2 interface show action_tutorials_interfaces/action/Fibonacci
+# int32 order
+# ---
+# int32[] sequence
+# ---
+# int32[] partial_sequence
+cd ~/ws/src
+ros2 pkg create --build-type ament_python --license Apache-2.0 py_action --dependencies rclpy action_tutorials_interfaces</pre></li>
+      <li><span lang="zh-CN">写 server。它在教程版本上加了 goal 回调（拒绝负数）和 cancel 回调。执行回调里有 <code>sleep</code>，为了让取消请求在执行期间也能被处理，这里用可重入回调组加多线程执行器；为什么必须这样，Phase 2 解释：</span><span lang="en">Write the server. It adds to the tutorial version a goal callback (rejecting negative orders) and a cancel callback. The execute callback sleeps, so to let cancel requests be processed during execution it uses a reentrant callback group with a multithreaded executor; Phase 2 explains why this is necessary:</span><pre data-lang="py" data-file="py_action/py_action/fibonacci_action_server.py">import time
+
+import rclpy
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from action_tutorials_interfaces.action import Fibonacci
+
+
+class FibonacciActionServer(Node):
+    def __init__(self):
+        super().__init__('fibonacci_action_server')
+        self._action_server = ActionServer(
+            self, Fibonacci, 'fibonacci',
+            execute_callback=self.execute_callback,
+            goal_callback=self.goal_callback,
+            cancel_callback=self.cancel_callback,
+            callback_group=ReentrantCallbackGroup())
+
+    def goal_callback(self, goal_request):
+        # 在 send_goal 服务里决定接受还是拒绝
+        return GoalResponse.REJECT if goal_request.order &lt; 0 else GoalResponse.ACCEPT
+
+    def cancel_callback(self, goal_handle):
+        # 接受只让目标进入 CANCELING，停不停由 execute_callback 决定
+        return CancelResponse.ACCEPT
+
+    def execute_callback(self, goal_handle):
+        feedback = Fibonacci.Feedback()
+        feedback.partial_sequence = [0, 1]
+        for i in range(1, goal_handle.request.order):
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                return Fibonacci.Result(sequence=feedback.partial_sequence)
+            feedback.partial_sequence.append(
+                feedback.partial_sequence[i] + feedback.partial_sequence[i - 1])
+            goal_handle.publish_feedback(feedback)      # feedback 话题
+            time.sleep(1)
+        goal_handle.succeed()
+        return Fibonacci.Result(sequence=feedback.partial_sequence)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(FibonacciActionServer(), executor=MultiThreadedExecutor())
+    rclpy.shutdown()</pre></li>
+      <li><span lang="zh-CN">在 <code>setup.py</code> 加入口 <code>'fibonacci_server = py_action.fibonacci_action_server:main'</code>，构建运行，然后用命令行发目标、看反馈、看五个隐藏实体。在 <code>send_goal</code> 运行中按 Ctrl+C，CLI 大致会发出取消请求，以实际输出为准；也可以对照官方教程写一个 <code>ActionClient</code> 来取消：</span><span lang="en">Add the entry point <code>'fibonacci_server = py_action.fibonacci_action_server:main'</code> to <code>setup.py</code>, build and run, then send a goal from the command line, watch the feedback, and look at the five hidden entities. Pressing Ctrl+C while <code>send_goal</code> runs approximately makes the CLI send a cancel request; go by the real output. You can also write an <code>ActionClient</code> following the official tutorial to cancel:</span><pre data-lang="sh">cd ~/ws &amp;&amp; colcon build --symlink-install --packages-select py_action
+source install/setup.bash
+ros2 run py_action fibonacci_server &amp;
+ros2 action list -t
+ros2 action info /fibonacci
+ros2 action send_goal --feedback /fibonacci action_tutorials_interfaces/action/Fibonacci "{order: 8}"
+ros2 action send_goal /fibonacci action_tutorials_interfaces/action/Fibonacci "{order: -1}"   # 被 goal 回调拒绝
+ros2 service list --include-hidden-services | grep fibonacci   # send_goal、get_result、cancel_goal
+ros2 topic list --include-hidden-topics | grep fibonacci       # feedback、status
+ros2 topic echo /fibonacci/_action/status                      # 另一个终端里边发目标边看</pre></li>
+      <li><span lang="zh-CN">参数。按官方教程「Using parameters in a class (Python)」写一个节点，加一个拒绝非法值的 on-set 回调（这个节点只校验 <code>rate_hz</code>，按新频率重建定时器留作练习）：</span><span lang="en">Parameters. Following the official tutorial “Using parameters in a class (Python)”, write a node and add an on-set callback that rejects invalid values (this node only validates <code>rate_hz</code>; rebuilding the timer at the new rate is left as an exercise):</span><pre data-lang="sh">cd ~/ws/src
+ros2 pkg create --build-type ament_python --license Apache-2.0 py_params --dependencies rclpy rcl_interfaces</pre><pre data-lang="py" data-file="py_params/py_params/param_node.py">import rclpy
+from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
+
+
+class MinimalParam(Node):
+    def __init__(self):
+        super().__init__('minimal_param_node')
+        self.declare_parameter('my_parameter', 'world')   # 默认值决定类型：string
+        self.declare_parameter('rate_hz', 2.0)            # double
+        self.add_on_set_parameters_callback(self.on_set)
+        self.timer = self.create_timer(1.0, self.timer_callback)
+
+    def on_set(self, params):
+        for p in params:
+            if p.name == 'rate_hz' and p.value &lt;= 0.0:
+                return SetParametersResult(successful=False, reason='rate_hz must be &gt; 0')
+        return SetParametersResult(successful=True)
+
+    def timer_callback(self):
+        name = self.get_parameter('my_parameter').get_parameter_value().string_value
+        self.get_logger().info(f'Hello {name}!')
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(MinimalParam())
+    rclpy.shutdown()</pre><pre data-lang="yaml" data-file="~/ws/params.yaml">minimal_param_node:
+  ros__parameters:
+    my_parameter: earth
+    rate_hz: 5.0</pre></li>
+      <li><span lang="zh-CN">加入口 <code>'param_node = py_params.param_node:main'</code>，构建，带 YAML 启动，然后读写参数。注意哪一次设置被回调拒绝、哪一次因为类型不符被拒绝，同时在另一个终端看 <code>/parameter_events</code>：</span><span lang="en">Add the entry point <code>'param_node = py_params.param_node:main'</code>, build, start with the YAML, then read and write the parameters. Note which set is rejected by the callback and which because of a type mismatch, while watching <code>/parameter_events</code> in another terminal:</span><pre data-lang="sh">cd ~/ws &amp;&amp; colcon build --symlink-install --packages-select py_params
+source install/setup.bash
+ros2 run py_params param_node --ros-args --params-file ~/ws/params.yaml   # Hello earth!
+ros2 topic echo /parameter_events                         # 另一个终端
+ros2 param list /minimal_param_node
+ros2 param get /minimal_param_node rate_hz                # 5.0，来自 YAML
+ros2 param set /minimal_param_node my_parameter mars      # 成功，日志变成 Hello mars!
+ros2 param set /minimal_param_node rate_hz -1.0           # 失败，打印 reason
+ros2 param set /minimal_param_node rate_hz 3              # 整数给 double 参数：看是否被拒绝
+ros2 param dump /minimal_param_node &gt; ~/ws/dumped.yaml</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 里 Python talker 加 C++ listener 同时运行的输出，以及 <code>ros2 interface show tutorial_interfaces/srv/AddThreeInts</code> 的输出 + Lab B 里一次带反馈的 <code>send_goal</code> 输出、<code>grep fibonacci</code> 找出的五个隐藏实体，以及 <code>rate_hz -1.0</code> 被拒绝时打印的那一行 + 你用自己的话写的「什么时候用话题、服务、动作」（各一句）。</div>
+    <div class="note" lang="en">Deliverables: from Lab A, the output of the Python talker and C++ listener running together, and the output of <code>ros2 interface show tutorial_interfaces/srv/AddThreeInts</code> + from Lab B, the output of one <code>send_goal</code> with feedback, the five hidden entities found with <code>grep fibonacci</code>, and the line printed when <code>rate_hz -1.0</code> is rejected + your own explanation of “when to use a topic, a service, an action” (one sentence each).</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/phase-1">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 一个 ROS 2 动作在 graph 里由什么组成？</p>
+      <p lang="en">1. What is a ROS 2 action made of in the graph?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">DDS 专门的 action 实体，与话题和服务并列的第三种传输</span><span lang="en">A dedicated DDS action entity, a third transport alongside topics and services</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">三个服务（send_goal、get_result、cancel_goal）加两个话题（feedback、status）</span><span lang="en">Three services (send_goal, get_result, cancel_goal) plus two topics (feedback, status)</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">一个发目标的话题和一个回结果的话题，取消靠 client 停止发布</span><span lang="en">One topic for goals and one for results; cancelling means the client stops publishing</span></label>
+      <div class="why" hidden><span lang="zh-CN">动作没有自己的传输，<code>rclpy.action</code> 和 <code>rclcpp_action</code> 只是把挂在 <code>_action/</code> 下的三个服务和两个话题包装起来。a 错在 DDS 里没有 action 实体；c 错在目标需要被确认接受，结果要可靠地配对，取消也是一个显式请求，这些都是服务。</span><span lang="en">An action has no transport of its own; <code>rclpy.action</code> and <code>rclcpp_action</code> merely wrap the three services and two topics under <code>_action/</code>. a is wrong because DDS has no action entity; c is wrong because a goal must be explicitly accepted, the result must be reliably paired with its goal, and a cancel is an explicit request, all of which are services.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 节点注册了 on-set 回调，它对 <code>rate_hz = -1.0</code> 返回 <code>successful=False</code>。执行 <code>ros2 param set … rate_hz -1.0</code> 之后会怎样？</p>
+      <p lang="en">2. A node has registered an on-set callback that returns <code>successful=False</code> for <code>rate_hz = -1.0</code>. What happens after <code>ros2 param set … rate_hz -1.0</code>?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">值被写入，回调只是额外打印一条警告</span><span lang="en">The value is written; the callback merely logs an extra warning</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">值被写入，并在 <code>/parameter_events</code> 上发布一条失败事件</span><span lang="en">The value is written, and a failure event is published on <code>/parameter_events</code></span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">整次设置被拒绝，值保持原样，reason 回到调用者</span><span lang="en">The whole set is rejected, the value stays as it was, and the reason goes back to the caller</span></label>
+      <div class="why" hidden><span lang="zh-CN">on-set 回调在写入之前运行，任何一个回调拒绝，整次设置都不生效，<code>ros2 param set</code> 会打印 reason。a 和 b 都假设值已经写入；实际上只有设置成功时才会在 <code>/parameter_events</code> 上发布变更事件。</span><span lang="en">On-set callbacks run before the write; if any callback rejects, the whole set does not take effect, and <code>ros2 param set</code> prints the reason. a and b both assume the value was written; in fact a change event appears on <code>/parameter_events</code> only when a set succeeds.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 另一个进程里的 Python 订阅者把收到的每条消息存进一个列表。发布者发布后又修改并复用自己的消息对象。列表里已存的消息会变吗？</p>
+      <p lang="en">3. A Python subscriber in another process stores every received message in a list. The publisher, after publishing, modifies and reuses its own message object. Do the stored messages change?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">不会：接收端 rmw 把字节反序列化进新对象，rclpy 再转换成新的 Python 对象，订阅者拿的是自己的副本</span><span lang="en">No: the receiving rmw deserializes the bytes into a new object and rclpy converts it into a new Python object, so the subscriber holds its own copy</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">会：同一台机器上 Fast DDS 走共享内存，两边看的是同一块内存</span><span lang="en">Yes: on one host Fast DDS uses shared memory, so both sides see the same memory</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">只有历史深度大于 1 时才会，因为队列里保存的是引用</span><span lang="en">Only if the history depth is greater than 1, because the queue stores references</span></label>
+      <div class="why" hidden><span lang="zh-CN">跨进程时消息以序列化字节传递，接收端总是得到新分配的对象。b 混淆了传输和对象：共享内存传输搬运的仍是序列化后的字节，只有 loaned message 才让订阅者直接看发布者的内存，而且 rclpy 回调拿到的永远是转换后的 Python 对象。c 错在历史深度只决定保留几条，不改变复制语义。</span><span lang="en">Across processes, messages travel as serialized bytes, and the receiver always gets a freshly allocated object. b confuses transport with objects: a shared-memory transport still moves serialized bytes, only a loaned message lets a subscriber see the publisher’s memory directly, and an rclpy callback always receives a converted Python object. c is wrong because the history depth only decides how many messages are kept, not the copy semantics.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 一个导航请求要 30 秒，需要显示进度，用户可能中途改主意。应该用哪种通信方式？</p>
+      <p lang="en">4. A navigation request takes 30 seconds, progress must be shown, and the user may change their mind midway. Which kind of communication fits?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">服务：请求里放目标，server 回调执行 30 秒后返回结果</span><span lang="en">A service: put the goal in the request, and the server callback runs for 30 seconds then returns the result</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">动作：目标被确认接受，执行中发反馈，随时可取消，结束时配对返回结果</span><span lang="en">An action: the goal is explicitly accepted, feedback flows during execution, it can be cancelled at any time, and the result is paired back at the end</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">两个话题：一个发目标，一个发进度，进度到 100% 就算完成</span><span lang="en">Two topics: one for the goal, one for progress; reaching 100 % means done</span></label>
+      <div class="why" hidden><span lang="zh-CN">这正是动作的设计目标，Nav2 的 NavigateToPose 就是动作。a 的服务没有中途反馈，请求也不能撤回，长时间的回调还会堵住执行器；c 用话题发目标没有接受确认，丢一条就不知道目标是否被收到，也没有取消和终态的定义。</span><span lang="en">This is exactly what actions are designed for; Nav2’s NavigateToPose is an action. The service in a has no feedback midway and the request cannot be withdrawn, and a long callback also blocks the executor; c sends the goal on a topic with no acceptance, so a lost message leaves you unsure the goal arrived, and there is no definition of cancel or of a terminal state.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Nodes.html">Nodes</a> · <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Topics.html">Topics</a> · <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Services.html">Services</a> · <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Actions.html">Actions</a> · <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Parameters.html">Parameters</a> · <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Interfaces.html">Interfaces</a> <span class="lvl" lang="zh-CN">官方概念页，概念 1 到 6：每种通信方式的定义与适用场景</span><span class="lvl" lang="en">Official concept pages, concepts 1 to 6: what each kind of communication is and when to use it</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Writing-A-Simple-Py-Publisher-And-Subscriber.html">Writing a simple publisher and subscriber (Python)</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Writing-A-Simple-Cpp-Publisher-And-Subscriber.html">(C++)</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Custom-ROS2-Interfaces.html">Creating custom msg and srv files</a> <span class="lvl" lang="zh-CN">官方教程，Lab A 的完整代码与 package.xml、CMakeLists.txt</span><span class="lvl" lang="en">Official tutorials, the full code, package.xml and CMakeLists.txt for Lab A</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Writing-A-Simple-Py-Service-And-Client.html">Writing a simple service and client (Python)</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Writing-an-Action-Server-Client/Py.html">Writing an action server and client (Python)</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Writing-an-Action-Server-Client/Cpp.html">(C++)</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Using-Parameters-In-A-Class-Python.html">Using parameters in a class (Python)</a> <span class="lvl" lang="zh-CN">官方教程，Lab B：服务、Fibonacci 动作（含 rclcpp_action 的 handle_accepted 写法）、参数</span><span class="lvl" lang="en">Official tutorials, Lab B: services, the Fibonacci action (including the rclcpp_action handle_accepted pattern), parameters</span></li>
+    <li><a href="https://design.ros2.org/articles/actions.html">Actions</a> · <a href="https://design.ros2.org/articles/topic_and_service_names.html">Topic and service name mapping to DDS</a> <span class="lvl" lang="zh-CN">设计文章，概念 1、4、5：动作由哪些服务和话题组成、目标状态机、名字如何映射到 DDS</span><span class="lvl" lang="en">Design articles, concepts 1, 4 and 5: which services and topics an action consists of, the goal state machine, how names map to DDS</span></li>
+    <li><a href="https://github.com/ros2/examples">github.com/ros2/examples</a> · <a href="https://github.com/ros2/demos">github.com/ros2/demos</a> <span class="lvl" lang="zh-CN">源码，入门到进阶：各种写法的最小例子，以及 action_tutorials 的 Python 与 C++ 版本</span><span class="lvl" lang="en">Source, beginner to intermediate: minimal examples of each style, and the Python and C++ versions of action_tutorials</span></li>
+    <li><a href="https://github.com/ros2/rclpy">github.com/ros2/rclpy</a> · <a href="https://github.com/ros2/rclcpp">github.com/ros2/rclcpp</a> <span class="lvl" lang="zh-CN">源码，进阶：Node、ActionServer、参数回调的实现</span><span class="lvl" lang="en">Source, advanced: how Node, ActionServer and parameter callbacks are implemented</span></li>
+    <li>Edouard Renard, <em>ROS 2 From Scratch</em> <span class="lvl" lang="zh-CN">入门，基于 Jazzy，本阶段每个概念都有 Python 与 C++ 两个版本的章节</span><span class="lvl" lang="en">Beginner, based on Jazzy; every concept of this phase has a chapter in both Python and C++</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024（11 月）, ISBN 9781835881408. <span class="lvl">讲节点、话题、服务、自定义接口、参数和动作的章节，对应概念 1 到 7；基于 Jazzy，Python 与 C++ 并列</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024 (November), ISBN 9781835881408. <span class="lvl">The chapters on nodes, topics, services, custom interfaces, parameters and actions; match concepts 1 to 7; based on Jazzy, Python and C++ side by side</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025（6 月）, ISBN 9781032851501（第 1 版 2022, ISBN 9781032267203）. <span class="lvl">讲第一批节点、话题通信与执行方式的章节，对应概念 2、7（以 C++ 为主）</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025 (June), ISBN 9781032851501 (1st ed. 2022, ISBN 9781032267203). <span class="lvl">The chapters on first nodes, topic communication and how nodes execute; match concepts 2 and 7 (mostly C++)</span></li>
+    <li lang="zh-CN">Lentin Joseph &amp; Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025（7 月）. <span class="lvl">讲 ROS 2 编程基础（话题、服务、动作、参数，C++ 与 Python）的章节，对应概念 4 到 7；基于 Jazzy</span></li>
+    <li lang="en">Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025 (July). <span class="lvl">The chapters on ROS 2 programming fundamentals (topics, services, actions, parameters, in C++ and Python); match concepts 4 to 7; based on Jazzy</span></li>
+    <li lang="zh-CN">Morgan Quigley, Brian Gerkey &amp; William D. Smart, 《Programming Robots with ROS》, O'Reilly, 2015. <span class="lvl">讲话题、服务和 actionlib 的章节，对应概念 2、4、5 的设计取舍；全书基于 ROS 1，三种通信方式的概念在 ROS 2 中仍然适用</span></li>
+    <li lang="en">Morgan Quigley, Brian Gerkey &amp; William D. Smart, <em>Programming Robots with ROS</em>, O'Reilly, 2015. <span class="lvl">The chapters on topics, services and actionlib; match the design trade-offs of concepts 2, 4 and 5; the whole book is ROS 1, but the three kinds of communication still apply in ROS 2</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-0-foundations/index.html">← Phase 0 · Foundations</a>
+    <a href="../phase-2-executors-and-timing/index.html">Phase 2 · Executors &amp; Timing →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
