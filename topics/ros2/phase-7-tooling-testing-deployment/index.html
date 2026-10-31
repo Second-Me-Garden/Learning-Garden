@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 7 · Tooling, Testing &amp; Deployment · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page">Phase 7 · Tooling, Testing &amp; Deployment</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 7 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 7 / 8 · about 1–2 weeks</p>
+  <h1>Tooling, Testing, Deployment <span class="en" lang="zh-CN">工具链、测试与部署：看清系统、录下现场、自动验证，再装进一个能交付的镜像</span><span class="en" lang="en">See the system, record what happened, verify it automatically, then ship it in one deployable image</span></h1>
+  <p class="lede" lang="zh-CN">前六个阶段造出了一个能建图、能导航的仿真机器人。这最后一个阶段回答的是「怎么知道它还对、怎么把它交出去」。先讲看系统的工具：rqt、<code>ros2 doctor</code> 和日志；再讲 <code>ros2 bag</code> 怎么把一次运行录下来，以及回放时为什么必须带上 <code>--clock</code> 并让节点用 <code>use_sim_time</code>。然后是测试金字塔：单元测试、用 <code>launch_testing</code> 做的集成测试、用 bag 回放做的系统回归，以及 <code>colcon test</code> 到底跑了什么、结果写到哪里。最后是交付：用多阶段 Dockerfile 做一个只带运行所需文件的镜像，用 <code>ros2_tracing</code> 量出每个回调花了多久。结尾是整门课的毕业项目。</p>
+  <p class="lede" lang="en">The first six phases built a simulated robot that maps and navigates. This last phase answers “how do I know it is still right, and how do I hand it over”. It starts with the tools for seeing the system: rqt, <code>ros2 doctor</code> and logging; then how <code>ros2 bag</code> records a run, and why replay must pass <code>--clock</code> and the nodes must use <code>use_sim_time</code>. Next comes the test pyramid: unit tests, integration tests with <code>launch_testing</code>, system regression by bag replay, and what <code>colcon test</code> actually runs and where its results go. Last is delivery: a multi-stage Dockerfile that produces an image holding only what is needed to run, and <code>ros2_tracing</code> to measure how long each callback takes. The page ends with the capstone for the whole course.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">给一个问题挑对工具：连接关系用 rqt_graph，日志用 rqt_console，数值曲线用 rqt_plot，环境问题用 <code>ros2 doctor --report</code>，回调耗时用 tracing。</li>
+      <li lang="en">Pick the right tool for a question: rqt_graph for connections, rqt_console for logs, rqt_plot for value curves, <code>ros2 doctor --report</code> for environment problems, tracing for callback durations.</li>
+      <li lang="zh-CN">为 Phase 1 的 talker 写一个 pytest 单元测试和一个 launch_testing 集成测试，用 <code>colcon test</code> 跑通，说出结果文件落在哪里、为什么 CI 要看 <code>colcon test-result</code> 的退出码。</li>
+      <li lang="en">Write a pytest unit test and a launch_testing integration test for the Phase 1 talker, run them with <code>colcon test</code>, and say where the result files land and why CI looks at the exit code of <code>colcon test-result</code>.</li>
+      <li lang="zh-CN">录一个 bag，用 <code>--clock</code> 回放给 <code>use_sim_time:=true</code> 的节点，并解释少了任何一个会出什么错。</li>
+      <li lang="en">Record a bag, replay it with <code>--clock</code> into nodes running with <code>use_sim_time:=true</code>, and explain what goes wrong when either is missing.</li>
+      <li lang="zh-CN">写一个多阶段 Dockerfile，说清楚运行阶段为什么更小、必须从构建阶段拷什么、为什么构建阶段不能用 <code>--symlink-install</code>。</li>
+      <li lang="en">Write a multi-stage Dockerfile and explain why the runtime stage is smaller, what must be copied from the build stage, and why the build stage must not use <code>--symlink-install</code>.</li>
+      <li lang="zh-CN">用 <code>ros2 trace</code> 追踪一个节点，算出每个回调的耗时分布，并说出一个 tracepoint 的代价从何而来。</li>
+      <li lang="en">Trace a node with <code>ros2 trace</code>, compute the duration distribution of each callback, and say where the cost of a tracepoint comes from.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1</a> 的 <code>py_pubsub</code> 包（talker 与 listener）还在 <code>~/ws/src</code> 里，本阶段的测试就是给它写的。</li>
+    <li lang="en">The <code>py_pubsub</code> package from <a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1</a> (talker and listener) is still in <code>~/ws/src</code>; this phase writes tests for it.</li>
+    <li lang="zh-CN"><a href="../phase-2-executors-and-timing/index.html">Phase 2</a> 的 <code>timing_lab</code> 包和 <code>jitter_node</code>：Lab B 用它做追踪对象。Phase 2 已经介绍过 tracepoint 和 LTTng 是什么。</li>
+    <li lang="en">The <code>timing_lab</code> package and <code>jitter_node</code> from <a href="../phase-2-executors-and-timing/index.html">Phase 2</a>: Lab B traces it. Phase 2 already introduced what tracepoints and LTTng are.</li>
+    <li lang="zh-CN"><a href="../phase-4-launch-lifecycle-composition/index.html">Phase 4</a> 的 Python launch 文件：<code>launch_testing</code> 的测试描述就是一个 launch 描述。毕业项目还会用到 Phase 5 和 Phase 6 的仿真机器人。</li>
+    <li lang="en">Python launch files from <a href="../phase-4-launch-lifecycle-composition/index.html">Phase 4</a>: a <code>launch_testing</code> test description is a launch description. The capstone also uses the simulated robot from Phases 5 and 6.</li>
+    <li lang="zh-CN"><a href="../lab-setup/index.html">实验环境</a>页的容器：Lab B 在 Mac 上用同一个 Docker Desktop 构建部署镜像，并通过 <code>share/</code> 目录拿到源码。</li>
+    <li lang="en">The container from the <a href="../lab-setup/index.html">lab environment</a> page: Lab B builds the deployment image on the Mac with the same Docker Desktop and gets the source through the <code>share/</code> directory.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 看清系统：rqt、ros2 doctor 与日志</h3><h3 lang="en">1. Seeing the system: rqt, ros2 doctor and logging</h3>
+  <p lang="zh-CN"><strong>rqt</strong> 是一个 Qt 框架，各种图形工具是它的插件，单独启动时各自有命令名：<code>rqt_graph</code> 把节点和话题画成图，数据来自 DDS 发现信息，跟 <code>ros2 node info</code> 是同一个来源；<code>rqt_console</code> 订阅 <code>/rosout</code>，按级别和节点过滤日志；<code>rqt_plot</code> 订阅一个话题里的数值字段（例如 <code>/odom/pose/pose/position/x</code>）画曲线。它们都只是普通的 ROS 节点，所以在容器里要从 noVNC 桌面启动，而且会出现在 <code>ros2 node list</code> 里。</p>
+  <p lang="en"><strong>rqt</strong> is a Qt framework whose graphical tools are plugins, each with its own command name when started alone: <code>rqt_graph</code> draws nodes and topics as a graph, from DDS discovery information, the same source as <code>ros2 node info</code>; <code>rqt_console</code> subscribes to <code>/rosout</code> and filters log messages by level and node; <code>rqt_plot</code> subscribes to a numeric field inside a topic (for example <code>/odom/pose/pose/position/x</code>) and draws it as a curve. They are all ordinary ROS nodes, so in the container you start them from the noVNC desktop, and they show up in <code>ros2 node list</code>.</p>
+  <p lang="zh-CN"><strong><code>ros2 doctor --report</code></strong> 不看你的代码，看的是环境：发行版与版本、平台、网络接口、当前 rmw 实现、已安装包是否落后于发行版。装错源、混用发行版、网卡没有多播这类问题，在这里比在节点日志里更容易看出来。</p>
+  <p lang="en"><strong><code>ros2 doctor --report</code></strong> does not look at your code but at the environment: distribution and version, platform, network interfaces, the active rmw implementation, and whether installed packages lag behind the distribution. Problems such as a wrong apt source, mixed distributions or an interface without multicast are easier to see here than in node logs.</p>
+  <p lang="zh-CN"><strong>日志的三个去处</strong>：按官方 Logging 概念页，一条 <code>get_logger().info(…)</code> 默认同时写到三处：控制台的 <strong>stderr</strong>（设 <code>RCUTILS_LOGGING_USE_STDOUT=1</code> 改到 stdout）、磁盘上的日志文件（通常在 <code>~/.ros/log</code>，可用 <code>ROS_LOG_DIR</code> 改）、以及 ROS 网络上的 <code>/rosout</code> 话题。级别在启动时调：<code>--ros-args --log-level debug</code> 改全部，<code>--log-level talker:=DEBUG</code> 只改一个 logger。控制台格式由 <code>RCUTILS_CONSOLE_OUTPUT_FORMAT</code> 决定，默认是 <code>[{severity}] [{time}] [{name}]: {message}</code>。日志走 stderr 这一点后面会用到：launch_testing 断言日志内容时，默认就去 stderr 里找。</p>
+  <p lang="en"><strong>Where a log line goes</strong>: per the official Logging concept page, one <code>get_logger().info(…)</code> by default goes to three places at once: the console on <strong>stderr</strong> (set <code>RCUTILS_LOGGING_USE_STDOUT=1</code> to switch to stdout), log files on disk (typically under <code>~/.ros/log</code>, configurable with <code>ROS_LOG_DIR</code>), and the <code>/rosout</code> topic on the ROS network. Levels are set at start-up: <code>--ros-args --log-level debug</code> for everything, <code>--log-level talker:=DEBUG</code> for one logger only. The console format comes from <code>RCUTILS_CONSOLE_OUTPUT_FORMAT</code>; the default is <code>[{severity}] [{time}] [{name}]: {message}</code>. The fact that logs go to stderr matters later: when launch_testing asserts on log text, it looks in stderr by default.</p>
+  <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲开发工具与调试的部分；Quigley 等《Programming Robots with ROS》讲 rqt 与 rosbag 等工具的章节（ROS 1，工具的用途在 ROS 2 中不变）；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Logging.html">Logging and logger configuration</a>。</p>
+  <p lang="en">Further reading: the parts of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on development tools and debugging; the chapters of Quigley et al., <em>Programming Robots with ROS</em>, on tools such as rqt and rosbag (ROS 1; what the tools are for is unchanged in ROS 2); the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Logging.html">Logging and logger configuration</a>.</p>
+
+  <h3 lang="zh-CN">2. 录制与回放：ros2 bag 与仿真时间</h3><h3 lang="en">2. Record and replay: ros2 bag and simulation time</h3>
+  <p lang="zh-CN"><code>ros2 bag record</code> 是一个订阅者：它订阅你点名的话题（<code>-a</code> 是全部），把收到的<strong>序列化字节</strong>原样写进存储文件，不反序列化，所以录任何类型都不需要它认识这个类型的代码。每条消息记下它被录下时的时间戳，消息里自己的 <code>header.stamp</code> 也原样留在字节里。<code>-o name</code> 指定目录名；目录里是 <code>metadata.yaml</code>（话题、类型、QoS、消息数、起止时间，<code>ros2 bag info</code> 读的就是它）和存储文件。存储插件有 <code>mcap</code> 和 <code>sqlite3</code> 两种，<code>--storage</code> 选择；rosbag2 jazzy 分支的 README 写明默认是 <code>mcap</code>（2026-10-31 查）。</p>
+  <p lang="en"><code>ros2 bag record</code> is a subscriber: it subscribes to the topics you name (<code>-a</code> for all) and writes the <strong>serialized bytes</strong> it receives straight into a storage file without deserializing them, so it can record any type without knowing that type’s code. Each message is stored with the time it was recorded, and the message’s own <code>header.stamp</code> stays inside the bytes unchanged. <code>-o name</code> names the directory; the directory holds <code>metadata.yaml</code> (topics, types, QoS, message counts, start and end time; this is what <code>ros2 bag info</code> reads) and the storage file. There are two storage plugins, <code>mcap</code> and <code>sqlite3</code>, chosen with <code>--storage</code>; the README of the rosbag2 jazzy branch states that the default is <code>mcap</code> (checked 2026-10-31).</p>
+  <p lang="zh-CN"><code>ros2 bag play</code> 是一个发布者：按录制时的间隔把消息重新发出去（<code>-r</code> 调倍速）。问题在于<strong>时间</strong>。回放时消息里的 <code>header.stamp</code> 还是录制那天的，而节点的 <code>now()</code> 默认读的是系统时钟，也就是今天。于是 tf2 用一个「几天前」的时间戳去查变换，会报外推错误；按消息年龄丢弃旧数据的代码会把每一条都判成过期；定时器按墙钟跑，和数据流的节奏对不上，倍速回放时更明显。</p>
+  <p lang="en"><code>ros2 bag play</code> is a publisher: it sends the messages again at their recorded spacing (<code>-r</code> changes the rate). The problem is <strong>time</strong>. During replay, the <code>header.stamp</code> inside each message is still from the recording day, while a node’s <code>now()</code> reads the system clock by default, which is today. So tf2 asked for a transform at a timestamp “days ago” reports an extrapolation error; code that drops data by message age judges every message stale; and timers run on the wall clock, out of step with the data, which is worse at a changed rate.</p>
+  <p lang="zh-CN">修法是两半，缺一不可。<strong><code>--clock</code></strong> 让播放器充当时间源：按固定频率在 <code>/clock</code> 上发布「当前回放到的录制时间」（不给数值时默认 40 Hz，以 <code>ros2 bag play -h</code> 为准；同时会排除 bag 里自带的 <code>/clock</code>，免得两个时间源打架）。<strong><code>use_sim_time:=true</code></strong> 是每个节点上的参数，按设计文章 Clock and Time，它让这个节点的 ROS time 改读 <code>/clock</code> 的最新值。只开 <code>--clock</code>，没人听；只开 <code>use_sim_time</code>，节点等不到 <code>/clock</code>，时间停在 0，按设计文章 0 表示「时间未初始化」，基于 ROS time 的定时器一次都不会触发。两半都开，<code>now()</code>、定时器、tf 查询就都在录制的时间线上，暂停播放，整个系统的时间也跟着停。</p>
+  <p lang="en">The fix has two halves, and both are needed. <strong><code>--clock</code></strong> makes the player a time source: it publishes “the recorded time playback has reached” on <code>/clock</code> at a fixed rate (40 Hz when no value is given; go by <code>ros2 bag play -h</code>; it also excludes any <code>/clock</code> stored in the bag so that two time sources do not fight). <strong><code>use_sim_time:=true</code></strong> is a parameter on each node; per the design article Clock and Time, it makes that node’s ROS time read the latest value from <code>/clock</code>. With only <code>--clock</code>, nobody listens; with only <code>use_sim_time</code>, the node never gets a <code>/clock</code>, so its time stays at 0, which the design article defines as “time not initialized”, and a timer on ROS time never fires. With both, <code>now()</code>, timers and tf lookups all live on the recorded timeline, and pausing playback pauses time for the whole system.</p>
+  <div class="note" lang="zh-CN">录制时也有对应的一面：如果被录的系统本身在仿真时间上（Gazebo 发布 <code>/clock</code>），给 <code>ros2 bag record</code> 加 <code>--use-sim-time</code>，消息就按仿真时间打戳。rosbag2 README 提醒：开了这个选项后，在收到第一条 <code>/clock</code> 之前录制器不写任何消息，否则时间会从 0 跳到 N，bag 基本没法回放。</div>
+  <div class="note" lang="en">Recording has a matching side: if the recorded system itself runs on simulation time (Gazebo publishes <code>/clock</code>), add <code>--use-sim-time</code> to <code>ros2 bag record</code> so messages are stamped with simulation time. The rosbag2 README warns that with this option the recorder writes nothing until the first <code>/clock</code> arrives; otherwise time would jump from 0 to N and the bag would be essentially unplayable.</div>
+  <p lang="zh-CN">延伸阅读：Quigley 等《Programming Robots with ROS》讲 rosbag 的章节（ROS 1 的 bag 格式不同，录制与回放的思路相同）；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Recording-And-Playing-Back-Data/Recording-And-Playing-Back-Data.html">Recording and playing back data</a> 与设计文章 <a href="https://design.ros2.org/articles/clock_and_time.html">Clock and Time</a>。</p>
+  <p lang="en">Further reading: the chapter on rosbag in Quigley et al., <em>Programming Robots with ROS</em> (the ROS 1 bag format differs, the idea of record and replay is the same); the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Recording-And-Playing-Back-Data/Recording-And-Playing-Back-Data.html">Recording and playing back data</a> and the design article <a href="https://design.ros2.org/articles/clock_and_time.html">Clock and Time</a>.</p>
+
+  <h3 lang="zh-CN">3. 测试金字塔：单元测试与 launch_testing</h3><h3 lang="en">3. The test pyramid: unit tests and launch_testing</h3>
+  <p lang="zh-CN"><strong>单元测试</strong>检查一个函数或一个类在给定输入下对不对。C++ 用 gtest：在 <code>CMakeLists.txt</code> 的 <code>if(BUILD_TESTING)</code> 里写 <code>ament_add_gtest(${PROJECT_NAME}_test test/test_x.cpp)</code>，<code>package.xml</code> 加 <code>&lt;test_depend&gt;ament_cmake_gtest&lt;/test_depend&gt;</code>。Python 用 pytest：<code>ament_python</code> 包把 <code>test_*.py</code> 放进包根目录的测试目录；CMake 包里的 Python 测试用 <code>ament_add_pytest_test</code> 登记。单元测试快、可以写很多，但它看不到进程、DDS、launch 文件，也看不到节点之间是否真的连上。</p>
+  <p lang="en">A <strong>unit test</strong> checks whether one function or class is correct for a given input. C++ uses gtest: inside <code>if(BUILD_TESTING)</code> in <code>CMakeLists.txt</code> write <code>ament_add_gtest(${PROJECT_NAME}_test test/test_x.cpp)</code>, and add <code>&lt;test_depend&gt;ament_cmake_gtest&lt;/test_depend&gt;</code> to <code>package.xml</code>. Python uses pytest: an <code>ament_python</code> package puts <code>test_*.py</code> files into the test directory at the package root; Python tests in a CMake package are registered with <code>ament_add_pytest_test</code>. Unit tests are fast and you can write many, but they cannot see processes, DDS or launch files, nor whether nodes really connect to each other.</p>
+  <p lang="zh-CN"><strong><code>launch_testing</code></strong> 补的正是这一层。测试文件里的 <code>generate_test_description()</code> 返回一个 <code>LaunchDescription</code>，和普通 launch 文件一样起真正的进程，再加一个 <code>launch_testing.actions.ReadyToTest()</code> 告诉框架「可以开始测了」。之后有两类测试：</p>
+  <p lang="en"><strong><code>launch_testing</code></strong> fills exactly that layer. In a test file, <code>generate_test_description()</code> returns a <code>LaunchDescription</code> that starts real processes, just as a normal launch file does, plus a <code>launch_testing.actions.ReadyToTest()</code> that tells the framework “you may start testing now”. After that there are two kinds of test:</p>
+  <ul>
+    <li lang="zh-CN"><strong>活动测试</strong>（普通的 <code>unittest.TestCase</code>）在被测进程运行期间执行。它们能做单元测试做不到的事：用 <code>proc_output.assertWaitFor(…)</code> 断言某个进程在超时之前打印了某行日志；自己建一个节点订阅被测节点的话题，断言消息真的跨进程、经过 DDS 发现到达了，频率和内容也对；验证 launch 文件里的重映射、参数文件和命名空间确实生效。</li>
+    <li lang="en"><strong>Active tests</strong> (ordinary <code>unittest.TestCase</code> classes) run while the processes under test are running. They can do what a unit test cannot: assert with <code>proc_output.assertWaitFor(…)</code> that a process printed a given log line before a timeout; create a node of their own that subscribes to the topics of the nodes under test and assert that messages really arrived across processes through DDS discovery, at the right rate and with the right content; and check that the remaps, parameter files and namespaces in a launch file actually took effect.</li>
+    <li lang="zh-CN"><strong>关闭后测试</strong>（用 <code>@launch_testing.post_shutdown_test()</code> 装饰的类）在所有进程退出之后执行，能拿到每个进程的退出码和全部输出。最常见的一条是 <code>launch_testing.asserts.assertExitCodes(proc_info)</code>：节点被 launch 用 SIGINT 结束时是否干净退出（默认只接受 0）。崩溃、关闭时抛异常、析构顺序出错，都只在这一层暴露。</li>
+    <li lang="en"><strong>Post-shutdown tests</strong> (classes decorated with <code>@launch_testing.post_shutdown_test()</code>) run after every process has exited and can see each process’s exit code and full output. The most common one is <code>launch_testing.asserts.assertExitCodes(proc_info)</code>: did each node exit cleanly when launch ended it with SIGINT (only 0 is accepted by default)? Crashes, exceptions during shutdown and wrong destruction order only show up at this layer.</li>
+  </ul>
+  <p lang="zh-CN">集成测试互相隔离是个真问题：两个测试同时跑，各自起一个 talker，DDS 发现会把它们连在一起，测试就互相污染。官方集成测试教程的做法是在 CMake 里用 <code>ament_cmake_ros</code> 自带的 <code>run_test_isolated.py</code> 作为 runner 登记 <code>add_launch_test</code>，它给每个测试挑一个独占的 <code>ROS_DOMAIN_ID</code>。金字塔的顶层是<strong>系统测试</strong>：把真实录下的 bag 回放给整条链路，比较输出和上一次认可的参考结果，这是概念 2 和毕业项目的内容。</p>
+  <p lang="en">Isolating integration tests is a real problem: if two tests run at the same time, each starting a talker, DDS discovery connects them and the tests contaminate each other. The official integration-testing tutorial registers <code>add_launch_test</code> in CMake with <code>run_test_isolated.py</code> from <code>ament_cmake_ros</code> as the runner, which picks an exclusive <code>ROS_DOMAIN_ID</code> for each test. The top of the pyramid is the <strong>system test</strong>: replay a really recorded bag into the whole chain and compare the output with the last accepted reference; that is concept 2 and the capstone.</p>
+  <p lang="zh-CN">延伸阅读：官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/Testing-Main.html">Testing</a> 系列（Python、C++、集成测试三篇）与 <a href="https://github.com/ros2/launch/tree/jazzy/launch_testing">launch_testing README</a>；Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲开发流程与工具的章节（是否覆盖测试请以目录为准）。</p>
+  <p lang="en">Further reading: the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/Testing-Main.html">Testing</a> series (Python, C++ and integration tests) and the <a href="https://github.com/ros2/launch/tree/jazzy/launch_testing">launch_testing README</a>; the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on the development workflow and tools (check the table of contents for whether testing is covered).</p>
+
+  <h3 lang="zh-CN">4. colcon test 跑了什么，结果去了哪里</h3><h3 lang="en">4. What colcon test runs, and where the results go</h3>
+  <p lang="zh-CN"><code>colcon test</code> 不自己执行测试，它按每个包的构建类型把活交出去，所以必须先 <code>colcon build</code>：</p>
+  <p lang="en"><code>colcon test</code> does not run tests itself; it hands the work to each package according to its build type, which is why you must <code>colcon build</code> first:</p>
+  <ul>
+    <li lang="zh-CN"><strong><code>ament_cmake</code> 包</strong>：colcon 在 <code>build/&lt;pkg&gt;</code> 里调用 CTest。<code>ament_add_gtest</code>、<code>ament_add_pytest_test</code>、<code>add_launch_test</code> 和 <code>ament_lint_auto</code> 在 CMake 配置时把每个测试登记成一个 CTest 条目；每个条目由 ament 的包装脚本运行，并写出一份 JUnit 风格的 XML，大致路径在 <code>build/&lt;pkg&gt;/test_results/&lt;pkg&gt;/</code> 下，以实际目录为准。</li>
+    <li lang="en"><strong><code>ament_cmake</code> packages</strong>: colcon invokes CTest in <code>build/&lt;pkg&gt;</code>. <code>ament_add_gtest</code>, <code>ament_add_pytest_test</code>, <code>add_launch_test</code> and <code>ament_lint_auto</code> registered each test as a CTest entry at configure time; each entry is run by an ament wrapper script that writes a JUnit-style XML file, at the approximate path <code>build/&lt;pkg&gt;/test_results/&lt;pkg&gt;/</code>; go by the real directory.</li>
+    <li lang="zh-CN"><strong><code>ament_python</code> 包</strong>：colcon 直接调用 pytest，并传入 <code>--junit-xml</code>，结果写到 <code>build/&lt;pkg&gt;/pytest.xml</code>（colcon-core 的 pytest 任务源码里就是这个文件名）。<code>ros2 pkg create</code> 生成的 Python 包自带 <code>test/test_copyright.py</code>、<code>test_flake8.py</code>、<code>test_pep257.py</code> 三个风格检查，所以第一次 <code>colcon test</code> 就可能因为代码风格失败。</li>
+    <li lang="en"><strong><code>ament_python</code> packages</strong>: colcon calls pytest directly with <code>--junit-xml</code>, writing the result to <code>build/&lt;pkg&gt;/pytest.xml</code> (that is the file name in the colcon-core pytest task source). A Python package generated by <code>ros2 pkg create</code> comes with three style checks, <code>test/test_copyright.py</code>, <code>test_flake8.py</code> and <code>test_pep257.py</code>, so your first <code>colcon test</code> may well fail on code style.</li>
+  </ul>
+  <p lang="zh-CN">两件容易踩的事。第一，按 colcon 文档，<strong>测试失败不算 <code>colcon test</code> 的错误</strong>：测试挂了它照样以 0 退出，除非加 <code>--return-code-on-test-failure</code>。第二，<code>colcon test-result</code> 扫描 <code>build/</code> 下所有结果文件做汇总，<code>--verbose</code> 打印每个失败用例；它的源码在有错误或失败时返回 1。所以 CI 脚本的惯用写法是 <code>colcon test</code> 之后再跑 <code>colcon test-result --verbose</code>，让后者的退出码决定成败。每个包的测试输出还会留在 <code>log/latest_test/&lt;pkg&gt;/</code> 下（大致路径）。</p>
+  <p lang="en">Two things trip people up. First, per the colcon docs, <strong>failing tests are not errors for <code>colcon test</code></strong>: it exits with 0 even when tests fail, unless you pass <code>--return-code-on-test-failure</code>. Second, <code>colcon test-result</code> scans every result file under <code>build/</code> and summarizes them, and <code>--verbose</code> prints each failing case; its source returns 1 when there are errors or failures. So the usual CI pattern runs <code>colcon test-result --verbose</code> after <code>colcon test</code> and lets the former’s exit code decide. Each package’s test output also stays under <code>log/latest_test/&lt;pkg&gt;/</code> (approximate path).</p>
+  <p lang="zh-CN"><strong>依赖从哪来</strong>：<code>package.xml</code> 里的 <code>depend</code>、<code>test_depend</code> 写的是 rosdep 键，不是 apt 包名。<code>rosdep install --from-paths src --ignore-src -y</code> 读出工作区里所有包的键，查 rosdep 数据库翻译成当前系统的 apt 包并安装，<code>--ignore-src</code> 跳过工作区里自己就有源码的包。依赖写全了，CI 和 Docker 构建才能在一台干净的机器上复现你的环境。</p>
+  <p lang="en"><strong>Where dependencies come from</strong>: <code>depend</code> and <code>test_depend</code> in <code>package.xml</code> hold rosdep keys, not apt package names. <code>rosdep install --from-paths src --ignore-src -y</code> collects the keys of every package in the workspace, translates them through the rosdep database into apt packages for the current system and installs them; <code>--ignore-src</code> skips packages whose source is already in the workspace. Only when dependencies are complete can CI and a Docker build reproduce your environment on a clean machine.</p>
+  <p lang="zh-CN">延伸阅读：官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/CLI.html">Running tests in ROS 2 from the command line</a>、<a href="https://colcon.readthedocs.io/en/released/reference/verb/test.html">colcon test 参考</a>与 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Rosdep.html">Managing dependencies with rosdep</a>；Renard《ROS 2 From Scratch》讲工作区与 colcon 构建的章节。</p>
+  <p lang="en">Further reading: the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/CLI.html">Running tests in ROS 2 from the command line</a>, the <a href="https://colcon.readthedocs.io/en/released/reference/verb/test.html">colcon test reference</a> and <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Rosdep.html">Managing dependencies with rosdep</a>; the chapters of Renard, <em>ROS 2 From Scratch</em>, on workspaces and building with colcon.</p>
+
+  <h3 lang="zh-CN">5. 持续集成：每次提交都在干净环境里重来一遍</h3><h3 lang="en">5. Continuous integration: start from a clean environment on every commit</h3>
+  <p lang="zh-CN">CI 的价值在于「干净」：你的容器里装过太多东西，一个漏写的依赖在本机永远发现不了。ros-tooling 提供两个 GitHub Action：<code>setup-ros</code> 在 runner 上配好 ROS 的 apt 源和构建工具；<code>action-ros-ci</code> 按 README 依次做 <code>vcs import</code>（可选）、把代码检出到工作区、<code>rosdep install</code>、<code>colcon build</code>、<code>colcon test</code>。下面的版本标签取自两个 README 的示例（2026-10-31 查，最新发布分别是 0.7.19 和 0.4.8），用之前请再核对：</p>
+  <p lang="en">The value of CI is that it is <em>clean</em>: your container has had too much installed into it, and a missing dependency will never show up on your own machine. ros-tooling provides two GitHub Actions: <code>setup-ros</code> configures the ROS apt source and build tools on the runner; per its README, <code>action-ros-ci</code> does <code>vcs import</code> (optional), checks the code out into a workspace, then runs <code>rosdep install</code>, <code>colcon build</code> and <code>colcon test</code>. The version tags below come from the examples in the two READMEs (checked 2026-10-31; the latest releases were 0.7.19 and 0.4.8); check them again before use:</p>
+<pre data-lang="yaml" data-file=".github/workflows/ci.yaml">name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:noble          # Jazzy 的 Tier 1 平台
+    steps:
+      - uses: ros-tooling/setup-ros@v0.7
+      - uses: ros-tooling/action-ros-ci@v0.4
+        with:
+          package-name: py_pubsub pubsub_tests
+          target-ros2-distro: jazzy</pre>
+  <p lang="zh-CN"><code>setup-ros</code> 的 README 特别说明：<code>required-ros-distributions</code> 会装整个 desktop，等于掩盖了漏写的依赖，一般不该用；上面的例子不用它，全靠 rosdep 按 <code>package.xml</code> 装依赖。GitHub 托管的 <code>ubuntu-latest</code> 是 amd64；要在 arm64 上跑，需要 arm64 runner，名称和可用性以 GitHub 文档为准。</p>
+  <p lang="en">The <code>setup-ros</code> README stresses that <code>required-ros-distributions</code> installs the whole desktop, which hides missing dependencies, and should generally be avoided; the example above does without it and relies on rosdep installing dependencies from <code>package.xml</code>. GitHub’s hosted <code>ubuntu-latest</code> is amd64; running on arm64 needs an arm64 runner, whose name and availability are in the GitHub docs.</p>
+  <p lang="zh-CN">延伸阅读：<a href="https://github.com/ros-tooling/setup-ros">setup-ros</a> 与 <a href="https://github.com/ros-tooling/action-ros-ci">action-ros-ci</a> 的 README；Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲开发流程的章节。</p>
+  <p lang="en">Further reading: the READMEs of <a href="https://github.com/ros-tooling/setup-ros">setup-ros</a> and <a href="https://github.com/ros-tooling/action-ros-ci">action-ros-ci</a>; the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on the development workflow.</p>
+
+  <h3 lang="zh-CN">6. 部署：多阶段镜像</h3><h3 lang="en">6. Deployment: multi-stage images</h3>
+  <p lang="zh-CN">实验容器是开发环境：编译器、desktop、Gazebo、Nav2 全在里面。机器人上只需要运行你的包。<strong>多阶段构建</strong>在一个 Dockerfile 里写两个 <code>FROM</code>：第一阶段 <code>FROM ros:jazzy-ros-base AS build</code>，装依赖、拷源码、<code>colcon build</code>；第二阶段从一个更小的基础镜像重新开始，只用 <code>COPY --from=build</code> 拿走构建结果。最终镜像只包含最后一个阶段的层，第一阶段的编译器、源码、<code>build/</code> 和 <code>log/</code> 目录、apt 缓存都不会被带走。</p>
+  <p lang="en">The lab container is a development environment: compilers, desktop, Gazebo and Nav2 are all inside. The robot only needs your packages to run. A <strong>multi-stage build</strong> writes two <code>FROM</code> lines in one Dockerfile: the first stage, <code>FROM ros:jazzy-ros-base AS build</code>, installs dependencies, copies the source and runs <code>colcon build</code>; the second stage starts again from a smaller base image and takes only the build result with <code>COPY --from=build</code>. The final image contains only the layers of the last stage; the first stage’s compilers, source, <code>build/</code> and <code>log/</code> directories and apt caches are left behind.</p>
+  <p lang="zh-CN"><strong>为什么更小</strong>：官方镜像的分层正好合适。按 osrf/docker_images 里的 Dockerfile，<code>ros:jazzy-ros-base</code> 是在 <code>ros:jazzy-ros-core</code> 之上加了 <code>build-essential</code>、git、colcon、rosdep、vcstool 和 <code>ros-jazzy-ros-base</code>。运行阶段用 <code>ros:jazzy-ros-core</code>，编译工具链就整个不在了。Docker Hub 上 arm64 的压缩体积（2026-10-31 查）：</p>
+  <p lang="en"><strong>Why it is smaller</strong>: the official images are layered just right. Per the Dockerfiles in osrf/docker_images, <code>ros:jazzy-ros-base</code> is <code>ros:jazzy-ros-core</code> plus <code>build-essential</code>, git, colcon, rosdep, vcstool and <code>ros-jazzy-ros-base</code>. With <code>ros:jazzy-ros-core</code> for the runtime stage, the whole compiler toolchain is gone. Compressed arm64 sizes on Docker Hub (checked 2026-10-31):</p>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">镜像标签</span><span lang="en">Image tag</span></th><th class="ros"><span lang="zh-CN">arm64 压缩体积</span><span lang="en">Compressed arm64 size</span></th><th class="gz"><span lang="zh-CN">在 Dockerfile 里的角色</span><span lang="en">Role in the Dockerfile</span></th></tr>
+    <tr><td><code>ros:jazzy-ros-base</code></td><td><span lang="zh-CN">约 285 MB</span><span lang="en">about 285 MB</span></td><td><span lang="zh-CN">构建阶段：有编译器、colcon、rosdep</span><span lang="en">Build stage: has compilers, colcon, rosdep</span></td></tr>
+    <tr><td><code>ros:jazzy-ros-core</code></td><td><span lang="zh-CN">约 152 MB</span><span lang="en">about 152 MB</span></td><td><span lang="zh-CN">运行阶段：rclpy、rclcpp、common_interfaces、ros2 命令行</span><span lang="en">Runtime stage: rclpy, rclcpp, common_interfaces, the ros2 CLI</span></td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN"><strong>必须从构建阶段拷什么</strong>：只有 <code>install/</code>。它就是 overlay：里面有每个包的可执行文件、库、Python 模块、<code>share/&lt;pkg&gt;/package.xml</code>、launch 文件和 <code>setup.bash</code>。三个条件决定拷过去能不能跑：</p>
+  <p lang="en"><strong>What must be copied from the build stage</strong>: only <code>install/</code>. It is the overlay: each package’s executables, libraries, Python modules, <code>share/&lt;pkg&gt;/package.xml</code>, launch files and <code>setup.bash</code>. Three conditions decide whether the copy runs:</p>
+  <ol>
+    <li lang="zh-CN"><strong>构建阶段不能用 <code>--symlink-install</code></strong>。那个选项让 <code>install/</code> 里放的是指回 <code>src/</code> 和 <code>build/</code> 的符号链接；只拷 <code>install/</code>，链接全部悬空。</li>
+    <li lang="en"><strong>The build stage must not use <code>--symlink-install</code></strong>. That option fills <code>install/</code> with symbolic links back into <code>src/</code> and <code>build/</code>; copy only <code>install/</code> and every link dangles.</li>
+    <li lang="zh-CN"><strong>两个阶段同一发行版、同一 Ubuntu</strong>。C++ 可执行文件链接的是 <code>/opt/ros/jazzy</code> 里的库，Python 包装在 <code>python3.12</code> 的目录下；运行阶段换一个发行版或 Ubuntu 版本，就找不到这些库和路径。</li>
+    <li lang="en"><strong>Both stages use the same distribution and the same Ubuntu</strong>. C++ executables link against libraries in <code>/opt/ros/jazzy</code>, and Python packages are installed under a <code>python3.12</code> directory; a runtime stage on another distribution or Ubuntu release will not find those libraries and paths.</li>
+    <li lang="zh-CN"><strong>拷到同一个路径，运行依赖另装</strong>。colcon 生成的部分 setup 脚本里写着安装目录的绝对路径（推断，以生成的脚本为准），所以两边都用 <code>/ws/install</code> 最省事。你的包在运行时依赖、但 ros-core 里没有的 apt 包，要在运行阶段另外装，否则启动时报缺库。</li>
+    <li lang="en"><strong>Copy to the same path, and install runtime dependencies separately</strong>. Some of the setup scripts colcon generates contain the absolute install path (inference; check the generated scripts), so using <code>/ws/install</code> in both stages is simplest. Any apt package your packages need at run time that ros-core lacks must be installed in the runtime stage, or start-up fails on a missing library.</li>
+  </ol>
+  <p lang="zh-CN"><strong>arm64 目标</strong>：在 Apple Silicon 上 <code>docker build</code> 默认就产出 <code>linux/arm64</code>，正好对上 Raspberry Pi、Jetson 这类 arm64 机器人电脑。要同时出 amd64，用 <code>docker buildx build --platform linux/amd64,linux/arm64</code>，另一个架构在 QEMU 模拟下构建，慢得多；多平台镜像的存放方式以 Docker 的 Multi-platform builds 文档为准。</p>
+  <p lang="en"><strong>arm64 targets</strong>: on Apple Silicon, <code>docker build</code> produces <code>linux/arm64</code> by default, which matches arm64 robot computers such as a Raspberry Pi or a Jetson. To produce amd64 as well, use <code>docker buildx build --platform linux/amd64,linux/arm64</code>; the other architecture builds under QEMU emulation and is much slower; how multi-platform images are stored is described in Docker’s Multi-platform builds docs.</p>
+  <p lang="zh-CN">延伸阅读：Docker 文档 <a href="https://docs.docker.com/build/building/multi-stage/">Multi-stage builds</a> 与 <a href="https://docs.docker.com/build/building/multi-platform/">Multi-platform builds</a>；Docker Hub 上的 <a href="https://hub.docker.com/_/ros">ros 官方镜像</a>页；Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲开发环境与部署的章节（以目录为准）。</p>
+  <p lang="en">Further reading: the Docker docs on <a href="https://docs.docker.com/build/building/multi-stage/">Multi-stage builds</a> and <a href="https://docs.docker.com/build/building/multi-platform/">Multi-platform builds</a>; the <a href="https://hub.docker.com/_/ros">official ros image</a> page on Docker Hub; the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on the development environment and deployment (check the table of contents).</p>
+
+  <h3 lang="zh-CN">7. 追踪：ros2_tracing 与 LTTng</h3><h3 lang="en">7. Tracing: ros2_tracing and LTTng</h3>
+  <p lang="zh-CN">日志告诉你「发生了什么」，追踪告诉你「什么时候、花了多久」。Phase 2 讲过：rclcpp、rcl 和 rmw 里编进了 tracepoint，例如 <code>ros2:callback_start</code> 和 <code>ros2:callback_end</code>；按 ros2_tracing 的 README，Iron 起 LTTng 是 ROS 2 的依赖，二进制安装开箱即可追踪，<code>ros2 run tracetools status</code> 应打印 <code>Tracing enabled</code>。</p>
+  <p lang="en">Logs tell you “what happened”; tracing tells you “when, and how long it took”. As Phase 2 explained, rclcpp, rcl and rmw are built with tracepoints such as <code>ros2:callback_start</code> and <code>ros2:callback_end</code>; per the ros2_tracing README, LTTng has been a ROS 2 dependency since Iron, a binary install can be traced out of the box, and <code>ros2 run tracetools status</code> should print <code>Tracing enabled</code>.</p>
+  <p lang="zh-CN"><strong>一个 tracepoint 花多少</strong>：没有追踪会话时，tracepoint 只是一次「这个事件开着吗」的判断，README 的说法是对执行几乎没有影响。会话开着时，LTTng-UST 在你的线程里把事件字段写进按 CPU 划分的共享内存环形缓冲区，然后立即返回；README 列出的特性是完全在用户态实现、可重入、不阻塞、<strong>快路径上没有系统调用</strong>、不复制追踪数据。把缓冲区搬到磁盘的是另一个 consumer 守护进程，不在你的线程上。README 引用的一篇综述给出 LTTng-UST 平均每个 tracepoint 约 158 ns 的延迟开销；具体数字随 CPU 和事件字段而变，在你的机器上要自己量（Lab B 第 7 步）。代价是真实存在的：每秒上万个回调就是每秒上万次写入，缓冲区写满时会丢事件。</p>
+  <p lang="en"><strong>What one tracepoint costs</strong>: with no tracing session, a tracepoint is just a check of “is this event enabled”, which the README describes as having virtually no impact on execution. With a session active, LTTng-UST writes the event fields into a per-CPU ring buffer in shared memory from your own thread and returns immediately; the README lists its properties as implemented entirely in user space, reentrant, non-blocking, <strong>no system calls in the fast path</strong>, and no copies of the trace data. Moving buffers to disk is done by a separate consumer daemon, not on your thread. A survey cited in the README gives LTTng-UST an average latency overhead of about 158 ns per tracepoint; the real number varies with the CPU and the event fields, so measure it on your machine (Lab B step 7). The cost is real: ten thousand callbacks a second means ten thousand writes a second, and events are lost when the buffers fill up.</p>
+  <p lang="zh-CN"><strong>它能看到什么</strong>：每个回调的开始和结束时间（于是有了耗时分布，而不是日志里的一个平均值）、回调属于哪个定时器或订阅、发布和对应回调之间隔了多久、执行器何时取到了哪个实体。要看线程何时被调度、何时在等锁，还得加内核事件（<code>ros2 trace -k …</code>），那需要另装 LTTng 内核模块，在容器里做不到。</p>
+  <p lang="en"><strong>What it reveals</strong>: the start and end time of every callback (so you get a distribution of durations rather than an average in a log line), which timer or subscription a callback belongs to, how long passes between a publish and the matching callback, and when the executor picked up which entity. To see when a thread was scheduled or waited on a lock you also need kernel events (<code>ros2 trace -k …</code>), which require the LTTng kernel modules installed separately and are not possible in the container.</p>
+  <div class="note" lang="zh-CN">README 里的硬规则：<strong>追踪必须在应用启动之前开始</strong>。节点初始化时会记录元数据（哪个回调地址属于哪个定时器、哪个节点），后面的事件要靠它解读；先启动节点再开追踪，得到的数据可能无法使用。所以 Lab B 先 <code>ros2 trace start</code>，再运行节点；launch 文件里的 <code>Trace</code> 动作（<code>tracetools_launch</code>）会自动保证这个顺序。追踪数据默认写到 <code>~/.ros/tracing/</code> 下。</div>
+  <div class="note" lang="en">A hard rule from the README: <strong>tracing must be started before the application is launched</strong>. Nodes record metadata during initialization (which callback address belongs to which timer and which node), and later events can only be interpreted with it; start the node first and the trace data may be unusable. That is why Lab B runs <code>ros2 trace start</code> before the node; the <code>Trace</code> action for launch files (<code>tracetools_launch</code>) guarantees this order automatically. Trace data goes under <code>~/.ros/tracing/</code> by default.</div>
+  <p lang="zh-CN">延伸阅读：<a href="https://github.com/ros2/ros2_tracing">ros2_tracing</a> 的 README 及其论文 <a href="https://arxiv.org/abs/2201.00393">ros2_tracing: Multipurpose Low-Overhead Framework for Real-Time Tracing of ROS 2</a>；官方教程 <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/ROS2-Tracing-Trace-and-Analyze.html">How to use ros2_tracing to trace and analyze an application</a>；<a href="https://lttng.org/docs/v2.13/">LTTng 2.13 文档</a>。</p>
+  <p lang="en">Further reading: the README of <a href="https://github.com/ros2/ros2_tracing">ros2_tracing</a> and its paper, <a href="https://arxiv.org/abs/2201.00393">ros2_tracing: Multipurpose Low-Overhead Framework for Real-Time Tracing of ROS 2</a>; the official tutorial <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/ROS2-Tracing-Trace-and-Analyze.html">How to use ros2_tracing to trace and analyze an application</a>; the <a href="https://lttng.org/docs/v2.13/">LTTng 2.13 documentation</a>.</p>
+
+  <h3 lang="zh-CN">8. 系统边缘：micro-ROS 与 DDS 调优</h3><h3 lang="en">8. At the edges: micro-ROS and DDS tuning</h3>
+  <p lang="zh-CN"><strong>micro-ROS</strong>（只讲概念）把 ROS 2 的客户端 API 放到微控制器上。微控制器跑不动完整的 DDS，所以它用的是为资源受限设备设计的 XRCE-DDS 客户端，通过串口或 UDP 连到 Linux 一侧的 <code>micro_ros_agent</code>。按 micro-ROS-Agent 的 README，这个 agent 是一个包装了 Micro XRCE-DDS Agent 的 ROS 2 节点，代表微控制器上的节点和 DDS 网络打交道，让它们在 graph 里看起来和普通节点一样。电机驱动板、IMU 采集板常这样接入。</p>
+  <p lang="en"><strong>micro-ROS</strong> (concept only) puts the ROS 2 client API on microcontrollers. A microcontroller cannot run full DDS, so it uses an XRCE-DDS client designed for resource-constrained devices and connects over serial or UDP to a <code>micro_ros_agent</code> on the Linux side. Per the micro-ROS-Agent README, this agent is a ROS 2 node wrapping the Micro XRCE-DDS Agent; it deals with the DDS network on behalf of the nodes on the microcontroller, so they look like ordinary nodes in the graph. Motor driver boards and IMU boards are often connected this way.</p>
+  <p lang="zh-CN"><strong>DDS 调优</strong>：Phase 3 讲过，大消息走 UDP 时被拆成很多 IP 分片，丢一片整条作废。官方 DDS tuning 页列出的内核参数：<code>net.ipv4.ipfrag_time</code>（默认 30 s，残缺的分片在内存里留多久，调小能更快释放）、<code>net.ipv4.ipfrag_high_thresh</code>（分片重组可用的内存上限）、<code>net.core.rmem_max</code>（socket 接收缓冲区的上限；Cyclone DDS 想申请大缓冲区时，被这个上限截断）。这些是内核参数，属于 Docker Desktop 那台 VM 的内核，在实验容器里只能读不能改（推断，以实际报错为准）；在真机器人上用 <code>sysctl -w</code> 或 <code>/etc/sysctl.d/</code> 设置。</p>
+  <p lang="en"><strong>DDS tuning</strong>: as Phase 3 explained, a large message sent over UDP is split into many IP fragments, and losing one voids the whole message. The kernel parameters listed on the official DDS tuning page are <code>net.ipv4.ipfrag_time</code> (default 30 s, how long incomplete fragments stay in memory; lowering it frees them sooner), <code>net.ipv4.ipfrag_high_thresh</code> (the memory limit for fragment reassembly) and <code>net.core.rmem_max</code> (the ceiling on socket receive buffers; when Cyclone DDS asks for a large buffer, this ceiling truncates it). These are kernel parameters belonging to the kernel of Docker Desktop’s VM, so in the lab container you can read them but not change them (inference; go by the actual error); on a real robot set them with <code>sysctl -w</code> or in <code>/etc/sysctl.d/</code>.</p>
+  <p lang="zh-CN">延伸阅读：官方 <a href="https://docs.ros.org/en/jazzy/How-To-Guides/DDS-tuning.html">DDS tuning information</a>；<a href="https://micro.vulcanexus.org/">micro-ROS 项目网站</a>与 <a href="https://github.com/micro-ROS/micro-ROS-Agent">micro-ROS-Agent</a>；Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》中涉及嵌入式与硬件接入的章节（以目录为准）。</p>
+  <p lang="en">Further reading: the official <a href="https://docs.ros.org/en/jazzy/How-To-Guides/DDS-tuning.html">DDS tuning information</a>; the <a href="https://micro.vulcanexus.org/">micro-ROS project site</a> and <a href="https://github.com/micro-ROS/micro-ROS-Agent">micro-ROS-Agent</a>; the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, that touch on embedded boards and hardware (check the table of contents).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：每个问题用什么工具</h2><h2 id="compare-en" lang="en">Comparison: the tool for each question</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">你想知道</span><span lang="en">You want to know</span></th><th class="ros"><span lang="zh-CN">工具</span><span lang="en">Tool</span></th><th class="gz"><span lang="zh-CN">它读的是什么</span><span lang="en">What it reads</span></th></tr>
+    <tr><td><span lang="zh-CN">谁连着谁、话题有没有接上</span><span lang="en">Who is connected to whom; is a topic wired up</span></td><td><code>rqt_graph</code> · <code>ros2 topic info -v</code></td><td><span lang="zh-CN">DDS 发现信息与端点 QoS</span><span lang="en">DDS discovery information and endpoint QoS</span></td></tr>
+    <tr><td><span lang="zh-CN">节点在抱怨什么</span><span lang="en">What a node is complaining about</span></td><td><code>rqt_console</code> · <code>--ros-args --log-level debug</code></td><td><span lang="zh-CN"><code>/rosout</code> 话题、stderr、<code>~/.ros/log</code></span><span lang="en">the <code>/rosout</code> topic, stderr, <code>~/.ros/log</code></span></td></tr>
+    <tr><td><span lang="zh-CN">一个数值随时间怎么变</span><span lang="en">How a value changes over time</span></td><td><code>rqt_plot</code></td><td><span lang="zh-CN">订阅到的消息字段</span><span lang="en">fields of subscribed messages</span></td></tr>
+    <tr><td><span lang="zh-CN">环境、发行版、网络有没有问题</span><span lang="en">Whether the environment, distribution or network is wrong</span></td><td><code>ros2 doctor --report</code></td><td><span lang="zh-CN">本机平台、已装包、网卡、rmw</span><span lang="en">local platform, installed packages, interfaces, rmw</span></td></tr>
+    <tr><td><span lang="zh-CN">刚才发生了什么、能不能复现</span><span lang="en">What just happened, and can it be reproduced</span></td><td><code>ros2 bag record</code> · <code>ros2 bag play --clock</code></td><td><span lang="zh-CN">序列化消息加录制时间戳</span><span lang="en">serialized messages plus record timestamps</span></td></tr>
+    <tr><td><span lang="zh-CN">一个回调到底花多久</span><span lang="en">How long a callback really takes</span></td><td><code>ros2 trace</code> · <code>babeltrace</code> · tracetools_analysis</td><td><span lang="zh-CN">LTTng 用户态 tracepoint 事件</span><span lang="en">LTTng userspace tracepoint events</span></td></tr>
+    <tr><td><span lang="zh-CN">这个函数、这个类对不对</span><span lang="en">Whether this function or class is correct</span></td><td><span lang="zh-CN">pytest · gtest（<code>ament_add_gtest</code>）</span><span lang="en">pytest · gtest (<code>ament_add_gtest</code>)</span></td><td><span lang="zh-CN">代码本身，不起 ROS 图</span><span lang="en">the code itself, no ROS graph</span></td></tr>
+    <tr><td><span lang="zh-CN">节点组合起来对不对、能否干净退出</span><span lang="en">Whether nodes work together and exit cleanly</span></td><td><code>launch_testing</code></td><td><span lang="zh-CN">真实进程的输出、话题、退出码</span><span lang="en">output, topics and exit codes of real processes</span></td></tr>
+    <tr><td><span lang="zh-CN">所有测试的结论</span><span lang="en">The verdict of all tests</span></td><td><code>colcon test</code> · <code>colcon test-result --verbose</code></td><td><span lang="zh-CN"><code>build/</code> 下的 JUnit XML</span><span lang="en">JUnit XML under <code>build/</code></span></td></tr>
+    <tr><td><span lang="zh-CN">缺了哪些依赖</span><span lang="en">Which dependencies are missing</span></td><td><code>rosdep install --from-paths src --ignore-src -y</code></td><td><span lang="zh-CN"><code>package.xml</code> 里的 rosdep 键</span><span lang="en">rosdep keys in <code>package.xml</code></span></td></tr>
+    <tr><td><span lang="zh-CN">每次提交是否都还对</span><span lang="en">Whether every commit is still right</span></td><td><span lang="zh-CN">GitHub Actions：<code>setup-ros</code> + <code>action-ros-ci</code></span><span lang="en">GitHub Actions: <code>setup-ros</code> + <code>action-ros-ci</code></span></td><td><span lang="zh-CN">干净容器里从头构建和测试</span><span lang="en">a build and test from scratch in a clean container</span></td></tr>
+    <tr><td><span lang="zh-CN">大消息为什么丢</span><span lang="en">Why large messages are lost</span></td><td><code>sysctl net.core.rmem_max</code> · <code>net.ipv4.ipfrag_time</code></td><td><span lang="zh-CN">内核的 socket 缓冲与 IP 分片设置</span><span lang="en">kernel socket buffer and IP fragment settings</span></td></tr>
+    <tr><td><span lang="zh-CN">怎么交付到机器人上</span><span lang="en">How to ship it to the robot</span></td><td><span lang="zh-CN">多阶段 Dockerfile</span><span lang="en">a multi-stage Dockerfile</span></td><td><span lang="zh-CN">构建阶段的 <code>install/</code> 叠加层</span><span lang="en">the <code>install/</code> overlay of the build stage</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 一个 ROS 2 包的测试金字塔</h3><h3 lang="en">(a) The test pyramid of one ROS 2 package</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：左边是测试金字塔，越往下越多、越快、越便宜，越往上越少、越慢、越接近真实运行；右边是每一层回答的问题。底部是 colcon test 怎么把三层的结果收拢，以及 CI 怎么在每次提交时重跑。按「播放」逐层看。",
+           "第 1 步，单元测试：pytest 或 gtest 直接调用函数和类，不起 ROS 图，几毫秒一个，可以写很多。Phase 1 的 talker 抽出一个纯函数 make_greeting 后，就能在这一层测它。",
+           "第 2 步，集成测试：launch_testing 用 generate_test_description 起真正的 talker 和 listener 进程。活动测试断言日志和话题，关闭后测试断言退出码。每个测试用独占的 ROS_DOMAIN_ID，互不干扰。",
+           "第 3 步，系统测试：把真实录下的 bag 用 --clock 回放给整条链路，被测节点用 use_sim_time，把输出录下来和参考结果比较。数量最少，最慢，但最接近机器人上的真实情况。",
+           "第 4 步，colcon test 把活交给每个包：CMake 包走 CTest，Python 包走 pytest。结果写成 build 目录下的 JUnit XML。测试失败时 colcon test 照样返回 0，所以要看 colcon test-result 的退出码。",
+           "第 5 步，CI：每次 push，setup-ros 和 action-ros-ci 在一个干净的 Ubuntu Noble 容器里做 rosdep install、colcon build、colcon test。漏写的依赖在这里才会暴露，测试结果决定能否合并。"]'
+         data-captions-en='["The whole picture: on the left the test pyramid, with more, faster and cheaper tests at the bottom and fewer, slower tests closer to real operation at the top; on the right the question each layer answers. At the bottom, how colcon test gathers the results of all three layers and how CI reruns them on every commit. Press Play to go layer by layer.",
+           "Step 1, unit tests: pytest or gtest call functions and classes directly with no ROS graph, a few milliseconds each, so you can write many. Once the Phase 1 talker has a pure function make_greeting factored out, it can be tested at this layer.",
+           "Step 2, integration tests: launch_testing uses generate_test_description to start real talker and listener processes. Active tests assert on logs and topics, post-shutdown tests assert on exit codes. Each test gets an exclusive ROS_DOMAIN_ID so tests do not interfere.",
+           "Step 3, system tests: replay a really recorded bag with --clock into the whole chain, run the nodes under test with use_sim_time, record their output and compare it with a reference. Fewest, slowest, but closest to what happens on the robot.",
+           "Step 4, colcon test hands the work to each package: CMake packages go through CTest, Python packages through pytest. Results are written as JUnit XML under the build directory. colcon test still returns 0 when tests fail, so look at the exit code of colcon test-result.",
+           "Step 5, CI: on every push, setup-ros and action-ros-ci run rosdep install, colcon build and colcon test in a clean Ubuntu Noble container. A missing dependency only shows up here, and the test results decide whether the change can be merged."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="55" y="28" class="small" style="fill: var(--ros)" lang="zh-CN">越往上：越少、越慢、越接近真实</text><text x="55" y="28" class="small" style="fill: var(--ros)" lang="en">higher up: fewer, slower, closer to real</text>
+      <text x="520" y="28" class="small" style="fill: var(--ros)" lang="zh-CN">这一层回答的问题</text><text x="520" y="28" class="small" style="fill: var(--ros)" lang="en">the question this layer answers</text>
+
+      <g data-step="3"><rect class="box gz" x="175" y="40" width="190" height="66"/>
+        <text x="190" y="62" lang="zh-CN">系统测试</text><text x="190" y="62" lang="en">System test</text>
+        <text x="190" y="81" class="mono">ros2 bag play --clock</text>
+        <text x="190" y="97" class="small" lang="zh-CN">少、慢、最像真机</text><text x="190" y="97" class="small" lang="en">few, slow, closest to real</text>
+        <rect class="box gz" x="520" y="40" width="360" height="66"/>
+        <text x="535" y="66" lang="zh-CN">整条链路在录制的数据上，</text><text x="535" y="66" lang="en">On recorded data, does the whole</text>
+        <text x="535" y="88" lang="zh-CN">还给出和上次一样的输出吗？</text><text x="535" y="88" lang="en">chain still give the same output?</text></g>
+
+      <g data-step="2"><rect class="box ros" x="115" y="118" width="310" height="66"/>
+        <text x="130" y="140" lang="zh-CN">集成测试</text><text x="130" y="140" lang="en">Integration test</text>
+        <text x="130" y="159" class="mono">launch_testing · ReadyToTest</text>
+        <text x="130" y="175" class="small" lang="zh-CN">多进程、真实 DDS、退出码</text><text x="130" y="175" class="small" lang="en">several processes, real DDS, exit codes</text>
+        <rect class="box ros" x="520" y="118" width="360" height="66"/>
+        <text x="535" y="144" lang="zh-CN">节点真的连上、收到了吗？</text><text x="535" y="144" lang="en">Do the nodes really connect and receive?</text>
+        <text x="535" y="166" lang="zh-CN">被 SIGINT 结束时干净退出吗？</text><text x="535" y="166" lang="en">Do they exit cleanly on SIGINT?</text></g>
+
+      <g data-step="1"><rect class="box ros" x="55" y="196" width="430" height="66"/>
+        <text x="70" y="218" lang="zh-CN">单元测试</text><text x="70" y="218" lang="en">Unit test</text>
+        <text x="70" y="237" class="mono">pytest · ament_add_gtest · ament_add_pytest_test</text>
+        <text x="70" y="253" class="small" lang="zh-CN">多、快、不起 ROS 图</text><text x="70" y="253" class="small" lang="en">many, fast, no ROS graph</text>
+        <rect class="box ros" x="520" y="196" width="360" height="66"/>
+        <text x="535" y="222" lang="zh-CN">这个函数、这个类，</text><text x="535" y="222" lang="en">Is this function or this class</text>
+        <text x="535" y="244" lang="zh-CN">在给定输入下对吗？</text><text x="535" y="244" lang="en">correct for a given input?</text></g>
+
+      <g data-step="4"><rect class="box" x="55" y="282" width="150" height="54"/>
+        <text x="70" y="314" class="mono">colcon test</text>
+        <path class="arrow" d="M207 309 L243 309"/>
+        <rect class="box" x="245" y="282" width="170" height="54"/>
+        <text x="260" y="304" class="mono">CTest | pytest</text>
+        <text x="260" y="324" class="small" lang="zh-CN">按每个包的构建类型</text><text x="260" y="324" class="small" lang="en">per package build type</text>
+        <path class="arrow" d="M417 309 L453 309"/>
+        <rect class="box" x="455" y="282" width="200" height="54"/>
+        <text x="470" y="304" class="mono">build/&lt;pkg&gt;/…xml</text>
+        <text x="470" y="324" class="small" lang="zh-CN">JUnit 结果文件</text><text x="470" y="324" class="small" lang="en">JUnit result files</text>
+        <path class="arrow" d="M657 309 L693 309"/>
+        <rect class="box" x="695" y="282" width="185" height="54"/>
+        <text x="710" y="304" class="mono">colcon test-result</text>
+        <text x="710" y="324" class="small" lang="zh-CN">有失败才返回 1</text><text x="710" y="324" class="small" lang="en">returns 1 only on failures</text></g>
+
+      <g data-step="5"><rect class="box gz" x="55" y="352" width="825" height="54"/>
+        <text x="70" y="375" class="mono">GitHub Actions: setup-ros@v0.7 → action-ros-ci@v0.4</text>
+        <text x="70" y="395" class="small" lang="zh-CN">每次 push：在干净的 ubuntu:noble 容器里 rosdep install、colcon build、colcon test，结果决定能否合并</text><text x="70" y="395" class="small" lang="en">on every push: rosdep install, colcon build, colcon test in a clean ubuntu:noble container; the results gate the merge</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 录制 → 带 --clock 回放给 use_sim_time 的节点 → 分析</h3><h3 lang="en">(b) Record → replay with --clock into use_sim_time nodes → analysis</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：左栏录制一次真实或仿真的运行，中栏把它回放给被测节点，右栏把节点的输出录下来和参考结果比较。中栏下方是少了 --clock 或 use_sim_time 时会出的错。按「播放」逐步看。",
+           "第 1 步，录制：仿真或真机发布 /scan、/odom、/tf。ros2 bag record 是一个订阅者，把收到的序列化字节原样写下，不需要认识消息类型的代码。",
+           "第 2 步，bag 目录：metadata.yaml 记下话题、类型、QoS、消息数和起止时间，ros2 bag info 读的就是它；存储文件在 Jazzy 上默认是 mcap。每条消息带录制时的时间戳，header.stamp 原样留在字节里。",
+           "第 3 步，回放：ros2 bag play 是一个发布者，按录制时的间隔重发每条消息，可以用 -r 改倍速。消息里的 header.stamp 仍然是录制那天的时间。",
+           "第 4 步，--clock：播放器同时成为时间源，以固定频率在 /clock 上发布当前回放到的录制时间，不给数值时默认 40 Hz。bag 里自带的 /clock 会被排除，免得两个时间源打架。",
+           "第 5 步，被测节点设了 use_sim_time:=true：它的 now()、定时器和 tf 查询都改读 /clock，于是和数据处在同一条时间线上。暂停播放，节点的时间也停住；没收到 /clock 之前时间是 0，定时器不触发。",
+           "第 6 步，少了任何一半：now() 读的是今天的墙钟，stamp 却是录制那天的。tf 查询报外推错误，按年龄过滤的代码把每条消息判成过期，定时器和数据节奏对不上。",
+           "第 7 步，录下输出：再开一个 ros2 bag record，只录被测节点的输出，比如 /cmd_vel，存成 out1。右上角的 golden 是上一次人工认可的同一份输出。",
+           "第 8 步，比较：一个用 rosbag2_py 读 bag 的小脚本把 out1 和 golden 按仿真时间对齐，在容差内比较。一致就通过，不一致就是一次回归，把它放进 colcon test 就成了系统测试。"]'
+         data-captions-en='["The whole picture: the left column records one real or simulated run, the middle column replays it into the node under test, and the right column records the node output and compares it with a reference. Below the middle column is what goes wrong without --clock or use_sim_time. Press Play to go step by step.",
+           "Step 1, record: the simulation or robot publishes /scan, /odom and /tf. ros2 bag record is a subscriber that writes the serialized bytes it receives as they are, without needing the code for the message types.",
+           "Step 2, the bag directory: metadata.yaml records topics, types, QoS, message counts and start and end times, which is what ros2 bag info reads; on Jazzy the storage file is mcap by default. Every message keeps its record timestamp, and header.stamp stays inside the bytes unchanged.",
+           "Step 3, replay: ros2 bag play is a publisher that re-sends each message at its recorded spacing; -r changes the rate. The header.stamp inside each message is still the time of the recording.",
+           "Step 4, --clock: the player also becomes a time source and publishes the recorded time playback has reached on /clock at a fixed rate, 40 Hz when no value is given. Any /clock stored in the bag is excluded so that two time sources do not fight.",
+           "Step 5, the node under test runs with use_sim_time:=true: its now(), timers and tf lookups read /clock instead, so it lives on the same timeline as the data. Pause playback and the node time stops too; before the first /clock arrives its time is 0 and timers do not fire.",
+           "Step 6, without either half: now() reads today on the wall clock while the stamps are from the recording day. tf lookups fail with extrapolation errors, code that filters by age judges every message stale, and timers drift out of step with the data.",
+           "Step 7, record the output: a second ros2 bag record captures only the outputs of the node under test, for example /cmd_vel, as out1. The golden bag at the top right is the same output as last accepted by a person.",
+           "Step 8, compare: a small script that reads bags with rosbag2_py aligns out1 and golden on simulation time and compares them within a tolerance. A match passes, a mismatch is a regression, and putting this into colcon test makes it a system test."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">1. 录制</text><text x="30" y="26" class="small" style="fill: var(--ros)" lang="en">1. Record</text>
+      <text x="320" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">2. 回放</text><text x="320" y="26" class="small" style="fill: var(--ros)" lang="en">2. Replay</text>
+      <text x="630" y="26" class="small" style="fill: var(--ros)" lang="zh-CN">3. 分析</text><text x="630" y="26" class="small" style="fill: var(--ros)" lang="en">3. Analysis</text>
+      <path class="lane" d="M303 36 L303 410"/>
+      <path class="lane" d="M613 36 L613 410"/>
+
+      <g data-step="1"><rect class="box gz" x="30" y="44" width="255" height="60"/>
+        <text x="44" y="68" lang="zh-CN">仿真或真机</text><text x="44" y="68" lang="en">Simulation or robot</text>
+        <text x="44" y="90" class="mono">/scan  /odom  /tf</text>
+        <path class="arrow flow" d="M157 106 L157 134"/>
+        <rect class="box ros" x="30" y="136" width="255" height="56"/>
+        <text x="44" y="159" class="mono">ros2 bag record -o run1</text>
+        <text x="44" y="179" class="mono">/scan /odom /tf</text></g>
+
+      <g data-step="2"><path class="arrow" d="M157 194 L157 226"/>
+        <rect class="box ros" x="30" y="228" width="255" height="92"/>
+        <text x="44" y="251" class="mono">run1/metadata.yaml</text>
+        <text x="44" y="270" class="mono">run1/run1_0.mcap</text>
+        <text x="44" y="290" class="small" lang="zh-CN">每条消息带录制时的时间戳</text><text x="44" y="290" class="small" lang="en">each message keeps its record time</text>
+        <text x="44" y="307" class="small" lang="zh-CN">header.stamp 原样保存</text><text x="44" y="307" class="small" lang="en">header.stamp stored as is</text></g>
+
+      <g data-step="3"><path class="arrow" d="M287 274 C 300 274, 300 74, 318 74"/>
+        <rect class="box ros" x="320" y="44" width="270" height="60"/>
+        <text x="334" y="68" class="mono">ros2 bag play run1 --clock</text>
+        <text x="334" y="90" class="small" lang="zh-CN">按录制时的间隔重发每条消息</text><text x="334" y="90" class="small" lang="en">re-sends messages at recorded spacing</text>
+        <path class="arrow flow" d="M380 106 L380 196"/>
+        <text x="388" y="146" class="mono">/scan /odom /tf</text>
+        <text x="388" y="163" class="small" lang="zh-CN">stamp 是录制那天</text><text x="388" y="163" class="small" lang="en">stamps from the recording</text></g>
+
+      <g data-step="4"><path class="arrow flow" d="M540 106 L540 196"/>
+        <text x="548" y="146" class="mono">/clock</text>
+        <text x="548" y="163" class="small">40 Hz</text></g>
+
+      <g data-step="5"><rect class="box gz" x="320" y="198" width="270" height="72"/>
+        <text x="334" y="220" lang="zh-CN">被测节点</text><text x="334" y="220" lang="en">Node under test</text>
+        <text x="334" y="240" class="mono">use_sim_time:=true</text>
+        <text x="334" y="259" class="small" lang="zh-CN">now() 与定时器跟着 /clock 走</text><text x="334" y="259" class="small" lang="en">now() and timers follow /clock</text></g>
+
+      <g data-step="6"><rect class="box" x="320" y="296" width="270" height="110"/>
+        <text x="334" y="318" lang="zh-CN">少了 --clock 或 use_sim_time</text><text x="334" y="318" lang="en">Without --clock or use_sim_time</text>
+        <text x="334" y="338" class="small" lang="zh-CN">now() 是今天的墙钟</text><text x="334" y="338" class="small" lang="en">now() is today on the wall clock</text>
+        <text x="334" y="355" class="small" lang="zh-CN">stamp 却是录制那天</text><text x="334" y="355" class="small" lang="en">but the stamps are from the recording</text>
+        <text x="334" y="372" class="small" lang="zh-CN">tf 外推失败、消息被判过期</text><text x="334" y="372" class="small" lang="en">tf extrapolation fails, data looks stale</text>
+        <text x="334" y="389" class="small" lang="zh-CN">定时器与数据节奏对不上</text><text x="334" y="389" class="small" lang="en">timers drift out of step with the data</text></g>
+
+      <g data-step="7"><path class="arrow flow" d="M592 234 L628 234"/>
+        <rect class="box ros" x="630" y="198" width="250" height="72"/>
+        <text x="644" y="221" class="mono">ros2 bag record -o out1</text>
+        <text x="644" y="240" class="mono">/cmd_vel</text>
+        <text x="644" y="259" class="small" lang="zh-CN">只录被测节点的输出</text><text x="644" y="259" class="small" lang="en">only the outputs of the node</text>
+        <rect class="box" x="630" y="44" width="250" height="60"/>
+        <text x="644" y="68" class="mono">golden/</text>
+        <text x="644" y="90" class="small" lang="zh-CN">上一次认可的参考输出</text><text x="644" y="90" class="small" lang="en">last accepted reference output</text></g>
+
+      <g data-step="8"><path class="arrow" d="M755 272 L755 294"/>
+        <path class="arrow" d="M882 74 C 896 74, 896 340, 882 340"/>
+        <rect class="box gz" x="630" y="296" width="250" height="110"/>
+        <text x="644" y="318" class="mono">compare.py</text>
+        <text x="644" y="338" class="small" lang="zh-CN">用 rosbag2_py 读 out1 与 golden</text><text x="644" y="338" class="small" lang="en">reads out1 and golden with rosbag2_py</text>
+        <text x="644" y="355" class="small" lang="zh-CN">按仿真时间对齐，带容差比较</text><text x="644" y="355" class="small" lang="en">aligned on sim time, with tolerance</text>
+        <text x="644" y="385" lang="zh-CN">通过 / 回归</text><text x="644" y="385" lang="en">pass / regression</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="note" lang="zh-CN"><strong>状态说明：</strong>本页的代码、Dockerfile 和命令是 2026-10-31 依据 Jazzy 官方文档、各仓库 jazzy 分支的 README 和源码拼装的，<strong>没有在这台 Mac 上实际执行过</strong>。标了「预期」或「推断」的输出是推理，不是记录；以实际输出和报错为准调整。</div>
+  <div class="note" lang="en"><strong>Status:</strong> the code, Dockerfile and commands on this page were assembled on 2026-10-31 from the official Jazzy docs and the READMEs and sources of each repository’s jazzy branch, and <strong>have not been executed on this Mac</strong>. Outputs marked “expected” or “inference” are reasoning, not records; adjust by the real output and errors.</div>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 给 Phase 1 的节点写 pytest 和 launch_test，跑 colcon test，录制并回放一个 bag</h3><h3 lang="en">Lab A · A pytest and a launch_test for the Phase 1 nodes, colcon test, and recording and replaying a bag</h3>
+    <ol>
+      <li><span lang="zh-CN">先让 talker 可测、可干净退出。把消息文本抽成一个纯函数，并按 Jazzy 的 <code>demo_nodes_py</code> talker 的写法在 <code>main</code> 里接住 SIGINT，否则后面的退出码测试会失败。listener 的 <code>main</code> 照同样的样子改：</span><span lang="en">First make the talker testable and able to exit cleanly. Factor the message text into a pure function, and catch SIGINT in <code>main</code> the way the Jazzy <code>demo_nodes_py</code> talker does; otherwise the exit-code test later fails. Change the listener’s <code>main</code> the same way:</span><pre data-lang="py" data-file="py_pubsub/py_pubsub/publisher_member_function.py">import rclpy
+from rclpy.executors import ExternalShutdownException
+from rclpy.node import Node
+from std_msgs.msg import String
+
+
+def make_greeting(i):
+    """Return the text the talker publishes for count i."""
+    return f'Hello World: {i}'
+
+
+class MinimalPublisher(Node):
+
+    def __init__(self):
+        super().__init__('minimal_publisher')
+        self.publisher_ = self.create_publisher(String, 'topic', 10)
+        self.timer = self.create_timer(0.5, self.timer_callback)
+        self.i = 0
+
+    def timer_callback(self):
+        msg = String()
+        msg.data = make_greeting(self.i)
+        self.publisher_.publish(msg)
+        self.get_logger().info(f'Publishing: "{msg.data}"')
+        self.i += 1
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = MinimalPublisher()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass  # launch 用 SIGINT 结束节点：接住它，退出码就是 0
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()</pre></li>
+      <li><span lang="zh-CN">写单元测试。第一个测纯函数，不碰 ROS；第二个起一个真节点但不 spin，只检查它把 publisher 建在了哪个话题上：</span><span lang="en">Write the unit tests. The first tests the pure function without touching ROS; the second creates a real node without spinning it and only checks which topic it created its publisher on:</span><pre data-lang="py" data-file="py_pubsub/test/test_greeting.py">from py_pubsub import publisher_member_function as pub
+import rclpy
+
+
+def test_make_greeting():
+    assert pub.make_greeting(0) == 'Hello World: 0'
+    assert pub.make_greeting(41) == 'Hello World: 41'
+
+
+def test_publisher_topic():
+    rclpy.init()
+    try:
+        node = pub.MinimalPublisher()
+        assert node.publisher_.topic_name == '/topic'  # 相对名 topic 解析成 /topic
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()</pre></li>
+      <li><span lang="zh-CN">构建、测试、看结果。然后故意把 <code>41</code> 那行的期望改错，再跑一次，对比两个命令的退出码：</span><span lang="en">Build, test and look at the results. Then deliberately break the expected value on the <code>41</code> line, run again, and compare the exit codes of the two commands:</span><pre data-lang="sh">cd ~/ws
+colcon build --packages-select py_pubsub
+colcon test --packages-select py_pubsub --event-handlers console_direct+
+echo "colcon test exit=$?"
+colcon test-result --verbose
+echo "test-result exit=$?"
+ls build/py_pubsub/pytest.xml          # pytest 的 JUnit 结果
+# 改错期望之后：colcon test 仍是 0，test-result 变成 1
+colcon test --packages-select py_pubsub --return-code-on-test-failure; echo "exit=$?"</pre></li>
+      <li><span lang="zh-CN">建一个只放集成测试的 <code>ament_cmake</code> 包（官方集成测试教程说测试可以单独成包）。在生成的 <code>CMakeLists.txt</code> 里已有的 <code>if(BUILD_TESTING)</code> 块中加入教程里的几行，在 <code>package.xml</code> 里加测试依赖，然后用 rosdep 补齐：</span><span lang="en">Create an <code>ament_cmake</code> package that holds only integration tests (the official integration-testing tutorial notes that tests may live in a package of their own). Add the tutorial’s lines inside the <code>if(BUILD_TESTING)</code> block already present in the generated <code>CMakeLists.txt</code>, add the test dependencies to <code>package.xml</code>, then let rosdep fill in the rest:</span><pre data-lang="sh">cd ~/ws/src
+ros2 pkg create --build-type ament_cmake --license Apache-2.0 pubsub_tests
+mkdir -p pubsub_tests/test</pre><pre data-lang="cmake" data-file="pubsub_tests/CMakeLists.txt">if(BUILD_TESTING)
+  # （生成的 ament_lint_auto 几行保留在这里）
+  find_package(ament_cmake_ros REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
+  function(add_ros_isolated_launch_test path)
+    set(RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py")
+    add_launch_test("${path}" RUNNER "${RUNNER}" ${ARGN})
+  endfunction()
+  add_ros_isolated_launch_test(test/test_talker_listener.py)
+endif()</pre><pre data-lang="xml" data-file="pubsub_tests/package.xml">&lt;test_depend&gt;ament_cmake_ros&lt;/test_depend&gt;
+&lt;test_depend&gt;launch&lt;/test_depend&gt;
+&lt;test_depend&gt;launch_ros&lt;/test_depend&gt;
+&lt;test_depend&gt;launch_testing&lt;/test_depend&gt;
+&lt;test_depend&gt;launch_testing_ament_cmake&lt;/test_depend&gt;
+&lt;test_depend&gt;rclpy&lt;/test_depend&gt;
+&lt;test_depend&gt;std_msgs&lt;/test_depend&gt;
+&lt;test_depend&gt;py_pubsub&lt;/test_depend&gt;</pre><pre data-lang="sh">cd ~/ws
+rosdep update
+rosdep install --from-paths src --ignore-src -y</pre></li>
+      <li><span lang="zh-CN">写 launch test。<code>generate_test_description</code> 返回的第二项是一个字典，里面的对象会按参数名注入到测试方法里，所以 <code>test_listener_hears</code> 能指定只看 listener 的输出：</span><span lang="en">Write the launch test. The second item returned by <code>generate_test_description</code> is a dictionary whose objects are injected into test methods by argument name, which is how <code>test_listener_hears</code> can look at the listener’s output only:</span><pre data-lang="py" data-file="pubsub_tests/test/test_talker_listener.py">import time
+import unittest
+
+import launch
+import launch_ros.actions
+import launch_testing
+import launch_testing.actions
+import launch_testing.asserts
+import rclpy
+from std_msgs.msg import String
+
+
+def generate_test_description():
+    talker = launch_ros.actions.Node(package='py_pubsub', executable='talker')
+    listener = launch_ros.actions.Node(package='py_pubsub', executable='listener')
+    return launch.LaunchDescription([
+        talker,
+        listener,
+        launch_testing.actions.ReadyToTest(),
+    ]), {'talker': talker, 'listener': listener}
+
+
+class TestTalkerListener(unittest.TestCase):
+    """Active tests: run while talker and listener are running."""
+
+    @classmethod
+    def setUpClass(cls):
+        rclpy.init()
+
+    @classmethod
+    def tearDownClass(cls):
+        rclpy.shutdown()
+
+    def setUp(self):
+        self.node = rclpy.create_node('test_probe')
+
+    def tearDown(self):
+        self.node.destroy_node()
+
+    def test_listener_hears(self, proc_output, listener):
+        # 日志在 stderr；这条断言证明消息跨进程、经 DDS 到达了 listener
+        proc_output.assertWaitFor(
+            'I heard: "Hello World', process=listener, timeout=10, stream='stderr')
+
+    def test_topic_rate_and_content(self):
+        msgs = []
+        sub = self.node.create_subscription(String, 'topic', msgs.append, 10)
+        try:
+            end = time.time() + 5.0
+            while time.time() &lt; end:
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+        finally:
+            self.node.destroy_subscription(sub)
+        # 2 Hz 的定时器，5 秒约 10 条；扣掉发现时间，至少 4 条
+        self.assertGreaterEqual(len(msgs), 4)
+        self.assertTrue(msgs[0].data.startswith('Hello World: '))
+
+
+@launch_testing.post_shutdown_test()
+class TestShutdown(unittest.TestCase):
+    """Post-shutdown tests: run after every process has exited."""
+
+    def test_exit_codes(self, proc_info):
+        launch_testing.asserts.assertExitCodes(proc_info)</pre></li>
+      <li><span lang="zh-CN">跑集成测试，找到它的结果文件。然后做一个实验：把 talker 里的 <code>try</code> / <code>except</code> 暂时去掉，重建再测，看关闭后测试报出的退出码（预期非零，推断），再改回来：</span><span lang="en">Run the integration test and find its result file. Then try an experiment: temporarily remove the <code>try</code> / <code>except</code> from the talker, rebuild and test again, and look at the exit code the post-shutdown test reports (expected non-zero; inference), then put it back:</span><pre data-lang="sh">cd ~/ws
+colcon build --packages-select py_pubsub pubsub_tests
+colcon test --packages-select pubsub_tests --event-handlers console_direct+
+colcon test-result --verbose
+ls build/pubsub_tests/test_results/pubsub_tests/     # 大致路径，以实际目录为准
+ls log/latest_test/pubsub_tests/</pre></li>
+      <li><span lang="zh-CN">录一个 bag。talker 跑起来后录 10 秒左右，用 Ctrl+C 停止，再看 <code>metadata.yaml</code> 的摘要，注意 Storage id 一行：</span><span lang="en">Record a bag. With the talker running, record for about 10 seconds, stop with Ctrl+C, then look at the summary of <code>metadata.yaml</code>, noting the Storage id line:</span><pre data-lang="sh">ros2 run py_pubsub talker                 # 终端 1
+cd ~/ws &amp;&amp; ros2 bag record -o hello_bag /topic   # 终端 2，约 10 秒后 Ctrl+C
+ros2 bag info hello_bag                   # 话题、消息数、时长、Storage id
+ls hello_bag/                             # metadata.yaml 和存储文件</pre></li>
+      <li><span lang="zh-CN">写一个时间探针，它每秒打印一次节点自己的时钟。定时器建在节点时钟上，所以 <code>use_sim_time</code> 打开后，它跟着 <code>/clock</code> 走：</span><span lang="en">Write a time probe that prints the node’s own clock once a second. Its timer runs on the node clock, so with <code>use_sim_time</code> on it follows <code>/clock</code>:</span><pre data-lang="py" data-file="~/ws/time_probe.py"># time_probe.py: 打印节点时钟；use_sim_time 为 true 时它读 /clock
+import rclpy
+from rclpy.node import Node
+
+
+class TimeProbe(Node):
+    def __init__(self):
+        super().__init__('time_probe')
+        self.create_timer(1.0, self.tick)
+
+    def tick(self):
+        now = self.get_clock().now().nanoseconds / 1e9
+        self.get_logger().info(f'node clock: {now:.3f} s')
+
+
+def main():
+    rclpy.init()           # 读 sys.argv，所以 --ros-args 照常生效
+    try:
+        rclpy.spin(TimeProbe())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rclpy.try_shutdown()
+
+
+main()</pre></li>
+      <li><span lang="zh-CN">停掉 talker，回放。先不开仿真时间跑一次探针，再开着跑一次。预期（推断）：不开时打印的是今天的 Unix 时间，暂停播放它照样走；开了以后打印的是录制那天的时间，在播放器终端里暂停（启动时会打印键位，或者调用它的 <code>toggle_paused</code> 服务），探针停止打印。播完后不再有 <code>/clock</code>，探针也停：</span><span lang="en">Stop the talker and replay. Run the probe once without simulation time, then once with it. Expected (inference): without it the probe prints today’s Unix time and keeps going when playback pauses; with it the probe prints the time of the recording, and when you pause in the player’s terminal (it prints its key bindings at start, or call its <code>toggle_paused</code> service) the probe stops printing. When playback ends there is no more <code>/clock</code>, and the probe stops too:</span><pre data-lang="sh">cd ~/ws &amp;&amp; ros2 bag play hello_bag --clock               # 终端 1；播完重来一次再测下一行
+python3 ~/ws/time_probe.py                                 # 终端 2：墙钟
+python3 ~/ws/time_probe.py --ros-args -p use_sim_time:=true   # 终端 2：录制时间
+ros2 run py_pubsub listener --ros-args -p use_sim_time:=true  # 终端 3：照常收到
+ros2 topic echo /clock --once                              # 终端 4
+ros2 service list | grep -i paused                         # 找到播放器的暂停服务名</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 多阶段 Dockerfile 部署工作区，用 ros2_tracing 量回调耗时</h3><h3 lang="en">Lab B · A multi-stage Dockerfile for the workspace, and callback latency with ros2_tracing</h3>
+    <ol>
+      <li><span lang="zh-CN">把要部署的包从工作区卷里拷到和 Mac 共享的目录（工作区在命名卷里，Mac 上的 <code>docker build</code> 看不到它）：</span><span lang="en">Copy the package to deploy out of the workspace volume into the directory shared with the Mac (the workspace lives in a named volume, which <code>docker build</code> on the Mac cannot see):</span><pre data-lang="sh"># 在实验容器里
+mkdir -p /share/deploy/src
+cp -r ~/ws/src/py_pubsub /share/deploy/src/</pre></li>
+      <li><span lang="zh-CN">在 Mac 上的 <code>~/ros2-lab/share/deploy/</code> 里写 Dockerfile 和入口脚本。构建阶段从 ros-base 开始，运行阶段从 ros-core 开始，中间只拷 <code>install/</code>：</span><span lang="en">On the Mac, write the Dockerfile and the entrypoint script in <code>~/ros2-lab/share/deploy/</code>. The build stage starts from ros-base, the runtime stage from ros-core, and only <code>install/</code> crosses between them:</span><pre data-lang="sh" data-file="Dockerfile"># Dockerfile: multi-stage image for py_pubsub (linux/arm64 on Apple Silicon)
+
+# ---- stage 1: build ----
+FROM ros:jazzy-ros-base AS build
+WORKDIR /ws
+COPY src/ src/
+RUN apt-get update \
+ &amp;&amp; rosdep update --rosdistro jazzy \
+ &amp;&amp; rosdep install --from-paths src --ignore-src -y \
+ &amp;&amp; rm -rf /var/lib/apt/lists/*
+# no --symlink-install: install/ must not point back into src/ or build/
+RUN . /opt/ros/jazzy/setup.sh &amp;&amp; colcon build
+
+# ---- stage 2: runtime ----
+FROM ros:jazzy-ros-core
+# same path as in the build stage
+COPY --from=build /ws/install /ws/install
+COPY deploy_entrypoint.sh /deploy_entrypoint.sh
+RUN chmod +x /deploy_entrypoint.sh
+ENTRYPOINT ["/deploy_entrypoint.sh"]
+CMD ["ros2", "run", "py_pubsub", "talker"]</pre><pre data-lang="sh" data-file="deploy_entrypoint.sh">#!/bin/bash
+# source underlay then overlay, then run the command
+set -e
+source /opt/ros/jazzy/setup.bash
+source /ws/install/setup.bash
+exec "$@"</pre></li>
+      <li><span lang="zh-CN">分别构建构建阶段和最终镜像，比较大小。<code>--target build</code> 只构建到第一阶段为止，正好用来对照：</span><span lang="en">Build the build stage and the final image separately and compare their sizes. <code>--target build</code> stops after the first stage, which makes a good comparison:</span><pre data-lang="sh"># 在 Mac 上
+cd ~/ros2-lab/share/deploy
+docker build --target build -t py_pubsub:build .
+docker build -t py_pubsub:jazzy .
+docker image ls py_pubsub          # 对比两个标签的 SIZE
+docker run --rm py_pubsub:jazzy ls /ws/install/py_pubsub/lib/py_pubsub   # talker、listener
+docker run --rm py_pubsub:jazzy which colcon || echo "no colcon in the runtime image"</pre></li>
+      <li><span lang="zh-CN">运行。两个容器在同一个用户自定义网络上，用同一个 <code>ROS_DOMAIN_ID</code>；部署镜像没有设 <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>，因为每个容器有自己的网络命名空间，设了就互相看不见。容器之间的多播能否通，取决于 Docker 的网络实现（推断）；不通时用最后一行在同一个容器里起 listener：</span><span lang="en">Run it. The two containers share one user-defined network and the same <code>ROS_DOMAIN_ID</code>; the deployment image does not set <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>, because each container has its own network namespace and with it set they could not see each other. Whether multicast passes between containers depends on Docker’s network implementation (inference); if it does not, use the last line to start the listener inside the same container:</span><pre data-lang="sh">docker network create rosnet
+docker run --rm -d --name talker --network rosnet -e ROS_DOMAIN_ID=7 py_pubsub:jazzy
+docker run --rm -it --network rosnet -e ROS_DOMAIN_ID=7 py_pubsub:jazzy ros2 run py_pubsub listener
+docker exec -it talker /deploy_entrypoint.sh ros2 run py_pubsub listener   # 备用
+docker stop talker</pre></li>
+      <li><span lang="zh-CN">回到实验容器，装追踪工具。Jazzy 追踪教程装的是 <code>babeltrace</code> 和 <code>ros-jazzy-ros2trace</code>；<code>lttng-tools</code> 提供 LTTng 的会话守护进程（大致需要，若 <code>ros2 trace</code> 不报缺守护进程可不装）：</span><span lang="en">Back in the lab container, install the tracing tools. The Jazzy tracing tutorial installs <code>babeltrace</code> and <code>ros-jazzy-ros2trace</code>; <code>lttng-tools</code> provides LTTng’s session daemon (approximately required; skip it if <code>ros2 trace</code> does not complain about a missing daemon):</span><pre data-lang="sh">apt-get update &amp;&amp; apt-get install -y babeltrace lttng-tools \
+    ros-jazzy-ros2trace ros-jazzy-tracetools-launch
+ros2 run tracetools status        # 期望：Tracing enabled
+lttng-sessiond --daemonize        # 只在 ros2 trace 报找不到 session daemon 时需要</pre></li>
+      <li><span lang="zh-CN">追踪 Phase 2 的 <code>jitter_node</code>（C++，rclcpp 里有 tracepoint）。先开追踪，再起节点；<code>single</code> 模式有一个 100 Hz 定时器和一个每次忙等 30 ms 的 5 Hz 定时器。只有用户态事件，容器里没有内核事件：</span><span lang="en">Trace Phase 2’s <code>jitter_node</code> (C++; rclcpp carries the tracepoints). Start tracing first, then the node; <code>single</code> mode has a 100 Hz timer and a 5 Hz timer that busy-waits 30 ms each time. Only userspace events are available; the container has no kernel events:</span><pre data-lang="sh">ros2 trace start p7                         # 先开追踪：元数据在节点初始化时记录
+BIN=~/ws/install/timing_lab/lib/timing_lab/jitter_node
+timeout -s INT 15 $BIN single               # 跑 15 秒
+ros2 trace stop p7
+ls ~/.ros/tracing/p7
+babeltrace ~/.ros/tracing/p7 | grep -c 'ros2:callback_start'
+babeltrace ~/.ros/tracing/p7 | grep 'ros2:callback_' | head -4</pre></li>
+      <li><span lang="zh-CN">把开始和结束事件配对，算出每个回调的耗时分布。babeltrace 的文本格式以你在上一步看到的为准，脚本里的正则据此调整。预期（推断）：两个回调地址，一个中位数在微秒级，另一个约 30 ms：</span><span lang="en">Pair the start and end events and compute each callback’s duration distribution. The babeltrace text format is whatever you saw in the previous step; adjust the regular expression to match. Expected (inference): two callback addresses, one with a median in microseconds and the other about 30 ms:</span><pre data-lang="py" data-file="~/ws/cb_durations.py"># cb_durations.py: pair ros2:callback_start / callback_end from babeltrace text
+import re
+import statistics
+import subprocess
+import sys
+
+LINE = re.compile(r'^\[(\d+):(\d+):(\d+\.\d+)\].*ros2:callback_(start|end):'
+                  r'.*callback = (0x[0-9A-Fa-f]+)', re.MULTILINE)
+
+text = subprocess.run(['babeltrace', sys.argv[1]],
+                      capture_output=True, text=True, check=True).stdout
+started, durations = {}, {}
+for h, m, s, kind, cb in LINE.findall(text):
+    t = int(h) * 3600 + int(m) * 60 + float(s)
+    if kind == 'start':
+        started[cb] = t
+    elif cb in started:
+        durations.setdefault(cb, []).append((t - started.pop(cb)) * 1e3)
+
+for cb, d in durations.items():
+    d.sort()
+    p99 = d[int(0.99 * (len(d) - 1))]
+    print(f'{cb}: n={len(d)} median={statistics.median(d):.3f} ms '
+          f'p99={p99:.3f} ms max={d[-1]:.3f} ms')</pre><pre data-lang="sh">python3 ~/ws/cb_durations.py ~/.ros/tracing/p7</pre></li>
+      <li><span lang="zh-CN">量追踪的代价。<code>alone</code> 模式只有 100 Hz 定时器，节点每 10 秒打印一行抖动统计。不开追踪跑 30 秒，开着追踪再跑 30 秒，比较两组 max 和 p99。预期（推断）：差别落在两次运行之间的噪声里，因为每秒只有约 200 个事件：</span><span lang="en">Measure the cost of tracing. <code>alone</code> mode has only the 100 Hz timer, and the node prints a line of jitter statistics every 10 seconds. Run 30 seconds without tracing and 30 seconds with it, and compare max and p99. Expected (inference): the difference is within the run-to-run noise, since there are only about 200 events per second:</span><pre data-lang="sh">timeout -s INT 30 $BIN alone                 # 不追踪
+ros2 trace start p7cost
+timeout -s INT 30 $BIN alone                 # 追踪中
+ros2 trace stop p7cost</pre></li>
+      <li><span lang="zh-CN">看一眼 DDS 相关的内核参数。读得到；改动属于 Docker Desktop 那台 VM 的内核，在容器里预期会失败（推断），这正说明它们是部署到真机器人时才调的东西：</span><span lang="en">Take a look at the DDS-related kernel parameters. You can read them; changing them belongs to the kernel of Docker Desktop’s VM and is expected to fail inside the container (inference), which is exactly why they are tuned only when deploying to a real robot:</span><pre data-lang="sh">sysctl net.core.rmem_max net.ipv4.ipfrag_time net.ipv4.ipfrag_high_thresh
+sysctl -w net.core.rmem_max=2147483647 || echo "read-only here: tune on the robot"</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 里 <code>colcon test-result --verbose</code> 的输出（一次全过、一次故意失败，附两个退出码），集成测试的结果文件路径，去掉 <code>try</code> / <code>except</code> 后关闭后测试报出的那一行，以及时间探针在墙钟和仿真时间下各三行输出 + Lab B 里 <code>docker image ls py_pubsub</code> 的两行、两个容器互通（或备用方式）的 listener 输出、<code>cb_durations.py</code> 的结果，以及追踪开关两组抖动统计的对比 + 一段话：用自己的话说明为什么回放要同时带 <code>--clock</code> 和 <code>use_sim_time</code>。</div>
+    <div class="note" lang="en">Deliverables: from Lab A, the output of <code>colcon test-result --verbose</code> (once all passing, once failing on purpose, with both exit codes), the path of the integration test’s result file, the line the post-shutdown test prints after removing the <code>try</code> / <code>except</code>, and three lines of time-probe output under wall time and under simulation time + from Lab B, the two lines of <code>docker image ls py_pubsub</code>, the listener output between the two containers (or the fallback), the result of <code>cb_durations.py</code>, and the jitter statistics with tracing off and on + one paragraph in your own words on why replay needs both <code>--clock</code> and <code>use_sim_time</code>.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/phase-7">
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">1. CI 脚本里只有一行 <code>colcon test</code>。一个 pytest 用例明明失败了，流水线却是绿的。原因和修法是什么？</p>
+      <p lang="en">1. A CI script has a single line, <code>colcon test</code>. A pytest case clearly failed, yet the pipeline is green. What is the cause, and the fix?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN"><code>ament_python</code> 包的测试不会被 <code>colcon test</code> 执行，要改成 <code>ament_cmake</code> 包</span><span lang="en"><code>colcon test</code> does not run tests of <code>ament_python</code> packages; the package must become <code>ament_cmake</code></span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">结果文件没写出来，要先 <code>source install/setup.bash</code> 再测</span><span lang="en">The result file was not written; you must <code>source install/setup.bash</code> before testing</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">测试失败不算 <code>colcon test</code> 的错误，它照样返回 0；加一行 <code>colcon test-result --verbose</code>（有失败返回 1），或用 <code>--return-code-on-test-failure</code></span><span lang="en">Failing tests are not errors for <code>colcon test</code>, so it still returns 0; add <code>colcon test-result --verbose</code> (returns 1 on failures), or use <code>--return-code-on-test-failure</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">colcon 文档明确说测试失败不被当作错误，<code>colcon test-result</code> 的源码在有错误或失败时返回 1。a 错在 colcon 对 <code>ament_python</code> 包直接调用 pytest，用例确实跑了才会失败；b 错在官方文档说测试前不必 source 工作区，而且用例失败本身说明它运行过、写了结果。</span><span lang="en">The colcon docs state that failing tests are not considered errors, and the <code>colcon test-result</code> source returns 1 when there are errors or failures. a is wrong because colcon calls pytest directly for <code>ament_python</code> packages; the case only failed because it ran; b is wrong because the official docs say sourcing the workspace before testing is unnecessary, and a failing case shows it ran and wrote a result.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">2. 你用 <code>ros2 bag play run1</code>（没有 <code>--clock</code>）把三天前录的 <code>/scan</code> 回放给一个节点，它对每条消息用 tf2 查 <code>base_link</code> 到 <code>laser</code> 在 <code>header.stamp</code> 时刻的变换。最可能发生什么？</p>
+      <p lang="en">2. You replay a <code>/scan</code> recorded three days ago with <code>ros2 bag play run1</code> (no <code>--clock</code>) into a node that, for every message, asks tf2 for the <code>base_link</code> to <code>laser</code> transform at <code>header.stamp</code>. What most likely happens?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">节点的 ROS time 是今天的墙钟，而 stamp 是三天前；tf 缓冲区里没有那个时刻的数据，查询报外推错误或超时</span><span lang="en">The node’s ROS time is today’s wall clock while the stamps are three days old; the tf buffer has no data for that time, so lookups fail with extrapolation errors or time out</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">播放器会把每条消息的 <code>header.stamp</code> 改写成当前时间，所以一切正常</span><span lang="en">The player rewrites every <code>header.stamp</code> to the current time, so everything works</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">只要节点设了 <code>use_sim_time:=true</code> 就够了，没有 <code>--clock</code> 也会自动用 bag 的时间</span><span lang="en">Setting <code>use_sim_time:=true</code> on the node is enough; without <code>--clock</code> it uses the bag time automatically</span></label>
+      <div class="why" hidden><span lang="zh-CN">bag 保存的是序列化字节，<code>header.stamp</code> 原样回放；节点的时间默认是系统时钟，两者差了三天。b 错在播放器不反序列化、不改写消息内容；c 错在 <code>use_sim_time</code> 只是让节点去读 <code>/clock</code>，没有人发布 <code>/clock</code> 时它的时间停在 0（「未初始化」），定时器不触发，问题并没有解决。</span><span lang="en">A bag stores serialized bytes and <code>header.stamp</code> is replayed unchanged; the node’s time is the system clock by default, three days apart. b is wrong because the player neither deserializes nor rewrites message content; c is wrong because <code>use_sim_time</code> only makes the node read <code>/clock</code>, and with nobody publishing <code>/clock</code> its time stays at 0 (“uninitialized”) and timers never fire, so nothing is fixed.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 多阶段 Dockerfile 的构建阶段运行 <code>colcon build --symlink-install</code>，运行阶段只 <code>COPY --from=build /ws/install /ws/install</code>。镜像构建成功，但 <code>ros2 run py_pubsub talker</code> 报找不到模块。为什么？</p>
+      <p lang="en">3. The build stage of a multi-stage Dockerfile runs <code>colcon build --symlink-install</code>, and the runtime stage only does <code>COPY --from=build /ws/install /ws/install</code>. The image builds, but <code>ros2 run py_pubsub talker</code> reports a missing module. Why?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">ros-core 里没有 rclpy，运行阶段必须换成 ros-base</span><span lang="en">ros-core has no rclpy, so the runtime stage must use ros-base</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN"><code>--symlink-install</code> 让 <code>install/</code> 里放的是指回 <code>src/</code> 和 <code>build/</code> 的链接，那些目录没被拷过来，链接全部悬空</span><span lang="en"><code>--symlink-install</code> fills <code>install/</code> with links back into <code>src/</code> and <code>build/</code>; those directories were not copied, so every link dangles</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN"><code>COPY --from</code> 只能拷单个文件，目录要先在构建阶段打包</span><span lang="en"><code>COPY --from</code> can only copy single files; a directory must be archived in the build stage first</span></label>
+      <div class="why" hidden><span lang="zh-CN">符号链接被原样拷贝，目标却留在构建阶段里，最终镜像中不存在。去掉 <code>--symlink-install</code>，<code>install/</code> 就是自包含的。a 错在按 REP 2001 ros_core 就包含 rclpy；c 错在 <code>COPY --from</code> 可以拷整个目录，本页的 Dockerfile 就是这么做的。</span><span lang="en">The symbolic links are copied as they are, but their targets stay in the build stage and do not exist in the final image. Drop <code>--symlink-install</code> and <code>install/</code> is self-contained. a is wrong because, per REP 2001, ros_core includes rclpy; c is wrong because <code>COPY --from</code> copies whole directories, as the Dockerfile on this page does.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">4. 你先启动了一个长期运行的节点，半小时后才执行 <code>ros2 trace start</code>，停止后发现事件很多，却分不清哪个回调地址属于哪个定时器。最可能的原因是什么？</p>
+      <p lang="en">4. You started a long-running node first and ran <code>ros2 trace start</code> half an hour later. After stopping, there are many events, but you cannot tell which callback address belongs to which timer. What is the most likely cause?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">追踪开销太大，LTTng 为了保护节点丢掉了所有元数据事件</span><span lang="en">Tracing overhead was too high, so LTTng dropped all metadata events to protect the node</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">容器里没有 LTTng 内核模块，用户态事件不带回调地址</span><span lang="en">The container has no LTTng kernel modules, so userspace events carry no callback addresses</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">回调与定时器、节点的对应关系是节点初始化时记录的元数据；追踪开始得太晚，那些事件没录上</span><span lang="en">The mapping from callbacks to timers and nodes is metadata recorded while the node initializes; tracing started too late to capture those events</span></label>
+      <div class="why" hidden><span lang="zh-CN">ros2_tracing 的 README 要求追踪在应用启动之前开始，正是因为初始化阶段的元数据是解读后续事件的钥匙；launch 的 <code>Trace</code> 动作会自动保证顺序。a 错在丢事件发生在缓冲区写满时，不会专挑元数据；b 错在 ROS 2 的 tracepoint 全在用户态，<code>callback_start</code> 本身就带着回调地址，内核模块只影响内核事件。</span><span lang="en">The ros2_tracing README requires tracing to start before the application precisely because initialization metadata is the key to interpreting later events; the <code>Trace</code> launch action guarantees the order automatically. a is wrong because events are lost when buffers fill up, not selectively metadata; b is wrong because the ROS 2 tracepoints are all in user space, <code>callback_start</code> itself carries the callback address, and kernel modules only matter for kernel events.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Logging.html">Logging and logger configuration</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Using-Rqt-Console/Using-Rqt-Console.html">Using rqt_console to view logs</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Getting-Started-With-Ros2doctor.html">Using ros2doctor to identify issues</a> <span class="lvl" lang="zh-CN">官方文档，入门，概念 1：日志的三个去处、级别和格式，rqt_console，<code>ros2 doctor</code></span><span class="lvl" lang="en">Official docs, beginner, concept 1: the three destinations of a log line, levels and format, rqt_console, <code>ros2 doctor</code></span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Recording-And-Playing-Back-Data/Recording-And-Playing-Back-Data.html">Recording and playing back data</a> · <a href="https://github.com/ros2/rosbag2/tree/jazzy">rosbag2 · jazzy</a> · <a href="https://design.ros2.org/articles/clock_and_time.html">Clock and Time</a> <span class="lvl" lang="zh-CN">官方教程、README 与设计文章，入门到进阶，概念 2 与 Lab A：存储插件、<code>--clock</code>、<code>--use-sim-time</code>、ROS time 的定义</span><span class="lvl" lang="en">Official tutorial, README and design article, beginner to intermediate, concept 2 and Lab A: storage plugins, <code>--clock</code>, <code>--use-sim-time</code>, how ROS time is defined</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/Testing-Main.html">Testing</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/Python.html">Python</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/Cpp.html">C++ with GTest</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/Integration.html">Integration tests with launch_testing</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Testing/CLI.html">Running tests from the command line</a> <span class="lvl" lang="zh-CN">官方教程，进阶，概念 3、4 与 Lab A：pytest、gtest、集成测试和独占 domain 的 runner</span><span class="lvl" lang="en">Official tutorials, intermediate, concepts 3 and 4 and Lab A: pytest, gtest, integration tests and the exclusive-domain runner</span></li>
+    <li><a href="https://github.com/ros2/launch/tree/jazzy/launch_testing">launch_testing README</a> · <a href="https://colcon.readthedocs.io/en/released/reference/verb/test.html">colcon test reference</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Rosdep.html">Managing dependencies with rosdep</a> <span class="lvl" lang="zh-CN">参考，进阶：<code>assertWaitFor</code>、<code>assertExitCodes</code> 的完整参数，colcon test 的退出码选项，rosdep</span><span class="lvl" lang="en">Reference, intermediate: the full arguments of <code>assertWaitFor</code> and <code>assertExitCodes</code>, the colcon test exit-code option, rosdep</span></li>
+    <li><a href="https://github.com/ros-tooling/setup-ros">setup-ros</a> · <a href="https://github.com/ros-tooling/action-ros-ci">action-ros-ci</a> <span class="lvl" lang="zh-CN">README，进阶，概念 5：GitHub Actions 的输入项与版本标签</span><span class="lvl" lang="en">READMEs, intermediate, concept 5: GitHub Actions inputs and version tags</span></li>
+    <li><a href="https://docs.docker.com/build/building/multi-stage/">Multi-stage builds</a> · <a href="https://docs.docker.com/build/building/multi-platform/">Multi-platform builds</a> · <a href="https://hub.docker.com/_/ros">ros on Docker Hub</a> <span class="lvl" lang="zh-CN">Docker 文档，进阶，概念 6 与 Lab B：多阶段、多架构构建，官方 ros 镜像的标签</span><span class="lvl" lang="en">Docker docs, intermediate, concept 6 and Lab B: multi-stage and multi-architecture builds, the tags of the official ros image</span></li>
+    <li><a href="https://github.com/ros2/ros2_tracing">ros2_tracing</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/ROS2-Tracing-Trace-and-Analyze.html">Trace and analyze an application</a> · <a href="https://github.com/ros-tracing/tracetools_analysis">tracetools_analysis</a> · <a href="https://lttng.org/docs/v2.13/">LTTng 2.13</a> <span class="lvl" lang="zh-CN">源码、教程与文档，进阶，概念 7 与 Lab B：<code>ros2 trace</code>、实时相关设置、回调耗时分析</span><span class="lvl" lang="en">Source, tutorial and docs, advanced, concept 7 and Lab B: <code>ros2 trace</code>, real-time settings, callback duration analysis</span></li>
+    <li><a href="https://arxiv.org/abs/2201.00393">Bédard, Lütkebohle, Dagenais: ros2_tracing (IEEE RA-L 2022)</a> <span class="lvl" lang="zh-CN">论文，进阶，概念 7：ros2_tracing 的设计与开销测量</span><span class="lvl" lang="en">Paper, advanced, concept 7: the design of ros2_tracing and its overhead measurements</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/How-To-Guides/DDS-tuning.html">DDS tuning information</a> · <a href="https://micro.vulcanexus.org/">micro-ROS</a> · <a href="https://github.com/micro-ROS/micro-ROS-Agent">micro-ROS-Agent</a> <span class="lvl" lang="zh-CN">官方文档与项目，进阶，概念 8：内核网络参数、微控制器经 agent 接入 ROS 2</span><span class="lvl" lang="en">Official docs and project pages, intermediate, concept 8: kernel network parameters, microcontrollers joining ROS 2 through the agent</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024（11 月）, ISBN 9781835881408. <span class="lvl">讲工作区、colcon 构建与 launch 文件的章节，对应概念 4 和 Lab A 的包结构；基于 Jazzy</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024 (November), ISBN 9781835881408. <span class="lvl">The chapters on workspaces, building with colcon and launch files; match concept 4 and the package layout of Lab A; based on Jazzy</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025（6 月）, ISBN 9781032851501（第 1 版 2022, ISBN 9781032267203）. <span class="lvl">讲开发工具、调试与 ROS 2 架构的部分，对应概念 1、2（具体章节以目录为准）</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025 (June), ISBN 9781032851501 (1st ed. 2022, ISBN 9781032267203). <span class="lvl">The parts on development tools, debugging and the ROS 2 architecture; match concepts 1 and 2 (check the table of contents for the exact chapters)</span></li>
+    <li lang="zh-CN">Lentin Joseph &amp; Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025（7 月）. <span class="lvl">讲开发流程、工具与把 ROS 2 系统落到硬件上的章节，对应概念 5、6、8（以目录为准）；基于 Jazzy</span></li>
+    <li lang="en">Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025 (July). <span class="lvl">The chapters on the development workflow, tools and bringing a ROS 2 system onto hardware; match concepts 5, 6 and 8 (check the table of contents); based on Jazzy</span></li>
+    <li lang="zh-CN">Morgan Quigley, Brian Gerkey &amp; William D. Smart, 《Programming Robots with ROS》, O'Reilly, 2015. <span class="lvl">讲 rqt、rosbag 等调试与记录工具的章节，对应概念 1、2；全书基于 ROS 1，录制回放和图形化调试的思路在 ROS 2 中仍然适用</span></li>
+    <li lang="en">Morgan Quigley, Brian Gerkey &amp; William D. Smart, <em>Programming Robots with ROS</em>, O'Reilly, 2015. <span class="lvl">The chapters on debugging and recording tools such as rqt and rosbag; match concepts 1 and 2; the whole book is ROS 1, but the ideas of record and replay and graphical debugging still apply in ROS 2</span></li>
+  </ol>
+
+  <h2 id="capstone" lang="zh-CN">毕业项目：一个带测试和 bag 回归的可部署包</h2><h2 id="capstone-en" lang="en">Capstone: one deployable package with tests and a bag-based regression</h2>
+  <p lang="zh-CN">整门课的收尾是一个你能拿给别人看的包：<code>scan_guard</code>，一个 <code>ament_python</code> 节点，订阅 Phase 5 仿真机器人的 <code>/scan</code>（<code>sensor_msgs/msg/LaserScan</code>），在最近的有效距离小于参数 <code>stop_distance</code> 时在 <code>/guard/stop</code> 上发布 <code>std_msgs/msg/Bool</code> 的 <code>true</code>。逻辑很小，是故意的：功夫花在让它可测、可复现、可交付上。规格如下，每一条都对应本阶段的一个概念：</p>
+  <p lang="en">The course ends with a package you can show someone: <code>scan_guard</code>, an <code>ament_python</code> node that subscribes to <code>/scan</code> (<code>sensor_msgs/msg/LaserScan</code>) from the Phase 5 simulated robot and publishes <code>true</code> as a <code>std_msgs/msg/Bool</code> on <code>/guard/stop</code> when the nearest valid range drops below the parameter <code>stop_distance</code>. The logic is small on purpose: the effort goes into making it testable, reproducible and deliverable. The specification follows, each item matching a concept of this phase:</p>
+  <ol>
+    <li lang="zh-CN"><strong>单元测试</strong>（概念 3）：把判断抽成纯函数 <code>nearest_valid(ranges, range_min, range_max)</code>，pytest 覆盖 <code>inf</code>、<code>nan</code>、小于 <code>range_min</code>、大于 <code>range_max</code> 和空数组。参数校验用 Phase 1 的 on-set 回调，拒绝非正的 <code>stop_distance</code>，也写一个测试。</li>
+    <li lang="en"><strong>Unit tests</strong> (concept 3): factor the decision into a pure function <code>nearest_valid(ranges, range_min, range_max)</code>, with pytest covering <code>inf</code>, <code>nan</code>, values below <code>range_min</code> or above <code>range_max</code>, and an empty array. Validate parameters with the on-set callback from Phase 1, rejecting a non-positive <code>stop_distance</code>, and test that too.</li>
+    <li lang="zh-CN"><strong>集成测试</strong>（概念 3、4）：一个 launch test 起 <code>scan_guard</code>，测试类自己发布一条最近距离 0.3 m 的假 <code>LaserScan</code>，断言 5 秒内在 <code>/guard/stop</code> 上收到 <code>true</code>；再发一条全部 3 m 的，断言收到 <code>false</code>。关闭后测试断言退出码为 0。用独占 domain 的 runner 登记。</li>
+    <li lang="en"><strong>Integration test</strong> (concepts 3 and 4): a launch test starts <code>scan_guard</code>; the test class publishes a fake <code>LaserScan</code> whose nearest range is 0.3 m and asserts that <code>true</code> arrives on <code>/guard/stop</code> within 5 seconds, then one with every range at 3 m and asserts <code>false</code>. A post-shutdown test asserts exit code 0. Register it with the exclusive-domain runner.</li>
+    <li lang="zh-CN"><strong>bag 回归</strong>（概念 2，动画 (b)）：在 Gazebo 里用 <code>teleop_twist_keyboard</code> 把机器人开向一面墙再开走，<code>ros2 bag record --use-sim-time -o scan_run /scan</code> 录下输入（前提是 <code>/clock</code> 已经从 Gazebo 桥接到 ROS 一侧，否则录制器一条也不写）。用 <code>ros2 bag play scan_run --clock --topics /scan</code> 回放给 <code>use_sim_time:=true</code> 的 <code>scan_guard</code>，录下 <code>/guard/stop</code>，人工确认一次后存成 <code>golden</code>。写一个 launch test，用 <code>ExecuteProcess</code> 起播放器，测试类订阅 <code>/guard/stop</code>，把每次状态切换的仿真时间和 golden 比较，容差 0.2 s。bag 放在 <code>test/data/</code> 下，这样 <code>colcon test</code> 每次都会重跑这条回归。</li>
+    <li lang="en"><strong>Bag regression</strong> (concept 2, diagram (b)): in Gazebo, drive the robot towards a wall and away again with <code>teleop_twist_keyboard</code>, recording the input with <code>ros2 bag record --use-sim-time -o scan_run /scan</code> (this assumes <code>/clock</code> is already bridged from Gazebo to the ROS side; otherwise the recorder writes nothing). Replay it with <code>ros2 bag play scan_run --clock --topics /scan</code> into <code>scan_guard</code> running with <code>use_sim_time:=true</code>, record <code>/guard/stop</code>, check it by hand once and keep it as <code>golden</code>. Write a launch test that starts the player with <code>ExecuteProcess</code>, subscribes to <code>/guard/stop</code> in the test class, and compares the simulation time of every state change with golden, within 0.2 s. Keep the bags under <code>test/data/</code> so that <code>colcon test</code> reruns this regression every time.</li>
+    <li lang="zh-CN"><strong>CI</strong>（概念 5）：一个 GitHub Actions 工作流，<code>setup-ros</code> 加 <code>action-ros-ci</code>，<code>package-name: scan_guard</code>。CI 里没有 Gazebo，回归测试只依赖 bag，正好能跑。</li>
+    <li lang="en"><strong>CI</strong> (concept 5): a GitHub Actions workflow with <code>setup-ros</code> and <code>action-ros-ci</code>, <code>package-name: scan_guard</code>. CI has no Gazebo; the regression test needs only the bag, so it runs there.</li>
+    <li lang="zh-CN"><strong>部署镜像</strong>（概念 6）：Lab B 的多阶段 Dockerfile，运行阶段 <code>ros:jazzy-ros-core</code>，<code>CMD</code> 是 <code>ros2 run scan_guard scan_guard</code>，<code>stop_distance</code> 通过 <code>--ros-args -p</code> 在 <code>docker run</code> 时给出。确认 <code>sensor_msgs</code> 在运行阶段可用（它属于 <code>common_interfaces</code>）。</li>
+    <li lang="en"><strong>Deployment image</strong> (concept 6): the multi-stage Dockerfile from Lab B, runtime stage <code>ros:jazzy-ros-core</code>, <code>CMD</code> set to <code>ros2 run scan_guard scan_guard</code>, with <code>stop_distance</code> given through <code>--ros-args -p</code> at <code>docker run</code>. Confirm that <code>sensor_msgs</code> is available in the runtime stage (it belongs to <code>common_interfaces</code>).</li>
+    <li lang="zh-CN"><strong>性能报告</strong>（概念 7）：回放 <code>scan_run</code> 时追踪 <code>scan_guard</code>，给出 <code>/scan</code> 回调的中位数、p99 和最大耗时，并说明它在 lidar 的扫描周期里占多少。<code>scan_guard</code> 是 Python 节点：rclpy 是否带 <code>callback_start</code> 一类 tracepoint，请先用 <code>babeltrace</code> 看实际事件；若没有，就把节点用 C++ 重写一个版本来测，或者在报告里写明这个限制。</li>
+    <li lang="en"><strong>Performance report</strong> (concept 7): trace <code>scan_guard</code> while replaying <code>scan_run</code>, and report the median, p99 and maximum duration of the <code>/scan</code> callback and what share of the lidar scan period it takes. <code>scan_guard</code> is a Python node: check with <code>babeltrace</code> whether rclpy emits tracepoints like <code>callback_start</code>; if it does not, write a C++ version of the node to measure, or state the limitation in the report.</li>
+  </ol>
+  <p lang="zh-CN">读 bag 的比较脚本可以照 rosbag2 jazzy 分支里 <code>rosbag2_py</code> 的测试写：<code>rosbag2_py.SequentialReader()</code>、<code>open(StorageOptions(uri=…, storage_id='mcap'), ConverterOptions('cdr', 'cdr'))</code>，循环 <code>has_next()</code> 和 <code>read_next()</code> 拿到话题、字节和时间戳，再用 <code>rclpy.serialization.deserialize_message</code> 和 <code>rosidl_runtime_py.utilities.get_message</code> 还原消息。交付物是一个仓库：包源码与 <code>test/</code>、<code>test/data/</code> 下的两个 bag、CI 工作流、Dockerfile、一份 README，写清如何重录 golden 以及性能报告的数字。</p>
+  <p lang="en">The comparison script that reads bags can follow the <code>rosbag2_py</code> tests in the rosbag2 jazzy branch: <code>rosbag2_py.SequentialReader()</code>, <code>open(StorageOptions(uri=…, storage_id='mcap'), ConverterOptions('cdr', 'cdr'))</code>, then loop over <code>has_next()</code> and <code>read_next()</code> to get topic, bytes and timestamp, and rebuild each message with <code>rclpy.serialization.deserialize_message</code> and <code>rosidl_runtime_py.utilities.get_message</code>. The deliverable is one repository: the package source with <code>test/</code>, the two bags under <code>test/data/</code>, the CI workflow, the Dockerfile, and a README that explains how to re-record golden and gives the numbers of the performance report.</p>
+
+  <h2 id="next" lang="zh-CN">接下来</h2><h2 id="next-en" lang="en">What comes next</h2>
+  <p lang="zh-CN">做完毕业项目，ROS 2 这条线就走完了：从一个节点，到一个能建图、导航、被测试、被打包的机器人栈。往下有两条路，都是这门课里已经碰到、但没有展开的东西：</p>
+  <p lang="en">With the capstone done, the ROS 2 track is complete: from one node to a robot stack that maps, navigates, is tested and is packaged. Two paths lead on, both about things this course touched without going deep:</p>
+  <ul>
+    <li lang="zh-CN"><strong>Parallel Programming</strong>（专题规划中）：执行器的线程、回调组的互斥与可重入、回调之间共享的数据，本质上都是并发问题。那个专题会从线程、内存模型和数据并行讲起，回头再看 Phase 2 的 MultiThreadedExecutor 会清楚得多。</li>
+    <li lang="en"><strong>Parallel Programming</strong> (topic in planning): executor threads, mutually exclusive and reentrant callback groups, and data shared between callbacks are concurrency problems at heart. That topic starts from threads, memory models and data parallelism, and Phase 2’s MultiThreadedExecutor will look much clearer afterwards.</li>
+    <li lang="zh-CN"><strong><a href="../../kernel-engineering/index.html">Kernel Engineering</a></strong>：这门课里每一处「容器里做不到」都指向它：<code>PREEMPT_RT</code> 和调度器（Phase 2）、UDP 与 socket 缓冲区（Phase 3 和本阶段的 <code>rmem_max</code>）、LTTng 的内核事件（本阶段）、以及 ros2_control 背后的设备驱动。一台能装自己内核的 Linux 机器，加上那个专题，就能把这些补上。</li>
+    <li lang="en"><strong><a href="../../kernel-engineering/index.html">Kernel Engineering</a></strong>: every “not possible in the container” in this course points there: <code>PREEMPT_RT</code> and the scheduler (Phase 2), UDP and socket buffers (Phase 3 and <code>rmem_max</code> in this phase), LTTng kernel events (this phase), and the device drivers behind ros2_control. A Linux machine that can install its own kernel, plus that topic, fills those gaps.</li>
+  </ul>
+  <div class="note" lang="zh-CN">迁移提醒：Jazzy 支持到 2029 年 5 月。按 Phase 0 和实验环境页的说法，把命令里的 <code>jazzy</code> 换成 <code>lyrical</code>（镜像 <code>ros:lyrical-ros-base</code> 与 <code>ros:lyrical-ros-core</code>，两者在 Docker Hub 上都列有 arm64/v8，2026-10-31 查过）即可把整门课和毕业项目迁到 Lyrical Luth；你的 CI 和 bag 回归测试正好用来验证迁移有没有改变行为。</div>
+  <div class="note" lang="en">A migration note: Jazzy is supported until May 2029. As Phase 0 and the lab environment page say, replacing <code>jazzy</code> with <code>lyrical</code> in the commands (images <code>ros:lyrical-ros-base</code> and <code>ros:lyrical-ros-core</code>, both listing arm64/v8 on Docker Hub, checked 2026-10-31) moves the whole course and the capstone to Lyrical Luth; your CI and bag regression tests are exactly what verifies that the migration did not change behaviour.</div>
+
+  <nav class="pn">
+    <a href="../phase-6-control-and-navigation/index.html">← Phase 6 · Control &amp; Navigation</a>
+    <a href="../index.html"><span lang="zh-CN">ROS 2 · 回到专题 →</span><span lang="en">ROS 2 · Back to the topic →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

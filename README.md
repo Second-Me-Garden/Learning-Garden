@@ -15,6 +15,7 @@ open index.html
 | Topic | Goal | Status |
 |---|---|---|
 | [Kernel Engineering](topics/kernel-engineering/index.html) | 成为 Apple 的 kernel engineer：从内核基础（以 Linux 为教学载体）到 XNU/Darwin 与 Apple 面试 | Phases 0–8 complete |
+| [ROS 2](topics/ros2/index.html) | 机器人中间件：从第一个 node 到一台在 Gazebo 里建图、导航的仿真机器人，脚下的内核始终在视野里（Jazzy LTS） | Phases 0–7 complete |
 
 ## Layout
 
