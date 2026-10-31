@@ -21,96 +21,126 @@
     <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
-  <p class="meta">Phase 7 / 9 · 约 1–2 周</p>
-  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
-  <h1>Security &amp; Hardening <span class="en">安全与加固：KASLR、PAN/PXN、PAC、PPL/SPTM、sandbox、code signing</span></h1>
-  <p class="lede">内核是攻击者的终极目标：一个内核内存破坏漏洞往往意味着整机沦陷。Apple 在硬件和内核两层叠加了大量缓解措施（PAC、PPL/SPTM、kalloc_type、代码签名），内核工程师写的每一行代码都要放在这套防御体系里考量。</p>
+  <p class="meta" lang="zh-CN">Phase 7 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 7 / 9 · about 1–2 weeks</p>
+  <h1>Security &amp; Hardening <span class="en" lang="zh-CN">安全与加固：KASLR、PAN/PXN、PAC、PPL/SPTM、sandbox、code signing</span><span class="en" lang="en">KASLR, PAN/PXN, PAC, PPL/SPTM, sandbox, code signing</span></h1>
+  <p class="lede" lang="zh-CN">内核是攻击者的终极目标：一个内核内存破坏漏洞往往意味着整机沦陷。Apple 在硬件和内核两层叠加了大量缓解措施（PAC、PPL/SPTM、kalloc_type、代码签名），内核工程师写的每一行代码都要放在这套防御体系里考量。</p>
+  <p class="lede" lang="en">The kernel is the attacker’s ultimate target: a single kernel memory-corruption bug often means the whole machine is compromised. Apple stacks a large number of mitigations across both the hardware and the kernel (PAC, PPL/SPTM, kalloc_type, code signing), and every line of code a kernel engineer writes has to be weighed against this defensive system.</p>
 
-  <h2 id="goals">目标</h2>
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
   <div class="goals">
-    读完并做完实验后，你应该能：
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
     <ul>
-      <li>为内核写出一个简单威胁模型：攻击面在哪里、攻击者拿到什么原语、各项缓解措施阻断哪一步。</li>
-      <li>解释 KASLR、W^X、PXN、PAN、stack canary、CFI 各自防御的攻击手法。</li>
-      <li>说明 ARM PAC 如何用 <code>pacia</code> 签名、<code>autia</code> 校验指针，以及 PPL/SPTM 为什么要把页表保护从内核本身剥离出来。</li>
-      <li>对比 XNU 的 MACF/Sandbox/AMFI/SIP 与 Linux 的 LSM/SELinux，并能读懂一篇内核 CVE 分析文章。</li>
+      <li lang="zh-CN">为内核写出一个简单威胁模型：攻击面在哪里、攻击者拿到什么原语、各项缓解措施阻断哪一步。</li>
+      <li lang="en">Write a simple threat model for the kernel: where the attack surface is, what primitives an attacker obtains, and which step each mitigation blocks.</li>
+      <li lang="zh-CN">解释 KASLR、W^X、PXN、PAN、stack canary、CFI 各自防御的攻击手法。</li>
+      <li lang="en">Explain which attack technique each of KASLR, W^X, PXN, PAN, stack canaries and CFI defends against.</li>
+      <li lang="zh-CN">说明 ARM PAC 如何用 <code>pacia</code> 签名、<code>autia</code> 校验指针，以及 PPL/SPTM 为什么要把页表保护从内核本身剥离出来。</li>
+      <li lang="en">Explain how ARM PAC signs a pointer with <code>pacia</code> and verifies it with <code>autia</code>, and why PPL/SPTM move page-table protection out of the kernel itself.</li>
+      <li lang="zh-CN">对比 XNU 的 MACF/Sandbox/AMFI/SIP 与 Linux 的 LSM/SELinux，并能读懂一篇内核 CVE 分析文章。</li>
+      <li lang="en">Compare XNU’s MACF/Sandbox/AMFI/SIP with Linux’s LSM/SELinux, and be able to read a kernel CVE analysis.</li>
     </ul>
   </div>
 
-  <h2 id="prereq">前置</h2>
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
   <ul>
-    <li><a href="../phase-0-foundations/index.html">Phase 0</a>：特权级、ARM64 系统寄存器、异常（本阶段的 PAC 失败、PAN 违例最终都是一次同步异常）。</li>
-    <li><a href="../phase-2-memory/index.html">Phase 2</a>：页表描述符的 <code>AP</code>、<code>PXN</code>/<code>UXN</code> 位，<code>kalloc_type</code> 与 SLUB——W^X、PXN、PAN、堆隔离都建立在其上。</li>
-    <li>Phase 4（系统调用与 VFS——LSM/MACF 钩子挂在这里）；Phase 6（读 oops/panic、用 QEMU 与容器做实验）。</li>
+    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0</a>：特权级、ARM64 系统寄存器、异常（本阶段的 PAC 失败、PAN 违例最终都是一次同步异常）。</li>
+    <li lang="en"><a href="../phase-0-foundations/index.html">Phase 0</a>: privilege levels, ARM64 system registers, exceptions (the PAC failures and PAN violations in this phase all end up as a synchronous exception).</li>
+    <li lang="zh-CN"><a href="../phase-2-memory/index.html">Phase 2</a>：页表描述符的 <code>AP</code>、<code>PXN</code>/<code>UXN</code> 位，<code>kalloc_type</code> 与 SLUB——W^X、PXN、PAN、堆隔离都建立在其上。</li>
+    <li lang="en"><a href="../phase-2-memory/index.html">Phase 2</a>: the <code>AP</code> and <code>PXN</code>/<code>UXN</code> bits of page-table descriptors, <code>kalloc_type</code> and SLUB — W^X, PXN, PAN and heap isolation are all built on these.</li>
+    <li lang="zh-CN">Phase 4（系统调用与 VFS——LSM/MACF 钩子挂在这里）；Phase 6（读 oops/panic、用 QEMU 与容器做实验）。</li>
+    <li lang="en">Phase 4 (system calls and the VFS — the LSM/MACF hooks live here); Phase 6 (reading oops/panics, experimenting with QEMU and containers).</li>
   </ul>
-  <div class="note">本阶段内容只为<strong>防御与理解</strong>：讲清每项缓解拦住了什么，所有实验只在你自己的 QEMU 虚拟机、容器和自己编译的程序上进行，不涉及利用真实漏洞。</div>
+  <div class="note" lang="zh-CN">本阶段内容只为<strong>防御与理解</strong>：讲清每项缓解拦住了什么，所有实验只在你自己的 QEMU 虚拟机、容器和自己编译的程序上进行，不涉及利用真实漏洞。</div>
+  <div class="note" lang="en">This phase is for <strong>defence and understanding</strong> only: it explains what each mitigation stops, and every lab runs only on your own QEMU virtual machine, your own containers and programs you compiled yourself; no real vulnerability is exploited.</div>
 
-  <h2 id="concepts">核心概念</h2>
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
-  <h3>1. 内核威胁模型</h3>
-  <p>威胁模型回答三个问题：<strong>攻击者从哪里开始</strong>（通常是一个低权限进程——沙箱里的 App、浏览器渲染进程——或者一段送进内核的外部数据）、<strong>能碰到哪些内核代码</strong>（攻击面）、<strong>想达到什么</strong>（提权、逃出沙箱、持久化）。<strong>Linux</strong> 的典型攻击面：几百个系统调用、设备文件上的 <code>ioctl</code>、netlink、网络协议栈、挂载不可信的文件系统镜像、io_uring、eBPF（非特权 eBPF 通常由 <code>kernel.unprivileged_bpf_disabled</code> 关闭）。<strong>XNU</strong> 多了两类：Mach trap 与发往内核对象的 Mach 消息（MIG 接口），以及 <strong>IOKit 用户客户端</strong>——用户态 <code>IOServiceOpen</code> 后通过 <code>IOConnectCallMethod</code> 进到驱动的 <code>IOUserClient::externalMethod</code>，每个驱动都是一块新攻击面。Sandbox 的意义正在于<em>缩小一个进程能够到的攻击面</em>。</p>
-  <p>典型利用链：<strong>漏洞</strong>（越界读写、释放后使用 UAF、竞态、类型混淆、逻辑错误）→ <strong>原语</strong>（信息泄露、有限的写 → 任意地址读写）→ <strong>绕过缓解</strong> → <strong>达成目标</strong>（例如改掉自己进程的凭证：Linux 的 <code>struct cred</code>，XNU 挂在 <code>struct proc_ro</code> 里的 <code>p_ucred</code>）。缓解措施的设计思路就是在这条链的每一环上加成本：让漏洞更难出现（类型安全、隔离）、更难变成原语（堆加固）、原语更难用（KASLR、PAC、PPL/SPTM）。XNU 自己的 <code>doc/allocators/read-only.md</code> 写得很直白：由于 PAC 等控制流防御，今天的攻击者更倾向<strong>只改数据</strong>（data-only），所以防线也在向「保护关键数据」移动。延伸阅读：《Modern Operating Systems》第 9 章「安全」；《Operating Systems: Three Easy Pieces》第 53–55 章（安全导论、认证、访问控制）。</p>
+  <h3 lang="zh-CN">1. 内核威胁模型</h3><h3 lang="en">1. The kernel threat model</h3>
+  <p lang="zh-CN">威胁模型回答三个问题：<strong>攻击者从哪里开始</strong>（通常是一个低权限进程——沙箱里的 App、浏览器渲染进程——或者一段送进内核的外部数据）、<strong>能碰到哪些内核代码</strong>（攻击面）、<strong>想达到什么</strong>（提权、逃出沙箱、持久化）。<strong>Linux</strong> 的典型攻击面：几百个系统调用、设备文件上的 <code>ioctl</code>、netlink、网络协议栈、挂载不可信的文件系统镜像、io_uring、eBPF（非特权 eBPF 通常由 <code>kernel.unprivileged_bpf_disabled</code> 关闭）。<strong>XNU</strong> 多了两类：Mach trap 与发往内核对象的 Mach 消息（MIG 接口），以及 <strong>IOKit 用户客户端</strong>——用户态 <code>IOServiceOpen</code> 后通过 <code>IOConnectCallMethod</code> 进到驱动的 <code>IOUserClient::externalMethod</code>，每个驱动都是一块新攻击面。Sandbox 的意义正在于<em>缩小一个进程能够到的攻击面</em>。</p>
+  <p lang="en">A threat model answers three questions: <strong>where the attacker starts</strong> (usually a low-privilege process — a sandboxed app, a browser renderer process — or a piece of external data fed into the kernel), <strong>which kernel code it can reach</strong> (the attack surface), and <strong>what it wants to achieve</strong> (privilege escalation, sandbox escape, persistence). The typical <strong>Linux</strong> attack surface: several hundred system calls, <code>ioctl</code> on device files, netlink, the network stack, mounting untrusted filesystem images, io_uring, and eBPF (unprivileged eBPF is usually disabled by <code>kernel.unprivileged_bpf_disabled</code>). <strong>XNU</strong> adds two more kinds: Mach traps and Mach messages sent to kernel objects (MIG interfaces), and <strong>IOKit user clients</strong> — after <code>IOServiceOpen</code> in user space, <code>IOConnectCallMethod</code> reaches the driver’s <code>IOUserClient::externalMethod</code>, so every driver is a new piece of attack surface. The whole point of the sandbox is to <em>shrink the attack surface a process can reach</em>.</p>
+  <p lang="zh-CN">典型利用链：<strong>漏洞</strong>（越界读写、释放后使用 UAF、竞态、类型混淆、逻辑错误）→ <strong>原语</strong>（信息泄露、有限的写 → 任意地址读写）→ <strong>绕过缓解</strong> → <strong>达成目标</strong>（例如改掉自己进程的凭证：Linux 的 <code>struct cred</code>，XNU 挂在 <code>struct proc_ro</code> 里的 <code>p_ucred</code>）。缓解措施的设计思路就是在这条链的每一环上加成本：让漏洞更难出现（类型安全、隔离）、更难变成原语（堆加固）、原语更难用（KASLR、PAC、PPL/SPTM）。XNU 自己的 <code>doc/allocators/read-only.md</code> 写得很直白：由于 PAC 等控制流防御，今天的攻击者更倾向<strong>只改数据</strong>（data-only），所以防线也在向「保护关键数据」移动。延伸阅读：《Modern Operating Systems》第 9 章「安全」；《Operating Systems: Three Easy Pieces》第 53–55 章（安全导论、认证、访问控制）。</p>
+  <p lang="en">A typical exploit chain: <strong>bug</strong> (out-of-bounds read/write, use-after-free (UAF), race, type confusion, logic error) → <strong>primitive</strong> (information leak, limited write → arbitrary read/write) → <strong>mitigation bypass</strong> → <strong>goal</strong> (for example, overwriting your own process’s credentials: <code>struct cred</code> on Linux, <code>p_ucred</code> in <code>struct proc_ro</code> on XNU). Mitigations are designed to add cost at every link of this chain: make bugs less likely to exist (type safety, isolation), harder to turn into primitives (heap hardening), and primitives harder to use (KASLR, PAC, PPL/SPTM). XNU’s own <code>doc/allocators/read-only.md</code> says it plainly: because of control-flow defences such as PAC, today’s attackers prefer to <strong>modify only data</strong> (data-only), so the defences are moving towards “protecting critical data” as well. Further reading: <em>Modern Operating Systems</em>, Chapter 9, “Security”; <em>Operating Systems: Three Easy Pieces</em>, Chapters 53–55 (introduction to security, authentication, access control).</p>
 
-  <h3>2. KASLR 与 W^X / PXN / PAN</h3>
-  <p><strong>KASLR</strong> 让内核镜像每次启动加载到随机虚拟地址，攻击者写死的地址全部失效，从而必须先拿到一个<strong>信息泄露</strong>。Linux arm64（<code>CONFIG_RANDOMIZE_BASE</code>）的种子来自设备树 <code>/chosen/kaslr-seed</code>，没有时用 CPU 的 <code>RNDR</code> 指令（FEAT_RNG），都没有就打印 <code>KASLR disabled due to lack of seed</code>（<code>arch/arm64/kernel/kaslr.c</code>）；<code>nokaslr</code> 关闭它；panic 时打印 <code>Kernel Offset</code>。配套的是「不泄露地址」：<code>kptr_restrict</code>、<code>%pK</code>、默认对 <code>%p</code> 打印的指针做哈希、<code>dmesg_restrict</code>。用户态 ASLR 由 <code>/proc/sys/kernel/randomize_va_space</code> 控制：0 关闭，1 随机化 mmap 基址、栈和 vDSO，2 再加上 <code>brk</code> 堆。<strong>XNU</strong> 的内核整体滑动一个 <strong>kernel slide</strong>（<code>vm_kernel_slide</code>）；内核往外报地址时用 <code>VM_KERNEL_UNSLIDE</code> / <code>VM_KERNEL_ADDRPERM</code> 去滑动或置换（<code>osfmk/mach/vm_param.h</code>）；查询 slide 的 <code>kas_info()</code> 系统调用要求 root，还要再过一道 MACF 检查（<code>bsd/vm/vm_unix.c</code>）。</p>
-  <p><strong>W^X</strong>：任何一页要么可写、要么可执行，不能同时。Linux arm64 的内核代码和只读数据用 <code>CONFIG_STRICT_KERNEL_RWX</code>（arm64 上默认强制）、<code>rodata=full</code> 保护——但这些是内核<em>自己</em>设的页表权限，拿到任意写的攻击者理论上可以改回去。Apple 把这一步交给硬件：<strong>KIP</strong>（Kernel Integrity Protection，源码里的 KTRR/CTRR，如 <code>osfmk/arm64/amcc_rorgn.h</code>）在内核初始化完成后由内存控制器锁定内核代码区域，此后连内核自己也改不了。</p>
-  <p><strong>PXN</strong>（Phase 2 讲过的描述符第 53 位）让内核不能执行用户页——挡住「把 shellcode 放在用户内存，再让内核跳过去」的 ret2usr。<strong>PAN</strong>（Privileged Access Never，ARMv8.1，<code>PSTATE.PAN</code>）更进一步：内核用普通 load/store 访问用户可访问的页直接触发 permission fault，挡住「在用户内存里伪造内核对象，让内核去读」。内核只能经受控的拷贝路径访问用户内存：Linux 的 <code>copy_from_user</code> 一类（arm64 用 LDTR/STTR 这类「按 EL0 权限访问」的指令，或在短窗口内临时放开 PAN，大致路径）；XNU 的 <code>copyin</code>/<code>copyout</code>（<code>osfmk/arm64/copyio.c</code>）。Linux 相关选项：<code>CONFIG_ARM64_PAN</code>，老 CPU 上用切换 TTBR0 模拟的 <code>CONFIG_ARM64_SW_TTBR0_PAN</code>，以及让「用户只执行页」也受 PAN 约束的 <code>CONFIG_ARM64_EPAN</code>。</p>
+  <h3 lang="zh-CN">2. KASLR 与 W^X / PXN / PAN</h3><h3 lang="en">2. KASLR and W^X / PXN / PAN</h3>
+  <p lang="zh-CN"><strong>KASLR</strong> 让内核镜像每次启动加载到随机虚拟地址，攻击者写死的地址全部失效，从而必须先拿到一个<strong>信息泄露</strong>。Linux arm64（<code>CONFIG_RANDOMIZE_BASE</code>）的种子来自设备树 <code>/chosen/kaslr-seed</code>，没有时用 CPU 的 <code>RNDR</code> 指令（FEAT_RNG），都没有就打印 <code>KASLR disabled due to lack of seed</code>（<code>arch/arm64/kernel/kaslr.c</code>）；<code>nokaslr</code> 关闭它；panic 时打印 <code>Kernel Offset</code>。配套的是「不泄露地址」：<code>kptr_restrict</code>、<code>%pK</code>、默认对 <code>%p</code> 打印的指针做哈希、<code>dmesg_restrict</code>。用户态 ASLR 由 <code>/proc/sys/kernel/randomize_va_space</code> 控制：0 关闭，1 随机化 mmap 基址、栈和 vDSO，2 再加上 <code>brk</code> 堆。<strong>XNU</strong> 的内核整体滑动一个 <strong>kernel slide</strong>（<code>vm_kernel_slide</code>）；内核往外报地址时用 <code>VM_KERNEL_UNSLIDE</code> / <code>VM_KERNEL_ADDRPERM</code> 去滑动或置换（<code>osfmk/mach/vm_param.h</code>）；查询 slide 的 <code>kas_info()</code> 系统调用要求 root，还要再过一道 MACF 检查（<code>bsd/vm/vm_unix.c</code>）。</p>
+  <p lang="en"><strong>KASLR</strong> loads the kernel image at a random virtual address on every boot, so every address the attacker has hard-coded becomes invalid and they must first obtain an <strong>information leak</strong>. On Linux arm64 (<code>CONFIG_RANDOMIZE_BASE</code>) the seed comes from the device tree’s <code>/chosen/kaslr-seed</code>; without one, the CPU’s <code>RNDR</code> instruction (FEAT_RNG) is used, and if neither exists the kernel prints <code>KASLR disabled due to lack of seed</code> (<code>arch/arm64/kernel/kaslr.c</code>); <code>nokaslr</code> turns it off; a panic prints <code>Kernel Offset</code>. It goes together with “do not leak addresses”: <code>kptr_restrict</code>, <code>%pK</code>, hashing pointers printed with <code>%p</code> by default, and <code>dmesg_restrict</code>. User-space ASLR is controlled by <code>/proc/sys/kernel/randomize_va_space</code>: 0 is off, 1 randomises the mmap base, the stack and the vDSO, and 2 adds the <code>brk</code> heap. <strong>XNU</strong> slides the whole kernel by a <strong>kernel slide</strong> (<code>vm_kernel_slide</code>); when the kernel reports addresses to the outside, it unslides or permutes them with <code>VM_KERNEL_UNSLIDE</code> / <code>VM_KERNEL_ADDRPERM</code> (<code>osfmk/mach/vm_param.h</code>); the <code>kas_info()</code> system call, which queries the slide, requires root and must also pass a MACF check (<code>bsd/vm/vm_unix.c</code>).</p>
+  <p lang="zh-CN"><strong>W^X</strong>：任何一页要么可写、要么可执行，不能同时。Linux arm64 的内核代码和只读数据用 <code>CONFIG_STRICT_KERNEL_RWX</code>（arm64 上默认强制）、<code>rodata=full</code> 保护——但这些是内核<em>自己</em>设的页表权限，拿到任意写的攻击者理论上可以改回去。Apple 把这一步交给硬件：<strong>KIP</strong>（Kernel Integrity Protection，源码里的 KTRR/CTRR，如 <code>osfmk/arm64/amcc_rorgn.h</code>）在内核初始化完成后由内存控制器锁定内核代码区域，此后连内核自己也改不了。</p>
+  <p lang="en"><strong>W^X</strong>: any page is either writable or executable, never both. On Linux arm64, kernel code and read-only data are protected with <code>CONFIG_STRICT_KERNEL_RWX</code> (enforced by default on arm64) and <code>rodata=full</code> — but these are page-table permissions the kernel sets <em>itself</em>, and an attacker with arbitrary write could in theory change them back. Apple hands this step to the hardware: with <strong>KIP</strong> (Kernel Integrity Protection; KTRR/CTRR in the source, e.g. <code>osfmk/arm64/amcc_rorgn.h</code>) the memory controller locks the kernel code region once kernel initialisation is complete, and from then on not even the kernel itself can change it.</p>
+  <p lang="zh-CN"><strong>PXN</strong>（Phase 2 讲过的描述符第 53 位）让内核不能执行用户页——挡住「把 shellcode 放在用户内存，再让内核跳过去」的 ret2usr。<strong>PAN</strong>（Privileged Access Never，ARMv8.1，<code>PSTATE.PAN</code>）更进一步：内核用普通 load/store 访问用户可访问的页直接触发 permission fault，挡住「在用户内存里伪造内核对象，让内核去读」。内核只能经受控的拷贝路径访问用户内存：Linux 的 <code>copy_from_user</code> 一类（arm64 用 LDTR/STTR 这类「按 EL0 权限访问」的指令，或在短窗口内临时放开 PAN，大致路径）；XNU 的 <code>copyin</code>/<code>copyout</code>（<code>osfmk/arm64/copyio.c</code>）。Linux 相关选项：<code>CONFIG_ARM64_PAN</code>，老 CPU 上用切换 TTBR0 模拟的 <code>CONFIG_ARM64_SW_TTBR0_PAN</code>，以及让「用户只执行页」也受 PAN 约束的 <code>CONFIG_ARM64_EPAN</code>。</p>
+  <p lang="en"><strong>PXN</strong> (bit 53 of the descriptor, covered in Phase 2) stops the kernel from executing user pages — blocking ret2usr, “put shellcode in user memory and make the kernel jump to it”. <strong>PAN</strong> (Privileged Access Never, ARMv8.1, <code>PSTATE.PAN</code>) goes further: an ordinary kernel load/store to a user-accessible page raises a permission fault directly, blocking “forge a kernel object in user memory and get the kernel to read it”. The kernel can reach user memory only through controlled copy paths: Linux’s <code>copy_from_user</code> family (on arm64 it uses instructions such as LDTR/STTR that “access with EL0 permissions”, or lifts PAN temporarily for a short window; approximate path) and XNU’s <code>copyin</code>/<code>copyout</code> (<code>osfmk/arm64/copyio.c</code>). The related Linux options: <code>CONFIG_ARM64_PAN</code>; <code>CONFIG_ARM64_SW_TTBR0_PAN</code>, which emulates it on older CPUs by switching TTBR0; and <code>CONFIG_ARM64_EPAN</code>, which makes “user execute-only pages” subject to PAN as well.</p>
 
-  <h3>3. stack canary 与 CFI</h3>
-  <p><strong>Stack canary</strong>：编译器在有局部数组的函数栈帧里、返回地址之前放一个随机值，返回前检查；被连续溢出覆盖就调用 <code>__stack_chk_fail</code> 直接终止。Linux：<code>CONFIG_STACKPROTECTOR</code> / <code>_STRONG</code>，arm64 还有每任务不同 canary 的 <code>CONFIG_STACKPROTECTOR_PER_TASK</code>。XNU 同样有 <code>__stack_chk_guard</code>（<code>libkern/stack_protector.c</code>）。canary 只防<em>连续</em>溢出覆盖到返回地址；任意地址写、或者能先泄露 canary 时就挡不住。</p>
-  <p><strong>CFI</strong>（控制流完整性）把间接跳转限制在「合法目标」：<strong>后向边</strong>（返回）由 PAC（下一节）或 Linux 的 shadow call stack（<code>CONFIG_SHADOW_CALL_STACK</code>，返回地址另存一份在 <code>x18</code> 指向的隐藏栈）保护；<strong>前向边</strong>（函数指针调用）由 Clang <strong>kCFI</strong>（Linux <code>CONFIG_CFI</code>，旧名 <code>CONFIG_CFI_CLANG</code>：调用前检查目标函数前面的类型哈希）和 ARM <strong>BTI</strong>（Branch Target Identification，<code>CONFIG_ARM64_BTI_KERNEL</code>：间接跳转只能落在 <code>bti</code> 指令上，页表里的 GP 位开启检查）保护。XNU 在 arm64e 上主要靠 PAC 签名的函数指针和 vtable 指针实现前向边保护。延伸阅读：《Computer Systems: A Programmer's Perspective》第 3 章中缓冲区溢出及其对抗（栈随机化、栈保护、不可执行栈）相关小节。</p>
+  <h3 lang="zh-CN">3. stack canary 与 CFI</h3><h3 lang="en">3. Stack canaries and CFI</h3>
+  <p lang="zh-CN"><strong>Stack canary</strong>：编译器在有局部数组的函数栈帧里、返回地址之前放一个随机值，返回前检查；被连续溢出覆盖就调用 <code>__stack_chk_fail</code> 直接终止。Linux：<code>CONFIG_STACKPROTECTOR</code> / <code>_STRONG</code>，arm64 还有每任务不同 canary 的 <code>CONFIG_STACKPROTECTOR_PER_TASK</code>。XNU 同样有 <code>__stack_chk_guard</code>（<code>libkern/stack_protector.c</code>）。canary 只防<em>连续</em>溢出覆盖到返回地址；任意地址写、或者能先泄露 canary 时就挡不住。</p>
+  <p lang="en"><strong>Stack canary</strong>: in the stack frame of a function with local arrays, the compiler places a random value before the return address and checks it before returning; if a contiguous overflow has overwritten it, <code>__stack_chk_fail</code> is called and execution terminates immediately. Linux: <code>CONFIG_STACKPROTECTOR</code> / <code>_STRONG</code>; arm64 also has <code>CONFIG_STACKPROTECTOR_PER_TASK</code>, with a different canary per task. XNU likewise has <code>__stack_chk_guard</code> (<code>libkern/stack_protector.c</code>). A canary only defends against a <em>contiguous</em> overflow reaching the return address; it cannot stop an arbitrary-address write, or an attacker who can leak the canary first.</p>
+  <p lang="zh-CN"><strong>CFI</strong>（控制流完整性）把间接跳转限制在「合法目标」：<strong>后向边</strong>（返回）由 PAC（下一节）或 Linux 的 shadow call stack（<code>CONFIG_SHADOW_CALL_STACK</code>，返回地址另存一份在 <code>x18</code> 指向的隐藏栈）保护；<strong>前向边</strong>（函数指针调用）由 Clang <strong>kCFI</strong>（Linux <code>CONFIG_CFI</code>，旧名 <code>CONFIG_CFI_CLANG</code>：调用前检查目标函数前面的类型哈希）和 ARM <strong>BTI</strong>（Branch Target Identification，<code>CONFIG_ARM64_BTI_KERNEL</code>：间接跳转只能落在 <code>bti</code> 指令上，页表里的 GP 位开启检查）保护。XNU 在 arm64e 上主要靠 PAC 签名的函数指针和 vtable 指针实现前向边保护。延伸阅读：《Computer Systems: A Programmer's Perspective》第 3 章中缓冲区溢出及其对抗（栈随机化、栈保护、不可执行栈）相关小节。</p>
+  <p lang="en"><strong>CFI</strong> (control-flow integrity) restricts indirect branches to “legitimate targets”: the <strong>backward edge</strong> (returns) is protected by PAC (next section) or by Linux’s shadow call stack (<code>CONFIG_SHADOW_CALL_STACK</code>, which keeps a second copy of each return address on a hidden stack pointed to by <code>x18</code>); the <strong>forward edge</strong> (function-pointer calls) is protected by Clang <strong>kCFI</strong> (Linux <code>CONFIG_CFI</code>, formerly <code>CONFIG_CFI_CLANG</code>: before the call, it checks a type hash placed in front of the target function) and by ARM <strong>BTI</strong> (Branch Target Identification, <code>CONFIG_ARM64_BTI_KERNEL</code>: an indirect branch may land only on a <code>bti</code> instruction, with the check enabled by the GP bit in the page table). On arm64e, XNU relies mainly on PAC-signed function pointers and vtable pointers for forward-edge protection. Further reading: <em>Computer Systems: A Programmer's Perspective</em>, the sections of Chapter 3 on buffer overflows and how to thwart them (stack randomisation, stack protection, non-executable stacks).</p>
 
-  <h3>4. ARM Pointer Authentication（PAC）</h3>
-  <p>ARMv8.3 的 FEAT_PAuth 增加了 5 把 128 位密钥（<code>APIAKey</code>、<code>APIBKey</code>、<code>APDAKey</code>、<code>APDBKey</code>、<code>APGAKey</code>，各分 <code>…Lo_EL1</code>/<code>…Hi_EL1</code> 两个系统寄存器；EL0 读不到）和一组指令：<code>pacia Xd, Xn</code> 用 IA 密钥、以 <code>Xn</code> 为修饰值（modifier）给 <code>Xd</code> 里的指针算出一个短 MAC——<strong>PAC</strong>——写进指针<strong>未用于寻址的高位</strong>；<code>autia</code> 用同样的密钥和修饰值重算并比较，对了就去掉 PAC 恢复原指针；<code>xpaci</code>/<code>xpacd</code> 只去掉不校验；<code>paciasp</code>/<code>pacibsp</code> 是「对 LR、以 SP 为修饰值」的简写；<code>retaa</code>/<code>retab</code>、<code>blraa</code> 把校验与跳转合成一条。PAC 位数取决于虚拟地址宽度和 TBI：48 位 VA 且开启 TBI 时只有 [54:48] 7 位（bit 55 用来选 TTBR），关闭 TBI 时高字节也可用；所以 PAC 是<em>概率</em>防护，靠的是「猜错一次就崩溃」。</p>
-  <p>校验失败时：有 <strong>FEAT_FPAC</strong> 的 CPU 让 <code>aut*</code> 指令<em>立即</em>产生异常（<code>ESR_ELx.EC = 0x1C</code>）——Linux 用户态收到 <code>SIGILL</code>（<code>do_el0_fpac</code>），内核态 <code>die("Oops - FPAC")</code>（<code>do_el1_fpac</code>，<code>arch/arm64/kernel/traps.c</code>）；XNU 走 <code>sleh.c</code> 里的 <code>handle_pac_fail</code>。没有 FPAC 时，<code>aut*</code> 把错误码写进高位使指针变成非规范地址（FEAT_PAuth 行为；FEAT_PAuth2 下改为把重算的 PAC 异或进高位，效果同样通常是非规范地址），等到真正用它跳转或访存时才触发 translation fault。arm64e 编译器还会在部分 <code>aut</code> 之后自己插入检查，失败时执行 <code>brk</code>（XNU 的 <code>ptrauth_handle_brk_trap</code> 负责把它报告成 PAC 失败）。</p>
-  <p><strong>Linux</strong>：<code>CONFIG_ARM64_PTR_AUTH</code> 给用户态启用（每个进程 exec 时随机生成密钥，<code>/proc/cpuinfo</code> 里能看到 <code>paca pacg</code>），<code>CONFIG_ARM64_PTR_AUTH_KERNEL</code> 用 <code>-mbranch-protection=pac-ret</code>（与 BTI 同开时 <code>pac-ret+bti</code>）编译内核，保护返回地址，用 IA 密钥。<strong>Apple arm64e</strong> 是全面使用：返回地址用 <strong>IB</strong> 密钥（XNU 汇编宏 <code>ARM64_STACK_PROLOG</code>/<code>EPILOG</code> 就是 <code>pacibsp</code>/<code>retab</code>，<code>osfmk/arm64/asm.h</code>），C 函数指针用 IA，数据指针用 DA/DB，C++ vtable 指针、ObjC 关键指针等再混入「存放地址 + 类型常量」做修饰值（address diversity），让签名不能从一个位置挪到另一个位置复用。<code>ptrauth.h</code> 里 <code>ptrauth_key_process_independent_code</code> 就是 IA 的别名——A 类密钥跨进程共享（共享缓存里的指针才能通用），B 类按进程区分。第三方 arm64e 二进制至今仍属「预览 ABI」：能编译，但正常系统默认不让它运行（见 Lab B）。</p>
+  <h3 lang="zh-CN">4. ARM Pointer Authentication（PAC）</h3><h3 lang="en">4. ARM Pointer Authentication (PAC)</h3>
+  <p lang="zh-CN">ARMv8.3 的 FEAT_PAuth 增加了 5 把 128 位密钥（<code>APIAKey</code>、<code>APIBKey</code>、<code>APDAKey</code>、<code>APDBKey</code>、<code>APGAKey</code>，各分 <code>…Lo_EL1</code>/<code>…Hi_EL1</code> 两个系统寄存器；EL0 读不到）和一组指令：<code>pacia Xd, Xn</code> 用 IA 密钥、以 <code>Xn</code> 为修饰值（modifier）给 <code>Xd</code> 里的指针算出一个短 MAC——<strong>PAC</strong>——写进指针<strong>未用于寻址的高位</strong>；<code>autia</code> 用同样的密钥和修饰值重算并比较，对了就去掉 PAC 恢复原指针；<code>xpaci</code>/<code>xpacd</code> 只去掉不校验；<code>paciasp</code>/<code>pacibsp</code> 是「对 LR、以 SP 为修饰值」的简写；<code>retaa</code>/<code>retab</code>、<code>blraa</code> 把校验与跳转合成一条。PAC 位数取决于虚拟地址宽度和 TBI：48 位 VA 且开启 TBI 时只有 [54:48] 7 位（bit 55 用来选 TTBR），关闭 TBI 时高字节也可用；所以 PAC 是<em>概率</em>防护，靠的是「猜错一次就崩溃」。</p>
+  <p lang="en">FEAT_PAuth in ARMv8.3 adds five 128-bit keys (<code>APIAKey</code>, <code>APIBKey</code>, <code>APDAKey</code>, <code>APDBKey</code>, <code>APGAKey</code>, each split across two system registers, <code>…Lo_EL1</code>/<code>…Hi_EL1</code>; EL0 cannot read them) and a set of instructions: <code>pacia Xd, Xn</code> uses the IA key, with <code>Xn</code> as the modifier, to compute a short MAC — the <strong>PAC</strong> — over the pointer in <code>Xd</code>, and writes it into the pointer’s <strong>high bits that are not used for addressing</strong>; <code>autia</code> recomputes it with the same key and modifier and compares, and on a match removes the PAC to restore the original pointer; <code>xpaci</code>/<code>xpacd</code> only strip it, without checking; <code>paciasp</code>/<code>pacibsp</code> are shorthand for “sign LR, with SP as the modifier”; <code>retaa</code>/<code>retab</code> and <code>blraa</code> combine verification and branch into one instruction. The number of PAC bits depends on the virtual-address width and on TBI: with a 48-bit VA and TBI enabled there are only 7 bits, [54:48] (bit 55 selects the TTBR); with TBI disabled the top byte can be used as well. So PAC is a <em>probabilistic</em> defence that relies on “one wrong guess means a crash”.</p>
+  <p lang="zh-CN">校验失败时：有 <strong>FEAT_FPAC</strong> 的 CPU 让 <code>aut*</code> 指令<em>立即</em>产生异常（<code>ESR_ELx.EC = 0x1C</code>）——Linux 用户态收到 <code>SIGILL</code>（<code>do_el0_fpac</code>），内核态 <code>die("Oops - FPAC")</code>（<code>do_el1_fpac</code>，<code>arch/arm64/kernel/traps.c</code>）；XNU 走 <code>sleh.c</code> 里的 <code>handle_pac_fail</code>。没有 FPAC 时，<code>aut*</code> 把错误码写进高位使指针变成非规范地址（FEAT_PAuth 行为；FEAT_PAuth2 下改为把重算的 PAC 异或进高位，效果同样通常是非规范地址），等到真正用它跳转或访存时才触发 translation fault。arm64e 编译器还会在部分 <code>aut</code> 之后自己插入检查，失败时执行 <code>brk</code>（XNU 的 <code>ptrauth_handle_brk_trap</code> 负责把它报告成 PAC 失败）。</p>
+  <p lang="en">When verification fails: on a CPU with <strong>FEAT_FPAC</strong>, the <code>aut*</code> instruction raises an exception <em>immediately</em> (<code>ESR_ELx.EC = 0x1C</code>) — on Linux, user space receives <code>SIGILL</code> (<code>do_el0_fpac</code>) and kernel mode hits <code>die("Oops - FPAC")</code> (<code>do_el1_fpac</code>, <code>arch/arm64/kernel/traps.c</code>); XNU goes to <code>handle_pac_fail</code> in <code>sleh.c</code>. Without FPAC, <code>aut*</code> writes an error code into the high bits so that the pointer becomes a non-canonical address (FEAT_PAuth behaviour; under FEAT_PAuth2 it instead XORs the recomputed PAC into the high bits, which likewise usually yields a non-canonical address), and a translation fault is raised only when the pointer is actually used for a branch or a memory access. The arm64e compiler also inserts its own check after some <code>aut</code> instructions and executes <code>brk</code> on failure (XNU’s <code>ptrauth_handle_brk_trap</code> reports it as a PAC failure).</p>
+  <p lang="zh-CN"><strong>Linux</strong>：<code>CONFIG_ARM64_PTR_AUTH</code> 给用户态启用（每个进程 exec 时随机生成密钥，<code>/proc/cpuinfo</code> 里能看到 <code>paca pacg</code>），<code>CONFIG_ARM64_PTR_AUTH_KERNEL</code> 用 <code>-mbranch-protection=pac-ret</code>（与 BTI 同开时 <code>pac-ret+bti</code>）编译内核，保护返回地址，用 IA 密钥。<strong>Apple arm64e</strong> 是全面使用：返回地址用 <strong>IB</strong> 密钥（XNU 汇编宏 <code>ARM64_STACK_PROLOG</code>/<code>EPILOG</code> 就是 <code>pacibsp</code>/<code>retab</code>，<code>osfmk/arm64/asm.h</code>），C 函数指针用 IA，数据指针用 DA/DB，C++ vtable 指针、ObjC 关键指针等再混入「存放地址 + 类型常量」做修饰值（address diversity），让签名不能从一个位置挪到另一个位置复用。<code>ptrauth.h</code> 里 <code>ptrauth_key_process_independent_code</code> 就是 IA 的别名——A 类密钥跨进程共享（共享缓存里的指针才能通用），B 类按进程区分。第三方 arm64e 二进制至今仍属「预览 ABI」：能编译，但正常系统默认不让它运行（见 Lab B）。</p>
+  <p lang="en"><strong>Linux</strong>: <code>CONFIG_ARM64_PTR_AUTH</code> enables it for user space (keys are generated randomly for each process at exec, and <code>paca pacg</code> shows up in <code>/proc/cpuinfo</code>); <code>CONFIG_ARM64_PTR_AUTH_KERNEL</code> builds the kernel with <code>-mbranch-protection=pac-ret</code> (<code>pac-ret+bti</code> when BTI is enabled too) to protect return addresses, using the IA key. <strong>Apple arm64e</strong> uses it throughout: return addresses use the <strong>IB</strong> key (the XNU assembly macros <code>ARM64_STACK_PROLOG</code>/<code>EPILOG</code> are exactly <code>pacibsp</code>/<code>retab</code>, <code>osfmk/arm64/asm.h</code>), C function pointers use IA, data pointers use DA/DB, and C++ vtable pointers, key ObjC pointers and so on also mix “storage address + type constant” into the modifier (address diversity), so that a signature cannot be moved from one location and reused at another. In <code>ptrauth.h</code>, <code>ptrauth_key_process_independent_code</code> is simply an alias for IA — the A keys are shared across processes (which is what lets pointers in the shared cache work everywhere), while the B keys differ per process. Third-party arm64e binaries are still a “preview ABI” today: they compile, but a normal system does not let them run by default (see Lab B).</p>
 
-  <h3>5. PPL 与 SPTM</h3>
-  <p>前面所有防线都有一个共同的弱点：<strong>页表在内核手里</strong>。一旦攻击者拿到内核任意读写，就可以直接改页表——把代码页改成可写、把任意物理内存映射进来、给未签名代码加上可执行权限。Apple 的回答是把「改页表」这件事从内核里拿走（以下据 Apple Platform Security Guide「Operating system integrity」）：</p>
+  <h3 lang="zh-CN">5. PPL 与 SPTM</h3><h3 lang="en">5. PPL and SPTM</h3>
+  <p lang="zh-CN">前面所有防线都有一个共同的弱点：<strong>页表在内核手里</strong>。一旦攻击者拿到内核任意读写，就可以直接改页表——把代码页改成可写、把任意物理内存映射进来、给未签名代码加上可执行权限。Apple 的回答是把「改页表」这件事从内核里拿走（以下据 Apple Platform Security Guide「Operating system integrity」）：</p>
+  <p lang="en">All of the defences above share one weakness: <strong>the page tables are in the kernel’s hands</strong>. Once an attacker has arbitrary kernel read/write, they can modify the page tables directly — make code pages writable, map in arbitrary physical memory, grant execute permission to unsigned code. Apple’s answer is to take “modifying the page tables” away from the kernel (the following is based on the “Operating system integrity” section of the Apple Platform Security Guide):</p>
   <ul>
-    <li><strong>Fast Permission Restrictions</strong>（A11 起，也称 APRR 寄存器）：一个按线程快速收紧内存权限的 CPU 寄存器，不必改页表、刷 TLB。</li>
-    <li><strong>PPL</strong>（Page Protection Layer）：建立在 KIP 和 Fast Permission Restrictions 之上的一小段受保护代码，<em>只有 PPL 能修改</em>页表和存放已签名用户代码的页。Apple 指南说明 PPL「签名校验后代码不可改」这一层保护只在 iOS、iPadOS、visionOS、watchOS 上提供，macOS 因为允许运行任意代码而不提供。XNU 源码里与之相关的是 <code>osfmk/arm/pmap/pmap_ppl_interface.c</code> 和 <code>XNU_MONITOR</code> 宏。</li>
-    <li><strong>SPTM + TXM</strong>（A15 及以后、M2 及以后的芯片，替代 PPL；iOS、iPadOS、macOS、visionOS）：Secure Page Table Monitor 运行在<strong>比内核更高的特权级</strong>，管理用户与内核两边的页表；Trusted Execution Monitor 权限更低，负责实际执行「什么代码可以运行」的策略。两者分开，是为了让 TXM 被攻破也不自动等于 SPTM 被绕过。XNU 源码里能看到 <code>CONFIG_SPTM</code> 宏，构建配置里还有一个 <code>SPTM</code> 内核变体。</li>
+    <li lang="zh-CN"><strong>Fast Permission Restrictions</strong>（A11 起，也称 APRR 寄存器）：一个按线程快速收紧内存权限的 CPU 寄存器，不必改页表、刷 TLB。</li>
+    <li lang="en"><strong>Fast Permission Restrictions</strong> (from the A11; also called the APRR registers): a CPU register that quickly tightens memory permissions per thread, without changing the page tables or flushing the TLB.</li>
+    <li lang="zh-CN"><strong>PPL</strong>（Page Protection Layer）：建立在 KIP 和 Fast Permission Restrictions 之上的一小段受保护代码，<em>只有 PPL 能修改</em>页表和存放已签名用户代码的页。Apple 指南说明 PPL「签名校验后代码不可改」这一层保护只在 iOS、iPadOS、visionOS、watchOS 上提供，macOS 因为允许运行任意代码而不提供。XNU 源码里与之相关的是 <code>osfmk/arm/pmap/pmap_ppl_interface.c</code> 和 <code>XNU_MONITOR</code> 宏。</li>
+    <li lang="en"><strong>PPL</strong> (Page Protection Layer): a small piece of protected code built on KIP and Fast Permission Restrictions; <em>only PPL can modify</em> the page tables and the pages that hold signed user code. Apple’s guide states that PPL’s layer of protection — “code cannot be modified after signature verification” — is provided only on iOS, iPadOS, visionOS and watchOS, and not on macOS, because macOS allows arbitrary code to run. The related XNU source is <code>osfmk/arm/pmap/pmap_ppl_interface.c</code> and the <code>XNU_MONITOR</code> macro.</li>
+    <li lang="zh-CN"><strong>SPTM + TXM</strong>（A15 及以后、M2 及以后的芯片，替代 PPL；iOS、iPadOS、macOS、visionOS）：Secure Page Table Monitor 运行在<strong>比内核更高的特权级</strong>，管理用户与内核两边的页表；Trusted Execution Monitor 权限更低，负责实际执行「什么代码可以运行」的策略。两者分开，是为了让 TXM 被攻破也不自动等于 SPTM 被绕过。XNU 源码里能看到 <code>CONFIG_SPTM</code> 宏，构建配置里还有一个 <code>SPTM</code> 内核变体。</li>
+    <li lang="en"><strong>SPTM + TXM</strong> (A15 and later and M2 and later chips, replacing PPL; iOS, iPadOS, macOS, visionOS): the Secure Page Table Monitor runs at a <strong>higher privilege level than the kernel</strong> and manages the page tables of both user space and the kernel; the Trusted Execution Monitor has lower privilege and actually enforces the policy on “which code may run”. They are kept separate so that compromising TXM does not automatically mean bypassing SPTM. In the XNU source you can see the <code>CONFIG_SPTM</code> macro, and the build configuration also has an <code>SPTM</code> kernel variant.</li>
   </ul>
-  <p><strong>Linux</strong> 主线没有直接对应物：内核始终可以写自己的页表。最接近的是在内核<em>之下</em>放一个 hypervisor 来保护页表和关键数据——一些手机厂商的方案（例如三星 RKP）就是这样做的（推断：这类方案多为厂商私有，细节不公开）；Android 的 pKVM 则是用 hypervisor 把客户虚拟机的内存与宿主内核隔离，目标不同但思路相同——<em>更高特权级 + 更小的可信代码</em>。</p>
+  <p lang="zh-CN"><strong>Linux</strong> 主线没有直接对应物：内核始终可以写自己的页表。最接近的是在内核<em>之下</em>放一个 hypervisor 来保护页表和关键数据——一些手机厂商的方案（例如三星 RKP）就是这样做的（推断：这类方案多为厂商私有，细节不公开）；Android 的 pKVM 则是用 hypervisor 把客户虚拟机的内存与宿主内核隔离，目标不同但思路相同——<em>更高特权级 + 更小的可信代码</em>。</p>
+  <p lang="en">Mainline <strong>Linux</strong> has no direct counterpart: the kernel can always write its own page tables. The closest thing is to put a hypervisor <em>below</em> the kernel to protect the page tables and critical data — some phone vendors’ schemes (for example Samsung RKP) do exactly this (inference: such schemes are mostly vendor-proprietary and their details are not public); Android’s pKVM, by contrast, uses a hypervisor to isolate guest virtual machines’ memory from the host kernel — a different goal, but the same idea: <em>a higher privilege level + a smaller body of trusted code</em>.</p>
 
-  <h3>6. kalloc_type 与堆隔离</h3>
-  <p>UAF 利用的经典步骤是「<strong>占位</strong>」：对象 A 被释放后，攻击者让内核在<em>同一块内存</em>上分配一个内容可控的对象 B，从此持有 A 悬空指针的代码会把 B 当成 A 来用（类型混淆）。通用分配器按大小分档，任何大小相近的对象都能互相占位，这正是攻击者需要的。</p>
-  <p><strong>XNU kalloc_type</strong>（iOS 15 / macOS 12 起；<code>osfmk/kern/kalloc.h</code> 的 <code>kalloc_type(...)</code>、<code>KALLOC_TYPE_DEFINE</code>）：编译器为每个类型生成签名，分配器据此把不同类型的对象分到不同的 zone，纯数据（不含指针）的走单独的 <code>kalloc_data</code>；加上 zone 的虚拟地址不在不同 zone 之间复用（大致机制，详见 Apple 的 kalloc_type 博文），跨类型占位就变得非常难。更敏感的数据放进<strong>只读 zone</strong>：只能通过 <code>zalloc_ro_mut</code> 修改（<code>doc/allocators/read-only.md</code>），进程凭证就在 <code>struct proc_ro</code> 里。最新一层是 <strong>MIE</strong>（Memory Integrity Enforcement，A19 / M5 及以后）：在这些安全分配器之上，加上同步模式的 EMTE（增强内存标签扩展）——每块内存和指针各带一个标签，标签不符的访问当场被硬件拦下。</p>
-  <p><strong>Linux</strong> 的 slab 加固是一组选项：<code>CONFIG_SLAB_FREELIST_HARDENED</code>（混淆空闲链表指针）、<code>CONFIG_SLAB_FREELIST_RANDOM</code>（随机化空闲顺序）、<code>init_on_free</code>/<code>init_on_alloc</code>（释放/分配时清零）、<code>CONFIG_SLAB_BUCKETS</code>（6.11 起，把大小由用户控制的分配放进独立的桶）、以及 6.6 引入的 <code>CONFIG_RANDOM_KMALLOC_CACHES</code>（按调用点 + 每次启动的随机种子，从 16 份 kmalloc 缓存里选一份）。截至 2026-10 的主线开发树（v7.3）把后者改名为 <code>CONFIG_KMALLOC_PARTITION_CACHES</code>，并新增 <code>KMALLOC_PARTITION_TYPED</code> 模式：编译器支持 Clang allocation token 时<strong>按分配的类型</strong>选缓存——这是 Linux 目前最接近 kalloc_type 的机制。硬件标签方面对应的是 arm64 MTE 与 <code>CONFIG_KASAN_HW_TAGS</code>。</p>
+  <h3 lang="zh-CN">6. kalloc_type 与堆隔离</h3><h3 lang="en">6. kalloc_type and heap isolation</h3>
+  <p lang="zh-CN">UAF 利用的经典步骤是「<strong>占位</strong>」：对象 A 被释放后，攻击者让内核在<em>同一块内存</em>上分配一个内容可控的对象 B，从此持有 A 悬空指针的代码会把 B 当成 A 来用（类型混淆）。通用分配器按大小分档，任何大小相近的对象都能互相占位，这正是攻击者需要的。</p>
+  <p lang="en">The classic step in exploiting a UAF is “<strong>reclaiming</strong>” the freed memory: after object A is freed, the attacker gets the kernel to allocate an object B with controlled contents in <em>the same memory</em>, and from then on code holding the dangling pointer to A uses B as if it were A (type confusion). A general-purpose allocator groups objects by size class, so any objects of similar size can reclaim each other’s memory — exactly what the attacker needs.</p>
+  <p lang="zh-CN"><strong>XNU kalloc_type</strong>（iOS 15 / macOS 12 起；<code>osfmk/kern/kalloc.h</code> 的 <code>kalloc_type(...)</code>、<code>KALLOC_TYPE_DEFINE</code>）：编译器为每个类型生成签名，分配器据此把不同类型的对象分到不同的 zone，纯数据（不含指针）的走单独的 <code>kalloc_data</code>；加上 zone 的虚拟地址不在不同 zone 之间复用（大致机制，详见 Apple 的 kalloc_type 博文），跨类型占位就变得非常难。更敏感的数据放进<strong>只读 zone</strong>：只能通过 <code>zalloc_ro_mut</code> 修改（<code>doc/allocators/read-only.md</code>），进程凭证就在 <code>struct proc_ro</code> 里。最新一层是 <strong>MIE</strong>（Memory Integrity Enforcement，A19 / M5 及以后）：在这些安全分配器之上，加上同步模式的 EMTE（增强内存标签扩展）——每块内存和指针各带一个标签，标签不符的访问当场被硬件拦下。</p>
+  <p lang="en"><strong>XNU kalloc_type</strong> (from iOS 15 / macOS 12; <code>kalloc_type(...)</code> and <code>KALLOC_TYPE_DEFINE</code> in <code>osfmk/kern/kalloc.h</code>): the compiler generates a signature for each type, and the allocator uses it to put objects of different types in different zones, with pure data (containing no pointers) going to a separate <code>kalloc_data</code>; combined with zone virtual addresses not being reused across zones (approximate mechanism; see Apple’s kalloc_type blog post for details), cross-type reclaiming becomes very hard. More sensitive data goes into <strong>read-only zones</strong>: it can be modified only through <code>zalloc_ro_mut</code> (<code>doc/allocators/read-only.md</code>), and process credentials live in <code>struct proc_ro</code>. The newest layer is <strong>MIE</strong> (Memory Integrity Enforcement, A19 / M5 and later): on top of these secure allocators it adds EMTE (Enhanced Memory Tagging Extension) in synchronous mode — every block of memory and every pointer carries a tag, and an access with a mismatched tag is stopped by the hardware on the spot.</p>
+  <p lang="zh-CN"><strong>Linux</strong> 的 slab 加固是一组选项：<code>CONFIG_SLAB_FREELIST_HARDENED</code>（混淆空闲链表指针）、<code>CONFIG_SLAB_FREELIST_RANDOM</code>（随机化空闲顺序）、<code>init_on_free</code>/<code>init_on_alloc</code>（释放/分配时清零）、<code>CONFIG_SLAB_BUCKETS</code>（6.11 起，把大小由用户控制的分配放进独立的桶）、以及 6.6 引入的 <code>CONFIG_RANDOM_KMALLOC_CACHES</code>（按调用点 + 每次启动的随机种子，从 16 份 kmalloc 缓存里选一份）。截至 2026-10 的主线开发树（v7.3）把后者改名为 <code>CONFIG_KMALLOC_PARTITION_CACHES</code>，并新增 <code>KMALLOC_PARTITION_TYPED</code> 模式：编译器支持 Clang allocation token 时<strong>按分配的类型</strong>选缓存——这是 Linux 目前最接近 kalloc_type 的机制。硬件标签方面对应的是 arm64 MTE 与 <code>CONFIG_KASAN_HW_TAGS</code>。</p>
+  <p lang="en"><strong>Linux</strong> slab hardening is a set of options: <code>CONFIG_SLAB_FREELIST_HARDENED</code> (obfuscates freelist pointers), <code>CONFIG_SLAB_FREELIST_RANDOM</code> (randomises the free order), <code>init_on_free</code>/<code>init_on_alloc</code> (zero memory on free / allocation), <code>CONFIG_SLAB_BUCKETS</code> (from 6.11; puts allocations whose size is controlled by user space into separate buckets), and <code>CONFIG_RANDOM_KMALLOC_CACHES</code>, introduced in 6.6 (picks one of 16 copies of the kmalloc caches by call site + a per-boot random seed). As of 2026-10, the mainline development tree (v7.3) renames the latter to <code>CONFIG_KMALLOC_PARTITION_CACHES</code> and adds a <code>KMALLOC_PARTITION_TYPED</code> mode: when the compiler supports Clang allocation tokens, the cache is picked <strong>by the allocated type</strong> — the closest Linux currently comes to kalloc_type. For hardware tagging, the counterparts are arm64 MTE and <code>CONFIG_KASAN_HW_TAGS</code>.</p>
 
-  <h3>7. 强制访问控制与代码签名</h3>
-  <p><strong>Linux LSM</strong>：内核在敏感操作处调用 <code>security_*</code> 钩子（例如 <code>security_file_open</code>，钩子清单在 <code>include/linux/lsm_hook_defs.h</code>），由启用的安全模块决定放行与否：SELinux（基于标签的完整 MAC）、AppArmor（基于路径的配置文件）、Landlock（非特权进程给自己加限制）、Yama（限制 ptrace）、lockdown（限制连 root 也不能做的事，如写 <code>/dev/mem</code>、加载未签名模块）。完整性一侧有模块签名（<code>CONFIG_MODULE_SIG</code>）、IMA/EVM、dm-verity。</p>
-  <p><strong>XNU MACF</strong>（源自 TrustedBSD）：内核在同类位置调用 <code>mac_*_check_*</code>（如 <code>mac_vnode_check_open</code>，<code>security/mac_vfs.c</code>；IOKit 有 <code>mac_iokit_check_open</code>），策略模块用 <code>mac_policy_register</code> 注册（<code>security/mac_base.c</code>）。主要策略是两个内核扩展：<strong>Sandbox</strong>（Seatbelt：按配置文件限制文件、Mach 服务查找、IOKit 打开等，Lab B 能在内核日志里看到它的 <code>deny</code> 记录）和 <strong>AMFI</strong>（AppleMobileFileIntegrity：执行时校验代码签名与 entitlements，配合用户态 <code>amfid</code>；内核侧代码签名状态在 <code>bsd/kern/kern_cs.c</code>、<code>ubc_subr.c</code>）。<strong>SIP</strong>（System Integrity Protection）是「连 root 也不行」的那一层：保护系统文件、受保护进程、内核扩展加载等，检查点是 <code>csr_check()</code>（<code>bsd/kern/kern_csr.c</code>），只能在 recoveryOS 里修改。macOS 11 起的系统卷还是签名封存的只读快照（SSV），在 Apple Silicon 上 SPTM/TXM 也参与到「哪些代码可以执行」的决策中。延伸阅读：《*OS Internals》Vol. III 的 MACF、代码签名、Sandbox 相关章节；《The Design and Implementation of the FreeBSD Operating System》安全相关章节（MACF 源自 TrustedBSD）。</p>
+  <h3 lang="zh-CN">7. 强制访问控制与代码签名</h3><h3 lang="en">7. Mandatory access control and code signing</h3>
+  <p lang="zh-CN"><strong>Linux LSM</strong>：内核在敏感操作处调用 <code>security_*</code> 钩子（例如 <code>security_file_open</code>，钩子清单在 <code>include/linux/lsm_hook_defs.h</code>），由启用的安全模块决定放行与否：SELinux（基于标签的完整 MAC）、AppArmor（基于路径的配置文件）、Landlock（非特权进程给自己加限制）、Yama（限制 ptrace）、lockdown（限制连 root 也不能做的事，如写 <code>/dev/mem</code>、加载未签名模块）。完整性一侧有模块签名（<code>CONFIG_MODULE_SIG</code>）、IMA/EVM、dm-verity。</p>
+  <p lang="en"><strong>Linux LSM</strong>: at sensitive operations the kernel calls <code>security_*</code> hooks (for example <code>security_file_open</code>; the hook list is in <code>include/linux/lsm_hook_defs.h</code>), and the enabled security modules decide whether to allow the operation: SELinux (full label-based MAC), AppArmor (path-based profiles), Landlock (unprivileged processes restricting themselves), Yama (restricts ptrace), and lockdown (restricts things that not even root may do, such as writing <code>/dev/mem</code> or loading unsigned modules). On the integrity side there are module signing (<code>CONFIG_MODULE_SIG</code>), IMA/EVM and dm-verity.</p>
+  <p lang="zh-CN"><strong>XNU MACF</strong>（源自 TrustedBSD）：内核在同类位置调用 <code>mac_*_check_*</code>（如 <code>mac_vnode_check_open</code>，<code>security/mac_vfs.c</code>；IOKit 有 <code>mac_iokit_check_open</code>），策略模块用 <code>mac_policy_register</code> 注册（<code>security/mac_base.c</code>）。主要策略是两个内核扩展：<strong>Sandbox</strong>（Seatbelt：按配置文件限制文件、Mach 服务查找、IOKit 打开等，Lab B 能在内核日志里看到它的 <code>deny</code> 记录）和 <strong>AMFI</strong>（AppleMobileFileIntegrity：执行时校验代码签名与 entitlements，配合用户态 <code>amfid</code>；内核侧代码签名状态在 <code>bsd/kern/kern_cs.c</code>、<code>ubc_subr.c</code>）。<strong>SIP</strong>（System Integrity Protection）是「连 root 也不行」的那一层：保护系统文件、受保护进程、内核扩展加载等，检查点是 <code>csr_check()</code>（<code>bsd/kern/kern_csr.c</code>），只能在 recoveryOS 里修改。macOS 11 起的系统卷还是签名封存的只读快照（SSV），在 Apple Silicon 上 SPTM/TXM 也参与到「哪些代码可以执行」的决策中。延伸阅读：《*OS Internals》Vol. III 的 MACF、代码签名、Sandbox 相关章节；《The Design and Implementation of the FreeBSD Operating System》安全相关章节（MACF 源自 TrustedBSD）。</p>
+  <p lang="en"><strong>XNU MACF</strong> (derived from TrustedBSD): at the same kinds of places the kernel calls <code>mac_*_check_*</code> (such as <code>mac_vnode_check_open</code>, <code>security/mac_vfs.c</code>; IOKit has <code>mac_iokit_check_open</code>), and policy modules register with <code>mac_policy_register</code> (<code>security/mac_base.c</code>). The main policies are two kernel extensions: <strong>Sandbox</strong> (Seatbelt: restricts files, Mach service lookups, IOKit opens and so on according to a profile; in Lab B you can see its <code>deny</code> records in the kernel log) and <strong>AMFI</strong> (AppleMobileFileIntegrity: verifies code signatures and entitlements at exec time, together with the user-space <code>amfid</code>; the kernel-side code-signing state is in <code>bsd/kern/kern_cs.c</code> and <code>ubc_subr.c</code>). <strong>SIP</strong> (System Integrity Protection) is the “not even root” layer: it protects system files, protected processes, kernel-extension loading and so on; its check point is <code>csr_check()</code> (<code>bsd/kern/kern_csr.c</code>), and it can be changed only in recoveryOS. Since macOS 11 the system volume has also been a signed, sealed, read-only snapshot (SSV), and on Apple Silicon SPTM/TXM also take part in deciding “which code may execute”. Further reading: the MACF, code-signing and Sandbox chapters of <em>*OS Internals</em> Vol. III; the security chapters of <em>The Design and Implementation of the FreeBSD Operating System</em> (MACF derives from TrustedBSD).</p>
 
-  <h3>8. 读 CVE 分析</h3>
-  <p>读任何一篇内核漏洞分析都填同一张表：<strong>① 根因</strong>（哪一行代码、属于哪类错误：越界、UAF、竞态、未初始化、逻辑）；<strong>② 可达性</strong>（从什么权限、经哪个接口触发，沙箱里能否够到）；<strong>③ 原语</strong>（漏洞直接给了什么：读/写多少字节、能否重复）；<strong>④ 缓解</strong>（哪些措施让利用更难，作者怎样绕过——或者为什么根本不需要绕过）；<strong>⑤ 修复</strong>（补丁改了什么，是只修这一处还是消灭了一类问题）。</p>
-  <p>两个好练习：<strong>Dirty Pipe</strong>（CVE-2022-0847，Linux）——管道缓冲区的 <code>flags</code> 字段在某条路径上未初始化，残留的「可合并」标志让写入落进只读文件的页缓存；它是逻辑错误、不涉及内存破坏，KASLR、PAN、CFI 全都帮不上，修复只是把 flags 初始化——说明缓解措施不能替代正确的代码。<strong>XNU</strong> 一侧读 Project Zero 博客上 Ian Beer 等人的 iOS 内核分析：注意它们怎样因为 PAC 而走向 data-only 利用，以及 Apple 随后在 kalloc_type、只读 zone、SPTM 上的应对。</p>
+  <h3 lang="zh-CN">8. 读 CVE 分析</h3><h3 lang="en">8. Reading CVE analyses</h3>
+  <p lang="zh-CN">读任何一篇内核漏洞分析都填同一张表：<strong>① 根因</strong>（哪一行代码、属于哪类错误：越界、UAF、竞态、未初始化、逻辑）；<strong>② 可达性</strong>（从什么权限、经哪个接口触发，沙箱里能否够到）；<strong>③ 原语</strong>（漏洞直接给了什么：读/写多少字节、能否重复）；<strong>④ 缓解</strong>（哪些措施让利用更难，作者怎样绕过——或者为什么根本不需要绕过）；<strong>⑤ 修复</strong>（补丁改了什么，是只修这一处还是消灭了一类问题）。</p>
+  <p lang="en">For any kernel vulnerability analysis you read, fill in the same table: <strong>① Root cause</strong> (which line of code, and which class of error: out-of-bounds, UAF, race, uninitialised, logic); <strong>② Reachability</strong> (from what privilege and through which interface it is triggered, and whether it can be reached from inside a sandbox); <strong>③ Primitive</strong> (what the bug gives directly: how many bytes of read/write, and whether it can be repeated); <strong>④ Mitigations</strong> (which measures make exploitation harder and how the author got around them — or why no bypass was needed at all); <strong>⑤ Fix</strong> (what the patch changed, and whether it fixes just this one spot or eliminates a whole class of problems).</p>
+  <p lang="zh-CN">两个好练习：<strong>Dirty Pipe</strong>（CVE-2022-0847，Linux）——管道缓冲区的 <code>flags</code> 字段在某条路径上未初始化，残留的「可合并」标志让写入落进只读文件的页缓存；它是逻辑错误、不涉及内存破坏，KASLR、PAN、CFI 全都帮不上，修复只是把 flags 初始化——说明缓解措施不能替代正确的代码。<strong>XNU</strong> 一侧读 Project Zero 博客上 Ian Beer 等人的 iOS 内核分析：注意它们怎样因为 PAC 而走向 data-only 利用，以及 Apple 随后在 kalloc_type、只读 zone、SPTM 上的应对。</p>
+  <p lang="en">Two good exercises: <strong>Dirty Pipe</strong> (CVE-2022-0847, Linux) — the <code>flags</code> field of a pipe buffer was left uninitialised on one path, and a leftover “can merge” flag let writes land in the page cache of a read-only file; it is a logic error with no memory corruption involved, so KASLR, PAN and CFI are all of no help, and the fix was simply to initialise the flags — which shows that mitigations cannot replace correct code. On the <strong>XNU</strong> side, read the iOS kernel analyses by Ian Beer and others on the Project Zero blog: notice how PAC pushed them towards data-only exploitation, and how Apple then responded with kalloc_type, read-only zones and SPTM.</p>
 
-  <h2 id="compare">对照表</h2>
+  <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th>这件事</th><th class="linux">Linux（arm64）</th><th class="xnu">XNU（Apple silicon）</th></tr>
-    <tr><td>内核地址随机化</td><td><code>CONFIG_RANDOMIZE_BASE</code>；panic 打印 <code>Kernel Offset</code></td><td>kernel slide（<code>vm_kernel_slide</code>）；panic log 记 <code>Kernel slide</code></td></tr>
-    <tr><td>不泄露内核地址</td><td><code>kptr_restrict</code>、<code>%pK</code>、哈希 <code>%p</code>、<code>dmesg_restrict</code></td><td><code>VM_KERNEL_ADDRPERM</code>/<code>UNSLIDE</code>；<code>kas_info</code> 需 root + MACF</td></tr>
-    <tr><td>用户态 ASLR</td><td><code>randomize_va_space</code>（0/1/2）</td><td>进程 ASLR + dyld 共享缓存滑动</td></tr>
-    <tr><td>内核代码不可改</td><td><code>STRICT_KERNEL_RWX</code>、<code>rodata=full</code>（内核自设）</td><td>KIP / KTRR、CTRR（硬件锁定）</td></tr>
-    <tr><td>不执行 / 不直接访问用户内存</td><td>PXN；PAN（<code>ARM64_PAN</code>、<code>SW_TTBR0_PAN</code>、<code>EPAN</code>）</td><td>PXN；PAN；<code>copyin</code>/<code>copyout</code></td></tr>
-    <tr><td>栈溢出检测</td><td><code>STACKPROTECTOR_STRONG</code>、<code>_PER_TASK</code></td><td><code>__stack_chk_guard</code></td></tr>
-    <tr><td>返回地址保护</td><td>pac-ret（IA，<code>paciasp</code>）或 shadow call stack</td><td>arm64e（IB，<code>pacibsp</code>/<code>retab</code>）</td></tr>
-    <tr><td>前向边 CFI</td><td>kCFI（<code>CONFIG_CFI</code>）+ BTI</td><td>PAC 签名的函数指针与 vtable</td></tr>
-    <tr><td>页表完整性</td><td>主线无；厂商 hypervisor 方案</td><td>PPL（A12–A14、M1）→ SPTM + TXM（A15+、M2+）</td></tr>
-    <tr><td>堆隔离</td><td>freelist 加固、<code>SLAB_BUCKETS</code>、<code>KMALLOC_PARTITION_CACHES</code>（旧名 <code>RANDOM_KMALLOC_CACHES</code>）</td><td><code>kalloc_type</code>、<code>kalloc_data</code>、只读 zone</td></tr>
-    <tr><td>硬件内存标签</td><td>MTE、<code>KASAN_HW_TAGS</code></td><td>MIE（EMTE 同步模式，A19 / M5+）</td></tr>
-    <tr><td>强制访问控制框架</td><td>LSM：<code>security_file_open</code> 等钩子；SELinux、AppArmor、Landlock</td><td>MACF：<code>mac_vnode_check_open</code> 等；Sandbox.kext</td></tr>
-    <tr><td>代码签名 / 完整性</td><td>模块签名、IMA/EVM、dm-verity</td><td>AMFI + 代码签名、TXM、签名系统卷（SSV）</td></tr>
-    <tr><td>连 root 也不行</td><td>lockdown LSM</td><td>SIP（<code>csr_check</code>）</td></tr>
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th class="linux"><span lang="zh-CN">Linux（arm64）</span><span lang="en">Linux (arm64)</span></th><th class="xnu"><span lang="zh-CN">XNU（Apple silicon）</span><span lang="en">XNU (Apple silicon)</span></th></tr>
+    <tr><td><span lang="zh-CN">内核地址随机化</span><span lang="en">Kernel address randomisation</span></td><td><span lang="zh-CN"><code>CONFIG_RANDOMIZE_BASE</code>；panic 打印 <code>Kernel Offset</code></span><span lang="en"><code>CONFIG_RANDOMIZE_BASE</code>; a panic prints <code>Kernel Offset</code></span></td><td><span lang="zh-CN">kernel slide（<code>vm_kernel_slide</code>）；panic log 记 <code>Kernel slide</code></span><span lang="en">kernel slide (<code>vm_kernel_slide</code>); the panic log records <code>Kernel slide</code></span></td></tr>
+    <tr><td><span lang="zh-CN">不泄露内核地址</span><span lang="en">Not leaking kernel addresses</span></td><td><span lang="zh-CN"><code>kptr_restrict</code>、<code>%pK</code>、哈希 <code>%p</code>、<code>dmesg_restrict</code></span><span lang="en"><code>kptr_restrict</code>, <code>%pK</code>, hashed <code>%p</code>, <code>dmesg_restrict</code></span></td><td><span lang="zh-CN"><code>VM_KERNEL_ADDRPERM</code>/<code>UNSLIDE</code>；<code>kas_info</code> 需 root + MACF</span><span lang="en"><code>VM_KERNEL_ADDRPERM</code>/<code>UNSLIDE</code>; <code>kas_info</code> needs root + MACF</span></td></tr>
+    <tr><td><span lang="zh-CN">用户态 ASLR</span><span lang="en">User-space ASLR</span></td><td><span lang="zh-CN"><code>randomize_va_space</code>（0/1/2）</span><span lang="en"><code>randomize_va_space</code> (0/1/2)</span></td><td><span lang="zh-CN">进程 ASLR + dyld 共享缓存滑动</span><span lang="en">process ASLR + dyld shared cache slide</span></td></tr>
+    <tr><td><span lang="zh-CN">内核代码不可改</span><span lang="en">Immutable kernel code</span></td><td><span lang="zh-CN"><code>STRICT_KERNEL_RWX</code>、<code>rodata=full</code>（内核自设）</span><span lang="en"><code>STRICT_KERNEL_RWX</code>, <code>rodata=full</code> (set by the kernel itself)</span></td><td><span lang="zh-CN">KIP / KTRR、CTRR（硬件锁定）</span><span lang="en">KIP / KTRR, CTRR (hardware-locked)</span></td></tr>
+    <tr><td><span lang="zh-CN">不执行 / 不直接访问用户内存</span><span lang="en">No executing / no direct access to user memory</span></td><td><span lang="zh-CN">PXN；PAN（<code>ARM64_PAN</code>、<code>SW_TTBR0_PAN</code>、<code>EPAN</code>）</span><span lang="en">PXN; PAN (<code>ARM64_PAN</code>, <code>SW_TTBR0_PAN</code>, <code>EPAN</code>)</span></td><td><span lang="zh-CN">PXN；PAN；<code>copyin</code>/<code>copyout</code></span><span lang="en">PXN; PAN; <code>copyin</code>/<code>copyout</code></span></td></tr>
+    <tr><td><span lang="zh-CN">栈溢出检测</span><span lang="en">Stack-overflow detection</span></td><td><span lang="zh-CN"><code>STACKPROTECTOR_STRONG</code>、<code>_PER_TASK</code></span><span lang="en"><code>STACKPROTECTOR_STRONG</code>, <code>_PER_TASK</code></span></td><td><code>__stack_chk_guard</code></td></tr>
+    <tr><td><span lang="zh-CN">返回地址保护</span><span lang="en">Return-address protection</span></td><td><span lang="zh-CN">pac-ret（IA，<code>paciasp</code>）或 shadow call stack</span><span lang="en">pac-ret (IA, <code>paciasp</code>) or shadow call stack</span></td><td><span lang="zh-CN">arm64e（IB，<code>pacibsp</code>/<code>retab</code>）</span><span lang="en">arm64e (IB, <code>pacibsp</code>/<code>retab</code>)</span></td></tr>
+    <tr><td><span lang="zh-CN">前向边 CFI</span><span lang="en">Forward-edge CFI</span></td><td><span lang="zh-CN">kCFI（<code>CONFIG_CFI</code>）+ BTI</span><span lang="en">kCFI (<code>CONFIG_CFI</code>) + BTI</span></td><td><span lang="zh-CN">PAC 签名的函数指针与 vtable</span><span lang="en">PAC-signed function pointers and vtables</span></td></tr>
+    <tr><td><span lang="zh-CN">页表完整性</span><span lang="en">Page-table integrity</span></td><td><span lang="zh-CN">主线无；厂商 hypervisor 方案</span><span lang="en">none in mainline; vendor hypervisor schemes</span></td><td><span lang="zh-CN">PPL（A12–A14、M1）→ SPTM + TXM（A15+、M2+）</span><span lang="en">PPL (A12–A14, M1) → SPTM + TXM (A15+, M2+)</span></td></tr>
+    <tr><td><span lang="zh-CN">堆隔离</span><span lang="en">Heap isolation</span></td><td><span lang="zh-CN">freelist 加固、<code>SLAB_BUCKETS</code>、<code>KMALLOC_PARTITION_CACHES</code>（旧名 <code>RANDOM_KMALLOC_CACHES</code>）</span><span lang="en">freelist hardening, <code>SLAB_BUCKETS</code>, <code>KMALLOC_PARTITION_CACHES</code> (formerly <code>RANDOM_KMALLOC_CACHES</code>)</span></td><td><span lang="zh-CN"><code>kalloc_type</code>、<code>kalloc_data</code>、只读 zone</span><span lang="en"><code>kalloc_type</code>, <code>kalloc_data</code>, read-only zones</span></td></tr>
+    <tr><td><span lang="zh-CN">硬件内存标签</span><span lang="en">Hardware memory tagging</span></td><td><span lang="zh-CN">MTE、<code>KASAN_HW_TAGS</code></span><span lang="en">MTE, <code>KASAN_HW_TAGS</code></span></td><td><span lang="zh-CN">MIE（EMTE 同步模式，A19 / M5+）</span><span lang="en">MIE (EMTE in synchronous mode, A19 / M5+)</span></td></tr>
+    <tr><td><span lang="zh-CN">强制访问控制框架</span><span lang="en">Mandatory access control framework</span></td><td><span lang="zh-CN">LSM：<code>security_file_open</code> 等钩子；SELinux、AppArmor、Landlock</span><span lang="en">LSM: hooks such as <code>security_file_open</code>; SELinux, AppArmor, Landlock</span></td><td><span lang="zh-CN">MACF：<code>mac_vnode_check_open</code> 等；Sandbox.kext</span><span lang="en">MACF: <code>mac_vnode_check_open</code> and others; Sandbox.kext</span></td></tr>
+    <tr><td><span lang="zh-CN">代码签名 / 完整性</span><span lang="en">Code signing / integrity</span></td><td><span lang="zh-CN">模块签名、IMA/EVM、dm-verity</span><span lang="en">module signing, IMA/EVM, dm-verity</span></td><td><span lang="zh-CN">AMFI + 代码签名、TXM、签名系统卷（SSV）</span><span lang="en">AMFI + code signing, TXM, signed system volume (SSV)</span></td></tr>
+    <tr><td><span lang="zh-CN">连 root 也不行</span><span lang="en">Not even root</span></td><td>lockdown LSM</td><td><span lang="zh-CN">SIP（<code>csr_check</code>）</span><span lang="en">SIP (<code>csr_check</code>)</span></td></tr>
   </table>
   </div>
 
-  <h2 id="diagram">动画图解</h2>
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
 
-  <h3>A · PAC：签名返回地址 → 篡改 → 校验失败</h3>
+  <h3 lang="zh-CN">A · PAC：签名返回地址 → 篡改 → 校验失败</h3><h3 lang="en">A · PAC: sign the return address → tamper → verification fails</h3>
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
          data-captions='["全图：上方是一个用户态返回地址的 64 位布局（48 位 VA、开启 TBI）。下面左列 Linux pac-ret（IA 密钥，paciasp / autiasp），右列 XNU arm64e（IB 密钥，pacibsp / retab）。看一次返回地址被签名、被篡改、被拦下。",
@@ -119,14 +149,21 @@
            "③ 篡改：一次栈溢出把保存的 LR 改成攻击者想去的地址。攻击者拿不到密钥，算不出与这个 SP 相配的 PAC，只能沿用旧 PAC 或去猜。",
            "④ 返回前校验：ldp 取回 LR；Linux 执行 autiasp，XNU 执行 retab（校验与返回合为一条），用同一 SP、同一密钥重算 PAC 并比较。",
            "⑤ 不匹配：有 FEAT_FPAC 时 aut 指令当场产生异常（EC 0x1C）——Linux 用户态收到 SIGILL（do_el0_fpac），内核态 Oops - FPAC；XNU 进入 handle_pac_fail。没有 FPAC 时 aut 把高位改成错误码，指针变成非规范地址，ret 跳过去时触发 translation fault。",
-           "⑥ 正常路径：没被篡改时 PAC 匹配，aut 去掉 PAC、恢复原地址，ret 回到调用者。代价只是入口和出口各一条指令；paciasp 与 autiasp 位于 HINT 编码空间，在不支持 PAC 的旧 CPU 上当 NOP 执行。"]'>
+           "⑥ 正常路径：没被篡改时 PAC 匹配，aut 去掉 PAC、恢复原地址，ret 回到调用者。代价只是入口和出口各一条指令；paciasp 与 autiasp 位于 HINT 编码空间，在不支持 PAC 的旧 CPU 上当 NOP 执行。"]'
+         data-captions-en='["The whole picture: at the top, the 64-bit layout of a user-space return address (48-bit VA, TBI enabled). Below, Linux pac-ret on the left (IA key, paciasp / autiasp) and XNU arm64e on the right (IB key, pacibsp / retab). Watch a return address get signed, tampered with and stopped.",
+           "① Signing at function entry: Linux paciasp, XNU pacibsp. The CPU computes a PAC from LR (x30), using the current SP as the modifier and a key that software cannot read, and writes it into the unused high bits of the address. With a 48-bit VA and TBI enabled it takes only the 7 bits [54:48]; the number of bits varies with the VA width and TBI.",
+           "② Save: stp x29, x30, [sp, #-16]! pushes the signed LR onto the stack. From now on the return address on the stack carries the PAC.",
+           "③ Tamper: a stack overflow overwrites the saved LR with the address the attacker wants to go to. The attacker does not have the key and cannot compute a PAC that matches this SP, so the only options are to keep the old PAC or to guess.",
+           "④ Verify before returning: ldp reloads LR; Linux executes autiasp, XNU executes retab (verification and return in one instruction), recomputing the PAC with the same SP and the same key and comparing.",
+           "⑤ Mismatch: with FEAT_FPAC the aut instruction raises an exception on the spot (EC 0x1C) — on Linux, user space receives SIGILL (do_el0_fpac) and kernel mode gives Oops - FPAC; XNU enters handle_pac_fail. Without FPAC, aut turns the high bits into an error code, the pointer becomes a non-canonical address, and a translation fault is raised when ret jumps to it.",
+           "⑥ Normal path: when nothing was tampered with, the PAC matches, aut strips the PAC and restores the original address, and ret returns to the caller. The cost is just one instruction at entry and one at exit; paciasp and autiasp sit in the HINT encoding space and execute as NOPs on older CPUs without PAC."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
       <!-- pointer layout -->
-      <text x="60" y="22" class="small">用户态返回地址（48-bit VA，TBI 开启）</text>
+      <text x="60" y="22" class="small" lang="zh-CN">用户态返回地址（48-bit VA，TBI 开启）</text><text x="60" y="22" class="small" lang="en">user-space return address (48-bit VA, TBI enabled)</text>
       <g data-step="1 4 6"><rect class="box" x="60" y="30" width="130" height="40"/>
         <text x="70" y="55" class="mono">[63:56] TBI</text>
         <rect class="box" x="190" y="30" width="70" height="40"/>
@@ -134,58 +171,58 @@
         <rect class="box xnu pulse" x="260" y="30" width="170" height="40"/>
         <text x="272" y="55" class="mono">[54:48] PAC</text>
         <rect class="box" x="430" y="30" width="410" height="40"/>
-        <text x="442" y="55" class="mono">[47:0] 虚拟地址（真正用来寻址）</text></g>
+        <text x="442" y="55" class="mono" lang="zh-CN">[47:0] 虚拟地址（真正用来寻址）</text><text x="442" y="55" class="mono" lang="en">[47:0] virtual address (used for addressing)</text></g>
       <line x1="450" y1="80" x2="450" y2="396" class="lane"/>
-      <text x="150" y="92" class="small" style="fill: var(--linux)">Linux · pac-ret（IA）</text>
-      <text x="590" y="92" class="small" style="fill: var(--xnu)">XNU · arm64e（IB）</text>
+      <text x="150" y="92" class="small" style="fill: var(--linux)" lang="zh-CN">Linux · pac-ret（IA）</text><text x="150" y="92" class="small" style="fill: var(--linux)" lang="en">Linux · pac-ret (IA)</text>
+      <text x="590" y="92" class="small" style="fill: var(--xnu)" lang="zh-CN">XNU · arm64e（IB）</text><text x="590" y="92" class="small" style="fill: var(--xnu)" lang="en">XNU · arm64e (IB)</text>
 
       <g data-step="1"><rect class="box linux" x="20" y="100" width="416" height="44"/>
         <text x="30" y="118" class="mono">paciasp        ; x30 ← PAC(x30, sp, IA)</text>
-        <text x="30" y="136" class="small">函数入口；HINT 空间，旧 CPU 上是 NOP</text></g>
+        <text x="30" y="136" class="small" lang="zh-CN">函数入口；HINT 空间，旧 CPU 上是 NOP</text><text x="30" y="136" class="small" lang="en">function entry; HINT space, a NOP on older CPUs</text></g>
       <g data-step="1"><rect class="box xnu" x="464" y="100" width="416" height="44"/>
         <text x="474" y="118" class="mono">pacibsp        ; x30 ← PAC(x30, sp, IB)</text>
-        <text x="474" y="136" class="small">XNU 宏 ARM64_STACK_PROLOG（osfmk/arm64/asm.h）</text></g>
+        <text x="474" y="136" class="small" lang="zh-CN">XNU 宏 ARM64_STACK_PROLOG（osfmk/arm64/asm.h）</text><text x="474" y="136" class="small" lang="en">XNU macro ARM64_STACK_PROLOG (osfmk/arm64/asm.h)</text></g>
 
       <g data-step="2 3"><rect class="box linux" x="20" y="150" width="416" height="44"/>
         <text x="30" y="168" class="mono">stp x29, x30, [sp, #-16]!</text>
-        <text x="30" y="186" class="small">栈上：[fp][LR = 0x0054_aaaa_b179_0894]（PAC 在高位）</text></g>
+        <text x="30" y="186" class="small" lang="zh-CN">栈上：[fp][LR = 0x0054_aaaa_b179_0894]（PAC 在高位）</text><text x="30" y="186" class="small" lang="en">on the stack: [fp][LR = 0x0054_aaaa_b179_0894] (PAC in high bits)</text></g>
       <g data-step="2 3"><rect class="box xnu" x="464" y="150" width="416" height="44"/>
         <text x="474" y="168" class="mono">stp x29, x30, [sp, #-16]!</text>
-        <text x="474" y="186" class="small">栈上保存的是签过名的 LR</text></g>
+        <text x="474" y="186" class="small" lang="zh-CN">栈上保存的是签过名的 LR</text><text x="474" y="186" class="small" lang="en">the stack holds the signed LR</text></g>
 
       <g data-step="3"><rect class="box linux pulse" x="20" y="200" width="416" height="44"/>
         <text x="30" y="218" class="mono">memcpy(buf, input, too_long)</text>
-        <text x="30" y="236" class="small">溢出覆盖保存的 LR → 攻击者的地址，PAC 不对</text></g>
+        <text x="30" y="236" class="small" lang="zh-CN">溢出覆盖保存的 LR → 攻击者的地址，PAC 不对</text><text x="30" y="236" class="small" lang="en">overflow overwrites saved LR → attacker address, wrong PAC</text></g>
       <g data-step="3"><rect class="box xnu pulse" x="464" y="200" width="416" height="44"/>
-        <text x="474" y="218" class="mono">同样的溢出</text>
-        <text x="474" y="236" class="small">没有 IB 密钥，算不出与此 SP 相配的 PAC</text></g>
+        <text x="474" y="218" class="mono" lang="zh-CN">同样的溢出</text><text x="474" y="218" class="mono" lang="en">the same overflow</text>
+        <text x="474" y="236" class="small" lang="zh-CN">没有 IB 密钥，算不出与此 SP 相配的 PAC</text><text x="474" y="236" class="small" lang="en">no IB key, so no PAC that matches this SP</text></g>
 
       <g data-step="4"><rect class="box linux" x="20" y="250" width="416" height="44"/>
         <text x="30" y="268" class="mono">ldp x29, x30, [sp], #16 ; autiasp</text>
-        <text x="30" y="286" class="small">同一 SP、同一 IA 密钥重算并比较</text></g>
+        <text x="30" y="286" class="small" lang="zh-CN">同一 SP、同一 IA 密钥重算并比较</text><text x="30" y="286" class="small" lang="en">recompute with the same SP and IA key, compare</text></g>
       <g data-step="4"><rect class="box xnu" x="464" y="250" width="416" height="44"/>
         <text x="474" y="268" class="mono">ldp x29, x30, [sp], #16 ; retab</text>
-        <text x="474" y="286" class="small">校验 + 返回合一（ARM64_STACK_EPILOG）</text></g>
+        <text x="474" y="286" class="small" lang="zh-CN">校验 + 返回合一（ARM64_STACK_EPILOG）</text><text x="474" y="286" class="small" lang="en">verify + return in one (ARM64_STACK_EPILOG)</text></g>
 
       <g data-step="5"><rect class="box linux" x="20" y="300" width="416" height="44"/>
         <text x="30" y="318" class="mono">FPAC: EC 0x1C → SIGILL / Oops - FPAC</text>
-        <text x="30" y="336" class="small">do_el0_fpac / do_el1_fpac；无 FPAC：非规范地址 → fault</text></g>
+        <text x="30" y="336" class="small" lang="zh-CN">do_el0_fpac / do_el1_fpac；无 FPAC：非规范地址 → fault</text><text x="30" y="336" class="small" lang="en">do_el0_fpac / do_el1_fpac; no FPAC: non-canonical → fault</text></g>
       <g data-step="5"><rect class="box xnu" x="464" y="300" width="416" height="44"/>
         <text x="474" y="318" class="mono">ESR_EC_PAC_FAIL → handle_pac_fail</text>
-        <text x="474" y="336" class="small">osfmk/arm64/sleh.c；编译器插的 brk 检查也会报告</text></g>
+        <text x="474" y="336" class="small" lang="zh-CN">osfmk/arm64/sleh.c；编译器插的 brk 检查也会报告</text><text x="474" y="336" class="small" lang="en">osfmk/arm64/sleh.c; compiler-inserted brk checks report too</text></g>
 
       <g data-step="6"><rect class="box" x="20" y="350" width="416" height="44"/>
-        <text x="30" y="368" class="mono">PAC 匹配 → 去掉 PAC → ret</text>
-        <text x="30" y="386" class="small">回到调用者，用户无感</text>
+        <text x="30" y="368" class="mono" lang="zh-CN">PAC 匹配 → 去掉 PAC → ret</text><text x="30" y="368" class="mono" lang="en">PAC matches → strip PAC → ret</text>
+        <text x="30" y="386" class="small" lang="zh-CN">回到调用者，用户无感</text><text x="30" y="386" class="small" lang="en">back to the caller, invisible to the user</text>
         <rect class="box" x="464" y="350" width="416" height="44"/>
-        <text x="474" y="368" class="mono">PAC 匹配 → retab 直接返回</text>
-        <text x="474" y="386" class="small">回到调用者</text>
+        <text x="474" y="368" class="mono" lang="zh-CN">PAC 匹配 → retab 直接返回</text><text x="474" y="368" class="mono" lang="en">PAC matches → retab returns directly</text>
+        <text x="474" y="386" class="small" lang="zh-CN">回到调用者</text><text x="474" y="386" class="small" lang="en">back to the caller</text>
         <path class="arrow flow" d="M10 372 L10 122 L18 122"/>
         <path class="arrow flow" d="M890 372 L890 122 L882 122"/></g>
     </svg>
   </div>
 
-  <h3>B · 层层缓解：攻击者每一步撞上什么</h3>
+  <h3 lang="zh-CN">B · 层层缓解：攻击者每一步撞上什么</h3><h3 lang="en">B · Layered mitigations: what the attacker hits at each step</h3>
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2600"
          data-captions='["全图：中间一列是攻击者手里有一个内核内存破坏漏洞之后想做的事，自上而下；左边是 Linux 在这一步的对应防线，右边是 XNU。每一层不必单独挡住所有攻击，只要让下一步更贵。",
@@ -194,77 +231,84 @@
            "③ 想直接改内核代码。Linux 用 STRICT_KERNEL_RWX 和 rodata=full，但这是内核自己设的页表权限；XNU 的 KIP（KTRR / CTRR）由硬件在初始化后锁定，内核自己也改不回来。",
            "④ 想劫持控制流：改返回地址或函数指针。Linux 用 pac-ret、BTI、kCFI；XNU arm64e 给返回地址、函数指针、vtable 都签名。攻击者转向只改数据的 data-only 攻击。",
            "⑤ 拿到任意读写后想改页表，给自己加权限。Linux 主线没有这一层，内核总能写自己的页表；XNU 由 PPL（A12 到 A14、M1）或 SPTM 加 TXM（A15、M2 及以后）在更高特权里独占页表修改。",
-           "⑥ 剩下的路：改关键数据，例如进程凭证。XNU 用 kalloc_type 和只读 zone（proc_ro 里的 p_ucred）提高门槛，A19 与 M5 上再加 MIE；Linux 有 freelist 加固、SLAB_BUCKETS、KMALLOC_PARTITION_CACHES。而 Sandbox 与 LSM 从一开始就缩小了能碰到的攻击面。"]'>
+           "⑥ 剩下的路：改关键数据，例如进程凭证。XNU 用 kalloc_type 和只读 zone（proc_ro 里的 p_ucred）提高门槛，A19 与 M5 上再加 MIE；Linux 有 freelist 加固、SLAB_BUCKETS、KMALLOC_PARTITION_CACHES。而 Sandbox 与 LSM 从一开始就缩小了能碰到的攻击面。"]'
+         data-captions-en='["The whole picture: the middle column lists, from top to bottom, what an attacker who holds a kernel memory-corruption bug wants to do next; the left side is the matching Linux defence at that step, the right side is XNU. No single layer has to stop every attack on its own; it only has to make the next step more expensive.",
+           "① Wants to use hard-coded kernel addresses. KASLR makes the addresses differ on every boot: Linux CONFIG_RANDOMIZE_BASE plus kptr_restrict; XNU kernel slide plus VM_KERNEL_ADDRPERM. The attacker is forced to find an information-leak bug first.",
+           "② Wants the kernel to execute or read something placed in user memory (ret2usr, forged objects). PXN forbids the kernel from executing user pages and PAN forbids it from reading or writing user pages directly, leaving only copy_from_user or copyin. The attacker is forced to spray data into the kernel heap.",
+           "③ Wants to modify kernel code directly. Linux uses STRICT_KERNEL_RWX and rodata=full, but these are page-table permissions the kernel sets itself; XNU KIP (KTRR / CTRR) is locked by hardware after initialisation, and not even the kernel can change it back.",
+           "④ Wants to hijack control flow: overwrite a return address or a function pointer. Linux uses pac-ret, BTI and kCFI; XNU arm64e signs return addresses, function pointers and vtables. The attacker turns to data-only attacks that modify only data.",
+           "⑤ Has arbitrary read/write and wants to modify the page tables to grant itself permissions. Mainline Linux has no such layer: the kernel can always write its own page tables. On XNU, PPL (A12 to A14, M1) or SPTM plus TXM (A15, M2 and later) holds exclusive control of page-table changes at a higher privilege.",
+           "⑥ The remaining path: modify critical data, such as process credentials. XNU raises the bar with kalloc_type and read-only zones (p_ucred in proc_ro), adding MIE on A19 and M5; Linux has freelist hardening, SLAB_BUCKETS and KMALLOC_PARTITION_CACHES. And Sandbox and LSM shrink the reachable attack surface from the very start."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="90" y="20" class="small" style="fill: var(--linux)">Linux 的防线</text>
-      <text x="380" y="20" class="small">攻击者想做的事</text>
-      <text x="700" y="20" class="small" style="fill: var(--xnu)">XNU 的防线</text>
+      <text x="90" y="20" class="small" style="fill: var(--linux)" lang="zh-CN">Linux 的防线</text><text x="90" y="20" class="small" style="fill: var(--linux)" lang="en">Linux defences</text>
+      <text x="380" y="20" class="small" lang="zh-CN">攻击者想做的事</text><text x="380" y="20" class="small" lang="en">what the attacker wants</text>
+      <text x="700" y="20" class="small" style="fill: var(--xnu)" lang="zh-CN">XNU 的防线</text><text x="700" y="20" class="small" style="fill: var(--xnu)" lang="en">XNU defences</text>
       <line x1="290" y1="28" x2="290" y2="396" class="lane"/>
       <line x1="610" y1="28" x2="610" y2="396" class="lane"/>
 
       <g data-step="1"><rect class="box" x="300" y="30" width="300" height="50"/>
-        <text x="310" y="51" class="mono">用写死的内核地址</text>
-        <text x="310" y="70" class="small">→ 先要一个信息泄露</text>
+        <text x="310" y="51" class="mono" lang="zh-CN">用写死的内核地址</text><text x="310" y="51" class="mono" lang="en">use hard-coded addresses</text>
+        <text x="310" y="70" class="small" lang="zh-CN">→ 先要一个信息泄露</text><text x="310" y="70" class="small" lang="en">→ needs an info leak first</text>
         <rect class="box linux" x="10" y="30" width="270" height="50"/>
         <text x="20" y="51" class="mono">KASLR · RANDOMIZE_BASE</text>
-        <text x="20" y="70" class="small">kptr_restrict、%pK、哈希 %p</text>
+        <text x="20" y="70" class="small" lang="zh-CN">kptr_restrict、%pK、哈希 %p</text><text x="20" y="70" class="small" lang="en">kptr_restrict, %pK, hashed %p</text>
         <rect class="box xnu" x="620" y="30" width="270" height="50"/>
         <text x="630" y="51" class="mono">kernel slide</text>
-        <text x="630" y="70" class="small">VM_KERNEL_ADDRPERM；kas_info 需 root</text></g>
+        <text x="630" y="70" class="small" lang="zh-CN">VM_KERNEL_ADDRPERM；kas_info 需 root</text><text x="630" y="70" class="small" lang="en">VM_KERNEL_ADDRPERM; kas_info needs root</text></g>
 
       <g data-step="2"><rect class="box" x="300" y="92" width="300" height="50"/>
-        <text x="310" y="113" class="mono">让内核用用户内存</text>
-        <text x="310" y="132" class="small">ret2usr / 在用户页伪造对象</text>
+        <text x="310" y="113" class="mono" lang="zh-CN">让内核用用户内存</text><text x="310" y="113" class="mono" lang="en">make kernel use user memory</text>
+        <text x="310" y="132" class="small" lang="zh-CN">ret2usr / 在用户页伪造对象</text><text x="310" y="132" class="small" lang="en">ret2usr / forged object in a user page</text>
         <rect class="box linux" x="10" y="92" width="270" height="50"/>
         <text x="20" y="113" class="mono">PXN + PAN</text>
-        <text x="20" y="132" class="small">ARM64_PAN、SW_TTBR0_PAN、EPAN</text>
+        <text x="20" y="132" class="small" lang="zh-CN">ARM64_PAN、SW_TTBR0_PAN、EPAN</text><text x="20" y="132" class="small" lang="en">ARM64_PAN, SW_TTBR0_PAN, EPAN</text>
         <rect class="box xnu" x="620" y="92" width="270" height="50"/>
         <text x="630" y="113" class="mono">PXN + PAN</text>
-        <text x="630" y="132" class="small">只经 copyin / copyout</text></g>
+        <text x="630" y="132" class="small" lang="zh-CN">只经 copyin / copyout</text><text x="630" y="132" class="small" lang="en">only via copyin / copyout</text></g>
 
       <g data-step="3"><rect class="box" x="300" y="154" width="300" height="50"/>
-        <text x="310" y="175" class="mono">改内核代码</text>
-        <text x="310" y="194" class="small">打补丁关掉检查</text>
+        <text x="310" y="175" class="mono" lang="zh-CN">改内核代码</text><text x="310" y="175" class="mono" lang="en">modify kernel code</text>
+        <text x="310" y="194" class="small" lang="zh-CN">打补丁关掉检查</text><text x="310" y="194" class="small" lang="en">patch out the checks</text>
         <rect class="box linux" x="10" y="154" width="270" height="50"/>
         <text x="20" y="175" class="mono">STRICT_KERNEL_RWX</text>
-        <text x="20" y="194" class="small">rodata=full；内核自设权限</text>
+        <text x="20" y="194" class="small" lang="zh-CN">rodata=full；内核自设权限</text><text x="20" y="194" class="small" lang="en">rodata=full; set by the kernel itself</text>
         <rect class="box xnu" x="620" y="154" width="270" height="50"/>
-        <text x="630" y="175" class="mono">KIP（KTRR / CTRR）</text>
-        <text x="630" y="194" class="small">硬件锁定，内核也改不了</text></g>
+        <text x="630" y="175" class="mono" lang="zh-CN">KIP（KTRR / CTRR）</text><text x="630" y="175" class="mono" lang="en">KIP (KTRR / CTRR)</text>
+        <text x="630" y="194" class="small" lang="zh-CN">硬件锁定，内核也改不了</text><text x="630" y="194" class="small" lang="en">hardware-locked; kernel cannot change it</text></g>
 
       <g data-step="4"><rect class="box" x="300" y="216" width="300" height="50"/>
-        <text x="310" y="237" class="mono">劫持控制流</text>
-        <text x="310" y="256" class="small">改返回地址 / 函数指针</text>
+        <text x="310" y="237" class="mono" lang="zh-CN">劫持控制流</text><text x="310" y="237" class="mono" lang="en">hijack control flow</text>
+        <text x="310" y="256" class="small" lang="zh-CN">改返回地址 / 函数指针</text><text x="310" y="256" class="small" lang="en">overwrite return address / function pointer</text>
         <rect class="box linux" x="10" y="216" width="270" height="50"/>
         <text x="20" y="237" class="mono">pac-ret + BTI + kCFI</text>
-        <text x="20" y="256" class="small">PTR_AUTH_KERNEL、BTI_KERNEL、CFI</text>
+        <text x="20" y="256" class="small" lang="zh-CN">PTR_AUTH_KERNEL、BTI_KERNEL、CFI</text><text x="20" y="256" class="small" lang="en">PTR_AUTH_KERNEL, BTI_KERNEL, CFI</text>
         <rect class="box xnu pulse" x="620" y="216" width="270" height="50"/>
-        <text x="630" y="237" class="mono">arm64e 全面 PAC</text>
-        <text x="630" y="256" class="small">返回地址、函数指针、vtable</text></g>
+        <text x="630" y="237" class="mono" lang="zh-CN">arm64e 全面 PAC</text><text x="630" y="237" class="mono" lang="en">arm64e PAC everywhere</text>
+        <text x="630" y="256" class="small" lang="zh-CN">返回地址、函数指针、vtable</text><text x="630" y="256" class="small" lang="en">return addresses, function pointers, vtables</text></g>
 
       <g data-step="5"><rect class="box" x="300" y="278" width="300" height="50"/>
-        <text x="310" y="299" class="mono">有任意读写，改页表</text>
-        <text x="310" y="318" class="small">给代码页加写权限、映射任意内存</text>
+        <text x="310" y="299" class="mono" lang="zh-CN">有任意读写，改页表</text><text x="310" y="299" class="mono" lang="en">arbitrary R/W: edit page tables</text>
+        <text x="310" y="318" class="small" lang="zh-CN">给代码页加写权限、映射任意内存</text><text x="310" y="318" class="small" lang="en">make code pages writable, map any memory</text>
         <rect class="box linux" x="10" y="278" width="270" height="50"/>
-        <text x="20" y="299" class="mono">主线无对应</text>
-        <text x="20" y="318" class="small">厂商 hypervisor 方案（推断）</text>
+        <text x="20" y="299" class="mono" lang="zh-CN">主线无对应</text><text x="20" y="299" class="mono" lang="en">nothing in mainline</text>
+        <text x="20" y="318" class="small" lang="zh-CN">厂商 hypervisor 方案（推断）</text><text x="20" y="318" class="small" lang="en">vendor hypervisor schemes (inference)</text>
         <rect class="box xnu pulse" x="620" y="278" width="270" height="50"/>
         <text x="630" y="299" class="mono">PPL → SPTM + TXM</text>
-        <text x="630" y="318" class="small">更高特权独占页表修改</text></g>
+        <text x="630" y="318" class="small" lang="zh-CN">更高特权独占页表修改</text><text x="630" y="318" class="small" lang="en">higher privilege owns page-table changes</text></g>
 
       <g data-step="6"><rect class="box" x="300" y="340" width="300" height="50"/>
-        <text x="310" y="361" class="mono">只改数据（凭证等）</text>
-        <text x="310" y="380" class="small">data-only 攻击</text>
+        <text x="310" y="361" class="mono" lang="zh-CN">只改数据（凭证等）</text><text x="310" y="361" class="mono" lang="en">modify data only (creds etc.)</text>
+        <text x="310" y="380" class="small" lang="zh-CN">data-only 攻击</text><text x="310" y="380" class="small" lang="en">data-only attacks</text>
         <rect class="box linux" x="10" y="340" width="270" height="50"/>
-        <text x="20" y="361" class="mono">slab 加固 · LSM</text>
-        <text x="20" y="380" class="small">SLAB_BUCKETS、KMALLOC_PARTITION</text>
+        <text x="20" y="361" class="mono" lang="zh-CN">slab 加固 · LSM</text><text x="20" y="361" class="mono" lang="en">slab hardening · LSM</text>
+        <text x="20" y="380" class="small" lang="zh-CN">SLAB_BUCKETS、KMALLOC_PARTITION</text><text x="20" y="380" class="small" lang="en">SLAB_BUCKETS, KMALLOC_PARTITION</text>
         <rect class="box xnu" x="620" y="340" width="270" height="50"/>
         <text x="630" y="361" class="mono">kalloc_type · RO zone · MIE</text>
-        <text x="630" y="380" class="small">proc_ro.p_ucred；Sandbox</text></g>
+        <text x="630" y="380" class="small" lang="zh-CN">proc_ro.p_ucred；Sandbox</text><text x="630" y="380" class="small" lang="en">proc_ro.p_ucred; Sandbox</text></g>
 
       <g data-step="1 2 3 4 5 6"><path class="arrow flow" d="M450 80 L450 92"/>
         <path class="arrow flow" d="M450 142 L450 154"/>
@@ -274,11 +318,12 @@
     </svg>
   </div>
 
-  <h2 id="lab">动手实验</h2>
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
   <div class="lab">
-    <h3>准备 · 一个可以在两边跑的 PAC 小程序</h3>
-    <p>Linux 版直接用 PAC 指令（内联汇编），存为 <code>pac_linux.c</code>：</p>
-<pre>#include &lt;stdio.h&gt;
+    <h3 lang="zh-CN">准备 · 一个可以在两边跑的 PAC 小程序</h3><h3 lang="en">Setup · A small PAC program that runs on both sides</h3>
+    <p lang="zh-CN">Linux 版直接用 PAC 指令（内联汇编），存为 <code>pac_linux.c</code>：</p>
+    <p lang="en">The Linux version uses the PAC instructions directly (inline assembly); save it as <code>pac_linux.c</code>:</p>
+<pre lang="zh-CN">#include &lt;stdio.h&gt;
 #include &lt;stdint.h&gt;
 
 static inline uint64_t pacia(uint64_t p, uint64_t mod) { __asm__ volatile("pacia %0, %1" : "+r"(p) : "r"(mod)); return p; }
@@ -299,7 +344,29 @@ int main(void) {
   printf("auth(tampered) = %#018llx  （无 FPAC：指针被毒化，不要调用它）\n", (unsigned long long)r);
   return 0;
 }</pre>
-    <p>macOS 版用编译器的 <code>&lt;ptrauth.h&gt;</code> 内建函数，存为 <code>pac_demo.c</code>：</p>
+<pre lang="en">#include &lt;stdio.h&gt;
+#include &lt;stdint.h&gt;
+
+static inline uint64_t pacia(uint64_t p, uint64_t mod) { __asm__ volatile("pacia %0, %1" : "+r"(p) : "r"(mod)); return p; }
+static inline uint64_t autia(uint64_t p, uint64_t mod) { __asm__ volatile("autia %0, %1" : "+r"(p) : "r"(mod)); return p; }
+static inline uint64_t xpaci(uint64_t p) { __asm__ volatile("xpaci %0" : "+r"(p)); return p; }
+
+static void target(void) { puts("target()"); }
+
+int main(void) {
+  uint64_t fn = (uint64_t)&amp;target, mod = 0x1234;
+  uint64_t s = pacia(fn, mod);
+  printf("raw    = %#018llx\n", (unsigned long long)fn);
+  printf("signed = %#018llx\n", (unsigned long long)s);
+  printf("strip  = %#018llx\n", (unsigned long long)xpaci(s));
+  printf("auth   = %#018llx (== raw)\n", (unsigned long long)autia(s, mod));
+  fflush(stdout);
+  uint64_t r = autia(s ^ 0x10, mod);   /* verify after tampering: with FEAT_FPAC this raises SIGILL right here */
+  printf("auth(tampered) = %#018llx  (no FPAC: the pointer is poisoned, do not call it)\n", (unsigned long long)r);
+  return 0;
+}</pre>
+    <p lang="zh-CN">macOS 版用编译器的 <code>&lt;ptrauth.h&gt;</code> 内建函数，存为 <code>pac_demo.c</code>：</p>
+    <p lang="en">The macOS version uses the compiler’s <code>&lt;ptrauth.h&gt;</code> builtins; save it as <code>pac_demo.c</code>:</p>
 <pre>#include &lt;stdio.h&gt;
 #include &lt;stdint.h&gt;
 #include &lt;ptrauth.h&gt;
@@ -321,113 +388,124 @@ int main(void) {
   return 0;
 }</pre>
 
-    <h3>Lab A · QEMU Linux：KASLR 偏移、用户态 ASLR、PAC</h3>
+    <h3 lang="zh-CN">Lab A · QEMU Linux：KASLR 偏移、用户态 ASLR、PAC</h3><h3 lang="en">Lab A · QEMU Linux: KASLR offset, user-space ASLR, PAC</h3>
     <ol>
-      <li>这次<strong>不要</strong>加 <code>nokaslr</code>，并换成 <code>-cpu max</code>（带 PAC；KASLR 的种子通常来自 QEMU <code>virt</code> 写进 DTB 的 <code>kaslr-seed</code>，<code>-cpu max</code> 的 <code>RNDR</code> 只是后备）：<pre>qemu-system-aarch64 -M virt -cpu max -m 1G -nographic \
+      <li><span lang="zh-CN">这次<strong>不要</strong>加 <code>nokaslr</code>，并换成 <code>-cpu max</code>（带 PAC；KASLR 的种子通常来自 QEMU <code>virt</code> 写进 DTB 的 <code>kaslr-seed</code>，<code>-cpu max</code> 的 <code>RNDR</code> 只是后备）：</span><span lang="en">This time do <strong>not</strong> add <code>nokaslr</code>, and switch to <code>-cpu max</code> (which has PAC; the KASLR seed usually comes from the <code>kaslr-seed</code> that QEMU <code>virt</code> writes into the DTB, and the <code>RNDR</code> of <code>-cpu max</code> is only a fallback):</span><pre>qemu-system-aarch64 -M virt -cpu max -m 1G -nographic \
   -kernel arch/arm64/boot/Image -initrd initramfs/initramfs.cpio.gz \
   -append "console=ttyAMA0 rdinit=/init"</pre>
-        进 shell 后：<pre>dmesg | grep -i kaslr                    # 期望 KASLR enabled；若 disabled due to lack of seed，检查 QEMU 是否关掉了 dtb-kaslr-seed
+        <span lang="zh-CN">进 shell 后：</span><span lang="en">Once in the shell:</span><pre>dmesg | grep -i kaslr                    # 期望 KASLR enabled；若 disabled due to lack of seed，检查 QEMU 是否关掉了 dtb-kaslr-seed
 cat /proc/sys/kernel/kptr_restrict
 grep -w _text /proc/kallsyms             # 运行时地址（root 才看得到真实值）
 grep -w start_kernel /proc/kallsyms
 grep -o -m1 -w paca /proc/cpuinfo        # 有输出 = 用户态 PAC 可用</pre>
-        在 macOS 上查链接时地址并相减：<pre>grep -w _text System.map
-python3 -c 'print(hex(0x运行时_text - 0x链接时_text))'</pre>
-        重启 QEMU 再做一次，偏移应该不同；再用 Phase 6 的 <code>echo c &gt; /proc/sysrq-trigger</code>，对照 panic 输出里的 <code>Kernel Offset: 0x… from 0x…</code> 是否与你算的一致。<code>-tcg</code> 下模拟 PAC 较慢，启动明显变慢时可试 <code>-cpu max,pauth-impdef=on</code>（大致：改用 QEMU 的实现定义算法）。</li>
-      <li>用户态 ASLR：<pre>cat /proc/sys/kernel/randomize_va_space     # 默认 2
+        <span lang="zh-CN">在 macOS 上查链接时地址并相减：</span><span lang="en">On macOS, look up the link-time address and subtract:</span><pre lang="zh-CN">grep -w _text System.map
+python3 -c 'print(hex(0x运行时_text - 0x链接时_text))'</pre><pre lang="en">grep -w _text System.map
+python3 -c 'print(hex(0xRUNTIME_text - 0xLINKTIME_text))'</pre>
+        <span lang="zh-CN">重启 QEMU 再做一次，偏移应该不同；再用 Phase 6 的 <code>echo c &gt; /proc/sysrq-trigger</code>，对照 panic 输出里的 <code>Kernel Offset: 0x… from 0x…</code> 是否与你算的一致。<code>-tcg</code> 下模拟 PAC 较慢，启动明显变慢时可试 <code>-cpu max,pauth-impdef=on</code>（大致：改用 QEMU 的实现定义算法）。</span><span lang="en">Restart QEMU and do it again — the offset should be different; then use <code>echo c &gt; /proc/sysrq-trigger</code> from Phase 6 and check whether <code>Kernel Offset: 0x… from 0x…</code> in the panic output matches what you calculated. Emulating PAC under <code>-tcg</code> is slow; if boot becomes noticeably slower, try <code>-cpu max,pauth-impdef=on</code> (roughly: switch to QEMU’s implementation-defined algorithm).</span></li>
+      <li><span lang="zh-CN">用户态 ASLR：</span><span lang="en">User-space ASLR:</span><pre>cat /proc/sys/kernel/randomize_va_space     # 默认 2
 grep -E "stack|vdso" /proc/self/maps; grep -E "stack|vdso" /proc/self/maps   # 两次地址不同
 echo 0 &gt; /proc/sys/kernel/randomize_va_space
 grep -E "stack|vdso" /proc/self/maps; grep -E "stack|vdso" /proc/self/maps   # 两次相同
 echo 2 &gt; /proc/sys/kernel/randomize_va_space</pre></li>
-      <li>看你的内核开了哪些加固（在 macOS 的内核树里）：<pre>grep -E "RANDOMIZE_BASE|STRICT_KERNEL_RWX|ARM64_PAN|ARM64_EPAN|ARM64_PTR_AUTH|ARM64_BTI_KERNEL|STACKPROTECTOR|CONFIG_CFI|SHADOW_CALL_STACK|SLAB_FREELIST|SLAB_BUCKETS|KMALLOC_PARTITION|RANDOM_KMALLOC|INIT_ON_" .config</pre>
-        对照概念 2–6，每个 <code>is not set</code> 的选项写一句「它挡的是哪一步」。</li>
-      <li>PAC 演示。最快的办法是在 Apple Silicon 上的 arm64 Linux 容器里直接跑（容器跑在一个 Linux 虚拟机里，PAC 指令由真实 CPU 执行）：<pre>docker run --platform linux/arm64 --rm -v "$PWD:/w" -w /w alpine:3.20 sh -c \
+      <li><span lang="zh-CN">看你的内核开了哪些加固（在 macOS 的内核树里）：</span><span lang="en">See which hardening options your kernel has enabled (in the kernel tree on macOS):</span><pre>grep -E "RANDOMIZE_BASE|STRICT_KERNEL_RWX|ARM64_PAN|ARM64_EPAN|ARM64_PTR_AUTH|ARM64_BTI_KERNEL|STACKPROTECTOR|CONFIG_CFI|SHADOW_CALL_STACK|SLAB_FREELIST|SLAB_BUCKETS|KMALLOC_PARTITION|RANDOM_KMALLOC|INIT_ON_" .config</pre>
+        <span lang="zh-CN">对照概念 2–6，每个 <code>is not set</code> 的选项写一句「它挡的是哪一步」。</span><span lang="en">Using concepts 2–6, write one sentence for each <code>is not set</code> option: “which step does it block?”</span></li>
+      <li><span lang="zh-CN">PAC 演示。最快的办法是在 Apple Silicon 上的 arm64 Linux 容器里直接跑（容器跑在一个 Linux 虚拟机里，PAC 指令由真实 CPU 执行）：</span><span lang="en">The PAC demo. The fastest way is to run it directly in an arm64 Linux container on Apple Silicon (the container runs inside a Linux virtual machine, and the PAC instructions are executed by the real CPU):</span><pre>docker run --platform linux/arm64 --rm -v "$PWD:/w" -w /w alpine:3.20 sh -c \
   'apk add -q build-base &amp;&amp; gcc -march=armv8.3-a -O1 -o pac_linux pac_linux.c &amp;&amp; \
    objdump -d pac_linux | grep -E "pacia|autia|xpaci" | head; ./pac_linux; echo exit=$?'</pre>
-        在一台 M 系列 Mac 上实测输出形如 <code>signed = 0x0054aaaab1790894</code>（高位多出的 <code>0x54</code> 就是 PAC，正好落在 [54:48]），<code>auth</code> 等于原值，最后一行没有打印，而是 <code>Illegal instruction</code>、<code>exit=132</code>——CPU 有 FEAT_FPAC，<code>autia</code> 当场异常，内核按 <code>do_el0_fpac</code> 发了 SIGILL。想在 QEMU 里跑：用 <code>gcc -static</code> 编译后按 Phase 2 的方法放进 initramfs，<code>-cpu max</code> 启动（<code>-cpu cortex-a72</code> 没有 PAC，<code>pacia</code> 不在 HINT 空间，会直接是非法指令）；QEMU 是否模拟 FPAC 取决于版本，没有时你会看到最后一行打印出一个高位被改坏的指针。</li>
-      <li>编译器自动插入的 pac-ret：<pre>printf 'int leaf(int);\nint caller(int x) { return leaf(x) + 1; }\n' &gt; ret.c
+        <span lang="zh-CN">在一台 M 系列 Mac 上实测输出形如 <code>signed = 0x0054aaaab1790894</code>（高位多出的 <code>0x54</code> 就是 PAC，正好落在 [54:48]），<code>auth</code> 等于原值，最后一行没有打印，而是 <code>Illegal instruction</code>、<code>exit=132</code>——CPU 有 FEAT_FPAC，<code>autia</code> 当场异常，内核按 <code>do_el0_fpac</code> 发了 SIGILL。想在 QEMU 里跑：用 <code>gcc -static</code> 编译后按 Phase 2 的方法放进 initramfs，<code>-cpu max</code> 启动（<code>-cpu cortex-a72</code> 没有 PAC，<code>pacia</code> 不在 HINT 空间，会直接是非法指令）；QEMU 是否模拟 FPAC 取决于版本，没有时你会看到最后一行打印出一个高位被改坏的指针。</span><span lang="en">Measured on an M-series Mac, the output looks like <code>signed = 0x0054aaaab1790894</code> (the extra <code>0x54</code> in the high bits is the PAC, landing exactly in [54:48]); <code>auth</code> equals the original value, and the last line is not printed — instead you get <code>Illegal instruction</code> and <code>exit=132</code>: the CPU has FEAT_FPAC, <code>autia</code> raised an exception on the spot, and the kernel sent SIGILL via <code>do_el0_fpac</code>. To run it in QEMU: compile with <code>gcc -static</code>, put it into the initramfs the way Phase 2 does, and boot with <code>-cpu max</code> (<code>-cpu cortex-a72</code> has no PAC, and <code>pacia</code> is not in the HINT space, so it is simply an illegal instruction); whether QEMU emulates FPAC depends on the version — if it does not, you will see the last line print a pointer whose high bits have been corrupted.</span></li>
+      <li><span lang="zh-CN">编译器自动插入的 pac-ret：</span><span lang="en">pac-ret inserted automatically by the compiler:</span><pre>printf 'int leaf(int);\nint caller(int x) { return leaf(x) + 1; }\n' &gt; ret.c
 docker run --platform linux/arm64 --rm -v "$PWD:/w" -w /w alpine:3.20 sh -c \
   'apk add -q build-base &amp;&amp; gcc -O1 -mbranch-protection=pac-ret -c ret.c &amp;&amp; objdump -d ret.o'</pre>
-        <code>caller</code> 的第一条是 <code>paciasp</code>，<code>ret</code> 前是 <code>autiasp</code>；去掉选项重编一次对比。</li>
+        <span lang="zh-CN"><code>caller</code> 的第一条是 <code>paciasp</code>，<code>ret</code> 前是 <code>autiasp</code>；去掉选项重编一次对比。</span><span lang="en">The first instruction of <code>caller</code> is <code>paciasp</code>, and <code>autiasp</code> comes right before <code>ret</code>; rebuild without the option and compare.</span></li>
     </ol>
 
-    <h3>Lab B · macOS：PAC、代码签名、SIP、Sandbox</h3>
+    <h3 lang="zh-CN">Lab B · macOS：PAC、代码签名、SIP、Sandbox</h3><h3 lang="en">Lab B · macOS: PAC, code signing, SIP, Sandbox</h3>
     <ol>
-      <li>CPU 支持哪些安全特性（名称随芯片和系统版本变化）：<pre>sysctl hw.optional.arm | grep -E "PAuth|FPAC|BTI|MTE"
+      <li><span lang="zh-CN">CPU 支持哪些安全特性（名称随芯片和系统版本变化）：</span><span lang="en">Which security features the CPU supports (the names vary with the chip and the OS version):</span><pre>sysctl hw.optional.arm | grep -E "PAuth|FPAC|BTI|MTE"
 file /bin/ls                 # 系统二进制是 arm64e</pre></li>
-      <li>编译 PAC 演示的两个版本，比较反汇编和运行结果：<pre>clang -arch arm64e -O1 -o pac_demo pac_demo.c
+      <li><span lang="zh-CN">编译 PAC 演示的两个版本，比较反汇编和运行结果：</span><span lang="en">Build both versions of the PAC demo and compare the disassembly and the results of running them:</span><pre>clang -arch arm64e -O1 -o pac_demo pac_demo.c
 otool -tv pac_demo | grep -E "pacib|pacda|autda|xpacd|retab"
 ./pac_demo; echo "exit=$?"
 clang -arch arm64 -O1 -o pac_plain pac_demo.c &amp;&amp; ./pac_plain</pre>
-        预期：arm64e 版的反汇编里有 <code>pacibsp</code>/<code>retab</code>（编译器自动加的返回地址保护）、<code>pacda</code>/<code>autda</code>（你写的内建函数），还有编译器在 <code>autda</code> 后插入的 <code>xpacd</code> 检查。但<strong>运行</strong>时它会在打印任何东西之前被系统结束（在一台 M 系列 Mac 上实测 <code>exit=138</code>）：第三方 arm64e 仍是预览 ABI，要运行需在 Reduced Security 下加 boot-arg <code>-arm64e_preview_abi</code>——这会降低整机安全性，本实验不需要，读反汇编即可。普通 arm64 版能运行，但 <code>signed</code> 与 <code>raw</code> 完全相同：非 arm64e 目标下 <code>&lt;ptrauth.h&gt;</code> 的内建函数退化为空操作。</li>
-      <li>代码签名与 SIP：<pre>codesign -dv --entitlements - /bin/ls 2&gt;&amp;1 | head -12   # Platform identifier、arm64e 切片
+        <span lang="zh-CN">预期：arm64e 版的反汇编里有 <code>pacibsp</code>/<code>retab</code>（编译器自动加的返回地址保护）、<code>pacda</code>/<code>autda</code>（你写的内建函数），还有编译器在 <code>autda</code> 后插入的 <code>xpacd</code> 检查。但<strong>运行</strong>时它会在打印任何东西之前被系统结束（在一台 M 系列 Mac 上实测 <code>exit=138</code>）：第三方 arm64e 仍是预览 ABI，要运行需在 Reduced Security 下加 boot-arg <code>-arm64e_preview_abi</code>——这会降低整机安全性，本实验不需要，读反汇编即可。普通 arm64 版能运行，但 <code>signed</code> 与 <code>raw</code> 完全相同：非 arm64e 目标下 <code>&lt;ptrauth.h&gt;</code> 的内建函数退化为空操作。</span><span lang="en">Expected: the disassembly of the arm64e version contains <code>pacibsp</code>/<code>retab</code> (return-address protection the compiler adds automatically), <code>pacda</code>/<code>autda</code> (the builtins you wrote), and an <code>xpacd</code> check that the compiler inserts after <code>autda</code>. But when you <strong>run</strong> it, the system terminates it before it prints anything (measured on an M-series Mac: <code>exit=138</code>): third-party arm64e is still a preview ABI, and running it requires adding the boot-arg <code>-arm64e_preview_abi</code> under Reduced Security — which lowers the security of the whole machine; this lab does not need it, and reading the disassembly is enough. The plain arm64 version runs, but <code>signed</code> and <code>raw</code> are identical: for non-arm64e targets the <code>&lt;ptrauth.h&gt;</code> builtins degrade to no-ops.</span></li>
+      <li><span lang="zh-CN">代码签名与 SIP：</span><span lang="en">Code signing and SIP:</span><pre>codesign -dv --entitlements - /bin/ls 2&gt;&amp;1 | head -12   # Platform identifier、arm64e 切片
 codesign -dv --entitlements - /Applications/Safari.app 2&gt;&amp;1 | grep -iE "Identifier|TeamIdentifier|flags"
 csrutil status
 sysctl kern.bootargs</pre></li>
-      <li>亲手触发一次 Sandbox（MACF）拒绝。注意 <code>/etc</code> 是指向 <code>/private/etc</code> 的符号链接，规则要写真实路径：<pre>sandbox-exec -p '(version 1)(allow default)(deny file-read-data (subpath "/private/etc"))' /bin/cat /etc/hosts
+      <li><span lang="zh-CN">亲手触发一次 Sandbox（MACF）拒绝。注意 <code>/etc</code> 是指向 <code>/private/etc</code> 的符号链接，规则要写真实路径：</span><span lang="en">Trigger a Sandbox (MACF) denial yourself. Note that <code>/etc</code> is a symlink to <code>/private/etc</code>, so the rule has to use the real path:</span><pre>sandbox-exec -p '(version 1)(allow default)(deny file-read-data (subpath "/private/etc"))' /bin/cat /etc/hosts
 # cat: /etc/hosts: Operation not permitted
 /usr/bin/log show --last 10m --predicate 'process == "kernel" AND eventMessage CONTAINS "deny"' --style compact | tail -5</pre>
-        <code>sandbox-exec</code> 已被标为过时，但仍可用来观察 Sandbox.kext 的行为；日志里看到的是系统中其他进程被拒的记录，正是 <code>mac_*_check_*</code> 钩子在工作。</li>
-      <li>读一篇 CVE 分析：从 Project Zero 博客挑一篇 iOS/XNU 内核文章，再读 Dirty Pipe 的原始报告，各按概念 8 的五栏（根因、可达性、原语、缓解、修复）做一页笔记。</li>
+        <span lang="zh-CN"><code>sandbox-exec</code> 已被标为过时，但仍可用来观察 Sandbox.kext 的行为；日志里看到的是系统中其他进程被拒的记录，正是 <code>mac_*_check_*</code> 钩子在工作。</span><span lang="en"><code>sandbox-exec</code> is marked as deprecated, but it can still be used to observe how Sandbox.kext behaves; what you see in the log are denial records for other processes on the system — exactly the <code>mac_*_check_*</code> hooks at work.</span></li>
+      <li><span lang="zh-CN">读一篇 CVE 分析：从 Project Zero 博客挑一篇 iOS/XNU 内核文章，再读 Dirty Pipe 的原始报告，各按概念 8 的五栏（根因、可达性、原语、缓解、修复）做一页笔记。</span><span lang="en">Read a CVE analysis: pick an iOS/XNU kernel article from the Project Zero blog, then read the original Dirty Pipe report, and make a one-page note on each using the five columns of concept 8 (root cause, reachability, primitive, mitigations, fix).</span></li>
     </ol>
-    <div class="note">交付物：两次启动的 KASLR 偏移 + panic 里 <code>Kernel Offset</code> 的截图；容器里 <code>pac_linux</code> 的输出与退出码；<code>pac_demo</code> 的反汇编片段；两篇 CVE 的五栏笔记。最后写 5 行：如果攻击者已有 XNU 内核任意读写，PAC、PPL/SPTM、kalloc_type 各自还能限制他什么。</div>
+    <div class="note" lang="zh-CN">交付物：两次启动的 KASLR 偏移 + panic 里 <code>Kernel Offset</code> 的截图；容器里 <code>pac_linux</code> 的输出与退出码；<code>pac_demo</code> 的反汇编片段；两篇 CVE 的五栏笔记。最后写 5 行：如果攻击者已有 XNU 内核任意读写，PAC、PPL/SPTM、kalloc_type 各自还能限制他什么。</div>
+    <div class="note" lang="en">Deliverables: the KASLR offsets from two boots + a screenshot of <code>Kernel Offset</code> in the panic; the output and exit code of <code>pac_linux</code> in the container; a disassembly excerpt of <code>pac_demo</code>; the five-column notes on the two CVEs. Finally, write 5 lines: if an attacker already has arbitrary read/write in the XNU kernel, what can PAC, PPL/SPTM and kalloc_type each still limit?</div>
   </div>
 
-  <h2 id="quiz">自测</h2>
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
   <form class="quiz" data-quiz="kernel/phase-7">
     <div class="q" data-answer="c">
-      <p>1. ARM PAC 的签名（PAC 值）存放在哪里？</p>
-      <label><input type="radio" name="q1" value="a"> 专用的 PAC 寄存器中</label>
-      <label><input type="radio" name="q1" value="b"> 指针所指向的内存旁边</label>
-      <label><input type="radio" name="q1" value="c"> 指针本身未用于寻址的高位中</label>
-      <div class="why" hidden>64 位虚拟地址并不使用全部 64 位，PAC 利用这些高位存放签名；autia 等指令校验成功会去掉签名，失败则触发异常（FEAT_FPAC）或使指针失效。专用寄存器里放的是密钥，不是签名。</div>
+      <p lang="zh-CN">1. ARM PAC 的签名（PAC 值）存放在哪里？</p>
+      <p lang="en">1. Where is the ARM PAC signature (the PAC value) stored?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">专用的 PAC 寄存器中</span><span lang="en">In a dedicated PAC register</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">指针所指向的内存旁边</span><span lang="en">Next to the memory the pointer points to</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">指针本身未用于寻址的高位中</span><span lang="en">In the pointer’s own high bits that are not used for addressing</span></label>
+      <div class="why" hidden><span lang="zh-CN">64 位虚拟地址并不使用全部 64 位，PAC 利用这些高位存放签名；autia 等指令校验成功会去掉签名，失败则触发异常（FEAT_FPAC）或使指针失效。专用寄存器里放的是密钥，不是签名。</span><span lang="en">A 64-bit virtual address does not use all 64 bits, and PAC uses those high bits to hold the signature; instructions such as autia remove the signature when verification succeeds, and on failure raise an exception (FEAT_FPAC) or invalidate the pointer. The dedicated registers hold the keys, not the signatures.</span></div>
     </div>
     <div class="q" data-answer="a">
-      <p>2. PAN（Privileged Access Never）开启后阻止的是什么？</p>
-      <label><input type="radio" name="q2" value="a"> 内核态直接用普通加载/存储访问用户态内存</label>
-      <label><input type="radio" name="q2" value="b"> 用户态访问内核内存</label>
-      <label><input type="radio" name="q2" value="c"> 内核执行用户态页面上的代码</label>
-      <div class="why" hidden>PAN 阻止 EL1 直接读写 EL0 可访问的页面，内核只能经由 copyin/copy_from_user 等受控路径访问；禁止内核执行用户页的是 PXN；用户态访问内核内存本来就被页表的 AP 位禁止。</div>
+      <p lang="zh-CN">2. PAN（Privileged Access Never）开启后阻止的是什么？</p>
+      <p lang="en">2. What does PAN (Privileged Access Never) block once it is enabled?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">内核态直接用普通加载/存储访问用户态内存</span><span lang="en">Kernel mode accessing user memory directly with ordinary loads/stores</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">用户态访问内核内存</span><span lang="en">User mode accessing kernel memory</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">内核执行用户态页面上的代码</span><span lang="en">The kernel executing code on user pages</span></label>
+      <div class="why" hidden><span lang="zh-CN">PAN 阻止 EL1 直接读写 EL0 可访问的页面，内核只能经由 copyin/copy_from_user 等受控路径访问；禁止内核执行用户页的是 PXN；用户态访问内核内存本来就被页表的 AP 位禁止。</span><span lang="en">PAN stops EL1 from directly reading or writing pages accessible to EL0, so the kernel can reach them only through controlled paths such as copyin/copy_from_user; it is PXN that stops the kernel from executing user pages; user-mode access to kernel memory is already forbidden by the AP bits of the page table.</span></div>
     </div>
     <div class="q" data-answer="b">
-      <p>3. 为什么 Apple 要用 PPL / SPTM 把页表修改从内核中剥离出来？</p>
-      <label><input type="radio" name="q3" value="a"> 为了让页表遍历更快，减少 TLB miss</label>
-      <label><input type="radio" name="q3" value="b"> 因为拿到内核任意读写的攻击者原本可以直接改页表、绕开 W^X 和代码签名；把页表交给更高特权、更小的可信代码后，内核被攻破也改不了它</label>
-      <label><input type="radio" name="q3" value="c"> 为了让 Linux 驱动可以在 macOS 上运行</label>
-      <div class="why" hidden>KASLR、PXN、PAC 都假设攻击者还不能随意改页表。PPL（A12–A14、M1）在内核内部建立受保护区域；SPTM（A15、M2 及以后）运行在比内核更高的特权级，与 TXM 配合决定页表与可执行代码。Linux 主线没有对应机制。</div>
+      <p lang="zh-CN">3. 为什么 Apple 要用 PPL / SPTM 把页表修改从内核中剥离出来？</p>
+      <p lang="en">3. Why does Apple use PPL / SPTM to take page-table modification out of the kernel?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">为了让页表遍历更快，减少 TLB miss</span><span lang="en">To make page-table walks faster and reduce TLB misses</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">因为拿到内核任意读写的攻击者原本可以直接改页表、绕开 W^X 和代码签名；把页表交给更高特权、更小的可信代码后，内核被攻破也改不了它</span><span lang="en">Because an attacker with arbitrary kernel read/write could otherwise modify the page tables directly and get around W^X and code signing; once the page tables are handed to smaller trusted code at a higher privilege, they cannot be changed even if the kernel is compromised</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">为了让 Linux 驱动可以在 macOS 上运行</span><span lang="en">So that Linux drivers can run on macOS</span></label>
+      <div class="why" hidden><span lang="zh-CN">KASLR、PXN、PAC 都假设攻击者还不能随意改页表。PPL（A12–A14、M1）在内核内部建立受保护区域；SPTM（A15、M2 及以后）运行在比内核更高的特权级，与 TXM 配合决定页表与可执行代码。Linux 主线没有对应机制。</span><span lang="en">KASLR, PXN and PAC all assume the attacker cannot yet modify the page tables at will. PPL (A12–A14, M1) sets up a protected region inside the kernel; SPTM (A15, M2 and later) runs at a higher privilege level than the kernel and, together with TXM, decides on the page tables and executable code. Mainline Linux has no equivalent mechanism.</span></div>
     </div>
     <div class="q" data-answer="c">
-      <p>4. kalloc_type 主要让哪一种利用步骤变难？</p>
-      <label><input type="radio" name="q4" value="a"> 用栈溢出覆盖返回地址</label>
-      <label><input type="radio" name="q4" value="b"> 通过时序侧信道推测 kernel slide</label>
-      <label><input type="radio" name="q4" value="c"> UAF 之后用另一种类型、内容可控的对象占住被释放的内存（类型混淆）</label>
-      <div class="why" hidden>kalloc_type 按类型签名把对象分进不同 zone，纯数据走 kalloc_data，跨类型占位因此变得很难。返回地址由 canary / PAC 保护；KASLR 侧信道是另一类问题。Linux 最接近的是 KMALLOC_PARTITION_TYPED（编译器支持时按类型选缓存）。</div>
+      <p lang="zh-CN">4. kalloc_type 主要让哪一种利用步骤变难？</p>
+      <p lang="en">4. Which exploitation step does kalloc_type mainly make harder?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">用栈溢出覆盖返回地址</span><span lang="en">Overwriting the return address with a stack overflow</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">通过时序侧信道推测 kernel slide</span><span lang="en">Inferring the kernel slide through a timing side channel</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">UAF 之后用另一种类型、内容可控的对象占住被释放的内存（类型混淆）</span><span lang="en">After a UAF, reclaiming the freed memory with an object of a different type and controlled contents (type confusion)</span></label>
+      <div class="why" hidden><span lang="zh-CN">kalloc_type 按类型签名把对象分进不同 zone，纯数据走 kalloc_data，跨类型占位因此变得很难。返回地址由 canary / PAC 保护；KASLR 侧信道是另一类问题。Linux 最接近的是 KMALLOC_PARTITION_TYPED（编译器支持时按类型选缓存）。</span><span lang="en">kalloc_type uses type signatures to split objects into different zones, with pure data going to kalloc_data, so cross-type reclaiming becomes very hard. Return addresses are protected by canaries / PAC; KASLR side channels are a different class of problem. The closest Linux mechanism is KMALLOC_PARTITION_TYPED (which picks the cache by type when the compiler supports it).</span></div>
     </div>
-    <button type="submit">检查答案</button>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
     <div class="result"></div>
   </form>
 
-  <h2 id="resources">资料</h2>
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
   <ul class="res">
-    <li><a href="https://support.apple.com/guide/security/welcome/web">Apple Platform Security Guide</a> <span class="lvl">必读，「Operating system integrity」一节：KIP、Fast Permission Restrictions、PAC、PPL、SPTM/TXM、MIE 的官方说明与芯片对照表</span></li>
-    <li><a href="https://security.apple.com/blog/towards-the-next-generation-of-xnu-memory-safety/">Apple Security Research — Towards the next generation of XNU memory safety: kalloc_type</a> <span class="lvl">深入，堆类型隔离</span></li>
-    <li><a href="https://security.apple.com/blog/memory-integrity-enforcement/">Apple Security Research — Memory Integrity Enforcement</a> <span class="lvl">深入，EMTE 与安全分配器</span></li>
-    <li><a href="https://clang.llvm.org/docs/PointerAuthentication.html">Clang — Pointer Authentication</a> <span class="lvl">进阶，arm64e ABI、密钥分工、<code>ptrauth.h</code> 内建函数</span></li>
-    <li><a href="https://docs.kernel.org/security/self-protection.html">Linux kernel docs — Kernel Self-Protection</a> <span class="lvl">入门，Linux 加固全景</span></li>
-    <li><a href="https://docs.kernel.org/arch/arm64/pointer-authentication.html">Linux kernel docs — Pointer authentication in AArch64 Linux</a> <span class="lvl">进阶，PAC 在 Linux 中的使用</span></li>
-    <li><a href="https://docs.kernel.org/admin-guide/LSM/index.html">Linux kernel docs — Linux Security Module Usage</a> <span class="lvl">对照，LSM/SELinux/AppArmor/Landlock/lockdown</span></li>
-    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual for A-profile</a> <span class="lvl">查手册，PAC/PAN/BTI/MTE 定义</span></li>
-    <li><a href="https://googleprojectzero.blogspot.com/">Google Project Zero blog</a> · <a href="https://dirtypipe.cm4all.com/">The Dirty Pipe Vulnerability（CVE-2022-0847 原始报告）</a> <span class="lvl">实战，概念 8 的练习材料</span></li>
-    <li><a href="https://github.com/apple-oss-distributions/xnu/blob/main/doc/allocators/read-only.md">xnu/doc/allocators/read-only.md</a> <span class="lvl">源码文档，只读 zone 与 data-only 攻击的动机</span></li>
+    <li><a href="https://support.apple.com/guide/security/welcome/web">Apple Platform Security Guide</a> <span class="lvl" lang="zh-CN">必读，「Operating system integrity」一节：KIP、Fast Permission Restrictions、PAC、PPL、SPTM/TXM、MIE 的官方说明与芯片对照表</span><span class="lvl" lang="en">Must-read: the “Operating system integrity” section — the official descriptions of KIP, Fast Permission Restrictions, PAC, PPL, SPTM/TXM and MIE, with a chip comparison table</span></li>
+    <li><a href="https://security.apple.com/blog/towards-the-next-generation-of-xnu-memory-safety/">Apple Security Research — Towards the next generation of XNU memory safety: kalloc_type</a> <span class="lvl" lang="zh-CN">深入，堆类型隔离</span><span class="lvl" lang="en">In depth: heap type isolation</span></li>
+    <li><a href="https://security.apple.com/blog/memory-integrity-enforcement/">Apple Security Research — Memory Integrity Enforcement</a> <span class="lvl" lang="zh-CN">深入，EMTE 与安全分配器</span><span class="lvl" lang="en">In depth: EMTE and the secure allocators</span></li>
+    <li><a href="https://clang.llvm.org/docs/PointerAuthentication.html">Clang — Pointer Authentication</a> <span class="lvl" lang="zh-CN">进阶，arm64e ABI、密钥分工、<code>ptrauth.h</code> 内建函数</span><span class="lvl" lang="en">Advanced: the arm64e ABI, how the keys are divided up, the <code>ptrauth.h</code> builtins</span></li>
+    <li><a href="https://docs.kernel.org/security/self-protection.html">Linux kernel docs — Kernel Self-Protection</a> <span class="lvl" lang="zh-CN">入门，Linux 加固全景</span><span class="lvl" lang="en">Beginner: an overview of Linux hardening</span></li>
+    <li><a href="https://docs.kernel.org/arch/arm64/pointer-authentication.html">Linux kernel docs — Pointer authentication in AArch64 Linux</a> <span class="lvl" lang="zh-CN">进阶，PAC 在 Linux 中的使用</span><span class="lvl" lang="en">Advanced: how Linux uses PAC</span></li>
+    <li><a href="https://docs.kernel.org/admin-guide/LSM/index.html">Linux kernel docs — Linux Security Module Usage</a> <span class="lvl" lang="zh-CN">对照，LSM/SELinux/AppArmor/Landlock/lockdown</span><span class="lvl" lang="en">For comparison: LSM/SELinux/AppArmor/Landlock/lockdown</span></li>
+    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual for A-profile</a> <span class="lvl" lang="zh-CN">查手册，PAC/PAN/BTI/MTE 定义</span><span class="lvl" lang="en">Reference manual: the definitions of PAC/PAN/BTI/MTE</span></li>
+    <li><a href="https://googleprojectzero.blogspot.com/">Google Project Zero blog</a> · <a href="https://dirtypipe.cm4all.com/">The Dirty Pipe Vulnerability<span lang="zh-CN">（CVE-2022-0847 原始报告）</span><span lang="en"> (CVE-2022-0847, original report)</span></a> <span class="lvl" lang="zh-CN">实战，概念 8 的练习材料</span><span class="lvl" lang="en">Practice: the exercise material for concept 8</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/blob/main/doc/allocators/read-only.md">xnu/doc/allocators/read-only.md</a> <span class="lvl" lang="zh-CN">源码文档，只读 zone 与 data-only 攻击的动机</span><span class="lvl" lang="en">Source documentation: read-only zones and the data-only attacks that motivated them</span></li>
   </ul>
 
-  <h2 id="books">参考书目</h2>
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
   <ol class="books">
-    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. III：代码签名、Sandbox、SIP、MACF 与内核完整性保护相关章节，对应概念 5、7；出版早于 SPTM</span></li>
-    <li>Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 9 章「安全」：威胁、利用手法与防护，对应概念 1–3</span></li>
-    <li>Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 53–57 章：安全导论、认证、访问控制、密码学、分布式安全，对应概念 1、7 · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
-    <li>Randal E. Bryant &amp; David R. O'Hallaron, 《Computer Systems: A Programmer's Perspective》, 3rd ed., Pearson, 2016. <span class="lvl">第 3 章缓冲区溢出与对抗相关小节，对应概念 2–3</span></li>
-    <li>Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, 《The Design and Implementation of the FreeBSD Operating System》, 2nd ed., Addison-Wesley, 2014. <span class="lvl">安全相关章节（含 TrustedBSD MAC 框架），对应概念 7 的 XNU MACF 来历</span></li>
+    <li lang="zh-CN">Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. III：代码签名、Sandbox、SIP、MACF 与内核完整性保护相关章节，对应概念 5、7；出版早于 SPTM</span></li>
+    <li lang="en">Jonathan Levin, <em>*OS Internals</em> Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019 (library catalogue date; retail listings vary from 2016 to 2019). <span class="lvl">Vol. III: the chapters on code signing, Sandbox, SIP, MACF and kernel integrity protection, matching concepts 5 and 7; published before SPTM</span></li>
+    <li lang="zh-CN">Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 9 章「安全」：威胁、利用手法与防护，对应概念 1–3</span></li>
+    <li lang="en">Andrew S. Tanenbaum &amp; Herbert Bos, <em>Modern Operating Systems</em>, 4th ed., Pearson, 2015. <span class="lvl">Chapter 9 “Security”: threats, exploitation techniques and defences; matches concepts 1–3</span></li>
+    <li lang="zh-CN">Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 53–57 章：安全导论、认证、访问控制、密码学、分布式安全，对应概念 1、7 · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li lang="en">Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, <em>Operating Systems: Three Easy Pieces</em>, v1.00, 2018. <span class="lvl">Chapters 53–57: introduction to security, authentication, access control, cryptography, distributed security; match concepts 1 and 7 · free online: <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li lang="zh-CN">Randal E. Bryant &amp; David R. O'Hallaron, 《Computer Systems: A Programmer's Perspective》, 3rd ed., Pearson, 2016. <span class="lvl">第 3 章缓冲区溢出与对抗相关小节，对应概念 2–3</span></li>
+    <li lang="en">Randal E. Bryant &amp; David R. O'Hallaron, <em>Computer Systems: A Programmer's Perspective</em>, 3rd ed., Pearson, 2016. <span class="lvl">The sections of Chapter 3 on buffer overflows and how to thwart them; match concepts 2–3</span></li>
+    <li lang="zh-CN">Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, 《The Design and Implementation of the FreeBSD Operating System》, 2nd ed., Addison-Wesley, 2014. <span class="lvl">安全相关章节（含 TrustedBSD MAC 框架），对应概念 7 的 XNU MACF 来历</span></li>
+    <li lang="en">Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, <em>The Design and Implementation of the FreeBSD Operating System</em>, 2nd ed., Addison-Wesley, 2014. <span class="lvl">The security chapters (including the TrustedBSD MAC framework); the origin of XNU’s MACF in concept 7</span></li>
   </ol>
 
   <nav class="pn">
