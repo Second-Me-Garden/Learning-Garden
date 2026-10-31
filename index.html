@@ -21,6 +21,24 @@
 
   <div class="garden">
   <article class="topic-card" aria-labelledby="t-kernel">
+    <figure class="topic-art" aria-hidden="true">
+      <svg viewBox="0 0 360 240" preserveAspectRatio="xMaxYMid slice">
+        <!-- a chip: four privilege layers EL3→EL0, pins, and one syscall crossing from EL0 to EL1 and back -->
+        <g class="art-pin">
+          <path d="M60 36 v-18 M90 36 v-18 M120 36 v-18 M150 36 v-18 M180 36 v-18 M210 36 v-18 M240 36 v-18 M270 36 v-18 M300 36 v-18"/>
+          <path d="M60 204 v18 M90 204 v18 M120 204 v18 M150 204 v18 M180 204 v18 M210 204 v18 M240 204 v18 M270 204 v18 M300 204 v18"/>
+          <path d="M42 54 h-18 M42 84 h-18 M42 114 h-18 M42 144 h-18 M42 174 h-18"/>
+          <path d="M318 54 h18 M318 84 h18 M318 114 h18 M318 144 h18 M318 174 h18"/>
+        </g>
+        <rect class="art-layer l3" x="42" y="36" width="276" height="168" rx="18"/>
+        <rect class="art-layer l2" x="66" y="56" width="228" height="128" rx="14"/>
+        <rect class="art-layer l1" x="90" y="76" width="180" height="88" rx="10"/>
+        <rect class="art-layer l0" x="114" y="96" width="132" height="48" rx="7"/>
+        <path class="art-path" d="M150 120 C 150 95, 120 92, 104 100 S 96 140, 130 142 S 190 150, 210 120"/>
+        <circle class="art-dot" cx="150" cy="120" r="4"/>
+        <circle class="art-dot" cx="210" cy="120" r="4"/>
+      </svg>
+    </figure>
     <h2 id="t-kernel"><a href="topics/kernel-engineering/index.html">Kernel Engineering</a></h2>
     <p class="what">目标：Apple 的 kernel engineer 岗位。九个阶段，Linux 为教学载体，XNU 并排对照。</p>
     <div class="track" data-topic="kernel">
