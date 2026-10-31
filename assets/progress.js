@@ -69,7 +69,28 @@
       }
     }
   }
+  // Lab-environment callout: "done" is remembered per browser (lg-setup:<topic>).
+  function setupCallouts() {
+    document.querySelectorAll('.setup[data-setup]').forEach(sec => {
+      const key = 'lg-setup:' + sec.dataset.setup;
+      const box = sec.querySelector('input[data-setup-done]');
+      let done = false;
+      try { done = localStorage.getItem(key) === '1'; } catch (_) {}
+      sec.classList.toggle('done', done);
+      if (box) {
+        box.checked = done;
+        box.addEventListener('change', () => {
+          try { box.checked ? localStorage.setItem(key, '1') : localStorage.removeItem(key); } catch (_) {}
+          document.querySelectorAll('.setup[data-setup="' + sec.dataset.setup + '"]').forEach(el => {
+            el.classList.toggle('done', box.checked);
+            const b = el.querySelector('input[data-setup-done]'); if (b) b.checked = box.checked;
+          });
+        });
+      }
+    });
+  }
   function init() {
+    setupCallouts();
     const roots = document.querySelectorAll('[data-topic]');
     if (roots.length) roots.forEach(topic); else topic(document);
   }

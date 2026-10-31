@@ -82,14 +82,28 @@
     </svg>
   </div>
 
-  <div lang="zh-CN">
-  <h2>实验环境</h2>
-  <p>所有实验都在客体机里做：QEMU 里的 Linux arm64 做内核实验，容器做构建，macOS 客体 VM 做 XNU / kext / 关 SIP 的实验。宿主机永远不动。先读 <a href="lab-setup/index.html">实验环境：VM、容器、快照</a>，再开始 Phase 0。</p>
-  </div>
-  <div lang="en">
-  <h2>Lab environment</h2>
-  <p>Every lab runs in a guest: Linux arm64 under QEMU for kernel work, a container for builds, and a macOS guest VM for XNU, kexts and anything that needs SIP off. The host is never touched. Read <a href="lab-setup/index.html">Lab environment: VMs, containers, snapshots</a> before Phase 0.</p>
-  </div>
+  <section class="setup" data-setup="kernel" lang="zh-CN">
+    <div class="setup-text">
+      <h2>实验环境</h2>
+      <p>所有实验都在客体机里做：QEMU 里的 Linux arm64 做内核实验，容器做构建，macOS 客体 VM 做 XNU / kext / 关 SIP 的实验。宿主机永远不动。开始 Phase 0 之前先把它建好。</p>
+      <p class="setup-ready">实验环境已建好。<a href="lab-setup/index.html">查看说明</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">设置实验环境</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="kernel"> 我已建好</label>
+    </div>
+  </section>
+  <section class="setup" data-setup="kernel" lang="en">
+    <div class="setup-text">
+      <h2>Lab environment</h2>
+      <p>Every lab runs in a guest: Linux arm64 under QEMU for kernel work, a container for builds, and a macOS guest VM for XNU, kexts and anything that needs SIP off. The host is never touched. Set it up before Phase 0.</p>
+      <p class="setup-ready">Lab environment is ready. <a href="lab-setup/index.html">Open the guide</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">Set up the lab</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="kernel"> Done</label>
+    </div>
+  </section>
 
   <h2 lang="zh-CN">阶段</h2><h2 lang="en">Phases</h2>
   <ol class="phases">

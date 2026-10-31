@@ -63,7 +63,7 @@
     <tr><td><code>-smp 2</code></td><td>虚拟 CPU 个数</td><td>并发、锁、per-CPU 变量（Phase 3）至少要 2 个；单步调试时 1 个更好跟。</td></tr>
     <tr><td><code>-m 2G</code></td><td>客体内存</td><td>busybox 环境 1G 足够；开 KASAN 或跑较大的测试再加。</td></tr>
     <tr><td><code>-drive … -device virtio-blk-pci</code></td><td>一块 virtio 磁盘</td><td>镜像用 <code>qemu-img</code> 生成 qcow2 格式，客体里显示为 <code>/dev/vda</code>。qcow2 支持内部快照和写时复制。</td></tr>
-    <tr><td><code>-virtfs local,path=…,mount_tag=share,security_model=none</code></td><td>9p 共享目录</td><td>宿主目录直接出现在客体里，客体 <code>mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share</code>。QEMU 从 7.0 起支持 macOS 宿主上的 9p。virtiofs 更快，但它依赖宿主上运行的 <code>virtiofsd</code> 守护进程，后者面向 Linux 宿主，macOS 宿主上用 9p。</td></tr>
+    <tr><td><code>-virtfs local,path=…,mount_tag=share,security_model=none</code></td><td>9p 共享目录</td><td>宿主目录直接出现在客体里，客体 <code>mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share   # throwaway 模式下没有共享设备，失败即跳过</code>。QEMU 从 7.0 起支持 macOS 宿主上的 9p。virtiofs 更快，但它依赖宿主上运行的 <code>virtiofsd</code> 守护进程，后者面向 Linux 宿主，macOS 宿主上用 9p。</td></tr>
     <tr><td><code>-s -S</code></td><td>gdbstub</td><td><code>-s</code> = <code>-gdb tcp::1234</code>；<code>-S</code> 让 CPU 停在第一条指令前，等调试器 <code>continue</code>。内核命令行加 <code>nokaslr</code>，符号地址才对得上。</td></tr>
     <tr><td><code>-snapshot</code></td><td>一次性运行</td><td>所有磁盘写入进临时文件，退出即丢弃——跑可疑代码时用。</td></tr>
     <tr><td><code>qemu-img snapshot</code></td><td>磁盘快照（VM 关机时操作）</td><td><code>-c 名字</code> 创建、<code>-l</code> 列出、<code>-a 名字</code> 回滚、<code>-d 名字</code> 删除。</td></tr>
@@ -79,9 +79,10 @@ INITRD=${INITRD:-./initramfs.cpio.gz}
 DISK=${DISK:-./disk.qcow2}
 CPU="-cpu cortex-a72"
 EXTRA=""
+SHARE="-virtfs local,path=$PWD/share,mount_tag=share,security_model=none"
 case "${1:-}" in
   debug)     EXTRA="-s -S" ;;               # gdbstub on tcp::1234, wait for debugger
-  throwaway) EXTRA="-snapshot" ;;           # discard all disk writes on exit
+  throwaway) EXTRA="-snapshot"; SHARE="" ;; # discard all disk writes on exit AND attach no host share
   fast)      CPU="-accel hvf -cpu host" ;;  # Hypervisor.framework, near-native speed
 esac
 mkdir -p share
@@ -91,8 +92,7 @@ exec qemu-system-aarch64 -M virt $CPU -smp 2 -m 2G -nographic \
   -append "console=ttyAMA0 rdinit=/init nokaslr" \
   -drive file="$DISK",if=none,format=qcow2,id=hd0 \
   -device virtio-blk-pci,drive=hd0 \
-  -virtfs local,path="$PWD/share",mount_tag=share,security_model=none \
-  $EXTRA</pre>
+  $SHARE $EXTRA</pre>
   <p>调试时另开一个终端：<code>lldb vmlinux</code>，然后 <code>gdb-remote 1234</code>（或 GNU gdb 的 <code>target remote :1234</code>）。退出 QEMU：<kbd>Ctrl-a</kbd> <kbd>x</kbd>。</p>
 
   <h3>3. 构建容器</h3>
@@ -134,7 +134,7 @@ make -C /src/linux M=/lab/share/hello LLVM=1 modules</pre>
     <tr><td>编译内核、模块、initramfs</td><td>构建容器（或宿主）</td><td>—</td></tr>
     <tr><td>启动自编 Linux 内核</td><td>QEMU Linux VM</td><td>—</td></tr>
     <tr><td><code>insmod</code> 自写 Linux 模块</td><td>QEMU Linux VM</td><td>容器（会进 Docker / OrbStack / Lima 的共享内核）、任何真机</td></tr>
-    <tr><td>跑漏洞复现 / 不可信代码（Phase 7）</td><td>QEMU Linux VM，加 <code>throwaway</code>（<code>-snapshot</code>），不挂共享目录</td><td>宿主、容器</td></tr>
+    <tr><td>跑漏洞复现 / 不可信代码（Phase 7）</td><td>QEMU Linux VM，用 <code>./run-vm.sh throwaway</code>：<code>-snapshot</code> 且<strong>不附加</strong> 9p 共享设备（脚本里 <code>SHARE=""</code>；只在客体里 umount 不够）</td><td>宿主、容器</td></tr>
     <tr><td><code>csrutil disable</code>、降低启动安全级别</td><td>macOS 客体 VM 的 Recovery</td><td>宿主</td></tr>
     <tr><td>改 <code>boot-args</code>、引导 KDK 内核</td><td>macOS 客体 VM</td><td>宿主</td></tr>
     <tr><td>加载自写 kext、<code>systemextensionsctl developer on</code></td><td>macOS 客体 VM（先克隆）</td><td>宿主</td></tr>
@@ -161,23 +161,7 @@ make -C /src/linux M=/lab/share/hello LLVM=1 modules</pre>
   <div class="table-wrap">
   <table class="cmp">
     <tr><th>实验</th><th class="linux">Linux 环境</th><th class="xnu">macOS / XNU 环境</th></tr>
-    <tr><td>跑自己编的内核</td><td>QEMU <code>-kernel Image</code>，秒级启动</td><td>XNU 无法从源码编出可引导的 Apple Silicon 内核给普通用户用；用 KDK 的 development / kasan 内核，在客体机里引导（大致路径）</td></tr>
-    <tr><td>回滚</td><td><code>qemu-img snapshot -a</code>、<code>-snapshot</code></td><td>克隆 VM bundle，删坏的</td></tr>
-    <tr><td>宿主 ↔ 客体传文件</td><td>9p 共享目录</td><td>UTM / Tart 的共享目录（Virtualization framework 的 VirtioFS 共享）</td></tr>
-    <tr><td>停机调试</td><td>QEMU gdbstub：<code>-s -S</code> + <code>gdb-remote 1234</code></td><td>KDP：<code>debug=</code> boot-arg + <code>kdp-remote</code>，配 KDK 符号</td></tr>
-    <tr><td>加载自写内核代码</td><td><code>insmod hello.ko</code></td><td>kext（关 SIP 的客体）；用户态驱动走 DriverKit</td></tr>
-    <tr><td>系统调用跟踪</td><td><code>strace</code>（需放进 rootfs）、ftrace</td><td><code>dtruss</code>（客体里关 SIP 后）、<code>fs_usage</code>（宿主可用）</td></tr>
-    <tr><td>内存错误检测</td><td><code>CONFIG_KASAN</code> 重编</td><td>KDK 里的 KASAN 内核变体（大致路径）</td></tr>
-    <tr><td>崩溃后看什么</td><td>串口上的 oops / panic 文本</td><td>客体重启后 <code>/Library/Logs/DiagnosticReports/</code> 下的 <code>.panic</code></td></tr>
-    <tr><td>构建工具链</td><td>容器里 <code>LLVM=1</code></td><td>宿主上的 Xcode（编 kext / dext 可以在宿主，加载只在客体）</td></tr>
-    <tr><td>安全机制实验</td><td>seccomp、LSM（Phase 7），在 VM 里随便开关</td><td>SIP、AMFI、签名要求，只在客体里放宽</td></tr>
-  </table>
-  </div>
-
-  <h2 id="diagram">动画图解：实验环境拓扑</h2>
-  <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
-         data-captions='["全图：底部是宿主 Mac，上面三个客体：QEMU Linux VM、构建容器、macOS 客体 VM。按「播放」逐层走，最后看连接线。",
+    <tr><td>跑自己编的内核</td><td>QEMU <code>-kernel Image</code>，秒级启动</td><td>从源码编译并在客体里引导自编 XNU 可行但门槛高（大致路径，以 xnu README 与 KDK 说明为准，Phase 8 展开）；入门先用 KDK 自带的 development / kasan 内核。按「播放」逐层走，最后看连接线。",
            "① 宿主 Mac（macOS，SIP 永远开着）：编辑、编译、跑 QEMU 和 UTM、当 lldb 调试器一端、存放实验目录 kernel-lab。",
            "② QEMU Linux arm64 VM：-M virt，virtio 磁盘 disk.qcow2，自编内核 Image + busybox initramfs。所有 Linux 内核实验和 insmod 都在这里。",
            "③ 构建容器（Docker Desktop / OrbStack / Lima）：同一个 clang 编内核和模块，产物拷回 kernel-lab。只编不跑，不 insmod。",
@@ -250,7 +234,7 @@ make -C /src/linux M=/lab/share/hello LLVM=1 modules</pre>
       <li>实验目录，把上面的 <code>run-vm.sh</code> 存进去，并拿到内核（Phase 0 编好的，或第 3 节容器里编的）：<pre data-lang="sh">mkdir -p ~/kernel-lab/share &amp;&amp; cd ~/kernel-lab
 chmod +x run-vm.sh
 cp /path/to/linux/arch/arm64/boot/Image /path/to/linux/vmlinux .</pre></li>
-      <li>确认内核带了需要的驱动（在内核源码树里跑）：<pre data-lang="sh">grep -E 'CONFIG_(VIRTIO_PCI|VIRTIO_BLK|EXT4_FS|NET_9P|NET_9P_VIRTIO|9P_FS|DEVTMPFS)=' .config</pre>
+      <li>确认内核带了需要的驱动（在内核源码树里跑）：<pre data-lang="sh">grep -E 'CONFIG_(VIRTIO_PCI|VIRTIO_BLK|EXT4_FS|NET_9P|NET_9P_VIRTIO|9P_FS|DEVTMPFS)=y' .config   # 七项都必须是 =y（内建）；=m 的模块不在 initramfs 里，挂载会静默失败</pre>
         缺哪个就 <code>scripts/config -e 选项名</code>，再 <code>make LLVM=1 ARCH=arm64 olddefconfig</code> 并重编。</li>
       <li>写客体的 <code>/init</code>，它会挂上磁盘和共享目录：<pre data-lang="sh" data-file="init">#!/bin/sh
 /bin/busybox --install -s
@@ -329,7 +313,7 @@ ls /mnt/disk        # marker is gone</pre></li>
       <label><input type="radio" name="q4" value="a"> 宿主上用 sudo 跑，跑完重启</label>
       <label><input type="radio" name="q4" value="b"> QEMU VM 正常模式，挂着可写的共享目录</label>
       <label><input type="radio" name="q4" value="c"> QEMU VM 用 <code>-snapshot</code>（<code>./run-vm.sh throwaway</code>），并且不挂共享目录</label>
-      <div class="why" hidden>-snapshot 让所有磁盘写入在退出时丢弃；不挂共享目录则客体碰不到宿主的文件。</div>
+      <div class="why" hidden>-snapshot 让所有磁盘写入在退出时丢弃，但它不管 9p；共享目录必须在 QEMU 命令行上就不附加（throwaway 模式下 SHARE 为空），客体才真的碰不到宿主的文件。</div>
     </div>
     <button type="submit">检查答案</button>
     <div class="result"></div>
