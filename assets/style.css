@@ -129,14 +129,19 @@ body.scrolled .top { position: fixed; top: 12px; left: 50%; transform: translate
   background: var(--pill-solid); border-color: var(--pill-rim); box-shadow: inset 0 1px 0 var(--pill-sheen), var(--pill-shadow); }
 @media (prefers-reduced-motion: no-preference) {
   body.scrolled .top { animation: pill-in .5s cubic-bezier(.3,.7,.2,1) both; }
-  body.scrolled.leaving .top { animation: pill-out .4s cubic-bezier(.3,.7,.2,1) both; }
   body.scrolled .top .brand .wordmark, body.scrolled .top .mark, body.scrolled .top .mark img { transition: font-size .5s cubic-bezier(.3,.7,.2,1), width .5s cubic-bezier(.3,.7,.2,1), height .5s cubic-bezier(.3,.7,.2,1); }
+  /* Way back: the header is already in the page flow; it starts as the pill, offset to where
+     the pill was, and morphs into the bar while riding up with the page. */
+  body.leaving .top { animation: pill-out .4s cubic-bezier(.3,.7,.2,1) both; z-index: 5; }
+  body.leaving .top .brand .wordmark { animation: wm-out .4s cubic-bezier(.3,.7,.2,1) both; }
+  body.leaving .top .mark { animation: mark-out .4s cubic-bezier(.3,.7,.2,1) both; }
+  body.leaving .top .mark img { animation: markimg-out .4s cubic-bezier(.3,.7,.2,1) both; }
 }
-@keyframes pill-in { from { top: calc(var(--top-h, 80px) / -2); width: min(var(--maxw), calc(100% - 40px)); padding: 11px 2px; border-radius: 0; background: transparent; border-color: transparent; box-shadow: none; } }
-@keyframes pill-out { to { top: calc(var(--top-h, 80px) / -2); width: min(var(--maxw), calc(100% - 40px)); padding: 11px 2px; border-radius: 0; background: transparent; border-color: transparent; box-shadow: none; } }
-body.scrolled.leaving .top .brand .wordmark { font-size: 26px; }
-body.scrolled.leaving .top .mark { width: 56px; height: 56px; }
-body.scrolled.leaving .top .mark img { width: 46px; height: 46px; }
+@keyframes pill-in { from { top: var(--top-from, -40px); width: min(var(--maxw), calc(100% - 40px)); padding: 11px 2px; border-radius: 0; background: transparent; border-color: transparent; box-shadow: none; } }
+@keyframes pill-out { from { transform: translateY(var(--dy, 0px)); width: min(880px, calc(100% - 16px)); padding: 5px 8px 5px 18px; border-radius: 26px; background: var(--pill-solid); border-color: var(--pill-rim); box-shadow: inset 0 1px 0 var(--pill-sheen), var(--pill-shadow); } to { transform: none; } }
+@keyframes wm-out { from { font-size: 22px; } }
+@keyframes mark-out { from { width: 46px; height: 46px; } }
+@keyframes markimg-out { from { width: 38px; height: 38px; } }
 body.scrolled .top .brand .wordmark { font-size: 22px; }
 body.scrolled .top .crumb { white-space: nowrap; }
 body.scrolled .top .crumb.current, body.scrolled .top .crumb[aria-current="page"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -355,6 +360,7 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 @media (min-width: 1480px) {
   body.lesson { --rail-w: min(220px, calc((100vw - 960px) / 2 - 64px)); }
   body.lesson.scrolled header.top { display: none; }
+  body.lesson.leaving header.top, body.lesson.leaving header.top * { animation: none; }
   .rail-crumb { display: grid; grid-template-columns: 1fr; gap: 4px; overflow: hidden;
     max-height: 0; opacity: 0; transform: translateY(-10px); margin-bottom: 0; }
   body.scrolled .rail-crumb { max-height: 140px; opacity: 1; transform: none; margin-bottom: 14px; }

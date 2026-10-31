@@ -86,7 +86,7 @@
   function headerDock() {
     const header = document.querySelector('header.top');
     if (!header || document.querySelector('.top-spacer')) return;
-    let SHOW = 60, HIDE = 48; const OUT_MS = 380, GAP = 6;
+    let SHOW = 60, HIDE = 48; const OUT_MS = 400, GAP = 6;
     const spacer = document.createElement('div'); spacer.className = 'top-spacer'; spacer.setAttribute('aria-hidden', 'true');
     header.parentNode.insertBefore(spacer, header);
     let on = false, leaving = null;
@@ -100,12 +100,23 @@
     function update() {
       const y = window.scrollY;
       if (!on && y > SHOW) {
-        on = true; if (leaving) { clearTimeout(leaving); leaving = null; }
-        document.body.classList.remove('leaving'); document.body.classList.add('scrolled');
-      } else if (on && y < HIDE && !leaving) {
-        if (reduce) { on = false; document.body.classList.remove('scrolled'); return; }
-        document.body.classList.add('leaving');
-        leaving = setTimeout(() => { leaving = null; on = false; document.body.classList.remove('scrolled', 'leaving'); }, OUT_MS);
+        on = true;
+        if (leaving) { clearTimeout(leaving); leaving = null; document.body.classList.remove('leaving'); }
+        // morph in from wherever the bar actually is right now
+        header.style.setProperty('--top-from', Math.min(header.getBoundingClientRect().top, 12) + 'px');
+        document.body.classList.add('scrolled');
+      } else if (on && y < HIDE) {
+        on = false;
+        // hand the header back to the page flow at once; the out-morph starts from where the
+        // pill is (relative to the header's own slot) and rides up with the page
+        const dy = header.getBoundingClientRect().top - spacer.getBoundingClientRect().top;
+        header.style.setProperty('--dy', dy + 'px');
+        document.body.classList.remove('scrolled');
+        if (!reduce) {
+          document.body.classList.add('leaving');
+          if (leaving) clearTimeout(leaving);
+          leaving = setTimeout(() => { leaving = null; document.body.classList.remove('leaving'); }, OUT_MS);
+        }
       }
     }
     function onScroll() { update(); }
