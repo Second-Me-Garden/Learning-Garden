@@ -20,7 +20,8 @@
   const m = /^(.+)\/phase-(\d+)$/.exec(quiz.dataset.quiz || '');
   if (!m) return;
   const topic = m[1], here = Number(m[2]);
-  const meta = document.querySelector('.meta');
+  const cur0 = window.LG ? window.LG.lang() : 'zh-CN';
+  const meta = document.querySelector('.meta[lang="' + cur0 + '"]') || document.querySelector('.meta:not([lang])') || document.querySelector('.meta');
   const mt = meta && /Phase\s+\d+\s*\/\s*(\d+)/.exec(meta.textContent);
   const total = mt ? Number(mt[1]) : 9;
   const crumb = document.querySelector('header.top a.crumb[href]');
@@ -89,7 +90,7 @@
     label.textContent = 'Phase ' + i + (i === here && title ? ' · ' + title : '');
     a.appendChild(label);
     const st = states[i] === 'done' ? T('done') : i === now ? T('now') : T('ahead');
-    a.setAttribute('aria-label', 'Phase ' + i + '，' + st);
+    a.setAttribute('aria-label', 'Phase ' + i + (cur0 === 'en' ? ', ' : '，') + st);
     li.appendChild(a); ol.appendChild(li); items.push({ li, label, i });
   }
   panel.appendChild(ol);
@@ -108,7 +109,7 @@
       if (!h.id) { let id = 's' + (idx + 1); while (used.has(id) || document.getElementById(id)) id += 'x'; h.id = id; }
       used.add(h.id);
       const li = document.createElement('li'); const a = document.createElement('a');
-      a.href = '#' + h.id; a.textContent = h.textContent.split('：')[0].trim();
+      a.href = '#' + h.id; a.textContent = h.textContent.split(/：|: /)[0].trim();
       if (/^(自测|Quiz|Self-check)/.test(a.textContent) && states[here] === 'done') a.textContent += ' · ' + T('done');
       li.appendChild(a); toc.appendChild(li);
     });

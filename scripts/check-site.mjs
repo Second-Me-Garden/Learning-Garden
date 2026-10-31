@@ -38,7 +38,7 @@ for (const page of pages) {
   if (!/<link rel="icon" href="[./]*assets\/brand\/favicon\.svg"/.test(html)) problems.push(`${rel}: favicon link missing`);
 
   // phase pages
-  if (/\/phase-\d+-[^/]+\/index\.html$/.test(page)) {
+  if (/\/(phase-\d+-[^/]+|lab-setup)\/index\.html$/.test(page)) {
     const diagrams = html.match(/<svg[^>]*\bdata-diagram\b/g) || [];
     if (diagrams.length < 1) problems.push(`${rel}: no svg[data-diagram]`);
     for (const d of html.matchAll(/<svg[^>]*\bdata-diagram\b[^>]*>/g)) {
@@ -48,6 +48,15 @@ for (const page of pages) {
     if (!/assets\/rail\.js/.test(html)) problems.push(`${rel}: rail.js not loaded`);
     if (!/assets\/code\.js/.test(html)) problems.push(`${rel}: code.js not loaded`);
     if (/<form class="quiz"/.test(html) && !/assets\/quiz\.js/.test(html)) problems.push(`${rel}: quiz present but quiz.js not loaded`);
+    // bilingual: a page that no longer carries the untranslated notice must be fully paired
+    if (!/class="note untranslated"/.test(html)) {
+      const en = (html.match(/lang="en"/g) || []).length, zh = (html.match(/lang="zh-CN"/g) || []).length;
+      if (en < 20) problems.push(`${rel}: translated page has only ${en} lang="en" blocks`);
+      if (Math.abs(en - zh) > Math.max(6, zh * 0.15)) problems.push(`${rel}: lang="en" (${en}) and lang="zh-CN" (${zh}) counts differ`);
+      for (const d of html.matchAll(/<svg[^>]*\bdata-diagram\b[^>]*>/g)) {
+        if (!/data-captions-en=/.test(d[0])) problems.push(`${rel}: diagram without data-captions-en`);
+      }
+    }
     for (const h of ['目标', '核心概念', '动画图解', '资料', '参考书目']) {
       if (!html.includes(h)) problems.push(`${rel}: section "${h}" missing`);
     }
