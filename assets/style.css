@@ -309,16 +309,16 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 
 /* ---------- Lesson pages: sticky left rail (wide screens only) ---------- */
 .rail { display: none; }
-@media (min-width: 1440px) {
+@media (min-width: 1480px) {
   body.lesson { background-color: var(--bg); background-image: var(--grain),
     radial-gradient(420px 360px at 6% 300px, var(--bloom-green), transparent 70%),
     radial-gradient(380px 320px at 4% 1000px, var(--bloom-lime), transparent 70%),
     radial-gradient(420px 360px at 96% 700px, var(--bloom-low), transparent 70%);
     background-size: 180px 180px, 100% 1400px, 100% 1400px, 100% 1400px;
     background-repeat: repeat, repeat-y, repeat-y, repeat-y; }
-  .rail { display: block; position: sticky; top: 20px; height: 0; z-index: 2; }
-  .rail-panel { position: absolute; top: 0; right: calc(100% + 36px); width: min(220px, calc((100vw - 960px) / 2 - 64px));
-    max-height: calc(100vh - 40px); overflow: auto; padding: 16px 16px 14px; border-radius: 16px;
+  .rail { display: block; position: sticky; top: 40px; height: 0; z-index: 2; }
+  .rail-panel { position: absolute; top: 0; right: calc(100% + 52px); width: min(224px, calc((100vw - 960px) / 2 - 80px));
+    max-height: calc(100vh - 80px); overflow: auto; padding: 18px 18px 16px; border-radius: 18px;
     background: var(--glass-solid); border: 1px solid var(--glass-rim); box-shadow: var(--glass-inner), var(--glass-shadow);
     font-size: 13.5px; line-height: 1.45; color: var(--ink-2); }
   @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
@@ -327,14 +327,14 @@ body.hub { min-height: 100svh; background-color: var(--bg);
   }
 }
 /* Header docks into the rail on scroll (wide screens only). */
-@media (min-width: 1440px) {
+@media (min-width: 1480px) {
   body.lesson { --rail-w: min(220px, calc((100vw - 960px) / 2 - 64px)); }
   body.lesson header.top { transform-origin: left top; will-change: transform, opacity; }
-  body.lesson.scrolled header.top { transform: translate(calc(16px - var(--rail-w) - 36px), 28px) scale(.9); opacity: 0; visibility: hidden; pointer-events: none;
+  body.lesson.scrolled header.top { transform: translate(calc(18px - var(--rail-w) - 52px), 48px) scale(.9); opacity: 0; visibility: hidden; pointer-events: none;
     top: 0; max-width: var(--maxw); padding: 11px 2px; font-size: 15px; border-radius: 0; background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
-  .rail-crumb { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; overflow: hidden;
+  .rail-crumb { display: grid; grid-template-columns: 1fr; gap: 4px; overflow: hidden;
     max-height: 0; opacity: 0; transform: translateY(-10px); margin-bottom: 0; }
-  body.scrolled .rail-crumb { max-height: 80px; opacity: 1; transform: none; margin-bottom: 10px; }
+  body.scrolled .rail-crumb { max-height: 140px; opacity: 1; transform: none; margin-bottom: 14px; }
   @media (prefers-reduced-motion: no-preference) {
     body.lesson header.top { transition: transform .38s cubic-bezier(.3,.7,.2,1), opacity .15s ease, visibility 0s .38s; }
     body.lesson.scrolled header.top { transition: transform .38s cubic-bezier(.3,.7,.2,1), opacity .15s ease, visibility 0s .38s; }
@@ -342,14 +342,13 @@ body.hub { min-height: 100svh; background-color: var(--bg);
     .rail-crumb { transition: max-height .38s cubic-bezier(.3,.7,.2,1), opacity .3s ease .08s, transform .38s cubic-bezier(.3,.7,.2,1), margin-bottom .38s; }
   }
 }
-.rail-crumb .rail-brand { grid-column: 1; font-family: var(--display); font-weight: 600; font-size: 15px; color: var(--ink); text-decoration: none; }
-.rail-crumb .rail-topic { grid-column: 1; font-weight: 600; color: var(--ink-2); text-decoration: none; }
-.rail-crumb .rail-theme, .rail-crumb .rail-lang { grid-column: 2; background: transparent; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); color: var(--ink-2); border-radius: 999px; width: 28px; height: 28px; font: inherit; cursor: pointer; line-height: 1; }
-.rail-crumb .rail-lang { width: auto; padding: 0 7px; font-size: 11.5px; font-weight: 600; }
+.rail-crumb .rail-brand { font-family: var(--display); font-weight: 600; font-size: 16px; color: var(--ink); text-decoration: none; }
+.rail-crumb .rail-topic { font-weight: 600; color: var(--ink-2); text-decoration: none; }
+.rail-crumb .rail-tools { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.rail-crumb .rail-theme, .rail-crumb .rail-lang { background: transparent; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); color: var(--ink-2); border-radius: 999px; width: 30px; height: 30px; font: inherit; cursor: pointer; line-height: 1; }
+.rail-crumb .rail-lang { width: auto; padding: 0 9px; font-size: 12px; font-weight: 600; }
 .rail-crumb .rail-theme:hover, .rail-crumb .rail-lang:hover { border-color: var(--ink-3); color: var(--ink); }
-.rail-crumb { grid-template-rows: auto auto; }
-.rail-crumb .rail-brand { grid-row: 1; } .rail-crumb .rail-topic { grid-row: 2; } .rail-crumb .rail-theme { grid-row: 1; } .rail-crumb .rail-lang { grid-row: 2; justify-self: end; }
-.rail-meta { margin: 0 0 10px; }
+.rail-meta { margin: 0 0 14px; }
 .rail-plots { list-style: none; margin: 0; padding: 0; position: relative; }
 .rail-plots::before { content: ""; position: absolute; left: 6px; top: 8px; bottom: 8px; width: 2px; background: color-mix(in srgb, var(--ink) 14%, transparent); }
 .rail-plots li { position: relative; display: flex; gap: 10px; align-items: center; min-height: 22px; }
@@ -358,7 +357,7 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .rail-plots .done .dot { background: var(--accent); border-color: var(--accent); }
 .rail-plots .now .dot { border: 3px solid var(--accent); }
 .rail-plots [aria-current="page"] { color: var(--ink); font-weight: 600; }
-.rail-count { margin: 8px 0 12px; }
+.rail-count { margin: 10px 0 14px; }
 .rail-toc { list-style: none; margin: 0; padding: 10px 0 0; border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent); }
 .rail-toc a { display: block; padding: 3px 0 3px 10px; border-left: 2px solid transparent; color: var(--ink-2); text-decoration: none; }
 .rail-toc a[aria-current] { border-left-color: var(--accent); color: var(--accent-text); font-weight: 600; }
