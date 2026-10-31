@@ -38,43 +38,43 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #203044;
-    --surface: #27394e;
-    --surface-2: #2f435a;
-    --ink: #eaf0f6;
-    --ink-2: #bac6d4;
-    --ink-3: #93a4b8;
-    --line: #3d5169;
+    --bg: #121714;
+    --surface: #1b231e;
+    --surface-2: #243029;
+    --ink: #e6ece5;
+    --ink-2: #aeb9b0;
+    --ink-3: #85928a;
+    --line: #33403a;
     --accent: #5fbf8e;
-    --accent-ink: #0f1a2a;
+    --accent-ink: #0d1a12;
     --linux: #e0a63a;
     --xnu: #8fa3ea;
     --ok: #5fbf8e;
     --warn: #e0a63a;
-    --field-top: #253a53; --field-bot: #1c2b3d; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
-    --glass-fill: rgba(39,57,78,.40); --glass-solid: rgba(32,48,68,.88); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
-    --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(32,48,68,.55); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block; --halo-core: #203044;
+    --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
+    --glass-fill: rgba(36,48,41,.36); --glass-solid: rgba(27,35,30,.86); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
+    --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block; --halo-core: #2f4b70;
     --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .18 0 0 0 -.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #203044;
-  --surface: #27394e;
-  --surface-2: #2f435a;
-  --ink: #eaf0f6;
-  --ink-2: #bac6d4;
-  --ink-3: #93a4b8;
-  --line: #3d5169;
+  --bg: #121714;
+  --surface: #1b231e;
+  --surface-2: #243029;
+  --ink: #e6ece5;
+  --ink-2: #aeb9b0;
+  --ink-3: #85928a;
+  --line: #33403a;
   --accent: #5fbf8e;
-  --accent-ink: #0f1a2a;
+  --accent-ink: #0d1a12;
   --linux: #e0a63a;
   --xnu: #8fa3ea;
   --ok: #5fbf8e;
   --warn: #e0a63a;
-  --field-top: #253a53; --field-bot: #1c2b3d; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
-  --glass-fill: rgba(39,57,78,.40); --glass-solid: rgba(32,48,68,.88); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
-  --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(32,48,68,.55); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block; --halo-core: #203044;
+  --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
+  --glass-fill: rgba(36,48,41,.36); --glass-solid: rgba(27,35,30,.86); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
+  --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block; --halo-core: #2f4b70;
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .18 0 0 0 -.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
 }
 
