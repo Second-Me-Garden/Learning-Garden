@@ -428,6 +428,10 @@ body.scrolled .rail-tools { display: flex; }
 .art-pin { stroke: var(--ink-3); stroke-width: 1.2; opacity: .5; }
 .art-path { fill: none; stroke: var(--ink-3); stroke-width: 2; stroke-linecap: round; opacity: .85; }
 .art-dot { fill: var(--accent); }
+/* ROS 2 card: a graph of node rings and topic edges, blue; the travelling message reuses .art-path/.art-dot */
+.art-edge { fill: none; stroke: var(--ros); stroke-width: 1.4; opacity: .35; }
+.art-node { fill: color-mix(in srgb, var(--ros) 8%, transparent); stroke: var(--ros); stroke-width: 1.4; opacity: .7; }
+.art-hub { fill: color-mix(in srgb, var(--ros) 14%, transparent); stroke: var(--ros); stroke-width: 1.4; opacity: .9; }
 @media (max-width: 700px) { .topic-art { display: none; } .topic-card h2, .topic-card .what { max-width: none; } }
 
 /* ---------- Bibliography ---------- */
