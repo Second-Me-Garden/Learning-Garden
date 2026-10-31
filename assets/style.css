@@ -1,5 +1,7 @@
 /* Learning Garden — shared styles. No build step, no dependencies.
- * Palette: sage paper, deep green ink, garden green; Linux = ochre, XNU = indigo. */
+ * Palette: sage paper, deep green ink, garden green; Linux = ochre, XNU = indigo.
+ * Brand: selected A / Fraunces (assets/brand/README.md). Fraunces is the logo wordmark only. */
+@font-face { font-family: "Fraunces"; src: url("brand/fonts/Fraunces.ttf") format("truetype"); font-weight: 100 900; font-display: swap; }
 
 :root {
   color-scheme: light;
@@ -29,6 +31,7 @@
   --pill-fill: rgba(255,255,255,.66); --pill-solid: rgba(252,253,251,.96); --pill-sheen: rgba(255,255,255,.9); --pill-rim: rgba(23,36,28,.18);
   --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: rgba(23,36,28,.22); --pill-shadow: 0 1px 2px rgba(23,36,28,.08), 0 14px 32px -12px rgba(23,36,28,.35);
   --bar-edge: rgba(23,36,28,.16);
+  --mark-light: inline-block; --mark-dark: none; --navy: #203044;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -49,7 +52,7 @@
     --warn: #e0a63a;
     --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
     --glass-fill: rgba(36,48,41,.36); --glass-solid: rgba(27,35,30,.86); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
-    --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14);
+    --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block;
     --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .18 0 0 0 -.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   }
 }
@@ -70,7 +73,7 @@
   --warn: #e0a63a;
   --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
   --glass-fill: rgba(36,48,41,.36); --glass-solid: rgba(27,35,30,.86); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
-  --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14);
+  --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block;
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .18 0 0 0 -.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
 }
 
@@ -114,7 +117,7 @@ img, svg { max-width: 100%; }
   padding: 11px 2px; border: 1px solid transparent; border-radius: 0;
   font-size: 15px; color: var(--ink-2); background: transparent;
 }
-.top .brand { font-size: 19px; }
+.top .brand { font-size: 20px; }
 .top .crumb { font-size: 15px; }
 .top .crumb.current, .top .crumb[aria-current="page"] { color: var(--ink); font-weight: 600; }
 @media (prefers-reduced-motion: no-preference) {
@@ -124,7 +127,8 @@ img, svg { max-width: 100%; }
 /* Scrolled: a centred glass pill over the content that passes beneath it. */
 body.scrolled .top { top: 12px; max-width: 820px; padding: 11px 11px 11px 26px; font-size: 15px; border-radius: 26px; color: var(--pill-ink-2);
   background: var(--pill-solid); border-color: var(--pill-rim); box-shadow: inset 0 1px 0 var(--pill-sheen), var(--pill-shadow); }
-body.scrolled .top .brand { font-size: 18px; }
+body.scrolled .top .brand { font-size: 19px; }
+body.scrolled .top .mark { width: 32px; height: 32px; }
 body.scrolled .top .brand, body.scrolled .top .crumb.current, body.scrolled .top .crumb[aria-current="page"] { color: var(--pill-ink); }
 body.scrolled .top button.theme, body.scrolled .top button.lang { border-color: var(--pill-line); }
 @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
@@ -135,7 +139,11 @@ body.scrolled .top button.theme, body.scrolled .top button.lang { border-color: 
   body.scrolled .top { background: var(--pill-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
 @media (max-width: 800px) { body.scrolled .top { max-width: calc(100% - 8px); } }
-.top .brand { font-family: var(--display); font-weight: 600; letter-spacing: 0.01em; color: var(--ink); text-decoration: none; }
+.top .brand { display: inline-flex; align-items: center; gap: 10px; font-family: "Fraunces", var(--display); font-weight: 600; font-variation-settings: "opsz" 72, "SOFT" 50, "WONK" 0; letter-spacing: 0; color: var(--ink); text-decoration: none; }
+.mark { display: inline-block; width: 34px; height: 34px; flex: none; }
+.mark img { width: 100%; height: 100%; }
+img.mark-light, .mark-light { display: var(--mark-light); } img.mark-dark, .mark-dark { display: var(--mark-dark); }
+.top .mark-light, .top .mark-dark { width: 34px; height: 34px; }
 .top .crumb { text-decoration: none; color: var(--ink-2); }
 .top .crumb::before { content: "›"; color: var(--ink-3); margin: 0 10px 0 2px; font-weight: 400; }
 .top .spacer { flex: 1; }
@@ -426,7 +434,8 @@ body.scrolled .rail-tools { display: flex; }
 .note.untranslated { margin: 6px 0 14px; border-left: 3px solid var(--ink-3); }
 
 /* ---------- Hub wordmark ---------- */
-h1.wordmark { font-size: clamp(64px, 9.5vw, 112px); line-height: .92; letter-spacing: -0.025em; margin: 18px 0 14px; }
+h1.wordmark { font-family: "Fraunces", var(--display); font-weight: 600; font-variation-settings: "opsz" 72, "SOFT" 50, "WONK" 0; font-size: clamp(54px, 8vw, 96px); line-height: .98; letter-spacing: -0.012em; margin: 18px 0 14px; }
+h1.wordmark .tagline { display: block; font-family: "Fraunces", var(--display); font-weight: 500; font-variation-settings: "opsz" 72, "SOFT" 50, "WONK" 0; font-size: clamp(20px, 2.4vw, 26px); letter-spacing: 0.01em; color: var(--ink-2); margin-top: 10px; }
 h1.wordmark .en { font-size: 18px; margin-top: 18px; }
 h1.wordmark .bed-mark { display: block; position: relative; width: 120px; height: 10px; margin-top: 22px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 14%, transparent); }
 h1.wordmark .bed-mark::before { content: ""; position: absolute; left: 0; top: 0; height: 10px; width: 34px; border-radius: 999px; background: var(--accent); }
@@ -435,3 +444,12 @@ h1.wordmark .bed-mark i { position: absolute; left: 30px; top: -4px; width: 18px
 /* keep the legend state fills last so nothing overrides them */
 .legend i.done { background: var(--accent) !important; border-color: var(--accent) !important; }
 .legend i.now { border-color: var(--accent) !important; }
+
+/* ---------- About (hub) ---------- */
+.about { display: grid; grid-template-columns: 200px 1fr; gap: 28px; align-items: start; margin-top: 56px; padding-top: 28px; border-top: 1px solid var(--line); }
+.about .seal img { width: 200px; height: 200px; border-radius: 22px; }
+.about .seal img.mark-light { display: var(--mark-light); } .about .seal img.mark-dark { display: var(--mark-dark); }
+.about h2 { margin: 0 0 10px; }
+.about p { margin: 0 0 10px; }
+.about .meta { font-size: 13px; }
+@media (max-width: 700px) { .about { grid-template-columns: 1fr; } .about .seal img { width: 160px; height: 160px; } }

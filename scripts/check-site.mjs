@@ -11,7 +11,7 @@ const problems = [];
 
 function walk(dir, out = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'docs') continue;
+    if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'docs' || e.name === 'tmp') continue;
     const p = path.join(dir, e.name);
     if (e.isDirectory()) walk(p, out); else if (e.name.endsWith('.html')) out.push(p);
   }
@@ -35,6 +35,7 @@ for (const page of pages) {
   if (!/<script src="[./]*assets\/lang\.js"><\/script>/.test(html)) problems.push(`${rel}: assets/lang.js not loaded`);
   if (!/<button class="lang"/.test(html)) problems.push(`${rel}: language button missing`);
   if (!/<meta name="google" content="notranslate">/.test(html)) problems.push(`${rel}: notranslate meta missing`);
+  if (!/<link rel="icon" href="[./]*assets\/brand\/favicon\.svg"/.test(html)) problems.push(`${rel}: favicon link missing`);
 
   // phase pages
   if (/\/phase-\d+-[^/]+\/index\.html$/.test(page)) {
