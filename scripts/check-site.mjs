@@ -58,6 +58,11 @@ for (const page of pages) {
     const steps = [...d[0].matchAll(/data-step="([^"]+)"/g)].flatMap(s => s[1].split(/\s+/).map(Number));
     const max = Math.max(0, ...steps);
     if (captions.length !== max + 1) problems.push(`${rel}: captions ${captions.length} != steps+1 (${max + 1})`);
+    const en = /data-captions-en='([^']*)'/.exec(d[0]);
+    if (en) {
+      try { const ce = JSON.parse(en[1]); if (ce.length !== captions.length) problems.push(`${rel}: captions-en ${ce.length} != captions ${captions.length}`); }
+      catch { problems.push(`${rel}: data-captions-en is not valid JSON`); }
+    }
   }
 }
 

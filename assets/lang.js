@@ -26,7 +26,10 @@
   function apply(l) {
     document.documentElement.dataset.lang = l;
     document.documentElement.lang = l;
-    document.querySelectorAll('button.lang').forEach(function (b) { b.textContent = T[l].langBtn; b.title = T[l].langLabel; b.setAttribute('aria-label', T[l].langLabel); });
+    document.querySelectorAll('button.lang').forEach(function (b) {
+      b.innerHTML = '<span class="opt' + (l === 'zh-CN' ? ' on' : '') + '">中文</span><span class="sep">/</span><span class="opt' + (l === 'en' ? ' on' : '') + '">EN</span>';
+      b.title = T[l].langLabel; b.setAttribute('aria-label', T[l].langLabel);
+    });
     document.querySelectorAll('button.theme').forEach(function (b) { b.title = T[l].theme; b.setAttribute('aria-label', T[l].theme); });
   }
   var saved = null;

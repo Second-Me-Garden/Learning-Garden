@@ -41,16 +41,26 @@
            "Phase 5 设备驱动：Linux driver model ↔ IOKit / DriverKit，中断与 DMA。",
            "Phase 6 调试与工具：ftrace/perf/kgdb ↔ lldb+KDP/dtrace/panic log。",
            "Phase 7 安全与加固：KASLR、PAC、PPL/SPTM、sandbox、code signing。",
-           "Phase 8 XNU 与 Apple 路线：编译 XNU、Darwin 内部阅读计划、作品项目、面试环节。"]'>
+           "Phase 8 XNU 与 Apple 路线：编译 XNU、Darwin 内部阅读计划、作品项目、面试环节。"]'
+         data-captions-en='["Nine phases: foundations on the left, subsystems in the middle, the Apple track on the right. Press Play to light them up one by one.",
+           "Phase 0 Foundations: C systems programming, ARM64, the toolchain; build Linux and boot it in QEMU.",
+           "Phase 1 Boot and processes: the boot chain, process and thread model, context switch, the scheduler.",
+           "Phase 2 Memory: virtual memory, page tables, page faults, kernel allocators.",
+           "Phase 3 Concurrency and IPC: locks, RCU, memory ordering; Mach ports and messages.",
+           "Phase 4 System calls, the VFS and filesystems, block I/O.",
+           "Phase 5 Device drivers: the Linux driver model vs IOKit / DriverKit, interrupts and DMA.",
+           "Phase 6 Debugging and tooling: ftrace / perf / kgdb vs lldb + KDP / dtrace / panic logs.",
+           "Phase 7 Security and hardening: KASLR, PAC, PPL / SPTM, sandbox, code signing.",
+           "Phase 8 XNU and the Apple track: build XNU, a Darwin internals reading plan, a portfolio project, the interview loop."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" fill="currentColor" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
       <!-- lanes -->
-      <text x="20" y="28" class="small">基础</text>
-      <text x="300" y="28" class="small">子系统（每阶段 Linux ↔ XNU 对照）</text>
-      <text x="760" y="28" class="small">Apple 路线</text>
+      <text x="20" y="28" class="small" lang="zh-CN">基础</text><text x="20" y="28" class="small" lang="en">Foundations</text>
+      <text x="300" y="28" class="small" lang="zh-CN">子系统（每阶段 Linux ↔ XNU 对照）</text><text x="300" y="28" class="small" lang="en">Subsystems (Linux ↔ XNU in every phase)</text>
+      <text x="760" y="28" class="small" lang="zh-CN">Apple 路线</text><text x="760" y="28" class="small" lang="en">Apple track</text>
       <line x1="270" y1="15" x2="270" y2="290" class="lane"/>
       <line x1="740" y1="15" x2="740" y2="290" class="lane"/>
 
@@ -78,7 +88,7 @@
       <path data-step="9" class="arrow" d="M730 190 L770 190 L770 140"/>
       <g data-step="9"><rect class="box xnu" x="760" y="50" width="120" height="90"/><text x="770" y="74">Phase 8</text><text x="770" y="94" class="small">XNU · Apple track</text><text x="770" y="114" class="small">build · project</text><text x="770" y="130" class="small">· interview</text></g>
 
-      <text x="20" y="270" class="small">每个阶段：目标 → 核心概念 → Linux ↔ XNU 对照 → 动画 → 实验 → 自测 → 资料</text>
+      <text x="20" y="270" class="small" lang="zh-CN">每个阶段：目标 → 核心概念 → Linux ↔ XNU 对照 → 动画 → 实验 → 自测 → 资料</text><text x="20" y="270" class="small" lang="en">Each phase: goals → core concepts → Linux ↔ XNU table → diagram → lab → quiz → resources</text>
     </svg>
   </div>
 

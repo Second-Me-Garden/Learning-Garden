@@ -117,7 +117,10 @@ img, svg { max-width: 100%; }
   border-radius: 999px; height: 30px; font: inherit; cursor: pointer; line-height: 1;
 }
 .top button.theme { width: 30px; }
-.top button.lang { min-width: 52px; padding: 0 8px; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; text-align: center; }
+.top button.lang { padding: 0 9px; font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em; }
+button.lang .opt { opacity: .5; }
+button.lang .opt.on { opacity: 1; color: var(--ink); }
+button.lang .sep { opacity: .35; margin: 0 4px; font-weight: 400; }
 .top button.theme:hover, .top button.lang:hover { border-color: var(--ink-3); color: var(--ink); }
 
 /* Type scale */
@@ -209,6 +212,9 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .phases .st:empty::after { content: "还没到"; }
 .phases li.done .st:empty::after { content: "自测全对"; }
 .phases li.now .st:empty::after { content: "正在学"; }
+:root[data-lang="en"] .phases .st:empty::after { content: "Not yet"; }
+:root[data-lang="en"] .phases li.done .st:empty::after { content: "Quiz passed"; }
+:root[data-lang="en"] .phases li.now .st:empty::after { content: "In progress"; }
 .phases li.done .st { color: var(--ok); }
 .phases li.now .st { color: var(--accent); font-weight: 600; }
 @media (max-width: 520px) { .phases li { grid-template-columns: 36px 1fr; } .phases .st { grid-column: 2; } }
@@ -312,7 +318,7 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .rail-crumb .rail-brand { grid-column: 1; font-family: var(--display); font-weight: 600; font-size: 15px; color: var(--ink); text-decoration: none; }
 .rail-crumb .rail-topic { grid-column: 1; font-weight: 600; color: var(--ink-2); text-decoration: none; }
 .rail-crumb .rail-theme, .rail-crumb .rail-lang { grid-column: 2; background: transparent; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); color: var(--ink-2); border-radius: 999px; width: 28px; height: 28px; font: inherit; cursor: pointer; line-height: 1; }
-.rail-crumb .rail-lang { min-width: 46px; width: auto; padding: 0 6px; font-size: 12px; font-weight: 600; text-align: center; }
+.rail-crumb .rail-lang { width: auto; padding: 0 7px; font-size: 11.5px; font-weight: 600; }
 .rail-crumb .rail-theme:hover, .rail-crumb .rail-lang:hover { border-color: var(--ink-3); color: var(--ink); }
 .rail-crumb { grid-template-rows: auto auto; }
 .rail-crumb .rail-brand { grid-row: 1; } .rail-crumb .rail-topic { grid-row: 2; } .rail-crumb .rail-theme { grid-row: 1; } .rail-crumb .rail-lang { grid-row: 2; justify-self: end; }
