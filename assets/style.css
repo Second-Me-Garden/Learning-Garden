@@ -22,9 +22,10 @@
   --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   --sans: "Avenir Next", -apple-system, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Noto Sans CJK SC", sans-serif;
   --display: "Avenir Next Condensed", "Avenir Next", "PingFang SC", "Arial Narrow", -apple-system, sans-serif;
-  --glass: rgba(247,249,245,.62); --glass-edge: rgba(23,36,28,.14); --glass-hi: rgba(255,255,255,.7);
-  --glass-blur: 20px; --field-1: rgba(31,111,74,.22); --field-2: rgba(196,214,140,.45);
-  --card-shadow: 0 1px 2px rgba(23,36,28,.05), 0 10px 28px -16px rgba(23,36,28,.22);
+  --field-top: #eef2ea; --field-bot: #e4eadf; --bloom-paper: rgba(255,255,255,.75); --bloom-green: rgba(31,111,74,.20); --bloom-lime: rgba(196,214,140,.45); --bloom-low: rgba(31,111,74,.08);
+  --glass-fill: rgba(247,249,245,.30); --glass-solid: rgba(247,249,245,.78); --glass-sheen: rgba(255,255,255,.45); --glass-rim: rgba(255,255,255,.6);
+  --glass-inner: inset 0 1px 0 rgba(255,255,255,.85), inset 0 -1px 0 rgba(23,36,28,.08); --glass-shadow: 0 1px 1px rgba(23,36,28,.05), 0 24px 48px -24px rgba(23,36,28,.30); --accent-text: #175a3b;
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .09 0 0 0 0 .14 0 0 0 0 .11 .3 0 0 0 -.1'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
 }
 
 @media (prefers-color-scheme: dark) {
@@ -43,8 +44,10 @@
     --xnu: #8fa3ea;
     --ok: #5fbf8e;
     --warn: #e0a63a;
-    --glass: rgba(36,48,41,.55); --glass-edge: rgba(230,236,229,.10); --glass-hi: rgba(255,255,255,.06);
-    --field-1: rgba(95,191,142,.16); --field-2: rgba(196,214,140,.07); --card-shadow: 0 10px 28px -16px rgba(0,0,0,.6);
+    --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
+    --glass-fill: rgba(36,48,41,.36); --glass-solid: rgba(27,35,30,.86); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
+    --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e;
+    --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .18 0 0 0 -.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   }
 }
 :root[data-theme="dark"] {
@@ -62,8 +65,10 @@
   --xnu: #8fa3ea;
   --ok: #5fbf8e;
   --warn: #e0a63a;
-  --glass: rgba(36,48,41,.55); --glass-edge: rgba(230,236,229,.10); --glass-hi: rgba(255,255,255,.06);
-  --field-1: rgba(95,191,142,.16); --field-2: rgba(196,214,140,.07); --card-shadow: 0 10px 28px -16px rgba(0,0,0,.6);
+  --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
+  --glass-fill: rgba(36,48,41,.36); --glass-solid: rgba(27,35,30,.86); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
+  --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e;
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .18 0 0 0 -.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
 }
 
 * { box-sizing: border-box; }
@@ -148,34 +153,38 @@ h2.plain { margin-top: 56px; }
 .howto { color: var(--ink-2); font-size: 15px; }
 .howto li { margin: 4px 0; }
 
-/* ---------- Hub: topic cards (glass over a soft field) ---------- */
+/* ---------- Hub: field + topic cards (thin glass over a grainy field) ---------- */
+body.hub { min-height: 100svh; background-color: var(--bg);
+  background-image: var(--grain),
+    radial-gradient(640px 420px at 12% 0, var(--bloom-paper), transparent 70%),
+    radial-gradient(520px 340px at 84% 360px, var(--bloom-green), transparent 70%),
+    radial-gradient(460px 300px at 6% 540px, var(--bloom-lime), transparent 70%),
+    radial-gradient(760px 400px at 60% 920px, var(--bloom-low), transparent 70%),
+    linear-gradient(180deg, var(--field-top), var(--field-bot) 720px);
+  background-repeat: repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat; }
 .garden { display: grid; gap: 16px; margin: 36px 0 0; }
-.topic-card { background: var(--surface); border: 1px solid var(--glass-edge); border-radius: 18px; padding: 24px 28px 22px; box-shadow: inset 0 1px 0 var(--glass-hi), var(--card-shadow); }
-.topic-card:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.topic-card { border-radius: 18px; padding: 24px 28px 22px; background: var(--glass-solid); border: 1px solid var(--glass-rim); box-shadow: var(--glass-inner), var(--glass-shadow); }
+.topic-card:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
 .topic-card h2 { margin: 0 0 4px; font-size: 30px; letter-spacing: -.01em; }
 .topic-card h2 a { color: var(--ink); text-decoration: none; }
-.topic-card h2 a:hover { color: var(--accent); }
+.topic-card h2 a:hover, .topic-card .track .next a { color: var(--accent-text); }
 .topic-card .what { margin: 0 0 14px; color: var(--ink-2); font-size: 15.5px; }
 .topic-card .track { background: none; padding: 0; margin: 0; border-radius: 0; }
+.topic-card .track .bed-line { stroke: color-mix(in srgb, var(--ink) 14%, transparent); }
 .topic-card .track .plot { vector-effect: non-scaling-stroke; }
+.topic-card .track text.now, .topic-card .track a:hover text.n, .topic-card .track a:focus-visible text.n { fill: var(--accent-text); }
 .topic-card .track .next { margin: 12px 0 0; font-size: 17px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 14px 4px 0; font-size: 13.5px; color: var(--ink-2); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; border: 2px solid var(--ink-3); background: var(--surface); }
 .legend i.done { background: var(--accent); border-color: var(--accent); }
 .legend i.now { border-color: var(--accent); }
 @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
-  .garden { position: relative; isolation: isolate; }
-  .garden::before { content: ""; position: absolute; inset: -28px -16px; z-index: -1; pointer-events: none;
-    background: radial-gradient(380px 200px at 14% 150px, var(--field-1), transparent 70%),
-                radial-gradient(300px 110px at 86% 230px, var(--field-2), transparent 70%);
-    background-size: 100% 316px; background-repeat: repeat-y; }
-  .topic-card { background: var(--glass); -webkit-backdrop-filter: blur(var(--glass-blur)); backdrop-filter: blur(var(--glass-blur)); }
+  .topic-card { background: linear-gradient(155deg, var(--glass-sheen), transparent 42%), var(--glass-fill);
+    -webkit-backdrop-filter: blur(12px) saturate(1.3); backdrop-filter: blur(12px) saturate(1.3); }
 }
-@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  .garden::before { display: none; }
-  .topic-card { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
-}
-@media (prefers-contrast: more) { .topic-card { border-color: var(--ink-3); box-shadow: none; } }
+@media (prefers-reduced-transparency: reduce) { .topic-card { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+@media (prefers-contrast: more) { body.hub { background: var(--bg); }
+  .topic-card { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; border-color: var(--ink-3); box-shadow: none; } }
 @media (max-width: 600px) { .topic-card { border-radius: 16px; padding: 18px 16px 16px; } .topic-card h2 { font-size: 24px; } .topic-card .track .next { font-size: 16px; } }
 
 /* ---------- Topic page: phase plots ---------- */

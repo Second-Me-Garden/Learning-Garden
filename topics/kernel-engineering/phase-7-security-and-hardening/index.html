@@ -57,7 +57,7 @@
 
   <h3>4. ARM Pointer Authentication（PAC）</h3>
   <p>ARMv8.3 的 FEAT_PAuth 增加了 5 把 128 位密钥（<code>APIAKey</code>、<code>APIBKey</code>、<code>APDAKey</code>、<code>APDBKey</code>、<code>APGAKey</code>，各分 <code>…Lo_EL1</code>/<code>…Hi_EL1</code> 两个系统寄存器；EL0 读不到）和一组指令：<code>pacia Xd, Xn</code> 用 IA 密钥、以 <code>Xn</code> 为修饰值（modifier）给 <code>Xd</code> 里的指针算出一个短 MAC——<strong>PAC</strong>——写进指针<strong>未用于寻址的高位</strong>；<code>autia</code> 用同样的密钥和修饰值重算并比较，对了就去掉 PAC 恢复原指针；<code>xpaci</code>/<code>xpacd</code> 只去掉不校验；<code>paciasp</code>/<code>pacibsp</code> 是「对 LR、以 SP 为修饰值」的简写；<code>retaa</code>/<code>retab</code>、<code>blraa</code> 把校验与跳转合成一条。PAC 位数取决于虚拟地址宽度和 TBI：48 位 VA 且开启 TBI 时只有 [54:48] 7 位（bit 55 用来选 TTBR），关闭 TBI 时高字节也可用；所以 PAC 是<em>概率</em>防护，靠的是「猜错一次就崩溃」。</p>
-  <p>校验失败时：有 <strong>FEAT_FPAC</strong> 的 CPU 让 <code>aut*</code> 指令<em>立即</em>产生异常（<code>ESR_ELx.EC = 0x1C</code>）——Linux 用户态收到 <code>SIGILL</code>（<code>do_el0_fpac</code>），内核态 <code>die("Oops - FPAC")</code>（<code>do_el1_fpac</code>，<code>arch/arm64/kernel/traps.c</code>）；XNU 走 <code>sleh.c</code> 里的 <code>handle_pac_fail</code>。没有 FPAC 时，<code>aut*</code> 把错误码写进高位使指针变成非规范地址，等到真正用它跳转或访存时才触发 translation fault。arm64e 编译器还会在部分 <code>aut</code> 之后自己插入检查，失败时执行 <code>brk</code>（XNU 的 <code>ptrauth_handle_brk_trap</code> 负责把它报告成 PAC 失败）。</p>
+  <p>校验失败时：有 <strong>FEAT_FPAC</strong> 的 CPU 让 <code>aut*</code> 指令<em>立即</em>产生异常（<code>ESR_ELx.EC = 0x1C</code>）——Linux 用户态收到 <code>SIGILL</code>（<code>do_el0_fpac</code>），内核态 <code>die("Oops - FPAC")</code>（<code>do_el1_fpac</code>，<code>arch/arm64/kernel/traps.c</code>）；XNU 走 <code>sleh.c</code> 里的 <code>handle_pac_fail</code>。没有 FPAC 时，<code>aut*</code> 把错误码写进高位使指针变成非规范地址（FEAT_PAuth 行为；FEAT_PAuth2 下改为把重算的 PAC 异或进高位，效果同样通常是非规范地址），等到真正用它跳转或访存时才触发 translation fault。arm64e 编译器还会在部分 <code>aut</code> 之后自己插入检查，失败时执行 <code>brk</code>（XNU 的 <code>ptrauth_handle_brk_trap</code> 负责把它报告成 PAC 失败）。</p>
   <p><strong>Linux</strong>：<code>CONFIG_ARM64_PTR_AUTH</code> 给用户态启用（每个进程 exec 时随机生成密钥，<code>/proc/cpuinfo</code> 里能看到 <code>paca pacg</code>），<code>CONFIG_ARM64_PTR_AUTH_KERNEL</code> 用 <code>-mbranch-protection=pac-ret</code>（与 BTI 同开时 <code>pac-ret+bti</code>）编译内核，保护返回地址，用 IA 密钥。<strong>Apple arm64e</strong> 是全面使用：返回地址用 <strong>IB</strong> 密钥（XNU 汇编宏 <code>ARM64_STACK_PROLOG</code>/<code>EPILOG</code> 就是 <code>pacibsp</code>/<code>retab</code>，<code>osfmk/arm64/asm.h</code>），C 函数指针用 IA，数据指针用 DA/DB，C++ vtable 指针、ObjC 关键指针等再混入「存放地址 + 类型常量」做修饰值（address diversity），让签名不能从一个位置挪到另一个位置复用。<code>ptrauth.h</code> 里 <code>ptrauth_key_process_independent_code</code> 就是 IA 的别名——A 类密钥跨进程共享（共享缓存里的指针才能通用），B 类按进程区分。第三方 arm64e 二进制至今仍属「预览 ABI」：能编译，但正常系统默认不让它运行（见 Lab B）。</p>
 
   <h3>5. PPL 与 SPTM</h3>
@@ -318,10 +318,10 @@ int main(void) {
 
     <h3>Lab A · QEMU Linux：KASLR 偏移、用户态 ASLR、PAC</h3>
     <ol>
-      <li>这次<strong>不要</strong>加 <code>nokaslr</code>，并换成 <code>-cpu max</code>（带 PAC，也带可作 KASLR 种子的 <code>RNDR</code>）：<pre>qemu-system-aarch64 -M virt -cpu max -m 1G -nographic \
+      <li>这次<strong>不要</strong>加 <code>nokaslr</code>，并换成 <code>-cpu max</code>（带 PAC；KASLR 的种子通常来自 QEMU <code>virt</code> 写进 DTB 的 <code>kaslr-seed</code>，<code>-cpu max</code> 的 <code>RNDR</code> 只是后备）：<pre>qemu-system-aarch64 -M virt -cpu max -m 1G -nographic \
   -kernel arch/arm64/boot/Image -initrd initramfs/initramfs.cpio.gz \
   -append "console=ttyAMA0 rdinit=/init"</pre>
-        进 shell 后：<pre>dmesg | grep -i kaslr                    # 期望 KASLR enabled；若 disabled due to lack of seed，检查是否误用了别的 -cpu
+        进 shell 后：<pre>dmesg | grep -i kaslr                    # 期望 KASLR enabled；若 disabled due to lack of seed，检查 QEMU 是否关掉了 dtb-kaslr-seed
 cat /proc/sys/kernel/kptr_restrict
 grep -w _text /proc/kallsyms             # 运行时地址（root 才看得到真实值）
 grep -w start_kernel /proc/kallsyms

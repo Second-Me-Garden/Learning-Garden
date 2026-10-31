@@ -282,7 +282,7 @@ echo nop &gt; current_tracer; echo &gt; set_graph_function</pre>
       <li>dynamic debug 与 oops：<pre>mount -t debugfs none /sys/kernel/debug
 grep -c . /sys/kernel/debug/dynamic_debug/control    # 可单独开关的 pr_debug 调用点数量
 echo c &gt; /proc/sysrq-trigger                          # 故意让内核崩溃（只在 QEMU 里做！）</pre>
-        串口上会出现完整的 oops / panic：找出 <code>pc</code>、<code>Call trace:</code> 第一帧、<code>Kernel Offset</code>（因为 <code>defconfig</code> 开了 <code>CONFIG_RANDOMIZE_BASE</code>）。回到 macOS，把第一帧喂给 <code>./scripts/faddr2line vmlinux 那一帧的func+0x../0x..</code>，应该指向 <code>drivers/tty/sysrq.c</code> 里的 <code>sysrq_handle_crash</code> 附近。</li>
+        串口上会出现 <code>Kernel panic - not syncing: sysrq triggered crash</code>（现代内核里 <code>sysrq_handle_crash</code> 直接调 <code>panic</code>，不是空指针解引用，所以没有 Oops 和寄存器 dump）：在 <code>Call trace:</code> 里越过 <code>show_stack</code>/<code>dump_backtrace</code>/<code>panic</code> 几帧，找到 <code>sysrq_handle_crash+0x…/0x…</code> 那一帧，以及 <code>Kernel Offset</code>（因为 <code>defconfig</code> 开了 <code>CONFIG_RANDOMIZE_BASE</code>，arm64 的 panic notifier 会打印）。回到 macOS，把那一帧喂给 <code>./scripts/faddr2line vmlinux sysrq_handle_crash+0x../0x..</code>，应该指向 <code>drivers/tty/sysrq.c</code> 里的 <code>sysrq_handle_crash</code>。</li>
       <li>gdb 单步内核。终端 1（注意 <code>-s -S</code> 和 <code>nokaslr</code>）：<pre>qemu-system-aarch64 -M virt -cpu cortex-a72 -m 1G -nographic -s -S \
   -kernel arch/arm64/boot/Image -initrd initramfs/initramfs.cpio.gz \
   -append "console=ttyAMA0 rdinit=/init nokaslr"</pre>
