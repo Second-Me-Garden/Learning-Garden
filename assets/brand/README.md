@@ -7,7 +7,7 @@ Current baseline: **GOLD HIGHLIGHTS ONLY** final vectors (2026-10-31), from `tmp
 
 Derived here for the site (never replacements for the two files above):
 
-- `symbol.svg` — the transparent logo with the two lettering groups removed (tree + ring only)
+- `symbol.svg` — the transparent logo with the two lettering groups removed (tree + ring only), viewBox cropped to the ring so it fills small placements
 - `favicon.svg` — the symbol over a radial navy halo (no hard disc) with a slightly heavier ring, for 16–32 px
 
 Halo treatment (`.logo-halo` for the full logo and `.mark` for the header symbol, in `assets/style.css`): the transparent logo sits on a separate radial-gradient layer — strongest at the centre, fading to fully transparent with no visible edge, tinted from the brand navy toward the current surface so it follows the light/dark theme; the fade extends well beyond the ring so the outer lettering stays readable.
