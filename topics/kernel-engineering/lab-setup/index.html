@@ -21,58 +21,69 @@
     <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
-  <p class="meta">环境准备 · 做任何实验之前</p>
-  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
-  <h1>实验环境 <span class="en">Lab environment: VMs, containers, snapshots</span></h1>
-  <p class="lede">内核实验的常态是「把机器弄崩」：空指针、死锁、改坏页表、加载自己写的模块。这些都应该发生在一台随时可以扔掉、可以一键回滚的机器里，而不是你每天用的 Mac。本页搭三层环境：宿主 macOS 只负责编辑、编译和当调试器；QEMU 里的 Linux arm64 虚拟机做 Linux 内核实验；容器做构建；一台 macOS 客体虚拟机做 XNU、kext、关 SIP 之类的实验。</p>
+  <p class="meta" lang="zh-CN">环境准备 · 做任何实验之前</p><p class="meta" lang="en">Environment setup · before any lab</p>
+  <h1><span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span> <span class="en" lang="zh-CN">Lab environment: VMs, containers, snapshots</span><span class="en" lang="en">VMs, containers, snapshots</span></h1>
+  <p class="lede" lang="zh-CN">内核实验的常态是「把机器弄崩」：空指针、死锁、改坏页表、加载自己写的模块。这些都应该发生在一台随时可以扔掉、可以一键回滚的机器里，而不是你每天用的 Mac。本页搭三层环境：宿主 macOS 只负责编辑、编译和当调试器；QEMU 里的 Linux arm64 虚拟机做 Linux 内核实验；容器做构建；一台 macOS 客体虚拟机做 XNU、kext、关 SIP 之类的实验。</p>
+  <p class="lede" lang="en">The normal state of a kernel lab is "breaking the machine": null pointers, deadlocks, corrupted page tables, loading modules you wrote yourself. All of this should happen on a machine you can throw away at any time and roll back in one step, not on the Mac you use every day. This page builds a three-layer environment: the macOS host only edits, compiles and acts as the debugger; a Linux arm64 VM in QEMU runs the Linux kernel labs; a container does the builds; and a macOS guest VM runs XNU, kext, SIP-off and similar labs.</p>
 
-  <h2 id="goals">目标</h2>
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
   <div class="goals">
-    读完并做完实验后，你应该能：
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading and doing the labs, you should be able to:</span>
     <ul>
-      <li>说清每类实验应该在哪一层做，以及为什么宿主机永远不关 SIP、不装自写 kext。</li>
-      <li>用一条脚本 <code>run-vm.sh</code> 启动带磁盘、共享目录、gdbstub 的 QEMU Linux arm64 虚拟机，并用 <code>qemu-img snapshot</code> 回滚一次。</li>
-      <li>用同一个编译器在容器里编内核和模块，把产物放回共享目录给虚拟机用。</li>
-      <li>在 UTM（Apple Virtualization 后端）里装一台 macOS 客体机，在它的 Recovery 里关 SIP，并确认宿主机的 SIP 仍然开着。</li>
+      <li lang="zh-CN">说清每类实验应该在哪一层做，以及为什么宿主机永远不关 SIP、不装自写 kext。</li>
+      <li lang="en">Say which layer each kind of lab belongs in, and why the host never has SIP turned off or self-written kexts installed.</li>
+      <li lang="zh-CN">用一条脚本 <code>run-vm.sh</code> 启动带磁盘、共享目录、gdbstub 的 QEMU Linux arm64 虚拟机，并用 <code>qemu-img snapshot</code> 回滚一次。</li>
+      <li lang="en">Start a QEMU Linux arm64 VM with a disk, a shared directory and a gdbstub from one script, <code>run-vm.sh</code>, and roll it back once with <code>qemu-img snapshot</code>.</li>
+      <li lang="zh-CN">用同一个编译器在容器里编内核和模块，把产物放回共享目录给虚拟机用。</li>
+      <li lang="en">Build the kernel and modules in a container with the same compiler, and put the output back in the shared directory for the VM to use.</li>
+      <li lang="zh-CN">在 UTM（Apple Virtualization 后端）里装一台 macOS 客体机，在它的 Recovery 里关 SIP，并确认宿主机的 SIP 仍然开着。</li>
+      <li lang="en">Install a macOS guest in UTM (Apple Virtualization backend), turn SIP off in its Recovery, and confirm that the host still has SIP on.</li>
     </ul>
   </div>
 
-  <h2 id="why">为什么要隔离</h2>
+  <h2 id="why" lang="zh-CN">为什么要隔离</h2><h2 id="why-en" lang="en">Why isolate</h2>
   <ul>
-    <li><strong>内核崩溃是整机崩溃。</strong>用户态程序崩了只死一个进程；内核里一个空指针就是 panic，正在写的文件、没保存的编辑器缓冲区一起丢。在虚拟机里，崩溃只是一个窗口里的一段 log，重启只要几秒。</li>
-    <li><strong>root 和内核权限没有「撤销」。</strong>实验里经常要 <code>sudo</code>、写 <code>/dev/mem</code>、改内核参数、跑 Phase 7 的漏洞复现程序。这些在一台带快照的客体机里做，做坏了回滚即可。</li>
-    <li><strong>关 SIP 是降低整台机器的安全级别。</strong>SIP（System Integrity Protection）保护系统文件、限制调试系统进程、限制加载内核扩展；关掉它意味着恶意软件也获得同样的自由。macOS 上需要关 SIP 的实验（<code>dtruss</code>、内核级 dtrace、加载自写 kext、改 boot-args、引导 KDK 的 development 内核）<strong>只在 macOS 客体机里做</strong>。</li>
-    <li><strong>自写模块 / kext 就是在内核里运行你的代码。</strong>写错一行就可能破坏文件系统缓存或内存。Linux 模块只在 QEMU 客体机里 <code>insmod</code>；macOS kext 只在 macOS 客体机里加载。</li>
+    <li lang="zh-CN"><strong>内核崩溃是整机崩溃。</strong>用户态程序崩了只死一个进程；内核里一个空指针就是 panic，正在写的文件、没保存的编辑器缓冲区一起丢。在虚拟机里，崩溃只是一个窗口里的一段 log，重启只要几秒。</li>
+    <li lang="en"><strong>A kernel crash is a whole-machine crash.</strong> When a user-space program crashes, only one process dies; one null pointer in the kernel is a panic, and the file being written and any unsaved editor buffers are lost with it. In a VM, a crash is just some log output in one window, and a reboot takes seconds.</li>
+    <li lang="zh-CN"><strong>root 和内核权限没有「撤销」。</strong>实验里经常要 <code>sudo</code>、写 <code>/dev/mem</code>、改内核参数、跑 Phase 7 的漏洞复现程序。这些在一台带快照的客体机里做，做坏了回滚即可。</li>
+    <li lang="en"><strong>Root and kernel privileges have no "undo".</strong> Labs often need <code>sudo</code>, writes to <code>/dev/mem</code>, changed kernel parameters, or the Phase 7 exploit reproductions. Do these in a guest with snapshots; if something breaks, roll back.</li>
+    <li lang="zh-CN"><strong>关 SIP 是降低整台机器的安全级别。</strong>SIP（System Integrity Protection）保护系统文件、限制调试系统进程、限制加载内核扩展；关掉它意味着恶意软件也获得同样的自由。macOS 上需要关 SIP 的实验（<code>dtruss</code>、内核级 dtrace、加载自写 kext、改 boot-args、引导 KDK 的 development 内核）<strong>只在 macOS 客体机里做</strong>。</li>
+    <li lang="en"><strong>Turning SIP off lowers the security level of the whole machine.</strong> SIP (System Integrity Protection) protects system files, restricts debugging of system processes and restricts loading kernel extensions; turning it off gives malware the same freedom. macOS labs that need SIP off (<code>dtruss</code>, kernel-level dtrace, loading self-written kexts, changing boot-args, booting the KDK development kernel) are <strong>done only in the macOS guest</strong>.</li>
+    <li lang="zh-CN"><strong>自写模块 / kext 就是在内核里运行你的代码。</strong>写错一行就可能破坏文件系统缓存或内存。Linux 模块只在 QEMU 客体机里 <code>insmod</code>；macOS kext 只在 macOS 客体机里加载。</li>
+    <li lang="en"><strong>A self-written module / kext is your code running inside the kernel.</strong> One wrong line can corrupt the filesystem cache or memory. Linux modules are <code>insmod</code>-ed only in the QEMU guest; macOS kexts are loaded only in the macOS guest.</li>
   </ul>
-  <div class="note">一条硬规则：<strong>宿主 Mac 永远不动 SIP、不改 boot-args、不降低启动安全级别、不装自写 kext 或 dext。</strong>宿主机上可以做的是：读源码、编译、跑 QEMU、当 lldb 调试器的「host」端、安装 KDK（它只是放在 <code>/Library/Developer/KDKs/</code> 下的文件，不改变正在运行的内核）。</div>
+  <div class="note" lang="zh-CN">一条硬规则：<strong>宿主 Mac 永远不动 SIP、不改 boot-args、不降低启动安全级别、不装自写 kext 或 dext。</strong>宿主机上可以做的是：读源码、编译、跑 QEMU、当 lldb 调试器的「host」端、安装 KDK（它只是放在 <code>/Library/Developer/KDKs/</code> 下的文件，不改变正在运行的内核）。</div><div class="note" lang="en">One hard rule: <strong>on the host Mac, never touch SIP, never change boot-args, never lower the boot security level, never install self-written kexts or dexts.</strong> What you may do on the host: read source, compile, run QEMU, act as the "host" end of the lldb debugger, and install the KDK (it is only files under <code>/Library/Developer/KDKs/</code> and does not change the running kernel).</div>
 
-  <h2 id="concepts">核心概念</h2>
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
-  <h3>1. 三层环境</h3>
-  <p>宿主是你的 Apple Silicon Mac（macOS，arm64）。上面跑三类客体：</p>
+  <h3 lang="zh-CN">1. 三层环境</h3><h3 lang="en">1. Three layers</h3>
+  <p lang="zh-CN">宿主是你的 Apple Silicon Mac（macOS，arm64）。上面跑三类客体：</p><p lang="en">The host is your Apple Silicon Mac (macOS, arm64). Three kinds of guest run on it:</p>
   <ul>
-    <li><strong>QEMU Linux arm64 VM</strong>：所有 Linux 内核实验——启动自编内核、<code>insmod</code> 自写模块、gdbstub 单步、故意制造 panic。Phase 0 的 <code>qemu-system-aarch64 -M virt</code> 命令就是它的雏形。</li>
-    <li><strong>arm64 Linux 容器</strong>（Docker Desktop、OrbStack 或 Lima 任选其一）：只做<strong>构建</strong>——编内核、编模块、做 busybox initramfs、生成磁盘镜像。容器不是内核实验场：它和其他容器共用 Docker Desktop / OrbStack / Lima 那台 Linux 虚拟机的内核，在 <code>--privileged</code> 容器里 <code>insmod</code> 会把模块装进那台共享 VM 的内核里——不要这样做。</li>
-    <li><strong>macOS 客体 VM</strong>（UTM 的 Apple Virtualization 后端，或 Tart）：所有 XNU 侧需要权限的实验——关 SIP、改 boot-args、加载 kext、DriverKit 开发者模式、作为两机内核调试的「target」。</li>
+    <li lang="zh-CN"><strong>QEMU Linux arm64 VM</strong>：所有 Linux 内核实验——启动自编内核、<code>insmod</code> 自写模块、gdbstub 单步、故意制造 panic。Phase 0 的 <code>qemu-system-aarch64 -M virt</code> 命令就是它的雏形。</li>
+    <li lang="en"><strong>QEMU Linux arm64 VM</strong>: all Linux kernel labs — booting your own kernel, <code>insmod</code>-ing your own modules, single-stepping through the gdbstub, deliberately causing panics. The <code>qemu-system-aarch64 -M virt</code> command from Phase 0 is its first form.</li>
+    <li lang="zh-CN"><strong>arm64 Linux 容器</strong>（Docker Desktop、OrbStack 或 Lima 任选其一）：只做<strong>构建</strong>——编内核、编模块、做 busybox initramfs、生成磁盘镜像。容器不是内核实验场：它和其他容器共用 Docker Desktop / OrbStack / Lima 那台 Linux 虚拟机的内核，在 <code>--privileged</code> 容器里 <code>insmod</code> 会把模块装进那台共享 VM 的内核里——不要这样做。</li>
+    <li lang="en"><strong>arm64 Linux container</strong> (any one of Docker Desktop, OrbStack or Lima): <strong>builds</strong> only — the kernel, modules, the busybox initramfs, disk images. A container is not a kernel lab: it shares the kernel of the Linux VM run by Docker Desktop / OrbStack / Lima with every other container, and <code>insmod</code> in a <code>--privileged</code> container loads the module into that shared VM's kernel — do not do this.</li>
+    <li lang="zh-CN"><strong>macOS 客体 VM</strong>（UTM 的 Apple Virtualization 后端，或 Tart）：所有 XNU 侧需要权限的实验——关 SIP、改 boot-args、加载 kext、DriverKit 开发者模式、作为两机内核调试的「target」。</li>
+    <li lang="en"><strong>macOS guest VM</strong> (UTM's Apple Virtualization backend, or Tart): every privileged lab on the XNU side — SIP off, changing boot-args, loading kexts, DriverKit developer mode, acting as the "target" in two-machine kernel debugging.</li>
   </ul>
-  <p>三者和宿主之间的连接只有四种：共享目录（传代码和产物）、gdbstub（宿主 lldb 调 QEMU 里的 Linux 内核）、KDP（宿主 lldb 调 macOS 客体的 XNU）、快照 / 克隆（回滚）。下面的动画逐层走一遍。</p>
+  <p lang="zh-CN">三者和宿主之间的连接只有四种：共享目录（传代码和产物）、gdbstub（宿主 lldb 调 QEMU 里的 Linux 内核）、KDP（宿主 lldb 调 macOS 客体的 XNU）、快照 / 克隆（回滚）。下面的动画逐层走一遍。</p><p lang="en">There are only four kinds of connection between the three and the host: shared directories (to move code and build output), gdbstub (host lldb debugging the Linux kernel in QEMU), KDP (host lldb debugging XNU in the macOS guest), and snapshots / clones (rollback). The diagram below walks through it layer by layer.</p>
 
-  <h3>2. QEMU Linux VM 详解</h3>
-  <p>以 Phase 0 Lab A 的命令为基线，逐项加上实验需要的东西：</p>
+  <h3 lang="zh-CN">2. QEMU Linux VM 详解</h3><h3 lang="en">2. The QEMU Linux VM in detail</h3>
+  <p lang="zh-CN">以 Phase 0 Lab A 的命令为基线，逐项加上实验需要的东西：</p><p lang="en">Taking the Phase 0 Lab A command as the baseline, add what the labs need one option at a time:</p>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th>选项</th><th>作用</th><th>说明</th></tr>
-    <tr><td><code>-M virt -cpu cortex-a72</code></td><td>QEMU 的通用 arm64 虚拟板 + 纯软件模拟（TCG）的 CPU</td><td>慢但行为稳定，gdbstub 断点最可靠。想要接近原生速度可换成 <code>-accel hvf -cpu host</code>（用 macOS 的 Hypervisor.framework）；hvf 下的调试支持不如 TCG 完整，调试时建议切回 TCG（推断，随 QEMU 版本变化）。</td></tr>
-    <tr><td><code>-smp 2</code></td><td>虚拟 CPU 个数</td><td>并发、锁、per-CPU 变量（Phase 3）至少要 2 个；单步调试时 1 个更好跟。</td></tr>
-    <tr><td><code>-m 2G</code></td><td>客体内存</td><td>busybox 环境 1G 足够；开 KASAN 或跑较大的测试再加。</td></tr>
-    <tr><td><code>-drive … -device virtio-blk-pci</code></td><td>一块 virtio 磁盘</td><td>镜像用 <code>qemu-img</code> 生成 qcow2 格式，客体里显示为 <code>/dev/vda</code>。qcow2 支持内部快照和写时复制。</td></tr>
-    <tr><td><code>-virtfs local,path=…,mount_tag=share,security_model=none</code></td><td>9p 共享目录</td><td>宿主目录直接出现在客体里，客体 <code>mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share   # throwaway 模式下没有共享设备，失败即跳过</code>。QEMU 从 7.0 起支持 macOS 宿主上的 9p。virtiofs 更快，但它依赖宿主上运行的 <code>virtiofsd</code> 守护进程，后者面向 Linux 宿主，macOS 宿主上用 9p。</td></tr>
-    <tr><td><code>-s -S</code></td><td>gdbstub</td><td><code>-s</code> = <code>-gdb tcp::1234</code>；<code>-S</code> 让 CPU 停在第一条指令前，等调试器 <code>continue</code>。内核命令行加 <code>nokaslr</code>，符号地址才对得上。</td></tr>
-    <tr><td><code>-snapshot</code></td><td>一次性运行</td><td>所有磁盘写入进临时文件，退出即丢弃——跑可疑代码时用。</td></tr>
-    <tr><td><code>qemu-img snapshot</code></td><td>磁盘快照（VM 关机时操作）</td><td><code>-c 名字</code> 创建、<code>-l</code> 列出、<code>-a 名字</code> 回滚、<code>-d 名字</code> 删除。</td></tr>
+    <tr><th><span lang="zh-CN">选项</span><span lang="en">Option</span></th><th><span lang="zh-CN">作用</span><span lang="en">Purpose</span></th><th><span lang="zh-CN">说明</span><span lang="en">Notes</span></th></tr>
+    <tr><td><code>-M virt -cpu cortex-a72</code></td><td><span lang="zh-CN">QEMU 的通用 arm64 虚拟板 + 纯软件模拟（TCG）的 CPU</span><span lang="en">QEMU's generic arm64 virtual board + a purely software-emulated (TCG) CPU</span></td><td><span lang="zh-CN">慢但行为稳定，gdbstub 断点最可靠。想要接近原生速度可换成 <code>-accel hvf -cpu host</code>（用 macOS 的 Hypervisor.framework）；hvf 下的调试支持不如 TCG 完整，调试时建议切回 TCG（推断，随 QEMU 版本变化）。</span><span lang="en">Slow but stable in behaviour, with the most reliable gdbstub breakpoints. For near-native speed switch to <code>-accel hvf -cpu host</code> (uses macOS's Hypervisor.framework); debugging support under hvf is less complete than under TCG, so switching back to TCG for debugging is recommended (inference; varies with the QEMU version).</span></td></tr>
+    <tr><td><code>-smp 2</code></td><td><span lang="zh-CN">虚拟 CPU 个数</span><span lang="en">Number of virtual CPUs</span></td><td><span lang="zh-CN">并发、锁、per-CPU 变量（Phase 3）至少要 2 个；单步调试时 1 个更好跟。</span><span lang="en">Concurrency, locks and per-CPU variables (Phase 3) need at least 2; with 1 it is easier to follow when single-stepping.</span></td></tr>
+    <tr><td><code>-m 2G</code></td><td><span lang="zh-CN">客体内存</span><span lang="en">Guest memory</span></td><td><span lang="zh-CN">busybox 环境 1G 足够；开 KASAN 或跑较大的测试再加。</span><span lang="en">1G is enough for a busybox environment; add more when KASAN is on or for larger tests.</span></td></tr>
+    <tr><td><code>-drive … -device virtio-blk-pci</code></td><td><span lang="zh-CN">一块 virtio 磁盘</span><span lang="en">A virtio disk</span></td><td><span lang="zh-CN">镜像用 <code>qemu-img</code> 生成 qcow2 格式，客体里显示为 <code>/dev/vda</code>。qcow2 支持内部快照和写时复制。</span><span lang="en">Create the image in qcow2 format with <code>qemu-img</code>; in the guest it appears as <code>/dev/vda</code>. qcow2 supports internal snapshots and copy-on-write.</span></td></tr>
+    <tr><td><code>-virtfs local,path=…,mount_tag=share,security_model=none</code></td><td><span lang="zh-CN">9p 共享目录</span><span lang="en">9p shared directory</span></td><td><span lang="zh-CN">宿主目录直接出现在客体里，客体 <code>mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share   # throwaway 模式下没有共享设备，失败即跳过</code>。QEMU 从 7.0 起支持 macOS 宿主上的 9p。virtiofs 更快，但它依赖宿主上运行的 <code>virtiofsd</code> 守护进程，后者面向 Linux 宿主，macOS 宿主上用 9p。</span><span lang="en">The host directory appears directly in the guest; in the guest: <code>mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share   # no share device in throwaway mode; skip on failure</code>. QEMU supports 9p on macOS hosts from 7.0. virtiofs is faster, but it depends on the <code>virtiofsd</code> daemon running on the host, which targets Linux hosts; on a macOS host use 9p.</span></td></tr>
+    <tr><td><code>-s -S</code></td><td>gdbstub</td><td><span lang="zh-CN"><code>-s</code> = <code>-gdb tcp::1234</code>；<code>-S</code> 让 CPU 停在第一条指令前，等调试器 <code>continue</code>。内核命令行加 <code>nokaslr</code>，符号地址才对得上。</span><span lang="en"><code>-s</code> = <code>-gdb tcp::1234</code>; <code>-S</code> halts the CPU before the first instruction until the debugger says <code>continue</code>. Add <code>nokaslr</code> to the kernel command line so the symbol addresses match.</span></td></tr>
+    <tr><td><code>-snapshot</code></td><td><span lang="zh-CN">一次性运行</span><span lang="en">One-shot run</span></td><td><span lang="zh-CN">所有磁盘写入进临时文件，退出即丢弃——跑可疑代码时用。</span><span lang="en">All disk writes go to a temporary file that is discarded on exit — use it when running suspicious code.</span></td></tr>
+    <tr><td><code>qemu-img snapshot</code></td><td><span lang="zh-CN">磁盘快照（VM 关机时操作）</span><span lang="en">Disk snapshots (operate while the VM is shut down)</span></td><td><span lang="zh-CN"><code>-c 名字</code> 创建、<code>-l</code> 列出、<code>-a 名字</code> 回滚、<code>-d 名字</code> 删除。</span><span lang="en"><code>-c name</code> creates, <code>-l</code> lists, <code>-a name</code> rolls back, <code>-d name</code> deletes.</span></td></tr>
   </table>
   </div>
-  <p>内核要带上这些驱动（arm64 <code>defconfig</code> 一般已经包含，编完先检查一次，见 Lab A）：<code>CONFIG_VIRTIO_PCI</code>、<code>CONFIG_VIRTIO_BLK</code>、<code>CONFIG_EXT4_FS</code>、<code>CONFIG_NET_9P</code>、<code>CONFIG_NET_9P_VIRTIO</code>、<code>CONFIG_9P_FS</code>、<code>CONFIG_DEVTMPFS</code>。把全部选项收进一个脚本，以后每个 Phase 都只敲 <code>./run-vm.sh</code>：</p>
+  <p lang="zh-CN">内核要带上这些驱动（arm64 <code>defconfig</code> 一般已经包含，编完先检查一次，见 Lab A）：<code>CONFIG_VIRTIO_PCI</code>、<code>CONFIG_VIRTIO_BLK</code>、<code>CONFIG_EXT4_FS</code>、<code>CONFIG_NET_9P</code>、<code>CONFIG_NET_9P_VIRTIO</code>、<code>CONFIG_9P_FS</code>、<code>CONFIG_DEVTMPFS</code>。把全部选项收进一个脚本，以后每个 Phase 都只敲 <code>./run-vm.sh</code>：</p><p lang="en">The kernel needs these drivers (arm64 <code>defconfig</code> usually includes them already; check once after building, see Lab A): <code>CONFIG_VIRTIO_PCI</code>, <code>CONFIG_VIRTIO_BLK</code>, <code>CONFIG_EXT4_FS</code>, <code>CONFIG_NET_9P</code>, <code>CONFIG_NET_9P_VIRTIO</code>, <code>CONFIG_9P_FS</code>, <code>CONFIG_DEVTMPFS</code>. Collect all the options in one script, so every later Phase only needs <code>./run-vm.sh</code>:</p>
 <pre data-lang="sh" data-file="run-vm.sh">#!/bin/sh
 # run-vm.sh: start the kernel-lab VM.  Usage: ./run-vm.sh [debug|throwaway|fast]
 set -eu
@@ -96,14 +107,17 @@ exec qemu-system-aarch64 -M virt $CPU -smp 2 -m 2G -nographic \
   -drive file="$DISK",if=none,format=qcow2,id=hd0 \
   -device virtio-blk-pci,drive=hd0 \
   $SHARE $EXTRA</pre>
-  <p>调试时另开一个终端：<code>lldb vmlinux</code>，然后 <code>gdb-remote 1234</code>（或 GNU gdb 的 <code>target remote :1234</code>）。退出 QEMU：<kbd>Ctrl-a</kbd> <kbd>x</kbd>。</p>
+  <p lang="zh-CN">调试时另开一个终端：<code>lldb vmlinux</code>，然后 <code>gdb-remote 1234</code>（或 GNU gdb 的 <code>target remote :1234</code>）。退出 QEMU：<kbd>Ctrl-a</kbd> <kbd>x</kbd>。</p><p lang="en">To debug, open another terminal: <code>lldb vmlinux</code>, then <code>gdb-remote 1234</code> (or GNU gdb's <code>target remote :1234</code>). To exit QEMU: <kbd>Ctrl-a</kbd> <kbd>x</kbd>.</p>
 
-  <h3>3. 构建容器</h3>
-  <p>原则：<strong>内核和模块用同一个编译器、同一份配置编。</strong>模块的 <code>vermagic</code> 和导出符号版本（<code>CONFIG_MODVERSIONS</code> 打开时）要和运行中的内核一致，编译器不同也可能让内核拒绝加载或行为异常。Phase 0 在 macOS 上用 Homebrew LLVM 编内核也能跑，但到了要编模块（Phase 5）、要装工具链里 macOS 没有的东西时，在 arm64 Linux 容器里一次性编齐更省事。</p>
+  <h3 lang="zh-CN">3. 构建容器</h3><h3 lang="en">3. The build container</h3>
+  <p lang="zh-CN">原则：<strong>内核和模块用同一个编译器、同一份配置编。</strong>模块的 <code>vermagic</code> 和导出符号版本（<code>CONFIG_MODVERSIONS</code> 打开时）要和运行中的内核一致，编译器不同也可能让内核拒绝加载或行为异常。Phase 0 在 macOS 上用 Homebrew LLVM 编内核也能跑，但到了要编模块（Phase 5）、要装工具链里 macOS 没有的东西时，在 arm64 Linux 容器里一次性编齐更省事。</p><p lang="en">Principle: <strong>build the kernel and modules with the same compiler and the same configuration.</strong> A module's <code>vermagic</code> and exported-symbol versions (when <code>CONFIG_MODVERSIONS</code> is on) must match the running kernel, and a different compiler can also make the kernel refuse to load it or behave abnormally. Building the kernel on macOS with Homebrew LLVM works for Phase 0, but once you need to build modules (Phase 5) or install toolchain pieces macOS does not have, building everything at once in an arm64 Linux container is less trouble.</p>
   <ul>
-    <li><strong>源码放哪里</strong>：macOS 默认文件系统大小写不敏感，绑定挂载（<code>-v</code>）进容器后仍然不敏感，内核树会出问题。两种做法：源码放在 Phase 0 建的大小写敏感 APFS 卷里再挂进去；或者放在容器自己的命名卷（<code>docker volume create linux-src</code>）里，构建也更快。</li>
-    <li><strong>产物放回共享目录</strong>：只把 <code>Image</code>、<code>vmlinux</code>（调试符号）、<code>*.ko</code>、<code>initramfs.cpio.gz</code> 拷到宿主的实验目录，<code>run-vm.sh</code> 和 9p 共享目录都从那里取。</li>
-    <li><strong>容器只编不跑</strong>：容器里不 <code>insmod</code>，也不需要 <code>--privileged</code>。</li>
+    <li lang="zh-CN"><strong>源码放哪里</strong>：macOS 默认文件系统大小写不敏感，绑定挂载（<code>-v</code>）进容器后仍然不敏感，内核树会出问题。两种做法：源码放在 Phase 0 建的大小写敏感 APFS 卷里再挂进去；或者放在容器自己的命名卷（<code>docker volume create linux-src</code>）里，构建也更快。</li>
+    <li lang="en"><strong>Where the source lives</strong>: the default macOS filesystem is case-insensitive, and it stays case-insensitive when bind-mounted (<code>-v</code>) into a container, which breaks the kernel tree. Two options: keep the source on the case-sensitive APFS volume created in Phase 0 and mount it in; or keep it in a named volume of the container's own (<code>docker volume create linux-src</code>), which also builds faster.</li>
+    <li lang="zh-CN"><strong>产物放回共享目录</strong>：只把 <code>Image</code>、<code>vmlinux</code>（调试符号）、<code>*.ko</code>、<code>initramfs.cpio.gz</code> 拷到宿主的实验目录，<code>run-vm.sh</code> 和 9p 共享目录都从那里取。</li>
+    <li lang="en"><strong>Put the output back in the shared directory</strong>: copy only <code>Image</code>, <code>vmlinux</code> (debug symbols), <code>*.ko</code> and <code>initramfs.cpio.gz</code> to the lab directory on the host; <code>run-vm.sh</code> and the 9p share both take them from there.</li>
+    <li lang="zh-CN"><strong>容器只编不跑</strong>：容器里不 <code>insmod</code>，也不需要 <code>--privileged</code>。</li>
+    <li lang="en"><strong>The container builds, it does not run</strong>: no <code>insmod</code> in the container, and no need for <code>--privileged</code>.</li>
   </ul>
 <pre data-lang="sh">docker volume create linux-src
 docker run --platform linux/arm64 --rm -it \
@@ -116,75 +130,97 @@ make LLVM=1 defconfig &amp;&amp; make LLVM=1 -j"$(nproc)" Image modules
 cp arch/arm64/boot/Image vmlinux /lab/
 # out-of-tree module, same compiler and tree:
 make -C /src/linux M=/lab/share/hello LLVM=1 modules</pre>
-  <p>容器本身就是 arm64，所以不必写 <code>ARCH=arm64</code>。OrbStack 和 Lima 都提供 <code>docker</code> 兼容的命令行（OrbStack 自带，Lima 通过其 Docker 模板），上面的命令在三者上应当相同；Lima 也可以直接开一台完整的 Linux VM 来编译。</p>
+  <p lang="zh-CN">容器本身就是 arm64，所以不必写 <code>ARCH=arm64</code>。OrbStack 和 Lima 都提供 <code>docker</code> 兼容的命令行（OrbStack 自带，Lima 通过其 Docker 模板），上面的命令在三者上应当相同；Lima 也可以直接开一台完整的 Linux VM 来编译。</p><p lang="en">The container itself is arm64, so there is no need to write <code>ARCH=arm64</code>. OrbStack and Lima both provide a <code>docker</code>-compatible command line (OrbStack built in, Lima through its Docker template), so the commands above should be the same on all three; Lima can also start a full Linux VM directly for building.</p>
 
-  <h3>4. macOS 客体 VM</h3>
-  <p>Apple Silicon 上能跑 arm64 macOS 客体的只有 Apple 的 <strong>Virtualization framework</strong>（UTM 的 Apple Virtualization 后端、Tart 都是它的前端）。QEMU 后端（UTM 里称为 QEMU）能跑 Linux、Windows 等客体，磁盘是 qcow2、支持快照，但它不能运行 arm64 macOS 客体（推断，以 UTM 文档为准）。</p>
+  <h3 lang="zh-CN">4. macOS 客体 VM</h3><h3 lang="en">4. The macOS guest VM</h3>
+  <p lang="zh-CN">Apple Silicon 上能跑 arm64 macOS 客体的只有 Apple 的 <strong>Virtualization framework</strong>（UTM 的 Apple Virtualization 后端、Tart 都是它的前端）。QEMU 后端（UTM 里称为 QEMU）能跑 Linux、Windows 等客体，磁盘是 qcow2、支持快照，但它不能运行 arm64 macOS 客体（推断，以 UTM 文档为准）。</p><p lang="en">On Apple Silicon, only Apple's <strong>Virtualization framework</strong> can run arm64 macOS guests (UTM's Apple Virtualization backend and Tart are both front ends to it). The QEMU backend (called QEMU in UTM) can run Linux, Windows and other guests, with qcow2 disks and snapshots, but it cannot run arm64 macOS guests (inference; the UTM documentation is authoritative).</p>
   <ul>
-    <li><strong>安装</strong>：UTM → 新建 → Virtualize → macOS，选一个 IPSW（恢复镜像）文件或让它下载最新版。也可以用 Tart：<code>tart create --from-ipsw=latest sip-lab</code>，或 <code>tart clone</code> 一个社区预装镜像。</li>
-    <li><strong>没有快照，用克隆</strong>：Apple Virtualization 后端没有类似 qcow2 的磁盘快照。替代办法是在做危险实验前<strong>克隆整个 VM bundle</strong>（UTM 的 Clone 菜单；Tart 的 <code>tart clone 源 新名字</code>）。在 APFS 上克隆是写时复制，初始几乎不占额外空间。坏了就删掉坏的、从干净的再克隆一份。</li>
-    <li><strong>在客体里关 SIP</strong>：关闭客体机，从 Recovery 启动它（Tart：<code>tart run --recovery sip-lab</code>；UTM 的入口位置随版本变化，查 UTM 文档），打开 Recovery 里的 Terminal：<code>csrutil disable</code>，重启。在客体里 <code>csrutil status</code> 应显示 disabled。真机 Apple Silicon 上加载第三方 kext 和改 boot-args 还要把启动安全级别降到 Reduced Security（Startup Security Utility 或 <code>bputil</code>）；在虚拟机里是否需要同样一步、具体步骤，以你的 macOS 版本和 KDK 说明为准（不确定）。</li>
-    <li><strong>boot-args</strong>：在客体里 <code>sudo nvram boot-args="…"</code>，重启生效；<code>nvram boot-args</code> 查看当前值。</li>
-    <li><strong>KDK 与两机调试（大致路径）</strong>：从 developer.apple.com 下载与客体 macOS 版本<strong>完全对应</strong>的 Kernel Debug Kit，宿主和客体都装（宿主用它的符号和 lldbmacros，客体用它的 development 内核）。客体通过 boot-arg <code>debug=</code> 打开调试（位定义见 Phase 6），在客体上按 KDK 自带 ReadMe 的步骤让它引导 development 内核；宿主上 <code>lldb</code> 载入 KDK 里对应内核的 dSYM，<code>kdp-remote 客体IP</code> 连接。这一整条路径在虚拟机里能走通到什么程度随 macOS 版本变化，本页没有逐步验证，以 KDK ReadMe 为准。</li>
+    <li lang="zh-CN"><strong>安装</strong>：UTM → 新建 → Virtualize → macOS，选一个 IPSW（恢复镜像）文件或让它下载最新版。也可以用 Tart：<code>tart create --from-ipsw=latest sip-lab</code>，或 <code>tart clone</code> 一个社区预装镜像。</li>
+    <li lang="en"><strong>Install</strong>: UTM → New → Virtualize → macOS, pick an IPSW (restore image) file or let it download the latest. Or use Tart: <code>tart create --from-ipsw=latest sip-lab</code>, or <code>tart clone</code> a community pre-installed image.</li>
+    <li lang="zh-CN"><strong>没有快照，用克隆</strong>：Apple Virtualization 后端没有类似 qcow2 的磁盘快照。替代办法是在做危险实验前<strong>克隆整个 VM bundle</strong>（UTM 的 Clone 菜单；Tart 的 <code>tart clone 源 新名字</code>）。在 APFS 上克隆是写时复制，初始几乎不占额外空间。坏了就删掉坏的、从干净的再克隆一份。</li>
+    <li lang="en"><strong>No snapshots, so use clones</strong>: the Apple Virtualization backend has no disk snapshots like qcow2's. The substitute is to <strong>clone the whole VM bundle</strong> before a dangerous lab (UTM's Clone menu; Tart's <code>tart clone source new-name</code>). On APFS a clone is copy-on-write and at first takes almost no extra space. If it breaks, delete the broken one and clone a fresh copy from the clean one.</li>
+    <li lang="zh-CN"><strong>在客体里关 SIP</strong>：关闭客体机，从 Recovery 启动它（Tart：<code>tart run --recovery sip-lab</code>；UTM 的入口位置随版本变化，查 UTM 文档），打开 Recovery 里的 Terminal：<code>csrutil disable</code>，重启。在客体里 <code>csrutil status</code> 应显示 disabled。真机 Apple Silicon 上加载第三方 kext 和改 boot-args 还要把启动安全级别降到 Reduced Security（Startup Security Utility 或 <code>bputil</code>）；在虚拟机里是否需要同样一步、具体步骤，以你的 macOS 版本和 KDK 说明为准（不确定）。</li>
+    <li lang="en"><strong>Turn SIP off in the guest</strong>: shut the guest down and boot it into Recovery (Tart: <code>tart run --recovery sip-lab</code>; where UTM puts this varies by version, see the UTM docs), open Terminal in Recovery: <code>csrutil disable</code>, and reboot. In the guest, <code>csrutil status</code> should show disabled. On real Apple Silicon hardware, loading third-party kexts and changing boot-args also requires lowering the boot security level to Reduced Security (Startup Security Utility or <code>bputil</code>); whether a VM needs the same step, and the exact steps, depend on your macOS version and the KDK instructions (unverified).</li>
+    <li lang="zh-CN"><strong>boot-args</strong>：在客体里 <code>sudo nvram boot-args="…"</code>，重启生效；<code>nvram boot-args</code> 查看当前值。</li>
+    <li lang="en"><strong>boot-args</strong>: in the guest, <code>sudo nvram boot-args="…"</code>, effective after a reboot; <code>nvram boot-args</code> shows the current value.</li>
+    <li lang="zh-CN"><strong>KDK 与两机调试（大致路径）</strong>：从 developer.apple.com 下载与客体 macOS 版本<strong>完全对应</strong>的 Kernel Debug Kit，宿主和客体都装（宿主用它的符号和 lldbmacros，客体用它的 development 内核）。客体通过 boot-arg <code>debug=</code> 打开调试（位定义见 Phase 6），在客体上按 KDK 自带 ReadMe 的步骤让它引导 development 内核；宿主上 <code>lldb</code> 载入 KDK 里对应内核的 dSYM，<code>kdp-remote 客体IP</code> 连接。这一整条路径在虚拟机里能走通到什么程度随 macOS 版本变化，本页没有逐步验证，以 KDK ReadMe 为准。</li>
+    <li lang="en"><strong>KDK and two-machine debugging (approximate path)</strong>: download from developer.apple.com the Kernel Debug Kit that <strong>exactly matches</strong> the guest's macOS version, and install it on both host and guest (the host uses its symbols and lldbmacros, the guest its development kernel). The guest turns on debugging with the boot-arg <code>debug=</code> (bit definitions in Phase 6), and you follow the steps in the KDK's own ReadMe to make the guest boot the development kernel; on the host, <code>lldb</code> loads the dSYM of the matching kernel from the KDK and connects with <code>kdp-remote guest-IP</code>. How far this whole path works inside a VM varies with the macOS version; this page has not verified it step by step, and the KDK ReadMe is authoritative.</li>
   </ul>
-  <div class="note">Virtualization framework 对同时运行的 macOS 客体数量有限制（大致 2 台，与 macOS 许可协议的条款对应，以 Apple 文档为准）。一台「干净模板」关机放着，一台工作副本在跑，正好够用。</div>
+  <div class="note" lang="zh-CN">Virtualization framework 对同时运行的 macOS 客体数量有限制（大致 2 台，与 macOS 许可协议的条款对应，以 Apple 文档为准）。一台「干净模板」关机放着，一台工作副本在跑，正好够用。</div><div class="note" lang="en">The Virtualization framework limits how many macOS guests can run at once (roughly 2, matching a term of the macOS licence agreement; Apple's documentation is authoritative). One "clean template" kept shut down and one working copy running is just enough.</div>
 
-  <h3>5. 安全规则清单</h3>
+  <h3 lang="zh-CN">5. 安全规则清单</h3><h3 lang="en">5. Safety rules checklist</h3>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th>动作</th><th>允许在哪里</th><th>不允许</th></tr>
-    <tr><td>读源码、编辑、<code>git</code></td><td>宿主</td><td>—</td></tr>
-    <tr><td>编译内核、模块、initramfs</td><td>构建容器（或宿主）</td><td>—</td></tr>
-    <tr><td>启动自编 Linux 内核</td><td>QEMU Linux VM</td><td>—</td></tr>
-    <tr><td><code>insmod</code> 自写 Linux 模块</td><td>QEMU Linux VM</td><td>容器（会进 Docker / OrbStack / Lima 的共享内核）、任何真机</td></tr>
-    <tr><td>跑漏洞复现 / 不可信代码（Phase 7）</td><td>QEMU Linux VM，用 <code>./run-vm.sh throwaway</code>：<code>-snapshot</code> 且<strong>不附加</strong> 9p 共享设备（脚本里 <code>SHARE=""</code>；只在客体里 umount 不够）</td><td>宿主、容器</td></tr>
-    <tr><td><code>csrutil disable</code>、降低启动安全级别</td><td>macOS 客体 VM 的 Recovery</td><td>宿主</td></tr>
-    <tr><td>改 <code>boot-args</code>、引导 KDK 内核</td><td>macOS 客体 VM</td><td>宿主</td></tr>
-    <tr><td>加载自写 kext、<code>systemextensionsctl developer on</code></td><td>macOS 客体 VM（先克隆）</td><td>宿主</td></tr>
-    <tr><td><code>dtruss</code>、内核级 dtrace</td><td>macOS 客体 VM（SIP 已关）</td><td>宿主（需要关 SIP）</td></tr>
-    <tr><td>安装 KDK、跑 lldb（调试器一端）</td><td>宿主 + 客体</td><td>—</td></tr>
+    <tr><th><span lang="zh-CN">动作</span><span lang="en">Action</span></th><th><span lang="zh-CN">允许在哪里</span><span lang="en">Allowed in</span></th><th><span lang="zh-CN">不允许</span><span lang="en">Not allowed</span></th></tr>
+    <tr><td><span lang="zh-CN">读源码、编辑、<code>git</code></span><span lang="en">Reading source, editing, <code>git</code></span></td><td><span lang="zh-CN">宿主</span><span lang="en">Host</span></td><td>—</td></tr>
+    <tr><td><span lang="zh-CN">编译内核、模块、initramfs</span><span lang="en">Building the kernel, modules, initramfs</span></td><td><span lang="zh-CN">构建容器（或宿主）</span><span lang="en">Build container (or host)</span></td><td>—</td></tr>
+    <tr><td><span lang="zh-CN">启动自编 Linux 内核</span><span lang="en">Booting your own Linux kernel</span></td><td>QEMU Linux VM</td><td>—</td></tr>
+    <tr><td><span lang="zh-CN"><code>insmod</code> 自写 Linux 模块</span><span lang="en"><code>insmod</code> of your own Linux modules</span></td><td>QEMU Linux VM</td><td><span lang="zh-CN">容器（会进 Docker / OrbStack / Lima 的共享内核）、任何真机</span><span lang="en">Container (it goes into the shared kernel of Docker / OrbStack / Lima), any real machine</span></td></tr>
+    <tr><td><span lang="zh-CN">跑漏洞复现 / 不可信代码（Phase 7）</span><span lang="en">Running exploit reproductions / untrusted code (Phase 7)</span></td><td><span lang="zh-CN">QEMU Linux VM，用 <code>./run-vm.sh throwaway</code>：<code>-snapshot</code> 且<strong>不附加</strong> 9p 共享设备（脚本里 <code>SHARE=""</code>；只在客体里 umount 不够）</span><span lang="en">QEMU Linux VM with <code>./run-vm.sh throwaway</code>: <code>-snapshot</code> and <strong>no</strong> 9p share device attached (<code>SHARE=""</code> in the script; unmounting inside the guest is not enough)</span></td><td><span lang="zh-CN">宿主、容器</span><span lang="en">Host, container</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>csrutil disable</code>、降低启动安全级别</span><span lang="en"><code>csrutil disable</code>, lowering the boot security level</span></td><td><span lang="zh-CN">macOS 客体 VM 的 Recovery</span><span lang="en">Recovery of the macOS guest VM</span></td><td><span lang="zh-CN">宿主</span><span lang="en">Host</span></td></tr>
+    <tr><td><span lang="zh-CN">改 <code>boot-args</code>、引导 KDK 内核</span><span lang="en">Changing <code>boot-args</code>, booting a KDK kernel</span></td><td><span lang="zh-CN">macOS 客体 VM</span><span lang="en">macOS guest VM</span></td><td><span lang="zh-CN">宿主</span><span lang="en">Host</span></td></tr>
+    <tr><td><span lang="zh-CN">加载自写 kext、<code>systemextensionsctl developer on</code></span><span lang="en">Loading your own kexts, <code>systemextensionsctl developer on</code></span></td><td><span lang="zh-CN">macOS 客体 VM（先克隆）</span><span lang="en">macOS guest VM (clone first)</span></td><td><span lang="zh-CN">宿主</span><span lang="en">Host</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>dtruss</code>、内核级 dtrace</span><span lang="en"><code>dtruss</code>, kernel-level dtrace</span></td><td><span lang="zh-CN">macOS 客体 VM（SIP 已关）</span><span lang="en">macOS guest VM (SIP off)</span></td><td><span lang="zh-CN">宿主（需要关 SIP）</span><span lang="en">Host (needs SIP off)</span></td></tr>
+    <tr><td><span lang="zh-CN">安装 KDK、跑 lldb（调试器一端）</span><span lang="en">Installing the KDK, running lldb (the debugger end)</span></td><td><span lang="zh-CN">宿主 + 客体</span><span lang="en">Host + guest</span></td><td>—</td></tr>
   </table>
   </div>
 
-  <h3>6. 磁盘与性能预算</h3>
-  <p>以下都是估算（推断），实际以你的版本和配置为准：</p>
+  <h3 lang="zh-CN">6. 磁盘与性能预算</h3><h3 lang="en">6. Disk and performance budget</h3>
+  <p lang="zh-CN">以下都是估算（推断），实际以你的版本和配置为准：</p><p lang="en">All of the following are estimates (inference); your actual versions and configuration are authoritative:</p>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th>项目</th><th>磁盘</th><th>内存 / CPU</th></tr>
-    <tr><td>Linux 源码树（浅克隆）+ defconfig 构建产物</td><td>约 5–10 GB；带完整调试信息更大</td><td>编译时用满所有核，十几分钟到半小时</td></tr>
-    <tr><td>QEMU Linux VM（busybox + 2 GB qcow2）</td><td>qcow2 按需增长，通常远小于 2 GB</td><td>1–2 GB 内存；TCG 下单核满载</td></tr>
-    <tr><td>Docker Desktop / OrbStack / Lima 的后台 VM</td><td>镜像 + 命名卷，数 GB</td><td>按工具设置分配；不用时退出</td></tr>
-    <tr><td>macOS 客体 VM</td><td>IPSW 十几 GB；系统盘建议给 64 GB 以上（稀疏文件，实际占用较少）；每份克隆起初几乎为零</td><td>建议 4 核、8 GB 内存</td></tr>
-    <tr><td>KDK（每个 macOS 版本一份）</td><td>数 GB</td><td>—</td></tr>
+    <tr><th><span lang="zh-CN">项目</span><span lang="en">Item</span></th><th><span lang="zh-CN">磁盘</span><span lang="en">Disk</span></th><th><span lang="zh-CN">内存 / CPU</span><span lang="en">Memory / CPU</span></th></tr>
+    <tr><td><span lang="zh-CN">Linux 源码树（浅克隆）+ defconfig 构建产物</span><span lang="en">Linux source tree (shallow clone) + defconfig build output</span></td><td><span lang="zh-CN">约 5–10 GB；带完整调试信息更大</span><span lang="en">About 5–10 GB; larger with full debug info</span></td><td><span lang="zh-CN">编译时用满所有核，十几分钟到半小时</span><span lang="en">Uses every core while compiling; from ten-odd minutes to half an hour</span></td></tr>
+    <tr><td><span lang="zh-CN">QEMU Linux VM（busybox + 2 GB qcow2）</span><span lang="en">QEMU Linux VM (busybox + 2 GB qcow2)</span></td><td><span lang="zh-CN">qcow2 按需增长，通常远小于 2 GB</span><span lang="en">qcow2 grows on demand, usually to far less than 2 GB</span></td><td><span lang="zh-CN">1–2 GB 内存；TCG 下单核满载</span><span lang="en">1–2 GB of memory; one core fully loaded under TCG</span></td></tr>
+    <tr><td><span lang="zh-CN">Docker Desktop / OrbStack / Lima 的后台 VM</span><span lang="en">The background VM of Docker Desktop / OrbStack / Lima</span></td><td><span lang="zh-CN">镜像 + 命名卷，数 GB</span><span lang="en">Images + named volumes, several GB</span></td><td><span lang="zh-CN">按工具设置分配；不用时退出</span><span lang="en">Allocated in the tool settings; quit it when not in use</span></td></tr>
+    <tr><td><span lang="zh-CN">macOS 客体 VM</span><span lang="en">macOS guest VM</span></td><td><span lang="zh-CN">IPSW 十几 GB；系统盘建议给 64 GB 以上（稀疏文件，实际占用较少）；每份克隆起初几乎为零</span><span lang="en">The IPSW is ten-odd GB; give the system disk 64 GB or more (a sparse file, so actual use is lower); each clone starts at almost zero</span></td><td><span lang="zh-CN">建议 4 核、8 GB 内存</span><span lang="en">4 cores and 8 GB of memory recommended</span></td></tr>
+    <tr><td><span lang="zh-CN">KDK（每个 macOS 版本一份）</span><span lang="en">KDK (one per macOS version)</span></td><td><span lang="zh-CN">数 GB</span><span lang="en">Several GB</span></td><td>—</td></tr>
   </table>
   </div>
-  <p>经验：宿主至少留 60–100 GB 空闲再开始 macOS 客体实验；不跑实验时关掉 macOS 客体和容器后台 VM，它们是最大的内存占用。</p>
+  <p lang="zh-CN">经验：宿主至少留 60–100 GB 空闲再开始 macOS 客体实验；不跑实验时关掉 macOS 客体和容器后台 VM，它们是最大的内存占用。</p><p lang="en">Rule of thumb: keep at least 60–100 GB free on the host before starting the macOS guest labs; when not running labs, shut down the macOS guest and the container background VM — they are the largest memory users.</p>
 
-  <h2 id="compare">对照表</h2>
+  <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th>实验</th><th class="linux">Linux 环境</th><th class="xnu">macOS / XNU 环境</th></tr>
-    <tr><td>跑自己编的内核</td><td>QEMU <code>-kernel Image</code>，秒级启动</td><td>从源码编译并在客体里引导自编 XNU 可行但门槛高（大致路径，以 xnu README 与 KDK 说明为准，Phase 8 展开）；入门先用 KDK 自带的 development / kasan 内核。按「播放」逐层走，最后看连接线。",
+    <tr><th><span lang="zh-CN">实验</span><span lang="en">Lab</span></th><th class="linux"><span lang="zh-CN">Linux 环境</span><span lang="en">Linux environment</span></th><th class="xnu"><span lang="zh-CN">macOS / XNU 环境</span><span lang="en">macOS / XNU environment</span></th></tr>
+    <tr><td><span lang="zh-CN">跑自己编的内核</span><span lang="en">Run a kernel you built</span></td><td><span lang="zh-CN">QEMU <code>-kernel Image</code>，秒级启动</span><span lang="en">QEMU <code>-kernel Image</code>, boots in seconds</span></td><td><span lang="zh-CN">从源码编译并在客体里引导自编 XNU 可行但门槛高（大致路径，以 xnu README 与 KDK 说明为准，Phase 8 展开）；入门先用 KDK 自带的 development / kasan 内核。</span><span lang="en">Building XNU from source and booting it in a guest is possible but demanding (approximate path; the xnu README and KDK notes are authoritative; Phase 8 expands on it). Start with the development / kasan kernels shipped in the KDK.</span></td></tr>
+    <tr><td><span lang="zh-CN">回滚</span><span lang="en">Rollback</span></td><td><span lang="zh-CN"><code>qemu-img snapshot -a</code>、<code>-snapshot</code></span><span lang="en"><code>qemu-img snapshot -a</code>, <code>-snapshot</code></span></td><td><span lang="zh-CN">克隆 VM bundle，删坏的</span><span lang="en">Clone the VM bundle; delete the broken one</span></td></tr>
+    <tr><td><span lang="zh-CN">宿主 ↔ 客体传文件</span><span lang="en">Host ↔ guest file transfer</span></td><td><span lang="zh-CN">9p 共享目录</span><span lang="en">9p shared directory</span></td><td><span lang="zh-CN">UTM / Tart 的共享目录（Virtualization framework 的 VirtioFS 共享）</span><span lang="en">UTM / Tart shared folders (VirtioFS sharing via the Virtualization framework)</span></td></tr>
+    <tr><td><span lang="zh-CN">停机调试</span><span lang="en">Stop-the-world debugging</span></td><td><span lang="zh-CN">QEMU gdbstub：<code>-s -S</code> + <code>gdb-remote 1234</code></span><span lang="en">QEMU gdbstub: <code>-s -S</code> + <code>gdb-remote 1234</code></span></td><td><span lang="zh-CN">KDP：<code>debug=</code> boot-arg + <code>kdp-remote</code>，配 KDK 符号</span><span lang="en">KDP: <code>debug=</code> boot-arg + <code>kdp-remote</code>, with KDK symbols</span></td></tr>
+    <tr><td><span lang="zh-CN">加载自写内核代码</span><span lang="en">Loading your own kernel code</span></td><td><span lang="zh-CN"><code>insmod hello.ko</code></span><span lang="en"><code>insmod hello.ko</code></span></td><td><span lang="zh-CN">kext（关 SIP 的客体）；用户态驱动走 DriverKit</span><span lang="en">kext (in a guest with SIP off); user-space drivers go through DriverKit</span></td></tr>
+    <tr><td><span lang="zh-CN">系统调用跟踪</span><span lang="en">System-call tracing</span></td><td><span lang="zh-CN"><code>strace</code>（需放进 rootfs）、ftrace</span><span lang="en"><code>strace</code> (must be added to the rootfs), ftrace</span></td><td><span lang="zh-CN"><code>dtruss</code>（客体里关 SIP 后）、<code>fs_usage</code>（宿主可用）</span><span lang="en"><code>dtruss</code> (in the guest, after disabling SIP), <code>fs_usage</code> (works on the host)</span></td></tr>
+    <tr><td><span lang="zh-CN">内存错误检测</span><span lang="en">Memory-error detection</span></td><td><span lang="zh-CN"><code>CONFIG_KASAN</code> 重编</span><span lang="en">Rebuild with <code>CONFIG_KASAN</code></span></td><td><span lang="zh-CN">KDK 里的 KASAN 内核变体（大致路径）</span><span lang="en">The KASAN kernel variant in the KDK (approximate path)</span></td></tr>
+    <tr><td><span lang="zh-CN">崩溃后看什么</span><span lang="en">What to look at after a crash</span></td><td><span lang="zh-CN">串口上的 oops / panic 文本</span><span lang="en">The oops / panic text on the serial console</span></td><td><span lang="zh-CN">客体重启后 <code>/Library/Logs/DiagnosticReports/</code> 下的 <code>.panic</code></span><span lang="en">The <code>.panic</code> file under <code>/Library/Logs/DiagnosticReports/</code> after the guest reboots</span></td></tr>
+    <tr><td><span lang="zh-CN">构建工具链</span><span lang="en">Build toolchain</span></td><td><span lang="zh-CN">容器里 <code>LLVM=1</code></span><span lang="en"><code>LLVM=1</code> in the container</span></td><td><span lang="zh-CN">宿主上的 Xcode（编 kext / dext 可以在宿主，加载只在客体）</span><span lang="en">Xcode on the host (kexts / dexts can be built on the host; loading happens only in a guest)</span></td></tr>
+    <tr><td><span lang="zh-CN">安全机制实验</span><span lang="en">Security-mechanism experiments</span></td><td><span lang="zh-CN">seccomp、LSM（Phase 7），在 VM 里随便开关</span><span lang="en">seccomp, LSM (Phase 7) — toggle freely inside the VM</span></td><td><span lang="zh-CN">SIP、AMFI、签名要求，只在客体里放宽</span><span lang="en">SIP, AMFI, signing requirements — relaxed only inside a guest</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解：实验环境拓扑</h2><h2 id="diagram-en" lang="en">Diagram: lab topology</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
+         data-captions='["全图：底部是宿主 Mac，上面三个客体：QEMU Linux VM、构建容器、macOS 客体 VM。按「播放」逐层走，最后看连接线。",
            "① 宿主 Mac（macOS，SIP 永远开着）：编辑、编译、跑 QEMU 和 UTM、当 lldb 调试器一端、存放实验目录 kernel-lab。",
            "② QEMU Linux arm64 VM：-M virt，virtio 磁盘 disk.qcow2，自编内核 Image + busybox initramfs。所有 Linux 内核实验和 insmod 都在这里。",
            "③ 构建容器（Docker Desktop / OrbStack / Lima）：同一个 clang 编内核和模块，产物拷回 kernel-lab。只编不跑，不 insmod。",
            "④ macOS 客体 VM（UTM Apple Virtualization 或 Tart）：在它的 Recovery 里 csrutil disable、改 boot-args、加载自写 kext。宿主不受影响。",
            "⑤ 共享目录：kernel-lab/share 通过 9p 挂进 Linux VM（/mnt/share），通过 -v 挂进容器，通过 VirtioFS 共享给 macOS 客体。",
-           "⑥ 调试与回滚：宿主 lldb 经 gdbstub（tcp 1234）调 Linux VM，经 KDP 调 macOS 客体；Linux 用 qemu-img snapshot 回滚，macOS 客体用克隆 VM bundle 代替快照。"]'>
+           "⑥ 调试与回滚：宿主 lldb 经 gdbstub（tcp 1234）调 Linux VM，经 KDP 调 macOS 客体；Linux 用 qemu-img snapshot 回滚，macOS 客体用克隆 VM bundle 代替快照。"]'
+         data-captions-en='["Overview: the host Mac at the bottom, three guests above it: the QEMU Linux VM, the build container and the macOS guest VM. Press Play to walk the layers, then the connections.", "1 Host Mac (macOS, SIP always on): editing, building, running QEMU and UTM, the lldb debugger end, and the kernel-lab working directory.", "2 QEMU Linux arm64 VM: -M virt, a virtio disk disk.qcow2, your own kernel Image + a busybox initramfs. Every Linux kernel experiment and every insmod happens here.", "3 Build container (Docker Desktop / OrbStack / Lima): one clang builds both the kernel and modules; the output is copied back to kernel-lab. It builds only — it never runs insmod.", "4 macOS guest VM (UTM Apple Virtualization or Tart): csrutil disable in its Recovery, boot-args changes and loading your own kexts all happen here. The host is untouched.", "5 Shared directory: kernel-lab/share is mounted into the Linux VM over 9p (/mnt/share), into the container with -v, and shared to the macOS guest over VirtioFS.", "6 Debugging and rollback: host lldb reaches the Linux VM through the gdbstub (tcp 1234) and the macOS guest through KDP; Linux rolls back with qemu-img snapshot, the macOS guest by cloning the VM bundle instead of a snapshot."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="20" y="22" class="small">客体（可崩溃、可回滚）</text>
+      <text x="20" y="22" class="small" lang="zh-CN">客体（可崩溃、可回滚）</text><text x="20" y="22" class="small" lang="en">Guests (may crash, can roll back)</text>
       <line x1="10" y1="250" x2="890" y2="250" class="lane"/>
-      <text x="20" y="268" class="small">宿主（永远不动 SIP）</text>
+      <text x="20" y="268" class="small" lang="zh-CN">宿主（永远不动 SIP）</text><text x="20" y="268" class="small" lang="en">Host (SIP never touched)</text>
 
       <!-- step 1: host -->
       <g data-step="1"><rect class="box" x="40" y="300" width="820" height="80"/>
-        <text x="60" y="325">宿主 Mac · macOS arm64 · SIP enabled</text>
+        <text x="60" y="325" lang="zh-CN">宿主 Mac · macOS arm64 · SIP enabled</text><text x="60" y="325" lang="en">Host Mac · macOS arm64 · SIP enabled</text>
         <text x="60" y="347" class="mono">~/kernel-lab/  run-vm.sh  Image  vmlinux  disk.qcow2  share/</text>
-        <text x="60" y="368" class="small">编辑 · QEMU · UTM / Tart · lldb（调试器一端）· KDK 符号</text></g>
+        <text x="60" y="368" class="small" lang="zh-CN">编辑 · QEMU · UTM / Tart · lldb（调试器一端）· KDK 符号</text><text x="60" y="368" class="small" lang="en">Editing · QEMU · UTM / Tart · lldb (debugger end) · KDK symbols</text></g>
 
       <!-- step 2: QEMU Linux VM -->
       <g data-step="2"><rect class="box linux" x="40" y="40" width="250" height="130"/>
@@ -192,32 +228,32 @@ make -C /src/linux M=/lab/share/hello LLVM=1 modules</pre>
         <text x="55" y="88" class="mono">-M virt -smp 2 -m 2G</text>
         <text x="55" y="108" class="mono">/dev/vda ← disk.qcow2</text>
         <text x="55" y="128" class="mono">/mnt/share ← 9p</text>
-        <text x="55" y="152" class="small">内核实验 · insmod · panic</text></g>
+        <text x="55" y="152" class="small" lang="zh-CN">内核实验 · insmod · panic</text><text x="55" y="152" class="small" lang="en">Kernel labs · insmod · panic</text></g>
 
       <!-- step 3: build container -->
       <g data-step="3"><rect class="box" x="325" y="40" width="250" height="130"/>
-        <text x="340" y="64">构建容器 linux/arm64</text>
+        <text x="340" y="64" lang="zh-CN">构建容器 linux/arm64</text><text x="340" y="64" lang="en">Build container linux/arm64</text>
         <text x="340" y="88" class="mono">make LLVM=1 Image modules</text>
-        <text x="340" y="108" class="mono">/src ← 命名卷</text>
+        <text x="340" y="108" class="mono" lang="zh-CN">/src ← 命名卷</text><text x="340" y="108" class="mono" lang="en">/src ← named volume</text>
         <text x="340" y="128" class="mono">/lab ← -v kernel-lab</text>
-        <text x="340" y="152" class="small">只编不跑 · 不 insmod</text></g>
+        <text x="340" y="152" class="small" lang="zh-CN">只编不跑 · 不 insmod</text><text x="340" y="152" class="small" lang="en">Build only, never run · no insmod</text></g>
 
       <!-- step 4: macOS guest -->
       <g data-step="4"><rect class="box xnu" x="610" y="40" width="250" height="130"/>
-        <text x="625" y="64">macOS 客体 VM</text>
+        <text x="625" y="64" lang="zh-CN">macOS 客体 VM</text><text x="625" y="64" lang="en">macOS guest VM</text>
         <text x="625" y="88" class="mono">csrutil disable</text>
         <text x="625" y="108" class="mono">nvram boot-args=…</text>
-        <text x="625" y="128" class="mono">kext · KDK 内核</text>
-        <text x="625" y="152" class="small">UTM（Apple VZ）/ Tart</text></g>
+        <text x="625" y="128" class="mono" lang="zh-CN">kext · KDK 内核</text><text x="625" y="128" class="mono" lang="en">kext · KDK kernel</text>
+        <text x="625" y="152" class="small" lang="zh-CN">UTM（Apple VZ）/ Tart</text><text x="625" y="152" class="small" lang="en">UTM (Apple VZ) / Tart</text></g>
 
       <!-- step 5: shared directories -->
       <g data-step="5">
         <path class="arrow flow" d="M110 300 L110 172"/>
         <text x="118" y="230" class="small">9p share</text>
         <path class="arrow flow" d="M400 300 L400 172"/>
-        <text x="408" y="230" class="small">-v 挂载</text>
+        <text x="408" y="230" class="small" lang="zh-CN">-v 挂载</text><text x="408" y="230" class="small" lang="en">-v mount</text>
         <path class="arrow flow" d="M680 300 L680 172"/>
-        <text x="688" y="230" class="small">VirtioFS 共享</text></g>
+        <text x="688" y="230" class="small" lang="zh-CN">VirtioFS 共享</text><text x="688" y="230" class="small" lang="en">VirtioFS share</text></g>
 
       <!-- step 6: debug links + rollback -->
       <g data-step="6">
@@ -226,20 +262,20 @@ make -C /src/linux M=/lab/share/hello LLVM=1 modules</pre>
         <path class="arrow" d="M790 300 L790 172"/>
         <text x="798" y="200" class="small">KDP</text>
         <text x="228" y="290" class="small">qemu-img snapshot</text>
-        <text x="700" y="290" class="small">克隆 VM bundle</text></g>
+        <text x="700" y="290" class="small" lang="zh-CN">克隆 VM bundle</text><text x="700" y="290" class="small" lang="en">Clone VM bundle</text></g>
     </svg>
   </div>
 
-  <h2 id="lab">动手实验</h2>
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on lab</h2>
   <div class="lab">
-    <h3>Lab A · 搭好 QEMU Linux VM：磁盘 + 共享目录 + 一键脚本，快照回滚一次</h3>
+    <h3 lang="zh-CN">Lab A · 搭好 QEMU Linux VM：磁盘 + 共享目录 + 一键脚本，快照回滚一次</h3><h3 lang="en">Lab A · Set up the QEMU Linux VM: disk + shared directory + one-command script, and roll back a snapshot once</h3>
     <ol>
-      <li>实验目录，把上面的 <code>run-vm.sh</code> 存进去，并拿到内核（Phase 0 编好的，或第 3 节容器里编的）：<pre data-lang="sh">mkdir -p ~/kernel-lab/share &amp;&amp; cd ~/kernel-lab
+      <li><span lang="zh-CN">实验目录，把上面的 <code>run-vm.sh</code> 存进去，并拿到内核（Phase 0 编好的，或第 3 节容器里编的）：</span><span lang="en">The lab directory: save the <code>run-vm.sh</code> above into it, and get a kernel (the one built in Phase 0, or the one built in the container in section 3):</span><pre data-lang="sh">mkdir -p ~/kernel-lab/share &amp;&amp; cd ~/kernel-lab
 chmod +x run-vm.sh
 cp /path/to/linux/arch/arm64/boot/Image /path/to/linux/vmlinux .</pre></li>
-      <li>确认内核带了需要的驱动（在内核源码树里跑）：<pre data-lang="sh">grep -E 'CONFIG_(VIRTIO_PCI|VIRTIO_BLK|EXT4_FS|NET_9P|NET_9P_VIRTIO|9P_FS|DEVTMPFS)=y' .config   # 七项都必须是 =y（内建）；=m 的模块不在 initramfs 里，挂载会静默失败</pre>
-        缺哪个就 <code>scripts/config -e 选项名</code>，再 <code>make LLVM=1 ARCH=arm64 olddefconfig</code> 并重编。</li>
-      <li>写客体的 <code>/init</code>，它会挂上磁盘和共享目录：<pre data-lang="sh" data-file="init">#!/bin/sh
+      <li><span lang="zh-CN">确认内核带了需要的驱动（在内核源码树里跑）：</span><span lang="en">Confirm that the kernel has the drivers it needs (run this in the kernel source tree):</span><pre data-lang="sh">grep -E 'CONFIG_(VIRTIO_PCI|VIRTIO_BLK|EXT4_FS|NET_9P|NET_9P_VIRTIO|9P_FS|DEVTMPFS)=y' .config   # 七项都必须是 =y（内建）；=m 的模块不在 initramfs 里，挂载会静默失败</pre>
+        <span lang="zh-CN">缺哪个就 <code>scripts/config -e 选项名</code>，再 <code>make LLVM=1 ARCH=arm64 olddefconfig</code> 并重编。</span><span lang="en">For any that is missing, run <code>scripts/config -e OPTION_NAME</code>, then <code>make LLVM=1 ARCH=arm64 olddefconfig</code>, and rebuild.</span></li>
+      <li><span lang="zh-CN">写客体的 <code>/init</code>，它会挂上磁盘和共享目录：</span><span lang="en">Write the guest's <code>/init</code>; it mounts the disk and the shared directory:</span><pre data-lang="sh" data-file="init">#!/bin/sh
 /bin/busybox --install -s
 mount -t proc none /proc
 mount -t sysfs none /sys
@@ -248,7 +284,7 @@ mkdir -p /mnt/disk /mnt/share
 mount -t ext4 /dev/vda /mnt/disk || echo "no disk"
 mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share || echo "no 9p"
 exec /bin/sh</pre></li>
-      <li>在构建容器里做 initramfs 和一块 ext4 磁盘，再在宿主上转成 qcow2：<pre data-lang="sh">docker run --platform linux/arm64 --rm -v "$PWD:/lab" alpine:3.20 sh -c '
+      <li><span lang="zh-CN">在构建容器里做 initramfs 和一块 ext4 磁盘，再在宿主上转成 qcow2：</span><span lang="en">Make the initramfs and an ext4 disk in the build container, then convert the disk to qcow2 on the host:</span><pre data-lang="sh">docker run --platform linux/arm64 --rm -v "$PWD:/lab" alpine:3.20 sh -c '
   apk add -q busybox-static cpio e2fsprogs &amp;&amp;
   mkdir -p /r/bin /r/sbin /r/usr/bin /r/usr/sbin /r/proc /r/sys /r/dev /r/mnt &amp;&amp;
   cp /bin/busybox.static /r/bin/busybox &amp;&amp;
@@ -257,87 +293,91 @@ exec /bin/sh</pre></li>
   truncate -s 2G /lab/disk.img &amp;&amp; mkfs.ext4 -q -F /lab/disk.img'
 qemu-img convert -f raw -O qcow2 disk.img disk.qcow2 &amp;&amp; rm disk.img
 qemu-img info disk.qcow2</pre></li>
-      <li>先打一个干净快照，再启动：<pre data-lang="sh">qemu-img snapshot -c clean disk.qcow2
+      <li><span lang="zh-CN">先打一个干净快照，再启动：</span><span lang="en">Take a clean snapshot first, then boot:</span><pre data-lang="sh">qemu-img snapshot -c clean disk.qcow2
 qemu-img snapshot -l disk.qcow2
 echo "hello from host" &gt; share/hello.txt
 ./run-vm.sh</pre>
-        客体 shell 里：<pre data-lang="sh">cat /mnt/share/hello.txt
+        <span lang="zh-CN">客体 shell 里：</span><span lang="en">In the guest shell:</span><pre data-lang="sh">cat /mnt/share/hello.txt
 echo "dirty" &gt; /mnt/disk/marker &amp;&amp; sync
 ls /mnt/disk
 poweroff -f</pre></li>
-      <li>回滚并验证 <code>marker</code> 消失：<pre data-lang="sh">qemu-img snapshot -a clean disk.qcow2
+      <li><span lang="zh-CN">回滚并验证 <code>marker</code> 消失：</span><span lang="en">Roll back and check that <code>marker</code> is gone:</span><pre data-lang="sh">qemu-img snapshot -a clean disk.qcow2
 ./run-vm.sh
 # in the guest:
 ls /mnt/disk        # marker is gone</pre></li>
-      <li>试一次调试模式：<code>./run-vm.sh debug</code>（QEMU 停住不动是正常的），另一个终端：<pre data-lang="sh">lldb vmlinux
+      <li><span lang="zh-CN">试一次调试模式：<code>./run-vm.sh debug</code>（QEMU 停住不动是正常的），另一个终端：</span><span lang="en">Try debug mode once: <code>./run-vm.sh debug</code> (QEMU sitting still is normal); in another terminal:</span><pre data-lang="sh">lldb vmlinux
 (lldb) gdb-remote 1234
 (lldb) breakpoint set --name start_kernel
 (lldb) continue</pre>
-        断点命中后 <code>bt</code> 看调用栈。断不下来时参考 Phase 6：关 <code>CONFIG_DEBUG_INFO_REDUCED</code>、MMU 打开前后用硬件断点。</li>
+        <span lang="zh-CN">断点命中后 <code>bt</code> 看调用栈。断不下来时参考 Phase 6：关 <code>CONFIG_DEBUG_INFO_REDUCED</code>、MMU 打开前后用硬件断点。</span><span lang="en">When the breakpoint hits, <code>bt</code> shows the call stack. If it will not stop, see Phase 6: turn off <code>CONFIG_DEBUG_INFO_REDUCED</code>, and use hardware breakpoints around the point where the MMU is turned on.</span></li>
     </ol>
 
-    <h3>Lab B · 建 macOS 客体 VM，在客体里关 SIP，确认宿主没变</h3>
+    <h3 lang="zh-CN">Lab B · 建 macOS 客体 VM，在客体里关 SIP，确认宿主没变</h3><h3 lang="en">Lab B · Build a macOS guest VM, turn SIP off in the guest, confirm the host has not changed</h3>
     <ol>
-      <li>先在宿主上记录基线：<pre data-lang="sh">csrutil status</pre>应为 <code>System Integrity Protection status: enabled.</code></li>
-      <li>安装 UTM，新建 → Virtualize → macOS，选择 IPSW 或让 UTM 下载，给 4 核、8 GB 内存、64 GB 以上磁盘，完成 macOS 安装向导。（或 Tart：<code>brew install cirruslabs/cli/tart</code>，<code>tart create --from-ipsw=latest sip-lab</code>。）</li>
-      <li>关机，<strong>克隆一份作为干净模板</strong>（UTM 的 Clone；Tart：<code>tart clone sip-lab sip-lab-clean</code>）。以后实验坏了就删掉工作副本，从模板再克隆。</li>
-      <li>从 Recovery 启动工作副本（Tart：<code>tart run --recovery sip-lab</code>；UTM 的入口查 UTM 文档），在 实用工具 → 终端 里：<pre data-lang="sh">csrutil disable</pre>按提示确认，重启进入正常系统。</li>
-      <li>在<strong>客体</strong>里：<pre data-lang="sh">csrutil status</pre>应显示 disabled。</li>
-      <li>回到<strong>宿主</strong>再跑一次：<pre data-lang="sh">csrutil status</pre>必须仍是 <code>enabled.</code>——这就是本页要证明的事：客体里的安全设置是客体自己的，宿主一点不变。</li>
+      <li><span lang="zh-CN">先在宿主上记录基线：</span><span lang="en">First record a baseline on the host:</span><pre data-lang="sh">csrutil status</pre><span lang="zh-CN">应为 <code>System Integrity Protection status: enabled.</code></span><span lang="en">It should read <code>System Integrity Protection status: enabled.</code></span></li>
+      <li lang="zh-CN">安装 UTM，新建 → Virtualize → macOS，选择 IPSW 或让 UTM 下载，给 4 核、8 GB 内存、64 GB 以上磁盘，完成 macOS 安装向导。（或 Tart：<code>brew install cirruslabs/cli/tart</code>，<code>tart create --from-ipsw=latest sip-lab</code>。）</li>
+      <li lang="en">Install UTM, New → Virtualize → macOS, choose an IPSW or let UTM download one, give it 4 cores, 8 GB of memory and a disk of 64 GB or more, and finish the macOS setup assistant. (Or Tart: <code>brew install cirruslabs/cli/tart</code>, <code>tart create --from-ipsw=latest sip-lab</code>.)</li>
+      <li lang="zh-CN">关机，<strong>克隆一份作为干净模板</strong>（UTM 的 Clone；Tart：<code>tart clone sip-lab sip-lab-clean</code>）。以后实验坏了就删掉工作副本，从模板再克隆。</li>
+      <li lang="en">Shut it down and <strong>clone a copy as a clean template</strong> (UTM's Clone; Tart: <code>tart clone sip-lab sip-lab-clean</code>). From then on, when a lab breaks something, delete the working copy and clone again from the template.</li>
+      <li><span lang="zh-CN">从 Recovery 启动工作副本（Tart：<code>tart run --recovery sip-lab</code>；UTM 的入口查 UTM 文档），在 实用工具 → 终端 里：</span><span lang="en">Boot the working copy into Recovery (Tart: <code>tart run --recovery sip-lab</code>; for UTM, see the UTM docs), and in Utilities → Terminal:</span><pre data-lang="sh">csrutil disable</pre><span lang="zh-CN">按提示确认，重启进入正常系统。</span><span lang="en">Confirm when prompted, then reboot into the normal system.</span></li>
+      <li><span lang="zh-CN">在<strong>客体</strong>里：</span><span lang="en">In the <strong>guest</strong>:</span><pre data-lang="sh">csrutil status</pre><span lang="zh-CN">应显示 disabled。</span><span lang="en">It should show disabled.</span></li>
+      <li><span lang="zh-CN">回到<strong>宿主</strong>再跑一次：</span><span lang="en">Back on the <strong>host</strong>, run it again:</span><pre data-lang="sh">csrutil status</pre><span lang="zh-CN">必须仍是 <code>enabled.</code>——这就是本页要证明的事：客体里的安全设置是客体自己的，宿主一点不变。</span><span lang="en">It must still be <code>enabled.</code> — this is what the page sets out to prove: the guest's security settings belong to the guest, and the host does not change at all.</span></li>
     </ol>
-    <div class="note">交付物：Lab A 回滚前后 <code>ls /mnt/disk</code> 的输出 + <code>qemu-img snapshot -l</code> 的输出；Lab B 客体与宿主两次 <code>csrutil status</code> 的截图。写进当天日志。</div>
+    <div class="note" lang="zh-CN">交付物：Lab A 回滚前后 <code>ls /mnt/disk</code> 的输出 + <code>qemu-img snapshot -l</code> 的输出；Lab B 客体与宿主两次 <code>csrutil status</code> 的截图。写进当天日志。</div><div class="note" lang="en">Deliverable: the output of <code>ls /mnt/disk</code> before and after the Lab A rollback + the output of <code>qemu-img snapshot -l</code>; screenshots of the two <code>csrutil status</code> runs in Lab B, guest and host. Write them into that day's log.</div>
   </div>
 
-  <h2 id="quiz">自测</h2>
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
   <form class="quiz" data-quiz="kernel/lab-setup">
     <div class="q" data-answer="c">
-      <p>1. 你要做一个需要关 SIP 的 dtruss 实验，应该在哪里关 SIP？</p>
-      <label><input type="radio" name="q1" value="a"> 宿主 Mac 的 Recovery，做完再打开</label>
-      <label><input type="radio" name="q1" value="b"> 构建容器里</label>
-      <label><input type="radio" name="q1" value="c"> macOS 客体 VM 的 Recovery 里</label>
-      <div class="why" hidden>SIP 是每台（虚拟）机器自己的设置。只在 macOS 客体机里关，宿主永远保持开启；容器是 Linux，没有 SIP。</div>
+      <p lang="zh-CN">1. 你要做一个需要关 SIP 的 dtruss 实验，应该在哪里关 SIP？</p><p lang="en">1. You are doing a dtruss lab that needs SIP off. Where should you turn SIP off?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">宿主 Mac 的 Recovery，做完再打开</span><span lang="en">In the host Mac's Recovery, turning it back on afterwards</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">构建容器里</span><span lang="en">In the build container</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">macOS 客体 VM 的 Recovery 里</span><span lang="en">In the Recovery of the macOS guest VM</span></label>
+      <div class="why" hidden><span lang="zh-CN">SIP 是每台（虚拟）机器自己的设置。只在 macOS 客体机里关，宿主永远保持开启；容器是 Linux，没有 SIP。</span><span lang="en">SIP is a setting of each (virtual) machine. Turn it off only in the macOS guest; the host always keeps it on; the container is Linux and has no SIP.</span></div>
     </div>
     <div class="q" data-answer="b">
-      <p>2. 为什么不在 <code>--privileged</code> 的 Docker 容器里 <code>insmod</code> 自写模块？</p>
-      <label><input type="radio" name="q2" value="a"> 容器里没有 insmod 命令</label>
-      <label><input type="radio" name="q2" value="b"> 容器没有自己的内核，模块会装进 Docker Desktop / OrbStack / Lima 那台共享 Linux VM 的内核，崩了影响所有容器且没有快照</label>
-      <label><input type="radio" name="q2" value="c"> 模块会被装进 macOS 宿主的 XNU 内核</label>
-      <div class="why" hidden>容器共享宿主（这里是后台 Linux VM）的内核。内核实验放在自己专用、可回滚的 QEMU VM 里。它不会进 XNU——macOS 不加载 Linux 模块。</div>
+      <p lang="zh-CN">2. 为什么不在 <code>--privileged</code> 的 Docker 容器里 <code>insmod</code> 自写模块？</p><p lang="en">2. Why not <code>insmod</code> your own module in a <code>--privileged</code> Docker container?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">容器里没有 insmod 命令</span><span lang="en">There is no insmod command in the container</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">容器没有自己的内核，模块会装进 Docker Desktop / OrbStack / Lima 那台共享 Linux VM 的内核，崩了影响所有容器且没有快照</span><span lang="en">A container has no kernel of its own; the module goes into the kernel of the shared Linux VM run by Docker Desktop / OrbStack / Lima, and a crash affects every container with no snapshot</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">模块会被装进 macOS 宿主的 XNU 内核</span><span lang="en">The module would be loaded into the macOS host's XNU kernel</span></label>
+      <div class="why" hidden><span lang="zh-CN">容器共享宿主（这里是后台 Linux VM）的内核。内核实验放在自己专用、可回滚的 QEMU VM 里。它不会进 XNU——macOS 不加载 Linux 模块。</span><span lang="en">Containers share the kernel of their host (here, the background Linux VM). Kernel labs belong in a dedicated QEMU VM of their own that can be rolled back. It will not go into XNU — macOS does not load Linux modules.</span></div>
     </div>
     <div class="q" data-answer="a">
-      <p>3. UTM 的 Apple Virtualization 后端没有快照，做危险的 kext 实验前该怎么准备回滚？</p>
-      <label><input type="radio" name="q3" value="a"> 关机后克隆整个 VM bundle，坏了删掉工作副本、从克隆再来</label>
-      <label><input type="radio" name="q3" value="b"> 用 qemu-img snapshot 给 macOS 客体打快照</label>
-      <label><input type="radio" name="q3" value="c"> 用宿主的 Time Machine 恢复</label>
-      <div class="why" hidden>Apple Virtualization 的磁盘不是 qcow2，qemu-img snapshot 用不上；APFS 上克隆是写时复制，快又省空间。</div>
+      <p lang="zh-CN">3. UTM 的 Apple Virtualization 后端没有快照，做危险的 kext 实验前该怎么准备回滚？</p><p lang="en">3. UTM's Apple Virtualization backend has no snapshots. How do you prepare a rollback before a dangerous kext lab?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">关机后克隆整个 VM bundle，坏了删掉工作副本、从克隆再来</span><span lang="en">Shut down and clone the whole VM bundle; if it breaks, delete the working copy and start again from the clone</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">用 qemu-img snapshot 给 macOS 客体打快照</span><span lang="en">Snapshot the macOS guest with qemu-img snapshot</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">用宿主的 Time Machine 恢复</span><span lang="en">Restore with the host's Time Machine</span></label>
+      <div class="why" hidden><span lang="zh-CN">Apple Virtualization 的磁盘不是 qcow2，qemu-img snapshot 用不上；APFS 上克隆是写时复制，快又省空间。</span><span lang="en">Apple Virtualization disks are not qcow2, so qemu-img snapshot does not apply; on APFS a clone is copy-on-write, fast and space-saving.</span></div>
     </div>
     <div class="q" data-answer="c">
-      <p>4. 要跑一个来路不明的内核漏洞复现程序（Phase 7），哪种方式最稳妥？</p>
-      <label><input type="radio" name="q4" value="a"> 宿主上用 sudo 跑，跑完重启</label>
-      <label><input type="radio" name="q4" value="b"> QEMU VM 正常模式，挂着可写的共享目录</label>
-      <label><input type="radio" name="q4" value="c"> QEMU VM 用 <code>-snapshot</code>（<code>./run-vm.sh throwaway</code>），并且不挂共享目录</label>
-      <div class="why" hidden>-snapshot 让所有磁盘写入在退出时丢弃，但它不管 9p；共享目录必须在 QEMU 命令行上就不附加（throwaway 模式下 SHARE 为空），客体才真的碰不到宿主的文件。</div>
+      <p lang="zh-CN">4. 要跑一个来路不明的内核漏洞复现程序（Phase 7），哪种方式最稳妥？</p><p lang="en">4. You need to run a kernel exploit reproduction of unknown origin (Phase 7). Which approach is safest?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">宿主上用 sudo 跑，跑完重启</span><span lang="en">Run it on the host with sudo, then reboot</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">QEMU VM 正常模式，挂着可写的共享目录</span><span lang="en">QEMU VM in normal mode, with a writable shared directory mounted</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">QEMU VM 用 <code>-snapshot</code>（<code>./run-vm.sh throwaway</code>），并且不挂共享目录</span><span lang="en">QEMU VM with <code>-snapshot</code> (<code>./run-vm.sh throwaway</code>), and no shared directory attached</span></label>
+      <div class="why" hidden><span lang="zh-CN">-snapshot 让所有磁盘写入在退出时丢弃，但它不管 9p；共享目录必须在 QEMU 命令行上就不附加（throwaway 模式下 SHARE 为空），客体才真的碰不到宿主的文件。</span><span lang="en">-snapshot discards all disk writes on exit, but it does not cover 9p; the shared directory must not be attached on the QEMU command line at all (SHARE is empty in throwaway mode) for the guest to be truly unable to reach host files.</span></div>
     </div>
-    <button type="submit">检查答案</button>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
     <div class="result"></div>
   </form>
 
-  <h2 id="resources">资料</h2>
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
   <ul class="res">
-    <li><a href="https://www.qemu.org/docs/master/system/index.html">QEMU System Emulation documentation</a> <span class="lvl">查手册：-M virt、-drive、-virtfs、gdbstub、-snapshot</span></li>
-    <li><a href="https://www.qemu.org/docs/master/tools/qemu-img.html">QEMU — qemu-img</a> <span class="lvl">查手册：create、convert、info、snapshot</span></li>
-    <li><a href="https://docs.getutm.app/">UTM documentation</a> <span class="lvl">macOS 客体、Apple Virtualization 与 QEMU 后端、共享目录、克隆</span></li>
-    <li><a href="https://developer.apple.com/documentation/virtualization">Apple — Virtualization framework</a> <span class="lvl">底层框架：VirtioFS 共享、macOS 客体能力与限制</span></li>
-    <li><a href="https://developer.apple.com/documentation/virtualization/running-macos-in-a-virtual-machine-on-apple-silicon">Apple — Running macOS in a virtual machine on Apple silicon</a> <span class="lvl">官方示例：从 IPSW 安装、启动 macOS 客体</span></li>
-    <li><a href="https://developer.apple.com/download/all/?q=Kernel%20Debug%20Kit">Apple Developer — Kernel Debug Kit 下载</a> <span class="lvl">需 Apple ID 登录；每个 KDK 自带 ReadMe，两机调试步骤以它为准</span></li>
-    <li><a href="https://docs.orbstack.dev/">OrbStack documentation</a> <span class="lvl">构建容器 / 轻量 Linux 机器</span></li>
-    <li><a href="https://lima-vm.io/docs/">Lima documentation</a> <span class="lvl">开源的 Linux VM + 容器方案</span></li>
+    <li><a href="https://www.qemu.org/docs/master/system/index.html">QEMU System Emulation documentation</a> <span class="lvl" lang="zh-CN">查手册：-M virt、-drive、-virtfs、gdbstub、-snapshot</span><span class="lvl" lang="en">Reference: -M virt, -drive, -virtfs, gdbstub, -snapshot</span></li>
+    <li><a href="https://www.qemu.org/docs/master/tools/qemu-img.html">QEMU — qemu-img</a> <span class="lvl" lang="zh-CN">查手册：create、convert、info、snapshot</span><span class="lvl" lang="en">Reference: create, convert, info, snapshot</span></li>
+    <li><a href="https://docs.getutm.app/">UTM documentation</a> <span class="lvl" lang="zh-CN">macOS 客体、Apple Virtualization 与 QEMU 后端、共享目录、克隆</span><span class="lvl" lang="en">macOS guests, the Apple Virtualization and QEMU backends, shared directories, cloning</span></li>
+    <li><a href="https://developer.apple.com/documentation/virtualization">Apple — Virtualization framework</a> <span class="lvl" lang="zh-CN">底层框架：VirtioFS 共享、macOS 客体能力与限制</span><span class="lvl" lang="en">The underlying framework: VirtioFS sharing, macOS guest capabilities and limits</span></li>
+    <li><a href="https://developer.apple.com/documentation/virtualization/running-macos-in-a-virtual-machine-on-apple-silicon">Apple — Running macOS in a virtual machine on Apple silicon</a> <span class="lvl" lang="zh-CN">官方示例：从 IPSW 安装、启动 macOS 客体</span><span class="lvl" lang="en">Official sample: installing from an IPSW and booting a macOS guest</span></li>
+    <li><a lang="zh-CN" href="https://developer.apple.com/download/all/?q=Kernel%20Debug%20Kit">Apple Developer — Kernel Debug Kit 下载</a><a lang="en" href="https://developer.apple.com/download/all/?q=Kernel%20Debug%20Kit">Apple Developer — Kernel Debug Kit downloads</a> <span class="lvl" lang="zh-CN">需 Apple ID 登录；每个 KDK 自带 ReadMe，两机调试步骤以它为准</span><span class="lvl" lang="en">Requires an Apple ID sign-in; every KDK ships with a ReadMe, which is authoritative for the two-machine debugging steps</span></li>
+    <li><a href="https://docs.orbstack.dev/">OrbStack documentation</a> <span class="lvl" lang="zh-CN">构建容器 / 轻量 Linux 机器</span><span class="lvl" lang="en">Build container / lightweight Linux machines</span></li>
+    <li><a href="https://lima-vm.io/docs/">Lima documentation</a> <span class="lvl" lang="zh-CN">开源的 Linux VM + 容器方案</span><span class="lvl" lang="en">An open-source Linux VM + container option</span></li>
   </ul>
 
-  <h2 id="books">参考书目</h2>
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
   <ol class="books">
-    <li>Jonathan Levin, 《*OS Internals, Volume II: Kernel Mode》, 2nd ed., Technologeeks Press, 2019. <span class="lvl">XNU 内核模式、kext 与调试相关章节，对应概念 4 与 Lab B 之后的 XNU 实验</span></li>
-    <li>Kaiwan N Billimoria, 《Linux Kernel Programming》, 2nd ed., Packt, 2024. <span class="lvl">开篇的内核工作区搭建（虚拟机、工具链）与内核构建章节，对应概念 2、3 与 Lab A</span></li>
+    <li lang="zh-CN">Jonathan Levin, 《*OS Internals, Volume II: Kernel Mode》, 2nd ed., Technologeeks Press, 2019. <span class="lvl">XNU 内核模式、kext 与调试相关章节，对应概念 4 与 Lab B 之后的 XNU 实验</span></li>
+    <li lang="en">Jonathan Levin, <em>*OS Internals, Volume II: Kernel Mode</em>, 2nd ed., Technologeeks Press, 2019. <span class="lvl">The chapters on XNU kernel mode, kexts and debugging, corresponding to concept 4 and the XNU labs after Lab B</span></li>
+    <li lang="zh-CN">Kaiwan N Billimoria, 《Linux Kernel Programming》, 2nd ed., Packt, 2024. <span class="lvl">开篇的内核工作区搭建（虚拟机、工具链）与内核构建章节，对应概念 2、3 与 Lab A</span></li>
+    <li lang="en">Kaiwan N Billimoria, <em>Linux Kernel Programming</em>, 2nd ed., Packt, 2024. <span class="lvl">The opening chapters on setting up the kernel workspace (VMs, toolchain) and on building the kernel, corresponding to concepts 2 and 3 and Lab A</span></li>
   </ol>
 
   <nav class="pn">

@@ -38,7 +38,7 @@ for (const page of pages) {
   if (!/<link rel="icon" href="[./]*assets\/brand\/favicon\.svg"/.test(html)) problems.push(`${rel}: favicon link missing`);
 
   // phase pages
-  if (/\/phase-\d+-[^/]+\/index\.html$/.test(page)) {
+  if (/\/(phase-\d+-[^/]+|lab-setup)\/index\.html$/.test(page)) {
     const diagrams = html.match(/<svg[^>]*\bdata-diagram\b/g) || [];
     if (diagrams.length < 1) problems.push(`${rel}: no svg[data-diagram]`);
     for (const d of html.matchAll(/<svg[^>]*\bdata-diagram\b[^>]*>/g)) {
