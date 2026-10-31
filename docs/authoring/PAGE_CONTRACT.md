@@ -16,7 +16,7 @@ Progress keys: the overview `section.setup[data-setup="<key>"]`, the phase list 
 
 ## Head and header
 
-Lesson pages sit three levels deep (`../../../assets/…`); the overview and lab-setup page two levels (`../../assets/…`). Copy this head exactly, adjusting depth and titles:
+Lesson pages and the lab-setup page sit three levels deep (`../../../assets/…`); only the topic overview sits two levels deep (`../../assets/…`). Copy this head exactly, adjusting depth and titles:
 
 ```html
 <!doctype html>
