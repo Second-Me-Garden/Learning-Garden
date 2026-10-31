@@ -139,7 +139,7 @@ jobs:
   <p lang="en"><strong>Why it is smaller</strong>: the official images are layered just right. Per the Dockerfiles in osrf/docker_images, <code>ros:jazzy-ros-base</code> is <code>ros:jazzy-ros-core</code> plus <code>build-essential</code>, git, colcon, rosdep, vcstool and <code>ros-jazzy-ros-base</code>. With <code>ros:jazzy-ros-core</code> for the runtime stage, the whole compiler toolchain is gone. Compressed arm64 sizes on Docker Hub (checked 2026-10-31):</p>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th><span lang="zh-CN">镜像标签</span><span lang="en">Image tag</span></th><th class="ros"><span lang="zh-CN">arm64 压缩体积</span><span lang="en">Compressed arm64 size</span></th><th class="gz"><span lang="zh-CN">在 Dockerfile 里的角色</span><span lang="en">Role in the Dockerfile</span></th></tr>
+    <tr><th><span lang="zh-CN">镜像标签</span><span lang="en">Image tag</span></th><th><span lang="zh-CN">arm64 压缩体积</span><span lang="en">Compressed arm64 size</span></th><th><span lang="zh-CN">在 Dockerfile 里的角色</span><span lang="en">Role in the Dockerfile</span></th></tr>
     <tr><td><code>ros:jazzy-ros-base</code></td><td><span lang="zh-CN">约 285 MB</span><span lang="en">about 285 MB</span></td><td><span lang="zh-CN">构建阶段：有编译器、colcon、rosdep</span><span lang="en">Build stage: has compilers, colcon, rosdep</span></td></tr>
     <tr><td><code>ros:jazzy-ros-core</code></td><td><span lang="zh-CN">约 152 MB</span><span lang="en">about 152 MB</span></td><td><span lang="zh-CN">运行阶段：rclpy、rclcpp、common_interfaces、ros2 命令行</span><span lang="en">Runtime stage: rclpy, rclcpp, common_interfaces, the ros2 CLI</span></td></tr>
   </table>
@@ -182,7 +182,7 @@ jobs:
   <h2 id="compare" lang="zh-CN">对照表：每个问题用什么工具</h2><h2 id="compare-en" lang="en">Comparison: the tool for each question</h2>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th><span lang="zh-CN">你想知道</span><span lang="en">You want to know</span></th><th class="ros"><span lang="zh-CN">工具</span><span lang="en">Tool</span></th><th class="gz"><span lang="zh-CN">它读的是什么</span><span lang="en">What it reads</span></th></tr>
+    <tr><th><span lang="zh-CN">你想知道</span><span lang="en">You want to know</span></th><th><span lang="zh-CN">工具</span><span lang="en">Tool</span></th><th><span lang="zh-CN">它读的是什么</span><span lang="en">What it reads</span></th></tr>
     <tr><td><span lang="zh-CN">谁连着谁、话题有没有接上</span><span lang="en">Who is connected to whom; is a topic wired up</span></td><td><code>rqt_graph</code> · <code>ros2 topic info -v</code></td><td><span lang="zh-CN">DDS 发现信息与端点 QoS</span><span lang="en">DDS discovery information and endpoint QoS</span></td></tr>
     <tr><td><span lang="zh-CN">节点在抱怨什么</span><span lang="en">What a node is complaining about</span></td><td><code>rqt_console</code> · <code>--ros-args --log-level debug</code></td><td><span lang="zh-CN"><code>/rosout</code> 话题、stderr、<code>~/.ros/log</code></span><span lang="en">the <code>/rosout</code> topic, stderr, <code>~/.ros/log</code></span></td></tr>
     <tr><td><span lang="zh-CN">一个数值随时间怎么变</span><span lang="en">How a value changes over time</span></td><td><code>rqt_plot</code></td><td><span lang="zh-CN">订阅到的消息字段</span><span lang="en">fields of subscribed messages</span></td></tr>

@@ -119,6 +119,8 @@ Four questions, three options each, every wrong option plausible, the explanatio
 
 Global tokens in `assets/style.css`: `--accent` (sage green), `--linux` (ochre) and `--xnu` (indigo) for the kernel topic, `--ros` (blue) and `--gz` (orange) for ROS 2 and simulation. Use them as `th.ros`, `.box.ros`, `style="fill: var(--ros)"`. New topics add their own pair next to these, light and dark values both.
 
+A topic colour carries one fixed meaning, the same on every page of the topic (Designer review, 2026-10-31): in the kernel topic ochre is always Linux and indigo always XNU; in ROS 2 blue is always the ROS 2 graph side (nodes, rcl, rmw, DDS), orange always the Gazebo or hardware side, and ochre the kernel beneath. A comparison table gets coloured `th` cells only when its two sides are those two meanings (URDF ↔ SDF, ROS node ↔ Gazebo plugin); a table of executor kinds, QoS profiles or tools uses plain `th`. A roadmap colours one lane or one destination, not every box. Failures, mismatches and errors are marked by a glyph and `--ink-2` text, never by a hue. The hub card illustration uses the brand green only. If a colour would carry no meaning, leave it out.
+
 ## Accuracy
 
 - No invented APIs, commands, package names, file paths or numbers. If a path is only approximately known, write 大致路径 / approximate path next to it.
