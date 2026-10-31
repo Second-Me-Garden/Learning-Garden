@@ -38,7 +38,7 @@ First topic: **Kernel Engineering — becoming a kernel engineer at Apple.** Fun
 ## Links
 
 - GitHub: `Second-Me-Garden/Learning-Garden` (private)
-- Local: `/Users/haoxiangzhang/MiniFactory/Learning-Garden`
+- Local clone: registered in the Shadow portfolio (`LEARNING-GARDEN`)
 - [[DASHBOARD]]
 - [[TASK_BOARD]]
 - [[ROADMAP]]
