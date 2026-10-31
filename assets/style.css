@@ -53,7 +53,7 @@
     --warn: #e0a63a;
     --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
     --glass-fill: rgba(36,48,41,.36); --glass-solid: rgba(27,35,30,.86); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
-    --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block; --halo-core: #243852;
+    --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block; --halo-core: #2f4b70;
     --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .18 0 0 0 -.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   }
 }
@@ -74,7 +74,7 @@
   --warn: #e0a63a;
   --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
   --glass-fill: rgba(36,48,41,.36); --glass-solid: rgba(27,35,30,.86); --glass-sheen: rgba(255,255,255,.05); --glass-rim: rgba(230,236,229,.16);
-  --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block; --halo-core: #243852;
+  --glass-inner: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35); --glass-shadow: 0 24px 48px -24px rgba(0,0,0,.7); --accent-text: #5fbf8e; --rail-fill: rgba(27,35,30,.50); --pill-fill: var(--glass-fill); --pill-solid: var(--glass-solid); --pill-sheen: var(--glass-sheen); --pill-rim: rgba(230,236,229,.22); --pill-ink: var(--ink); --pill-ink-2: var(--ink-2); --pill-line: var(--line); --pill-shadow: var(--glass-shadow); --bar-edge: rgba(230,236,229,.14); --mark-light: none; --mark-dark: inline-block; --halo-core: #2f4b70;
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .18 0 0 0 -.06'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
 }
 
@@ -129,8 +129,8 @@ img, svg { max-width: 100%; }
 body.scrolled .top { top: 12px; max-width: 820px; padding: 11px 11px 11px 26px; font-size: 15px; border-radius: 26px; color: var(--pill-ink-2);
   background: var(--pill-solid); border-color: var(--pill-rim); box-shadow: inset 0 1px 0 var(--pill-sheen), var(--pill-shadow); }
 body.scrolled .top .brand { font-size: 19px; }
-body.scrolled .top .mark { width: 44px; height: 44px; }
-body.scrolled .top .mark img { width: 35px; height: 35px; }
+body.scrolled .top .mark { width: 48px; height: 48px; }
+body.scrolled .top .mark img { width: 39px; height: 39px; }
 body.scrolled .top .brand, body.scrolled .top .crumb.current, body.scrolled .top .crumb[aria-current="page"] { color: var(--pill-ink); }
 body.scrolled .top button.theme, body.scrolled .top button.lang { border-color: var(--pill-line); }
 @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
@@ -141,11 +141,11 @@ body.scrolled .top button.theme, body.scrolled .top button.lang { border-color: 
   body.scrolled .top { background: var(--pill-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
 @media (max-width: 800px) { body.scrolled .top { max-width: calc(100% - 8px); } }
-.top .brand { display: inline-flex; align-items: center; gap: 10px; font-family: "Fraunces", var(--display); font-weight: 600; font-variation-settings: "opsz" 72, "SOFT" 50, "WONK" 0; letter-spacing: 0; color: var(--ink); text-decoration: none; }
-.mark { position: relative; display: inline-grid; place-items: center; width: 48px; height: 48px; flex: none; isolation: isolate; }
+.top .brand { display: inline-flex; align-items: center; gap: 12px; font-family: "Fraunces", var(--display); font-weight: 600; font-variation-settings: "opsz" 72, "SOFT" 50, "WONK" 0; letter-spacing: 0; color: var(--ink); text-decoration: none; }
+.mark { position: relative; display: inline-grid; place-items: center; width: 56px; height: 56px; flex: none; isolation: isolate; }
 .mark::before { content: ""; position: absolute; inset: 0; z-index: 0; border-radius: 50%; pointer-events: none;
   background: radial-gradient(circle at 50% 50%, var(--halo-core) 0%, var(--halo-core) 66%, color-mix(in srgb, var(--halo-core) 84%, transparent) 74%, color-mix(in srgb, var(--halo-core) 62%, transparent) 82%, color-mix(in srgb, var(--halo-core) 36%, transparent) 90%, color-mix(in srgb, var(--halo-core) 14%, transparent) 96%, transparent 100%); filter: blur(1px); }
-.mark img { position: relative; z-index: 1; width: 38px; height: 38px; }
+.mark img { position: relative; z-index: 1; width: 46px; height: 46px; }
 .top .crumb { text-decoration: none; color: var(--ink-2); }
 .top .crumb::before { content: "›"; color: var(--ink-3); margin: 0 10px 0 2px; font-weight: 400; }
 .top .spacer { flex: 1; }
