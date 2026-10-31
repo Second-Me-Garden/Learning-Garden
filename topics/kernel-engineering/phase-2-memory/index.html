@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 2 · Memory · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 2</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 2 / 9 · 约 1–2 周</p>
+  <h1>Memory <span class="en">虚拟内存、ARM64 页表、缺页路径、分配器（buddy/slab ↔ Mach VM/zalloc）</span></h1>
+  <p class="lede">进程看到的每一个地址都是「假的」：CPU 的 MMU 按页表把虚拟地址翻译成物理地址，翻不出来就触发异常交给内核补救。这一阶段把这条链从硬件走到软件：ARM64 页表长什么样、一次 <code>ldr</code> 碰到没映射的页时内核做了什么、内核自己又从哪里拿内存——Linux 和 XNU 并排对照。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>给一个 48-bit 虚拟地址，手工切出 L0–L3 索引和页内偏移，说清 <code>TTBR0_EL1</code> / <code>TTBR1_EL1</code> 怎么选、TLB 和 ASID 在哪一步起作用；说出 Apple Silicon 16 KB 页为什么只要 3 级表。</li>
+      <li>从 data abort 一路讲到缺页处理完成：<code>ESR_EL1</code>/<code>FAR_EL1</code> 记了什么，Linux 的 <code>do_page_fault</code> → <code>handle_mm_fault</code> 与 XNU 的 <code>vm_fault</code> 各自怎么找区域、分匿名页 / 读文件 / 做 COW。</li>
+      <li>画出两个内核的内存对象层次：<code>mm_struct</code>/<code>vm_area_struct</code>/<code>struct page</code> ↔ <code>vm_map</code>/<code>vm_map_entry</code>/<code>vm_object</code>/<code>vm_page</code>，以及 buddy + SLUB ↔ <code>pmap</code> + <code>zalloc</code>/<code>kalloc_type</code> 的分工。</li>
+      <li>用 <code>/proc</code>（Linux）和 <code>vmmap</code>/<code>vm_stat</code>/<code>footprint</code>（macOS）亲眼看到 demand paging：<code>mmap</code> 64 MB 后 RSS 几乎不动，逐页写入后才增长。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li>Phase 0：exception level、<code>svc</code>/<code>eret</code>、<code>ESR_EL1</code>/<code>FAR_EL1</code> 是什么；QEMU 里能启动带 busybox initramfs 的 Linux arm64 内核。</li>
+    <li>Phase 1：进程/线程模型、<code>fork</code>/<code>exec</code>、上下文切换时页表基址怎么跟着换（<code>task_struct</code>→<code>mm</code>，Mach <code>task</code>→<code>map</code>）。</li>
+    <li>C：位运算（移位、掩码）要熟，本阶段大量「取第 x 到 y 位」。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. 虚拟内存与地址空间：ARM64 的两半</h3>
+  <p>ARM64 把 64 位虚拟地址空间切成两半，各用一个页表基址寄存器：<strong>低半（高位全 0）走 <code>TTBR0_EL1</code>，给用户态；高半（高位全 1）走 <code>TTBR1_EL1</code>，给内核</strong>。中间的「非规范」地址直接触发 translation fault。启用 Top Byte Ignore（TBI）时最高 8 位不参与翻译，选择哪个 TTBR 看 bit 55。好处：切换进程只需换 <code>TTBR0_EL1</code>，内核那一半所有进程共享、不用动。有效位数由 <code>TCR_EL1</code> 的 <code>T0SZ</code>/<code>T1SZ</code> 决定。</p>
+  <p>以 Linux arm64 经典配置 <strong>48-bit VA + 4 KB 页</strong>为例：页内偏移 12 位；每张页表 4 KB / 8 B = 512 项 = 9 位索引；48 − 12 = 36 = 4 × 9，所以是 <strong>4 级表 L0–L3</strong>：</p>
+  <pre>VA:  [63:48] 全0→TTBR0 / 全1→TTBR1 | [47:39] L0 | [38:30] L1 | [29:21] L2 | [20:12] L3 | [11:0] offset
+Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB），内核从 0xffff_0000_0000_0000 起</pre>
+  <p><strong>Apple Silicon 用 16 KB 页</strong>：XNU 在 M 系列上的默认页大小是 16 KB（<code>pagesize</code> 输出 16384；Intel Mac 是 4 KB）。16 KB 粒度下偏移 14 位，每张表 16 KB / 8 B = 2048 项 = 11 位索引；14 + 3 × 11 = 47，所以 <strong>47-bit VA 只要 3 级表（L1–L3）</strong>，少走一级、TLB 每项覆盖面是 4 KB 页的 4 倍。Linux arm64 也能编成 16 KB 或 64 KB 页（<code>CONFIG_ARM64_16K_PAGES</code> / <code>CONFIG_ARM64_64K_PAGES</code>），Asahi Linux 在 Apple Silicon 上就用 16 KB——但发行版通用内核默认仍是 4 KB。</p>
+  <p><strong>TLB 与 ASID</strong>：每次访存都走 4 级表太慢，MMU 把翻译结果缓存在 TLB。用户映射在描述符里置 <code>nG</code>（non-global），TLB 项会带上当前 ASID（放在 <code>TTBR0_EL1</code> 高位，8 或 16 位）；不同进程的同一 VA 因 ASID 不同可以同时留在 TLB 里，切进程不必全刷。内核映射是 global 的，所有 ASID 共用。</p>
+  <div class="note">寄存器名这里统一写 <code>_EL1</code>。Phase 0 提过 XNU 在 M 系列上运行于 EL2 + VHE；VHE 下软件写 <code>_EL1</code> 名字的寄存器会被重定向到对应的 EL2 寄存器，概念不变。</div>
+
+  <h3>2. 页表遍历、TLB 与描述符</h3>
+  <p>TLB miss 时，硬件 table walker 从 TTBR 给出的 L0 表基址开始，每级用 VA 的一段索引取出 8 字节描述符，看最低两位：</p>
+  <ul>
+    <li><code>bit0 = 0</code>：invalid → translation fault（缺页的最常见原因）。</li>
+    <li>L0–L2 上 <code>0b11</code> = <strong>table</strong> 描述符：指向下一级表。</li>
+    <li>L1/L2 上 <code>0b01</code> = <strong>block</strong> 描述符：直接映射一大块（4 KB 粒度下 L1 = 1 GB、L2 = 2 MB，就是「大页」/ THP 的硬件基础）。</li>
+    <li>L3 上 <code>0b11</code> = <strong>page</strong> 描述符：给出 4 KB 页的输出地址（OA）。</li>
+  </ul>
+  <p>block/page 描述符里的属性位决定「能不能访问、怎么缓存」：<code>AttrIndx[4:2]</code> 是一个下标，指向 <code>MAIR_EL1</code> 里 8 组内存类型之一（Normal Write-Back、Device-nGnRE……，页表里不直接写缓存属性）；<code>AP[7:6]</code> 管只读/可写与 EL0 是否可访问；<code>SH[9:8]</code> 共享域；<code>AF[10]</code> access flag，为 0 时第一次访问触发 access flag fault（内核借此统计「最近用过」，有 FEAT_HAFDBS 的 CPU 可由硬件自动置位）；<code>nG[11]</code>；高位的 <code>PXN[53]</code>/<code>UXN[54]</code> 分别禁止 EL1 / EL0 在此执行。</p>
+  <p>改页表后 TLB 里的旧项不会自己消失：内核要发 <code>TLBI</code>（如按 VA+ASID 的 <code>tlbi vae1is</code>）再 <code>dsb ish</code>、<code>isb</code>。Linux 封装为 <code>flush_tlb_page()</code>/<code>flush_tlb_range()</code>（<code>arch/arm64/include/asm/tlbflush.h</code>）；XNU 在 <code>pmap</code> 层内部处理。Arm 还要求修改有效映射时遵守 break-before-make（先置无效、刷 TLB、再写新值）。</p>
+
+  <h3>3. 缺页路径：从 data abort 到重新执行</h3>
+  <p>翻译失败或权限不符时，CPU 产生同步异常 <strong>data abort</strong>（取指失败则是 instruction abort）：<code>ESR_EL1.EC = 0x24</code> 表示来自更低 EL（用户态），<code>0x25</code> 表示同一 EL（内核自己访问出错，例如 <code>copy_from_user</code> 碰到未映射的用户页）。ISS 里的 <code>DFSC</code> 区分 translation / access flag / permission fault 以及出错的表级，<code>WnR</code> 位说明是读还是写；出错的虚拟地址在 <code>FAR_EL1</code>。<code>ELR_EL1</code> 指向出错的那条指令本身——修好映射后 <code>eret</code>，同一条指令重新执行，用户程序完全无感。</p>
+  <p><strong>Linux</strong>：<code>el0t_64_sync</code> → <code>el0t_64_sync_handler</code> 按 EC 分发到 <code>el0_da</code>（<code>arch/arm64/kernel/entry-common.c</code>）→ <code>do_mem_abort(far, esr, regs)</code> 按 DFSC 查 <code>fault_info[]</code> 表，translation fault 走 <code>do_translation_fault</code>，permission fault 直接进 <code>do_page_fault</code>（都在 <code>arch/arm64/mm/fault.c</code>）。<code>do_page_fault</code> 在当前进程的 <code>mm_struct</code> 里找覆盖该地址的 VMA（<code>vm_area_struct</code>，自 6.1 起存放在 <code>mm-&gt;mm_mt</code> maple tree 中；新内核先尝试 per-VMA 锁 <code>lock_vma_under_rcu</code>，失败再拿 <code>mmap_lock</code>），检查 VMA 权限，然后调通用的 <code>handle_mm_fault</code>（<code>mm/memory.c</code>）。后者逐级分配缺失的页表，最后在 <code>handle_pte_fault</code> 分情况：</p>
+  <ul>
+    <li><strong>匿名页首次访问</strong>（堆、栈、<code>MAP_ANONYMOUS</code>）：<code>do_anonymous_page</code>——读访问可映射共享的零页，写访问才真正分一页清零。这就是 demand paging。</li>
+    <li><strong>文件映射</strong>：<code>do_fault</code> → 读 page cache，没有就发起 I/O（major fault）；私有映射被写时走 <code>do_cow_fault</code>。</li>
+    <li><strong>COW</strong>：<code>fork</code> 后父子共享物理页、PTE 都置只读；任一方写 → permission fault → <code>do_wp_page</code> 复制一页（若该页只剩自己一个使用者则直接改回可写）。</li>
+  </ul>
+  <p>找不到 VMA 或权限不符 → 用户态收到 <code>SIGSEGV</code>；内核态则查异常修复表（<code>fixup_exception</code>），查不到就 oops。</p>
+  <p><strong>XNU</strong>：<code>fleh_synchronous</code> → <code>sleh_synchronous</code>（<code>osfmk/arm64/sleh.c</code>）按 EC（<code>ESR_EC_DABORT_EL0</code>）调 <code>handle_abort</code>，用户态再进 <code>handle_user_abort</code> → <code>vm_fault</code>（<code>osfmk/vm/vm_fault.c</code>）。Mach VM 的模型和 Linux 同构但命名不同：任务的地址空间是 <code>vm_map</code>，由一串 <code>vm_map_entry</code>（对应 VMA）组成，每个 entry 指向一个 <code>vm_object</code>（「一段可被映射的内存」，背后挂 pager：vnode pager 读文件，匿名内存由 compressor / swap 承担），object 里是 <code>vm_page</code>。<code>vm_fault</code> 的大致路径：在 map 中查到 entry 和 object → <code>vm_fault_page</code> 在 object（及其 shadow 链）中找页，没有就向 pager 要或给零页 → <code>vm_fault_enter</code> → <code>pmap_enter</code> 写入硬件页表。<strong>COW 用 shadow object 实现</strong>：写一个 copy-on-write 的 entry 时，在原 object 前面叠一个新的 shadow object（<code>vm_object_shadow</code>），被写的页复制进 shadow，未写的页继续从下层 object 读。</p>
+
+  <h3>4. 物理内存与内核分配器</h3>
+  <p><strong>Linux</strong>：每页物理内存有一个 <code>struct page</code>（新代码越来越多用 <code>struct folio</code> 表示「一组连续页」）。物理内存按 node → zone（arm64 上有 <code>ZONE_DMA</code>/<code>ZONE_DMA32</code>/<code>ZONE_NORMAL</code>/<code>ZONE_MOVABLE</code>，没有 HIGHMEM）组织，每个 zone 用 <strong>buddy allocator</strong> 管理：按 2<sup>order</sup> 页分块挂在 free list 上，<code>alloc_pages(gfp, order)</code> 不够就拆大块、释放时与「伙伴」合并（<code>/proc/buddyinfo</code> 就是每个 order 的空闲块数）。小对象走 <strong>SLUB</strong>（6.8 起唯一的 slab 实现）：<code>kmem_cache_create</code> 建同类对象缓存，<code>kmalloc</code> 是按大小分档的通用缓存。需要虚拟连续、物理可以不连续的大块用 <code>vmalloc</code>。内核通过 linear map（<code>phys_to_virt</code>/<code>virt_to_phys</code>）直接访问全部物理内存。</p>
+  <p><strong>XNU</strong>：架构相关的页表操作全部收在 <strong><code>pmap</code></strong> 层（<code>pmap_enter</code>、<code>pmap_remove</code>、<code>pmap_protect</code>……，arm 实现在 <code>osfmk/arm/pmap/</code>，旧版本是 <code>osfmk/arm/pmap.c</code>），机器无关的 Mach VM 只调这组接口——比 Linux 用通用的 pgd/pud/pmd/pte 抽象更彻底地隔离了硬件。物理页由 <code>vm_page</code> 描述，空闲页放在 free queue 上（<code>vm_page_grab</code> 取页）。内核小对象走 <strong>zone allocator</strong>：<code>zalloc</code>/<code>zfree</code> 按 zone（固定大小对象池）分配；<code>kalloc</code> 系列在其上按大小分档。macOS 13 / iOS 16 起引入 <strong><code>kalloc_type</code></strong>：按类型签名把不同类型的对象隔离到不同 zone（数据型走 <code>kalloc_data</code>），使 use-after-free 难以把一个类型的对象「换成」另一个类型——这是安全加固，不是性能优化。大块内核内存用 <code>kmem_alloc</code>（<code>osfmk/vm/vm_kern.c</code>）。</p>
+  <div class="note">Apple Silicon 上页表并不由普通内核代码直接写：PPL（较新设备上是 SPTM）把页表修改关进一个更高权限的小环境里，<code>pmap</code> 调用会跨过这道边界。这是 Phase 7 的主题，这里只需知道「<code>pmap_enter</code> 背后还有一层保护」。</div>
+
+  <h3>5. 用户态视角：mmap、malloc 与 RSS</h3>
+  <p>用户程序拿内存只有两类系统调用：<code>brk</code>（移动堆顶）和 <code>mmap</code>（映射一段匿名或文件内存）。glibc <code>malloc</code> 小块从堆（<code>brk</code>）和 arena 切，大块（默认阈值 128 KB 起，可动态调整）直接 <code>mmap</code>。macOS 上 BSD 层的 <code>mmap</code> 最终落到 Mach 的 <code>mach_vm_map</code>；也可以直接调 Mach 接口 <code>mach_vm_allocate</code>/<code>mach_vm_map</code>（旧名 <code>vm_allocate</code>/<code>vm_map</code>）；libmalloc 主要基于这些 VM 区域，而不是 <code>brk</code>。</p>
+  <p>两个数字要分清：<strong>VSZ</strong>（虚拟大小）= 映射了多少地址；<strong>RSS</strong>（驻留集）= 其中当前真有物理页的部分。<code>mmap</code> 只改 VSZ，缺页才让 RSS 增长。macOS 上 Apple 更推荐看 <strong>footprint</strong>（<code>phys_footprint</code>：脏页 + 被压缩的页等，算「这个进程真正占的内存」），工具是 <code>vmmap</code> 和 <code>footprint</code>。</p>
+
+  <h2 id="compare">对照表</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td>进程地址空间</td><td><code>struct mm_struct</code>（<code>task-&gt;mm</code>）</td><td><code>vm_map</code>（<code>task-&gt;map</code>）+ 其硬件侧 <code>pmap</code></td></tr>
+    <tr><td>地址区域</td><td><code>vm_area_struct</code>（VMA），存在 <code>mm_mt</code> maple tree</td><td><code>vm_map_entry</code>，在 <code>vm_map</code> 中按地址有序链接</td></tr>
+    <tr><td>区域背后的内容</td><td>文件：<code>address_space</code>（page cache）；匿名：<code>anon_vma</code></td><td><code>vm_object</code> + pager；COW 用 shadow object 链</td></tr>
+    <tr><td>物理页描述</td><td><code>struct page</code> / <code>struct folio</code></td><td><code>struct vm_page</code>（<code>vm_page_t</code>）</td></tr>
+    <tr><td>页表操作层</td><td>通用 pgd/p4d/pud/pmd/pte 抽象 + <code>arch/arm64/mm/</code></td><td><code>pmap</code> 接口（<code>osfmk/arm/pmap/</code>）</td></tr>
+    <tr><td>缺页入口</td><td><code>el0_da</code> → <code>do_mem_abort</code> → <code>do_page_fault</code> → <code>handle_mm_fault</code></td><td><code>sleh_synchronous</code> → <code>handle_abort</code> → <code>vm_fault</code></td></tr>
+    <tr><td>物理页分配</td><td>buddy：<code>alloc_pages</code> / <code>__get_free_pages</code></td><td><code>vm_page_grab</code>，free queue</td></tr>
+    <tr><td>内核小对象</td><td>SLUB：<code>kmalloc</code>、<code>kmem_cache_alloc</code></td><td><code>zalloc</code>、<code>kalloc_type</code>、<code>kalloc_data</code></td></tr>
+    <tr><td>内核大块虚拟内存</td><td><code>vmalloc</code></td><td><code>kmem_alloc</code></td></tr>
+    <tr><td>默认页大小（arm64）</td><td>4 KB（可配 16 KB / 64 KB）</td><td>Apple Silicon 16 KB（Intel Mac 4 KB）</td></tr>
+    <tr><td>用户态映射接口</td><td><code>mmap</code>/<code>munmap</code>/<code>mprotect</code>/<code>brk</code></td><td>BSD <code>mmap</code> 等 + Mach <code>mach_vm_allocate</code>/<code>mach_vm_map</code></td></tr>
+    <tr><td>回收与换出</td><td><code>kswapd</code>、LRU、swap</td><td>pageout（<code>osfmk/vm/vm_pageout.c</code>）、memory compressor + swap</td></tr>
+    <tr><td>观察工具</td><td><code>/proc/&lt;pid&gt;/maps</code>、<code>smaps</code>、<code>/proc/meminfo</code>、<code>buddyinfo</code>、<code>slabinfo</code></td><td><code>vmmap</code>、<code>vm_stat</code>、<code>footprint</code>、<code>zprint</code>、<code>sysctl vm.*</code></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解</h2>
+
+  <h3>A · ARM64 页表遍历（48-bit VA，4 KB 粒度）</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
+         data-captions='["全图：上方是一个 48-bit 虚拟地址被切成的位段；中间一排是 TTBR 和 L0–L3 四级页表；左下是 TLB 这条捷径，右下是最终物理地址。按「播放」逐步走。",
+           "① 切地址：[47:39] L0 索引、[38:30] L1、[29:21] L2、[20:12] L3，各 9 位（一张表 512 项）；[11:0] 是页内偏移，12 位 = 4 KB。",
+           "② 先看高位：[63:48] 全 0 用 TTBR0_EL1（用户），全 1 用 TTBR1_EL1（内核）；启用 TBI 时看 bit 55。同时 MMU 用 VA 页号 + 当前 ASID 查 TLB——命中就直接得到 PA，后面四步全部跳过。",
+           "③ TLB miss：从 TTBR 取 L0 表物理基址，用 [47:39] 选中一项。它必须是 table 描述符（低两位 0b11），给出 L1 表基址；若无效则 translation fault level 0。",
+           "④ L1：用 [38:30] 选项。table 描述符继续往下；block 描述符（0b01）则直接映射 1 GB，遍历到此结束。",
+           "⑤ L2：用 [29:21] 选项。table 继续；block 则映射 2 MB——这正是 Linux THP 用到的大页。",
+           "⑥ L3：用 [20:12] 选中 page 描述符，检查 AP、UXN/PXN、AF，按 AttrIndx 去 MAIR_EL1 取内存类型；PA = 描述符输出地址 [47:12] 拼上 VA [11:0]。结果回填 TLB，下次同一页直接命中。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="60" y="22" class="small">VA（48-bit 有效，4 KB 粒度）</text>
+
+      <!-- VA bit fields -->
+      <g data-step="1 2"><rect class="box" x="60" y="50" width="120" height="40"/>
+        <text x="66" y="44" class="small">63</text>
+        <text x="70" y="75" class="mono">[63:48] 选TTBR</text></g>
+      <g data-step="1 3"><rect class="box" x="180" y="50" width="120" height="40"/>
+        <text x="184" y="44" class="small">47</text>
+        <text x="192" y="75" class="mono">L0 [47:39]</text></g>
+      <g data-step="1 4"><rect class="box" x="300" y="50" width="120" height="40"/>
+        <text x="304" y="44" class="small">38</text>
+        <text x="312" y="75" class="mono">L1 [38:30]</text></g>
+      <g data-step="1 5"><rect class="box" x="420" y="50" width="120" height="40"/>
+        <text x="424" y="44" class="small">29</text>
+        <text x="432" y="75" class="mono">L2 [29:21]</text></g>
+      <g data-step="1 6"><rect class="box" x="540" y="50" width="120" height="40"/>
+        <text x="544" y="44" class="small">20</text>
+        <text x="552" y="75" class="mono">L3 [20:12]</text></g>
+      <g data-step="1 6"><rect class="box" x="660" y="50" width="160" height="40"/>
+        <text x="664" y="44" class="small">11</text>
+        <text x="806" y="44" class="small">0</text>
+        <text x="676" y="75" class="mono">offset [11:0]</text></g>
+
+      <!-- step 2: TTBR select + TLB lookup -->
+      <g data-step="2"><path class="arrow" d="M100 90 L70 160"/>
+        <rect class="box" x="20" y="160" width="100" height="90"/>
+        <text x="28" y="180" class="mono">TTBR0/1</text>
+        <text x="28" y="200" class="small">高位全0→TTBR0</text>
+        <text x="28" y="216" class="small">高位全1→TTBR1</text>
+        <text x="28" y="236" class="small">TTBR0 带 ASID</text></g>
+      <g data-step="2"><path class="arrow flow" d="M62 88 C 6 120, 6 300, 30 310"/>
+        <path class="arrow flow" d="M300 335 L530 335"/>
+        <text x="330" y="328" class="small">hit：跳过整个遍历</text></g>
+      <g data-step="2 6"><rect class="box pulse" x="30" y="300" width="270" height="70"/>
+        <text x="42" y="322" class="mono">TLB</text>
+        <text x="42" y="342" class="small">键：VA[47:12] + ASID（nG 页）</text>
+        <text x="42" y="360" class="small">值：PA 页基址 + 属性</text></g>
+
+      <!-- step 3: L0 -->
+      <g data-step="3"><path class="arrow" d="M120 205 L140 205"/>
+        <path class="arrow" d="M240 90 L195 160"/>
+        <rect class="box linux" x="140" y="160" width="110" height="90"/>
+        <text x="148" y="180" class="mono">L0 table</text>
+        <text x="148" y="196" class="small">512 项 × 8 B</text>
+        <rect x="148" y="206" width="94" height="20" style="fill: none; stroke: var(--ink-3)"/>
+        <text x="152" y="221" class="small">table desc</text>
+        <text x="148" y="243" class="small">→ L1 基址</text></g>
+
+      <!-- step 4: L1 -->
+      <g data-step="4"><path class="arrow" d="M250 205 L270 205"/>
+        <path class="arrow" d="M360 90 L325 160"/>
+        <rect class="box linux" x="270" y="160" width="110" height="90"/>
+        <text x="278" y="180" class="mono">L1 table</text>
+        <text x="278" y="196" class="small">block = 1 GB</text>
+        <rect x="278" y="206" width="94" height="20" style="fill: none; stroke: var(--ink-3)"/>
+        <text x="282" y="221" class="small">table/block</text>
+        <text x="278" y="243" class="small">→ L2 基址</text></g>
+
+      <!-- step 5: L2 -->
+      <g data-step="5"><path class="arrow" d="M380 205 L400 205"/>
+        <path class="arrow" d="M480 90 L455 160"/>
+        <rect class="box linux" x="400" y="160" width="110" height="90"/>
+        <text x="408" y="180" class="mono">L2 table</text>
+        <text x="408" y="196" class="small">block = 2 MB</text>
+        <rect x="408" y="206" width="94" height="20" style="fill: none; stroke: var(--ink-3)"/>
+        <text x="412" y="221" class="small">table/block</text>
+        <text x="408" y="243" class="small">→ L3 基址</text></g>
+
+      <!-- step 6: L3 + PA -->
+      <g data-step="6"><path class="arrow" d="M510 205 L530 205"/>
+        <path class="arrow" d="M600 90 L585 160"/>
+        <rect class="box linux" x="530" y="160" width="110" height="90"/>
+        <text x="538" y="180" class="mono">L3 table</text>
+        <text x="538" y="196" class="small">page = 4 KB</text>
+        <rect x="538" y="206" width="94" height="20" style="fill: none; stroke: var(--ink-3)"/>
+        <text x="542" y="221" class="small">page desc</text>
+        <text x="538" y="243" class="small">OA + 属性位</text>
+        <path class="arrow" d="M600 250 L600 300"/>
+        <path class="arrow" d="M740 90 L740 300"/>
+        <path class="arrow flow" d="M560 250 C 520 290, 360 290, 300 305"/>
+        <rect class="box" x="530" y="300" width="350" height="70"/>
+        <text x="542" y="322" class="mono">PA = OA[47:12] ‖ VA[11:0]</text>
+        <text x="542" y="342" class="small">AttrIndx → MAIR_EL1；AP、UXN/PXN、AF、SH 检查</text>
+        <text x="542" y="360" class="small">权限不符 → permission fault</text></g>
+
+      <text x="20" y="392" class="small">16 KB 粒度（Apple Silicon）：偏移 14 位、每级 11 位，47-bit VA = 14 + 3×11，只需 L1–L3 三级。</text>
+    </svg>
+  </div>
+
+  <h3>B · 缺页路径（Linux ↔ XNU）</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
+         data-captions='["全图：上半 EL0 用户态，下半 EL1 内核态；左列 Linux，右列 XNU。一次读写碰到还没有物理页的地址，看两个内核怎么补上。",
+           "① 用户程序执行 ldr x0, [x1]，x1 指向刚 mmap 出来、从没碰过的匿名页（或 fork 后要写的共享页）。L3 描述符无效（或只读）。",
+           "② MMU 翻译失败 → 同步异常 data abort：硬件把这条 ldr 的地址存进 ELR_EL1、PSTATE 存进 SPSR_EL1，切到 EL1，跳到 VBAR_EL1 + 0x400。",
+           "③ 原因和地址被记下：ESR_EL1.EC = 0x24（来自 lower EL 的 data abort），ISS 里 DFSC 说明是 translation / permission fault 及其级别，WnR 说明读还是写；FAR_EL1 = 出错的 VA。Linux：el0t_64_sync → el0_da；XNU：fleh_synchronous → sleh_synchronous 看到 ESR_EC_DABORT_EL0。",
+           "④ 找区域。Linux：do_mem_abort → do_translation_fault / do_page_fault，在 mm_struct 的 maple tree 里找 VMA 并检查权限。XNU：handle_abort → handle_user_abort → vm_fault，在 vm_map 里查到 vm_map_entry 和它的 vm_object。找不到 → SIGSEGV / EXC_BAD_ACCESS。",
+           "⑤ 拿到物理页。匿名首次访问：分一页清零（读可先映射零页）；文件映射：从 page cache / pager 读，可能要等 I/O；写共享只读页：COW 复制一页。Linux 在 handle_mm_fault → handle_pte_fault 里分派；XNU 在 vm_fault_page 里沿 shadow 链找页或向 pager 要。",
+           "⑥ 写入页表并返回：Linux 设置 PTE（set_pte_at 一类辅助函数）；XNU vm_fault_enter → pmap_enter。然后 eret 回到 ELR_EL1——还是那条 ldr，这次翻译成功，程序毫无察觉。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <!-- EL bands -->
+      <rect x="10" y="30" width="880" height="80" rx="8" style="fill: none; stroke: var(--line); stroke-dasharray: 4 4"/>
+      <text x="20" y="48" class="small">EL0 · user</text>
+      <rect x="10" y="155" width="880" height="240" rx="8" style="fill: none; stroke: var(--line); stroke-dasharray: 4 4"/>
+      <text x="20" y="173" class="small">EL1 · kernel</text>
+      <text x="200" y="22" class="small" style="fill: var(--linux)">Linux</text>
+      <text x="640" y="22" class="small" style="fill: var(--xnu)">XNU</text>
+      <line x1="450" y1="30" x2="450" y2="395" class="lane"/>
+
+      <!-- step 1: user access -->
+      <g data-step="1"><rect class="box linux" x="60" y="55" width="330" height="45"/>
+        <text x="72" y="74" class="mono">ldr x0, [x1]</text>
+        <text x="72" y="92" class="small">x1 → mmap 出来、未访问过的页</text></g>
+      <g data-step="1"><rect class="box xnu" x="500" y="55" width="330" height="45"/>
+        <text x="512" y="74" class="mono">ldr x0, [x1]</text>
+        <text x="512" y="92" class="small">x1 → mach_vm_allocate / mmap 出来的页</text></g>
+
+      <!-- step 2: hardware data abort -->
+      <g data-step="2"><path class="arrow" d="M225 100 L225 180"/><path class="arrow" d="M665 100 L665 180"/>
+        <rect class="box" x="290" y="114" width="320" height="38" style="fill: var(--surface)"/>
+        <text x="302" y="130" class="small">MMU: L3 无效 → Data Abort；ELR_EL1←这条 ldr</text>
+        <text x="302" y="145" class="small">EL0→EL1, PC←VBAR_EL1 + 0x400</text></g>
+
+      <!-- step 3: ESR / FAR -->
+      <g data-step="3"><rect class="box linux" x="60" y="180" width="330" height="40"/>
+        <text x="72" y="197" class="mono">el0t_64_sync → el0_da</text>
+        <text x="72" y="213" class="small">ESR.EC=0x24, DFSC, WnR；FAR_EL1 = VA</text></g>
+      <g data-step="3"><rect class="box xnu" x="500" y="180" width="330" height="40"/>
+        <text x="512" y="197" class="mono">fleh_ → sleh_synchronous</text>
+        <text x="512" y="213" class="small">ESR_EC_DABORT_EL0；FAR_EL1 = VA</text></g>
+
+      <!-- step 4: find region -->
+      <g data-step="4"><path class="arrow" d="M225 220 L225 235"/><path class="arrow" d="M665 220 L665 235"/>
+        <rect class="box linux" x="60" y="235" width="330" height="40"/>
+        <text x="72" y="252" class="mono">do_mem_abort → do_page_fault</text>
+        <text x="72" y="268" class="small">mm_struct 的 maple tree 里找 VMA，查权限</text>
+        <rect class="box xnu" x="500" y="235" width="330" height="40"/>
+        <text x="512" y="252" class="mono">handle_user_abort → vm_fault</text>
+        <text x="512" y="268" class="small">vm_map → vm_map_entry → vm_object</text></g>
+
+      <!-- step 5: get a page -->
+      <g data-step="5"><path class="arrow" d="M225 275 L225 290"/><path class="arrow" d="M665 275 L665 290"/>
+        <rect class="box linux" x="60" y="290" width="330" height="40"/>
+        <text x="72" y="307" class="mono">handle_mm_fault → handle_pte_fault</text>
+        <text x="72" y="323" class="small">do_anonymous_page | do_fault | do_wp_page (COW)</text>
+        <rect class="box xnu" x="500" y="290" width="330" height="40"/>
+        <text x="512" y="307" class="mono">vm_fault_page</text>
+        <text x="512" y="323" class="small">零页 | pager 读文件 | shadow object 复制 (COW)</text></g>
+
+      <!-- step 6: install + eret -->
+      <g data-step="6"><path class="arrow" d="M225 330 L225 345"/><path class="arrow" d="M665 330 L665 345"/>
+        <rect class="box" x="60" y="345" width="330" height="40"/>
+        <text x="72" y="370" class="mono">set PTE ; eret → 重新执行 ldr</text>
+        <rect class="box" x="500" y="345" width="330" height="40"/>
+        <text x="512" y="370" class="mono">pmap_enter ; eret → 重新执行 ldr</text>
+        <path class="arrow flow" d="M400 365 C 440 365, 440 78, 400 78"/>
+        <path class="arrow flow" d="M840 365 C 880 365, 880 78, 840 78"/></g>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <h3>准备 · 一个让 demand paging 现形的小程序</h3>
+    <p>把下面存为 <code>touch64.c</code>。它 <code>mmap</code> 64 MB 匿名内存，然后分 4 段、每 4 KB 写一个字节，每段之后打印 RSS 和这一段触发的 minor fault 数。同一份源码在 Linux（读 <code>/proc/self/status</code> 的 <code>VmRSS</code>）和 macOS（Mach <code>task_info</code>）上都能编。</p>
+<pre>#define _GNU_SOURCE
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/resource.h&gt;
+#ifdef __APPLE__
+#include &lt;mach/mach.h&gt;
+#endif
+
+static long rss_kb(void) {
+#ifdef __APPLE__
+  struct mach_task_basic_info info;
+  mach_msg_type_number_t n = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&amp;info, &amp;n) != KERN_SUCCESS) return -1;
+  return (long)(info.resident_size / 1024);
+#else
+  FILE *f = fopen("/proc/self/status", "r");
+  char line[256];
+  long kb = -1;
+  if (!f) return -1;
+  while (fgets(line, sizeof line, f))
+    if (sscanf(line, "VmRSS: %ld kB", &amp;kb) == 1) break;
+  fclose(f);
+  return kb;
+#endif
+}
+
+static long minflt(void) {
+  struct rusage ru;
+  getrusage(RUSAGE_SELF, &amp;ru);
+  return ru.ru_minflt;
+}
+
+int main(void) {
+  const size_t len = 64UL * 1024 * 1024, step = 4096;
+  printf("pid=%d pagesize=%ld\n", (int)getpid(), sysconf(_SC_PAGESIZE));
+  char *p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (p == MAP_FAILED) { perror("mmap"); return 1; }
+  printf("after mmap:     RSS=%6ld kB\n", rss_kb());
+  fflush(stdout);
+  sleep(5);
+  for (size_t q = 1; q &lt;= 4; q++) {
+    long f0 = minflt();
+    for (size_t off = (q - 1) * len / 4; off &lt; q * len / 4; off += step) p[off] = 1;
+    printf("touched %2zu MB:  RSS=%6ld kB  +faults=%ld\n", q * 16, rss_kb(), minflt() - f0);
+    fflush(stdout);
+    sleep(5);
+  }
+  munmap(p, len);
+  return 0;
+}</pre>
+
+    <h3>Lab A · Linux（Phase 0 的 QEMU 环境）</h3>
+    <ol>
+      <li>在 Linux arm64 容器里静态编译（musl 静态二进制可以直接扔进 busybox initramfs）：<pre>docker run --platform linux/arm64 --rm -v "$PWD:/w" -w /w alpine:3.20 sh -c \
+  'apk add -q build-base &amp;&amp; gcc -static -O1 -o touch64 touch64.c'</pre></li>
+      <li>重做 Phase 0 的 initramfs：在那条 <code>docker run</code> 里再加 <code>-v "$PWD:/w"</code>，在 <code>cd /r</code> 之前加 <code>cp /w/touch64 /r/bin/ &amp;&amp;</code>，并把 busybox 链接列表扩成 <code>sh ls cat echo mount uname dmesg grep head sleep</code>。然后按 Phase 0 的 QEMU 命令启动。</li>
+      <li>先看全局：<pre>cat /proc/meminfo | head -20      # MemTotal / MemFree / AnonPages / Slab / VmallocUsed
+cat /proc/buddyinfo              # 每个 zone、每个 order（1,2,4,…页）的空闲块数
+head -20 /proc/slabinfo          # 每个 kmem_cache 的对象数与大小；不存在时检查 CONFIG_SLUB_DEBUG</pre></li>
+      <li>跑实验，边跑边看地址空间：<pre>touch64 &amp;
+sleep 1; cat /proc/$!/maps        # 找到一段 64 MB 的匿名区（rw-p，无文件名）
+grep -E "VmSize|VmRSS" /proc/$!/status
+wait</pre>
+        预期：<code>pagesize=4096</code>（这就是 <code>getconf PAGESIZE</code> 给的值；完整发行版里可直接跑 <code>getconf PAGESIZE</code>，busybox 环境用程序里的 <code>sysconf</code> 代替）；<code>after mmap</code> 时 RSS 只有几百 KB，之后每段 RSS 增长约 16 MB、<code>+faults</code> 约 4096（16 MB / 4 KB）。VmSize 一开始就包含了整整 64 MB——VSZ 与 RSS 的区别就在这里。</li>
+      <li>若 <code>+faults</code> 远少于 4096、RSS 按 2 MB 跳：那是 THP（透明大页）用 L2 block 映射了 2 MB。<code>cat /sys/kernel/mm/transparent_hugepage/enabled</code>，<code>echo never &gt; …/enabled</code> 后再跑一次对比（需要内核开了 <code>CONFIG_TRANSPARENT_HUGEPAGE</code> 且已挂载 sysfs）。</li>
+      <li>在源码里找到动画 B 的 Linux 列：<pre>grep -n "el0_da" arch/arm64/kernel/entry-common.c | head
+grep -n "do_mem_abort\|do_translation_fault\|do_page_fault" arch/arm64/mm/fault.c | head
+grep -n "handle_mm_fault\|handle_pte_fault\|do_anonymous_page\|do_wp_page" mm/memory.c | head</pre></li>
+    </ol>
+
+    <h3>Lab B · macOS（Apple Silicon）</h3>
+    <ol>
+      <li>页大小与全局统计：<pre>pagesize                         # Apple Silicon 上输出 16384
+sysctl hw.pagesize vm.pages
+vm_stat                          # 第一行会写 page size of 16384 bytes；各计数单位都是「页」</pre></li>
+      <li>编译同一个程序并观察：<pre>clang -O1 -o touch64 touch64.c
+./touch64 &amp;
+sleep 1; vmmap -summary $!       # 看 VIRTUAL SIZE / RESIDENT SIZE 两列
+vmmap $! | grep -i vm_allocate   # 匿名 mmap 区通常标为 VM_ALLOCATE
+footprint $!                     # Apple 推荐的「真实占用」口径
+wait</pre>
+        预期：<code>pagesize=16384</code>；RSS 每段同样增长约 16 MB，但 <code>+faults</code> 大约只有 Linux 的 1/4（约 1024）——每 4 KB 写一次，可一页是 16 KB，同一页里后三次写不再缺页。注意 macOS 的 <code>ru_minflt</code> 口径与 Linux 不完全相同，以数量级对比为准。</li>
+      <li>看看内核 zone：<code>sudo zprint | head -30</code>（每个 zalloc zone 的元素大小与占用；<code>kalloc.type</code> 开头的就是 kalloc_type 的分档）。</li>
+      <li>在 XNU 源码里找到动画 B 的 XNU 列（沿用 Phase 0 克隆的 <code>xnu</code>）：<pre>cd xnu
+grep -n "handle_user_abort\|^handle_abort" osfmk/arm64/sleh.c | head
+grep -n "^vm_fault(\|^vm_fault_page(\|^vm_fault_enter(" osfmk/vm/vm_fault.c
+grep -rn "^pmap_enter" osfmk/ | head     # pmap 实现位置随版本变化：osfmk/arm/pmap/ 或 osfmk/arm/pmap.c
+grep -rn "^vm_object_shadow" osfmk/vm/ | head
+grep -rln "kalloc_type" osfmk/kern/ | head</pre>
+        XNU 的函数定义习惯把返回类型单独放一行，所以 <code>^函数名</code> 能直接定位定义。若某个 <code>grep</code> 没有结果，说明该版本改了名或位置，用不带 <code>^</code> 的 <code>grep -rn</code> 再搜一遍，别凭记忆补。</li>
+    </ol>
+    <div class="note">交付物：两台机器上 <code>touch64</code> 的输出并排贴进当天日志，加 5 行解释：为什么 mmap 之后 RSS 不变、为什么 macOS 的 fault 数约是 Linux 的 1/4、THP 打开时又会怎样。</div>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-2">
+    <div class="q" data-answer="b">
+      <p>1. Apple Silicon Mac 上 macOS 的默认页大小是多少？</p>
+      <label><input type="radio" name="q1" value="a"> 4 KB</label>
+      <label><input type="radio" name="q1" value="b"> 16 KB</label>
+      <label><input type="radio" name="q1" value="c"> 64 KB</label>
+      <div class="why" hidden>XNU 在 Apple Silicon 上用 16 KB 页（<code>pagesize</code> 输出 16384）；Intel Mac 和大多数 Linux arm64 发行版内核是 4 KB。16 KB 粒度下 47-bit VA 只需三级页表。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>2. 一个高位全 1 的地址（如 <code>0xffff_8000_1234_5000</code>）由哪个寄存器提供页表基址？</p>
+      <label><input type="radio" name="q2" value="a"> TTBR0_EL1</label>
+      <label><input type="radio" name="q2" value="b"> TTBR1_EL1</label>
+      <label><input type="radio" name="q2" value="c"> VBAR_EL1</label>
+      <div class="why" hidden>高半（高位全 1）是内核地址，走 TTBR1_EL1；低半是用户地址，走 TTBR0_EL1，切换进程时只换 TTBR0。VBAR_EL1 是异常向量表基址，与翻译无关。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>3. <code>fork</code> 之后，copy-on-write 的物理页复制在什么时候真正发生？</p>
+      <label><input type="radio" name="q3" value="a"> <code>fork</code> 返回之前，内核一次性复制全部可写页</label>
+      <label><input type="radio" name="q3" value="b"> 子进程第一次读这一页时</label>
+      <label><input type="radio" name="q3" value="c"> 父或子任一方第一次写这一页、触发对共享只读页的写保护缺页时</label>
+      <div class="why" hidden>fork 只复制页表并把共享页都设为只读；读不会触发复制。第一次写触发 permission fault，Linux 在 do_wp_page、XNU 通过 shadow object 才复制那一页。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>4. 48-bit VA、4 KB 页、4 级页表下，L2 表的索引取自 VA 的哪几位？</p>
+      <label><input type="radio" name="q4" value="a"> [47:39]</label>
+      <label><input type="radio" name="q4" value="b"> [29:21]</label>
+      <label><input type="radio" name="q4" value="c"> [20:12]</label>
+      <div class="why" hidden>偏移 [11:0] 12 位，往上每级 9 位：L3 = [20:12]，L2 = [29:21]，L1 = [38:30]，L0 = [47:39]。L2 若是 block 描述符就直接映射 2 MB（2<sup>21</sup>）。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual for A-profile (Arm ARM)</a> <span class="lvl">查手册，VMSA 章节（新版 D8，旧版 D5）：描述符格式、TCR/MAIR、fault 编码</span></li>
+    <li><a href="https://developer.arm.com/documentation/101811/latest">Arm — Learn the architecture: AArch64 memory management</a> <span class="lvl">入门，先读这份再翻 Arm ARM</span></li>
+    <li><a href="https://docs.kernel.org/arch/arm64/memory.html">Linux kernel docs — Memory Layout on AArch64 Linux（Documentation/arch/arm64/memory.rst）</a> <span class="lvl">进阶，4K/16K/64K 各配置下的地址布局</span></li>
+    <li><a href="https://docs.kernel.org/mm/index.html">Linux kernel docs — Memory Management</a> <span class="lvl">进阶，页表、buddy、slab、THP 各专题</span></li>
+    <li><a href="https://www.kernel.org/doc/gorman/">Mel Gorman — Understanding the Linux Virtual Memory Manager（免费在线）</a> <span class="lvl">基础，基于 2.4/2.6，概念仍然适用，细节以现代源码为准</span></li>
+    <li><a href="https://github.com/torvalds/linux/blob/master/arch/arm64/mm/fault.c">linux/arch/arm64/mm/fault.c</a> + <code>mm/memory.c</code> <span class="lvl">源码，动画 B 左列</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/tree/main/osfmk/vm">apple-oss-distributions/xnu — osfmk/vm/</a> <span class="lvl">源码；vm_fault.c、vm_map.c、vm_object.c、vm_resident.c</span></li>
+    <li>Jonathan Levin, <em>*OS Internals</em> Vol. II（Kernel Mode）VM 章节 <span class="lvl">进阶，Mach VM 与 pmap 最系统的讲解</span></li>
+    <li><a href="https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/ManagingMemory.html">Apple — Memory Usage Performance Guidelines</a> + <code>man vmmap</code> <span class="lvl">基础，用户态视角（归档文档，工具部分仍可用）</span></li>
+    <li><a href="https://security.apple.com/blog/towards-the-next-generation-of-xnu-memory-safety/">Apple Security Research — Towards the next generation of XNU memory safety: kalloc_type</a> <span class="lvl">进阶，类型隔离分配器的设计动机；Phase 7 前导</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-1-boot-and-processes/index.html">← Phase 1 · Boot &amp; Processes</a>
+    <a href="../phase-3-concurrency-and-ipc/index.html">Phase 3 · Concurrency &amp; IPC →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>

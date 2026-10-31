@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 6 · Debugging &amp; Tooling · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 6</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 6 / 9 · skeleton — 内容待写</p>
+  <h1>Debugging &amp; Tooling <span class="en">调试与工具：ftrace/perf/kgdb/crash ↔ lldb+KDP/dtrace/panic log；读内核源码的方法</span></h1>
+  <p class="lede">内核工程师的大部分时间不是在写新代码，而是在读代码、追踪问题和分析崩溃。Apple 的内核面试通常包含调试环节，团队日常也离不开 panic log 分析和两机调试；这一阶段把 Linux 与 macOS 两边的工具箱配齐。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>用 cscope 或 clangd 在 Linux 与 XNU 源码树中快速跳转定义和调用者。</li>
+      <li>用 ftrace 和 perf 追踪一个内核函数的调用与热点，并说出 macOS 上对应的 dtrace / Instruments 做法。</li>
+      <li>用 QEMU gdbstub 单步调试 Linux 内核，并说明 lldb + KDP 两机调试 XNU 的基本流程。</li>
+      <li>读懂一份 panic 日志的关键字段，并用 <code>git bisect</code> 与最小复现缩小问题范围。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li>Phase 0（在 QEMU 中编译并启动 Linux、ARM64 寄存器）。</li>
+    <li>Phase 1–5（调试需要知道被调试的子系统在做什么；可与 Phase 3–5 交叉进行）。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. 高效读内核源码</h3>
+  <p>本节讲 cscope/ctags、clangd + <code>compile_commands.json</code>（Linux 用 <code>scripts/clang-tools/gen_compile_commands.py</code> 生成）以及在线交叉索引的用法。</p>
+
+  <h3>2. 打印式调试：<code>printk</code> ↔ <code>os_log</code></h3>
+  <p>本节讲日志级别、<code>dmesg</code>、dynamic debug，以及 XNU 内核日志如何进入统一日志系统（<code>log show</code>）。</p>
+
+  <h3>3. 追踪与性能分析</h3>
+  <p>本节对比 Linux 的 ftrace、perf、eBPF 与 macOS 的 dtrace、kperf/ktrace、Instruments。</p>
+
+  <h3>4. 交互式调试器</h3>
+  <p>本节讲 QEMU gdbstub（<code>-s -S</code>）与 kgdb，以及 macOS 上用 lldb 通过 KDP 连接目标机的两机调试。</p>
+
+  <h3>5. 崩溃分析</h3>
+  <p>本节讲 Linux oops/panic 信息、kdump + <code>crash</code> 工具，以及 macOS panic 日志的结构与 kernel core dump。</p>
+
+  <h3>6. 二分定位</h3>
+  <p>本节讲用 <code>git bisect</code>（含 <code>git bisect run</code> 自动化）在内核版本之间定位引入回归的提交。</p>
+
+  <h3>7. 写最小复现</h3>
+  <p>本节讲如何把一个偶发问题缩成可在 QEMU 中稳定重现的小程序或模块，以及 syzkaller 生成的复现程序长什么样。</p>
+
+  <h2 id="compare">对照表</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">macOS / XNU</th></tr>
+    <tr><td>内核打印</td><td><code>printk</code> / <code>dmesg</code></td><td><code>printf</code> / <code>os_log</code> → <code>log show</code></td></tr>
+    <tr><td>函数级追踪</td><td>ftrace</td><td>dtrace（<code>fbt</code> provider）</td></tr>
+    <tr><td>性能采样</td><td>perf</td><td>kperf / Instruments</td></tr>
+    <tr><td>可编程追踪</td><td>eBPF / bpftrace</td><td>dtrace D 脚本</td></tr>
+    <tr><td>源码级调试</td><td>gdb + QEMU gdbstub / kgdb</td><td>lldb + KDP（<code>kdp-remote</code>）</td></tr>
+    <tr><td>崩溃转储分析</td><td>kdump + <code>crash</code></td><td>panic log + kernel core + KDK 符号</td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解：两机调试——lldb 经 KDP 连接目标机（占位）</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 200"
+         data-captions='["（占位）本阶段动画待制作：将逐步展示 Linux 侧 gdb 连 QEMU gdbstub、macOS 侧 host 上的 lldb 通过 KDP 连接停在调试器中的目标机，并加载 KDK 符号查看回溯。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="200" y="60" width="500" height="80"/>
+      <text x="230" y="106">两机调试：host lldb ⇄ KDP ⇄ target 内核</text>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <ul>
+      <li>Linux（QEMU）：用 <code>-s -S</code> 启动 QEMU，<code>gdb vmlinux</code> 后 <code>target remote :1234</code>，在 <code>start_kernel</code> 下断点。</li>
+      <li>Linux（QEMU）：在 <code>/sys/kernel/tracing</code> 下启用 <code>function_graph</code> tracer，追踪一次 <code>openat</code> 的调用树。</li>
+      <li>macOS：在 Console 或 <code>/Library/Logs/DiagnosticReports/</code> 中找一份历史 panic 报告，标出 panic 字符串、回溯与内核版本。</li>
+      <li>任意：在内核树上用 <code>git bisect</code> 走一遍（可用人为制造的回归练习）。</li>
+    </ul>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-6">
+    <div class="q" data-answer="b">
+      <p>1. 在 1000 个提交中用 <code>git bisect</code> 定位一个回归，大约需要测试多少次？</p>
+      <label><input type="radio" name="q1" value="a"> 约 100 次</label>
+      <label><input type="radio" name="q1" value="b"> 约 10 次</label>
+      <label><input type="radio" name="q1" value="c"> 约 500 次</label>
+      <div class="why" hidden>bisect 是二分查找，次数约为 log2(1000) ≈ 10。</div>
+    </div>
+    <div class="q" data-answer="a">
+      <p>2. QEMU 启动参数 <code>-s -S</code> 的作用是？</p>
+      <label><input type="radio" name="q2" value="a"> 在 TCP 端口 1234 开启 gdbstub，并在启动时暂停 CPU 等待调试器</label>
+      <label><input type="radio" name="q2" value="b"> 开启串口并静默输出</label>
+      <label><input type="radio" name="q2" value="c"> 生成内核 core dump</label>
+      <div class="why" hidden>-s 是 -gdb tcp::1234 的简写；-S 让 CPU 在启动时停住，直到调试器发出 continue。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://www.kernel.org/doc/html/latest/trace/ftrace.html">Linux kernel docs — ftrace - Function Tracer</a> <span class="lvl">查手册，ftrace 全部功能</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/dev-tools/gdb-kernel-debugging.html">Linux kernel docs — Debugging kernel and modules via gdb</a> <span class="lvl">入门，QEMU + gdb</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/admin-guide/bug-hunting.html">Linux kernel docs — Bug hunting</a> <span class="lvl">入门，读 oops</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/admin-guide/bug-bisect.html">Linux kernel docs — Bisecting a bug</a> <span class="lvl">入门，内核 bisect</span></li>
+    <li><a href="https://www.brendangregg.com/perf.html">Brendan Gregg — Linux perf Examples</a> <span class="lvl">实战，perf 用法合集</span></li>
+    <li><a href="https://ebpf.io/">ebpf.io</a> <span class="lvl">入门，eBPF 概览</span></li>
+    <li><a href="https://lldb.llvm.org/">LLDB documentation</a> <span class="lvl">查手册，lldb 命令</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-5-device-drivers/index.html">← Phase 5 · Device Drivers</a>
+    <a href="../phase-7-security-and-hardening/index.html">Phase 7 · Security &amp; Hardening →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>

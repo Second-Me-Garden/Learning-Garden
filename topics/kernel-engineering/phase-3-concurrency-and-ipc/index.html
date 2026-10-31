@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 3 · Concurrency &amp; IPC · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 3</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 3 / 9 · skeleton — 内容待写</p>
+  <h1>Concurrency &amp; IPC <span class="en">并发与 IPC：spinlock/mutex/RCU、内存序；Mach port 与消息</span></h1>
+  <p class="lede">内核里任何共享数据都可能同时被多个 CPU 和中断处理程序访问，锁、原子操作和内存序决定了代码是否正确。XNU 又是一个以 Mach 消息为骨架的内核：launchd、XPC、IOKit 用户客户端都建立在 Mach port 之上，不懂 port 和 <code>mach_msg</code> 就读不懂 Darwin 的大半代码。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>根据「能否睡眠、读写比例、临界区长度」在 spinlock、mutex、rwsem、RCU 之间做出选择，并说出理由。</li>
+      <li>解释 acquire/release 语义，并说清它们在 ARM64 上对应 <code>ldar</code>/<code>stlr</code> 和 <code>dmb</code> 的哪种用法。</li>
+      <li>画出一次 <code>mach_msg</code> 发送与接收的路径，区分 send right、receive right、send-once right。</li>
+      <li>用 Linux 的 pipe、futex、signal 对照说明 Mach IPC 在设计上的不同取舍。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li>Phase 0（ARM64 寄存器、<code>DAIF</code>、<code>dmb</code>/<code>dsb</code>/<code>isb</code>）。</li>
+    <li>Phase 1（线程、上下文切换、调度——知道「睡眠」是什么意思）。</li>
+    <li>Phase 2（虚拟内存——理解 Mach 消息里的 out-of-line 内存）。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. spinlock、mutex、rw_semaphore</h3>
+  <p>本节对比忙等锁与可睡眠锁的适用场景，以及持有 spinlock 时为什么不能睡眠。</p>
+
+  <h3>2. 原子操作与内存序</h3>
+  <p>本节讲 acquire/release、<code>smp_load_acquire</code>/<code>smp_store_release</code>，以及 ARM64 弱内存模型下 <code>dmb ish</code> 的作用。</p>
+
+  <h3>3. RCU（Read-Copy-Update）</h3>
+  <p>本节讲读者无锁、写者复制后等待宽限期（<code>synchronize_rcu</code>/<code>call_rcu</code>）的机制，以及 XNU 中对应的 SMR。</p>
+
+  <h3>4. per-CPU 数据</h3>
+  <p>本节讲用 <code>DEFINE_PER_CPU</code>（Linux）与 <code>PERCPU_DATA</code>（XNU）避免共享，以及访问时为什么要关抢占。</p>
+
+  <h3>5. 锁正确性检查：lockdep 与 XNU <code>lck_*</code></h3>
+  <p>本节讲 lockdep 如何在运行时发现锁顺序反转，以及 XNU <code>lck_mtx_t</code>/<code>lck_spin_t</code>/<code>lck_rw_t</code> 的接口与锁组。</p>
+
+  <h3>6. Mach port 与 <code>mach_msg</code></h3>
+  <p>本节讲 port 作为内核管理的消息队列、port 名字空间，以及 <code>mach_msg</code> 一次调用完成发送和/或接收。</p>
+
+  <h3>7. port rights 与 XPC</h3>
+  <p>本节讲 receive/send/send-once 三种权限如何在消息中传递，以及 XPC 和 launchd 服务查找如何建立在这些权限之上。</p>
+
+  <h3>8. 对照：Linux IPC（pipe、futex、signal）</h3>
+  <p>本节以 pipe、futex（对照 XNU 的 ulock）、signal 为例，说明 Linux 在「无统一消息原语」下如何组合出 IPC。</p>
+
+  <h2 id="compare">对照表</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td>自旋锁</td><td><code>spinlock_t</code></td><td><code>lck_spin_t</code></td></tr>
+    <tr><td>可睡眠互斥锁</td><td><code>struct mutex</code></td><td><code>lck_mtx_t</code></td></tr>
+    <tr><td>读写锁</td><td><code>struct rw_semaphore</code></td><td><code>lck_rw_t</code></td></tr>
+    <tr><td>原子操作</td><td><code>atomic_t</code>、<code>smp_load_acquire</code></td><td><code>os_atomic_*</code> 宏</td></tr>
+    <tr><td>用户态快速锁</td><td>futex</td><td>ulock（<code>__ulock_wait</code>/<code>__ulock_wake</code>）</td></tr>
+    <tr><td>消息 IPC 原语</td><td>pipe / UNIX socket</td><td>Mach port + <code>mach_msg</code></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解：一次 mach_msg 发送与接收（占位）</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 200"
+         data-captions='["（占位）本阶段动画待制作：将逐步展示发送方用 send right 调用 mach_msg、消息进入 port 队列、持有 receive right 的接收方取出消息的全过程。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="200" y="60" width="500" height="80"/>
+      <text x="230" y="106">mach_msg：发送方 → port 队列 → 接收方</text>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <ul>
+      <li>Linux（QEMU）：写一个内核模块，两个 kthread 无锁地累加同一计数器，再分别用 <code>spinlock_t</code> 和 <code>atomic_t</code> 修正，对比结果。</li>
+      <li>Linux（QEMU）：打开 <code>CONFIG_PROVE_LOCKING</code>，故意以相反顺序获取两把锁，读 lockdep 报告。</li>
+      <li>macOS：用 <code>mach_port_allocate</code> + <code>mach_msg</code> 写一个单进程收发消息的小程序。</li>
+      <li>macOS：用 <code>lsmp -p &lt;pid&gt;</code> 查看一个进程持有的 port 和权限类型。</li>
+    </ul>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-3">
+    <div class="q" data-answer="b">
+      <p>1. 持有 spinlock 时调用可能睡眠的函数（例如 <code>GFP_KERNEL</code> 的 <code>kmalloc</code>），主要问题是什么？</p>
+      <label><input type="radio" name="q1" value="a"> 没有问题，调度器会自动释放锁</label>
+      <label><input type="radio" name="q1" value="b"> 当前线程睡眠后其他 CPU 会一直自旋等锁，且持有 spinlock 时抢占已关闭，可能死锁</label>
+      <label><input type="radio" name="q1" value="c"> 只会影响性能，不影响正确性</label>
+      <div class="why" hidden>spinlock 的设计前提是临界区短且不睡眠；持锁期间抢占被关闭，睡眠会导致等锁的 CPU 空转甚至死锁。要睡眠请用 mutex。</div>
+    </div>
+    <div class="q" data-answer="a">
+      <p>2. 一个 Mach port 的 receive right 最多可以同时被几个 task 持有？</p>
+      <label><input type="radio" name="q2" value="a"> 1 个</label>
+      <label><input type="radio" name="q2" value="b"> 2 个</label>
+      <label><input type="radio" name="q2" value="c"> 不限</label>
+      <div class="why" hidden>每个 port 只有一个 receive right（单一接收者）；send right 可以有很多个，分布在不同 task 中。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://www.kernel.org/doc/html/latest/locking/index.html">Linux kernel docs — Locking</a> <span class="lvl">入门，各类锁的官方说明</span></li>
+    <li><a href="https://www.kernel.org/doc/Documentation/memory-barriers.txt">Linux kernel — memory-barriers.txt</a> <span class="lvl">进阶，内存屏障权威文档</span></li>
+    <li><a href="https://lwn.net/Articles/262464/">LWN — What is RCU, Fundamentally?</a> <span class="lvl">入门，RCU 经典讲解</span></li>
+    <li><a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">Paul McKenney — Is Parallel Programming Hard, And, If So, What Can You Do About It?</a> <span class="lvl">深入，并发与 RCU 全书</span></li>
+    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual (Arm ARM) — B2 The AArch64 Application Level Memory Model</a> <span class="lvl">权威，ARM64 内存序与屏障</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl">源码；osfmk/ipc/、osfmk/kern/locks.c</span></li>
+    <li>Jonathan Levin, <em>*OS Internals</em> Vol. II <span class="lvl">深入，Mach IPC 章节</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-2-memory/index.html">← Phase 2 · Memory</a>
+    <a href="../phase-4-syscalls-vfs-filesystems/index.html">Phase 4 · Syscalls, VFS &amp; Filesystems →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>

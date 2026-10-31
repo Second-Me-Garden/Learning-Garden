@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Learning Garden</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <span class="brand">Learning Garden</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <h1>Learning Garden</h1>
+  <p class="lede">分阶段的学习路径，每一步配一张可逐步播放的动画图解。</p>
+
+  <h2 style="border:0;margin-top:24px">Topics</h2>
+  <div class="cards">
+    <a class="card" href="topics/kernel-engineering/index.html">
+      <span class="tag">9 phases · Linux → XNU</span>
+      <h3>Kernel Engineering <span class="en">Apple kernel engineer track</span></h3>
+      <p>从内核基础出发——进程、内存、并发、驱动、调试、安全——以 Linux 为教学载体，逐阶段对照 XNU/Darwin，最后一阶段进入 Apple 路线：编译 XNU、作品项目、面试环节。</p>
+    </a>
+    <div class="card soon">
+      <span class="tag">coming</span>
+      <h3>下一个 topic</h3>
+      <p>复制 <code>topics/kernel-engineering/</code> 的结构即可新增一个 topic。</p>
+    </div>
+  </div>
+
+  <h2>怎么用</h2>
+  <ul>
+    <li>每个 phase 按顺序读：目标 → 核心概念 → 对照表 → 动画 → 实验 → 自测。</li>
+    <li>动画：点「播放」自动走，或用 <kbd>←</kbd> <kbd>→</kbd> 逐步看；<kbd>space</kbd> 暂停。</li>
+    <li>自测分数只存在本机浏览器里（localStorage），不上传。</li>
+  </ul>
+</div>
+<script src="assets/diagram.js"></script>
+</body>
+</html>

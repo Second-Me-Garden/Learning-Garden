@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 8 · XNU &amp; the Apple Track · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 8</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 8 / 9 · skeleton — 内容待写</p>
+  <h1>XNU &amp; the Apple Track <span class="en">编译 XNU、Darwin 内部阅读计划、作品项目（Linux module + DriverKit driver）、Apple 面试环节</span></h1>
+  <p class="lede">前面七个阶段用 Linux 打底、处处对照 XNU；这一阶段把重心完全切到 Apple：亲手编译 XNU、按计划读 Darwin 源码、做出能拿得出手的作品，并为 Apple 的面试流程做准备。目标是让你能用自己做过的东西，清楚地讲出对 XNU 的理解。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>从 <code>apple-oss-distributions/xnu</code> 源码按仓库 README 构建 XNU，并配合 KDK 理解开发版内核与符号。</li>
+      <li>按一份有序的文件清单读完 XNU 的启动、调度、IPC、VM、VFS、IOKit 主干。</li>
+      <li>完成一个作品集项目：一个 Linux 内核模块，加上一个 DriverKit 驱动或一个用户态 Mach IPC 工具。</li>
+      <li>为 Apple 面试的各个环节（电话面、编码、操作系统基础、调试、系统设计）准备好可讲的例子。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li>Phase 0–7 全部（本阶段是综合应用）。</li>
+    <li>特别是 Phase 3（Mach IPC）、Phase 5（IOKit/DriverKit）、Phase 6（lldb + KDP）。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. 从源码构建 XNU</h3>
+  <p>本节讲获取 <code>apple-oss-distributions/xnu</code>、匹配版本的 KDK 与 SDK，以及按仓库 README 中的 <code>make</code> 参数（如 <code>KERNEL_CONFIGS</code>、<code>ARCH_CONFIGS</code>）构建。</p>
+
+  <h3>2. Darwin 内部阅读计划</h3>
+  <p>本节给出有序文件清单：<code>osfmk/arm64/start.s</code> → <code>osfmk/kern/startup.c</code> → <code>osfmk/kern/sched_prim.c</code> → <code>osfmk/ipc/ipc_kmsg.c</code> → <code>osfmk/vm/vm_fault.c</code> → <code>bsd/kern/kern_exec.c</code> → <code>bsd/vfs/vfs_lookup.c</code> → <code>iokit/Kernel/IOService.cpp</code>。</p>
+
+  <h3>3. 作品集项目</h3>
+  <p>本节规划一个 Linux 内核模块（如字符设备 + procfs 统计），再加一个 DriverKit 驱动或用户态 Mach IPC 工具，并写清设计说明。</p>
+
+  <h3>4. 跟踪 XNU 的版本变化</h3>
+  <p>本节讲如何在 opensource.apple.com 的版本发布与 xnu 仓库的 tag 之间做 diff，从变化中读出新机制。</p>
+
+  <h3>5. Apple 面试流程</h3>
+  <p>本节梳理常见环节：电话面、编码（C/C++）、操作系统基础、调试题、系统设计，以及每一环的准备方法。</p>
+
+  <h3>6. 讲述你的工作</h3>
+  <p>本节讲如何把前面各阶段的实验和作品组织成「问题 → 做法 → 取舍 → 结果」的面试叙事。</p>
+
+  <h2 id="compare">对照表</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td>源码仓库</td><td><code>torvalds/linux</code></td><td><code>apple-oss-distributions/xnu</code></td></tr>
+    <tr><td>开发方式</td><td>公开邮件列表（LKML）</td><td>内部开发，按版本发布开源快照</td></tr>
+    <tr><td>调试符号</td><td><code>vmlinux</code></td><td>Kernel Debug Kit（KDK）</td></tr>
+    <tr><td>可加载内核代码</td><td>内核模块（<code>.ko</code>）</td><td>kext</td></tr>
+    <tr><td>用户态驱动</td><td>UIO / VFIO</td><td>DriverKit（dext）</td></tr>
+    <tr><td>版本变化追踪</td><td>kernelnewbies LinuxChanges</td><td>opensource.apple.com releases</td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解：Apple Track 路线图（占位）</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 200"
+         data-captions='["（占位）本阶段动画待制作：将逐步展示从构建 XNU、按清单阅读源码、完成作品项目到准备面试各环节的路线与产出物。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box xnu" x="200" y="60" width="500" height="80"/>
+      <text x="230" y="106">构建 XNU → 阅读计划 → 作品项目 → 面试</text>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <ul>
+      <li>macOS：克隆 xnu 仓库，按 README 构建一次（或至少跑通依赖准备），记录用到的 SDK 与 KDK 版本。</li>
+      <li>macOS：用 <code>git log</code>/<code>git diff</code> 对比 xnu 两个相邻 tag 中 <code>osfmk/ipc/</code> 的变化，写一段摘要。</li>
+      <li>Linux（QEMU）：完成作品集中的内核模块，附带测试脚本与 README。</li>
+      <li>macOS：用 Xcode 的 DriverKit 模板创建一个最小 dext，或写一个用 <code>mach_msg</code> 通信的客户端/服务端工具。</li>
+    </ul>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-8">
+    <div class="q" data-answer="b">
+      <p>1. XNU 由哪三大部分组成？</p>
+      <label><input type="radio" name="q1" value="a"> Linux、BSD、IOKit</label>
+      <label><input type="radio" name="q1" value="b"> Mach、BSD、IOKit</label>
+      <label><input type="radio" name="q1" value="c"> Mach、Hurd、DriverKit</label>
+      <div class="why" hidden>XNU = Mach（osfmk/：任务、线程、IPC、VM）+ BSD（bsd/：POSIX、VFS、网络）+ IOKit（iokit/：C++ 驱动框架）。DriverKit 是用户态的驱动框架，不在内核中。</div>
+    </div>
+    <div class="q" data-answer="a">
+      <p>2. 在 xnu 源码树中，Mach IPC 的核心实现位于哪个目录？</p>
+      <label><input type="radio" name="q2" value="a"> <code>osfmk/ipc/</code></label>
+      <label><input type="radio" name="q2" value="b"> <code>bsd/ipc/</code></label>
+      <label><input type="radio" name="q2" value="c"> <code>libkern/ipc/</code></label>
+      <div class="why" hidden>Mach 部分都在 osfmk/ 下：IPC 在 osfmk/ipc/，消息收发的 trap 入口在 osfmk/ipc/mach_msg.c。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl">源码与 README 构建说明</span></li>
+    <li><a href="https://opensource.apple.com/releases/">Apple Open Source — Releases</a> <span class="lvl">各 macOS 版本对应的开源组件版本</span></li>
+    <li><a href="https://developer.apple.com/documentation/kernel">Apple Developer — Kernel</a> <span class="lvl">查手册，内核 API</span></li>
+    <li><a href="https://developer.apple.com/documentation/driverkit">Apple Developer — DriverKit</a> <span class="lvl">作品项目</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/kbuild/modules.html">Linux kernel docs — Building External Modules</a> <span class="lvl">作品项目，Linux 模块构建</span></li>
+    <li><a href="http://newosxbook.com/">Jonathan Levin — *OS Internals（newosxbook.com）</a> <span class="lvl">深入，XNU/Darwin 最系统的书</span></li>
+    <li><a href="https://jobs.apple.com/">Apple Jobs</a> <span class="lvl">查看内核相关岗位的职责描述</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-7-security-and-hardening/index.html">← Phase 7 · Security &amp; Hardening</a>
+    <a href="../index.html">回到 Kernel Engineering →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>

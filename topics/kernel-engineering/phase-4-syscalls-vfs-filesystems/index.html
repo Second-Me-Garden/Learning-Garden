@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 4 · Syscalls, VFS &amp; Filesystems · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 4</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 4 / 9 · skeleton — 内容待写</p>
+  <h1>Syscalls, VFS &amp; Filesystems <span class="en">系统调用入口、VFS 层次、ext4 ↔ APFS、块 I/O</span></h1>
+  <p class="lede">一次 <code>open()</code>/<code>read()</code> 会穿过系统调用入口、VFS 抽象层、页缓存、具体文件系统和块层，最终到达存储设备。Apple 的内核工程师经常要回答「数据到底什么时候落盘」「APFS 的 clone 和 snapshot 是怎么实现的」这类问题，这一阶段把整条 I/O 路径串起来。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>从 <code>open()</code> 出发，说出 Linux 的 <code>file</code>/<code>dentry</code>/<code>inode</code> 与 XNU 的 <code>vnode</code> 各自在哪一步被找到或创建。</li>
+      <li>解释页缓存（Linux）与 UBC（XNU）的作用，以及一次 buffered write 何时真正写到设备。</li>
+      <li>对比 ext4 与 APFS 的关键设计：日志 vs copy-on-write，snapshot、clone、原生加密。</li>
+      <li>说清 macOS 上 <code>fsync</code> 与 <code>fcntl(F_FULLFSYNC)</code> 的区别，以及数据库为什么关心它。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li>Phase 0（系统调用的异常进入与返回）。</li>
+    <li>Phase 2（页、页缓存依赖的虚拟内存机制）。</li>
+    <li>Phase 3（VFS 对象的引用计数与锁）。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. 系统调用表与 ABI（回顾）</h3>
+  <p>本节回顾 Phase 0 的入口路径，补充参数校验、<code>copy_from_user</code>/<code>copyin</code> 与错误码返回约定。</p>
+
+  <h3>2. VFS 对象模型</h3>
+  <p>本节对比 Linux 的 <code>super_block</code>/<code>inode</code>/<code>dentry</code>/<code>file</code> 与 XNU 的 <code>mount</code>/<code>vnode</code>/<code>fileproc</code>。</p>
+
+  <h3>3. 路径查找</h3>
+  <p>本节讲 Linux <code>fs/namei.c</code> 的逐级查找与 dcache，以及 XNU <code>bsd/vfs/vfs_lookup.c</code> 的 <code>namei()</code> 与 name cache。</p>
+
+  <h3>4. 页缓存 ↔ UBC</h3>
+  <p>本节讲 Linux <code>address_space</code> 与 XNU Unified Buffer Cache（<code>ubc_info</code>）如何让文件 I/O 和 <code>mmap</code> 共享同一批物理页。</p>
+
+  <h3>5. ext4 vs APFS</h3>
+  <p>本节对比 ext4 的日志与 extent，和 APFS 的 copy-on-write 元数据、snapshot、clone 与原生加密。</p>
+
+  <h3>6. 块层与 I/O 调度</h3>
+  <p>本节讲 Linux <code>bio</code> 与 blk-mq 多队列，以及 XNU 中 <code>buf_t</code> 经 IOKit 存储栈下发的路径。</p>
+
+  <h3>7. 持久化语义：<code>fsync</code> 与 <code>F_FULLFSYNC</code></h3>
+  <p>本节讲 macOS 上 <code>fsync</code> 不保证设备缓存落盘、需要 <code>F_FULLFSYNC</code> 的原因及其性能代价。</p>
+
+  <h2 id="compare">对照表</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td>文件系统实例</td><td><code>struct super_block</code></td><td><code>struct mount</code></td></tr>
+    <tr><td>文件对象</td><td><code>struct inode</code> + <code>struct dentry</code></td><td><code>struct vnode</code></td></tr>
+    <tr><td>打开的文件</td><td><code>struct file</code></td><td><code>struct fileproc</code> / <code>struct fileglob</code></td></tr>
+    <tr><td>路径查找</td><td><code>fs/namei.c</code></td><td><code>bsd/vfs/vfs_lookup.c</code></td></tr>
+    <tr><td>文件页缓存</td><td>page cache（<code>address_space</code>）</td><td>UBC（<code>ubc_info</code>）</td></tr>
+    <tr><td>主力文件系统</td><td>ext4 / XFS / Btrfs</td><td>APFS（不开源）</td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解：open() 从路径到文件对象（占位）</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 200"
+         data-captions='["（占位）本阶段动画待制作：将逐步展示 open() 进入内核后逐级查找路径分量，Linux 走 dentry/inode、XNU 走 vnode，最终返回文件描述符。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="200" y="60" width="500" height="80"/>
+      <text x="230" y="106">open()：路径查找 → dentry/inode ↔ vnode → fd</text>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <ul>
+      <li>Linux（QEMU）：用 <code>strace -f cat /etc/hostname</code> 观察 <code>openat</code>/<code>read</code>/<code>close</code> 序列。</li>
+      <li>Linux（QEMU）：写一个最小的内核模块，在 <code>/proc</code> 下注册一个文件并实现 <code>read</code>。</li>
+      <li>macOS：用 <code>sudo fs_usage -w -f filesys</code> 观察一个程序的文件系统调用，再用 <code>cp -c</code> 创建 APFS clone 并对比 <code>df</code> 的变化。</li>
+      <li>macOS：写一个小程序循环写文件，分别用 <code>fsync</code> 和 <code>fcntl(fd, F_FULLFSYNC)</code> 计时对比。</li>
+    </ul>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-4">
+    <div class="q" data-answer="c">
+      <p>1. 在 macOS 上，要确保写入的数据穿过设备的写缓存真正落到持久介质，应使用什么？</p>
+      <label><input type="radio" name="q1" value="a"> <code>fsync(fd)</code> 即可</label>
+      <label><input type="radio" name="q1" value="b"> <code>sync()</code></label>
+      <label><input type="radio" name="q1" value="c"> <code>fcntl(fd, F_FULLFSYNC)</code></label>
+      <div class="why" hidden>macOS 的 fsync 把数据交给设备，但不要求设备清空自己的写缓存；F_FULLFSYNC 额外要求设备 flush，代价更高。</div>
+    </div>
+    <div class="q" data-answer="a">
+      <p>2. Linux 中把「路径名分量」映射到 inode、并被缓存以加速路径查找的对象是？</p>
+      <label><input type="radio" name="q2" value="a"> <code>struct dentry</code></label>
+      <label><input type="radio" name="q2" value="b"> <code>struct file</code></label>
+      <label><input type="radio" name="q2" value="c"> <code>struct super_block</code></label>
+      <div class="why" hidden>dentry 表示目录项（名字 → inode），由 dcache 缓存；file 表示一次打开，super_block 表示一个已挂载的文件系统实例。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://www.kernel.org/doc/html/latest/filesystems/vfs.html">Linux kernel docs — Overview of the Linux Virtual File System</a> <span class="lvl">入门，VFS 对象与操作表</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/filesystems/path-lookup.html">Linux kernel docs — Pathname lookup</a> <span class="lvl">进阶，namei 全流程</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/filesystems/ext4/index.html">Linux kernel docs — ext4 Data Structures and Algorithms</a> <span class="lvl">查手册，ext4 磁盘格式</span></li>
+    <li><a href="https://developer.apple.com/support/downloads/Apple-File-System-Reference.pdf">Apple File System Reference</a> <span class="lvl">深入，APFS 磁盘格式官方规范</span></li>
+    <li><a href="https://lwn.net/Articles/457667/">LWN — Ensuring data reaches disk</a> <span class="lvl">入门，fsync 语义</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl">源码；bsd/vfs/、bsd/kern/ubc_subr.c</span></li>
+    <li>Robert Love, <em>Linux Kernel Development</em>（3rd ed.）<span class="lvl">VFS、块 I/O 章节</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-3-concurrency-and-ipc/index.html">← Phase 3 · Concurrency &amp; IPC</a>
+    <a href="../phase-5-device-drivers/index.html">Phase 5 · Device Drivers →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+/* Learning Garden — shared diagram stepper.
+ *
+ * A diagram is a `.diagram` element containing one <svg data-diagram> whose
+ * animated parts carry `data-step="N"` (an element may list several steps:
+ * data-step="1 2"). Captions live in `data-captions` on the <svg> as a JSON
+ * array, index = step. Step 0 shows the whole picture; steps 1..N highlight
+ * the parts for that step and dim the rest.
+ *
+ * Controls (play / pause / step / reset) are injected automatically.
+ * Keyboard: ← → to step, space to play/pause, when the diagram has focus.
+ */
+(function () {
+  'use strict';
+
+  function setup(frame) {
+    const svg = frame.querySelector('svg[data-diagram]');
+    if (!svg) return;
+    let captions = [];
+    try { captions = JSON.parse(svg.dataset.captions || '[]'); } catch (_) { captions = []; }
+    const parts = Array.from(svg.querySelectorAll('[data-step]'));
+    const max = parts.reduce((m, el) => Math.max(m, ...el.dataset.step.split(/\s+/).map(Number)), 0);
+    const interval = Number(svg.dataset.interval || 1600);
+    let step = 0, timer = null;
+
+    const caption = document.createElement('div');
+    caption.className = 'caption';
+    const controls = document.createElement('div');
+    controls.className = 'controls';
+    const mk = (label, fn) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.addEventListener('click', fn); controls.appendChild(b); return b; };
+    const playBtn = mk('▶ 播放', toggle);
+    mk('← 上一步', () => go(step - 1, true));
+    mk('下一步 →', () => go(step + 1, true));
+    mk('↺ 重置', () => go(0, true));
+    const counter = document.createElement('span');
+    counter.className = 'step';
+    controls.appendChild(counter);
+    frame.appendChild(caption);
+    frame.appendChild(controls);
+    frame.tabIndex = 0;
+    frame.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight') { go(step + 1, true); e.preventDefault(); }
+      else if (e.key === 'ArrowLeft') { go(step - 1, true); e.preventDefault(); }
+      else if (e.key === ' ') { toggle(); e.preventDefault(); }
+    });
+
+    function render() {
+      for (const el of parts) {
+        const steps = el.dataset.step.split(/\s+/).map(Number);
+        el.classList.remove('on', 'off');
+        if (step === 0) continue;
+        el.classList.add(steps.includes(step) ? 'on' : 'off');
+      }
+      caption.textContent = captions[step] || (step === 0 ? (captions[0] || '') : '');
+      counter.textContent = step + ' / ' + max;
+    }
+    function go(n, manual) {
+      if (manual) pause();
+      step = ((n % (max + 1)) + (max + 1)) % (max + 1);
+      render();
+    }
+    function play() {
+      if (timer) return;
+      playBtn.textContent = '❚❚ 暂停';
+      timer = setInterval(() => { if (step >= max) { pause(); return; } go(step + 1, false); }, interval);
+      if (step >= max) go(0, false);
+    }
+    function pause() {
+      if (timer) clearInterval(timer);
+      timer = null;
+      playBtn.textContent = '▶ 播放';
+    }
+    function toggle() { timer ? pause() : play(); }
+    render();
+  }
+
+  function init() { document.querySelectorAll('.diagram').forEach(setup); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+
+  // Theme toggle (optional button.theme in the header). Persists per browser.
+  const KEY = 'lg-theme';
+  try {
+    const saved = localStorage.getItem(KEY);
+    if (saved === 'dark' || saved === 'light') document.documentElement.dataset.theme = saved;
+  } catch (_) {}
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('button.theme');
+    if (!b) return;
+    const cur = document.documentElement.dataset.theme;
+    const next = cur === 'dark' ? 'light' : cur === 'light' ? '' : (matchMedia('(prefers-color-scheme: dark)').matches ? 'light' : 'dark');
+    if (next) document.documentElement.dataset.theme = next; else delete document.documentElement.dataset.theme;
+    try { next ? localStorage.setItem(KEY, next) : localStorage.removeItem(KEY); } catch (_) {}
+  });
+})();

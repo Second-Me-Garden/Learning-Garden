@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 7 · Security &amp; Hardening · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 7</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 7 / 9 · skeleton — 内容待写</p>
+  <h1>Security &amp; Hardening <span class="en">安全与加固：KASLR、PAN/PXN、PAC、PPL/SPTM、sandbox、code signing</span></h1>
+  <p class="lede">内核是攻击者的终极目标：一个内核内存破坏漏洞往往意味着整机沦陷。Apple 在硬件和内核两层叠加了大量缓解措施（PAC、PPL/SPTM、kalloc_type、代码签名），内核工程师写的每一行代码都要放在这套防御体系里考量。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>为内核写出一个简单威胁模型：攻击面在哪里、攻击者拿到什么原语、各项缓解措施阻断哪一步。</li>
+      <li>解释 KASLR、W^X、PXN、PAN、stack canary、CFI 各自防御的攻击手法。</li>
+      <li>说明 ARM PAC 如何用 <code>pacia</code> 签名、<code>autia</code> 校验指针，以及 PPL/SPTM 为什么要把页表保护从内核本身剥离出来。</li>
+      <li>对比 XNU 的 MACF/Sandbox/AMFI/SIP 与 Linux 的 LSM/SELinux，并能读懂一篇内核 CVE 分析文章。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li>Phase 0（特权级、ARM64 系统寄存器）。</li>
+    <li>Phase 2（页表与页表权限位——W^X、PXN、PAN 都建立在其上）。</li>
+    <li>Phase 4（系统调用与 VFS——LSM/MACF 钩子挂在这里）。</li>
+    <li>Phase 6（读 panic 和 CVE 分析需要调试经验）。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. 内核威胁模型</h3>
+  <p>本节讲攻击面（系统调用、IOKit 用户客户端、文件系统、网络）与典型利用链：内存破坏 → 读写原语 → 提权。</p>
+
+  <h3>2. KASLR 与 W^X / PXN / PAN</h3>
+  <p>本节讲地址随机化，以及页表权限位如何阻止内核执行或直接访问用户内存。</p>
+
+  <h3>3. stack canary 与 CFI</h3>
+  <p>本节讲栈保护（<code>CONFIG_STACKPROTECTOR</code>）、前向边 CFI（Clang kCFI、ARM BTI）分别防御的控制流劫持方式。</p>
+
+  <h3>4. ARM Pointer Authentication（PAC）</h3>
+  <p>本节讲 <code>pacia</code>/<code>autia</code>/<code>pacibsp</code> 如何把签名放进指针高位，以及 Apple arm64e ABI 对它的大规模使用。</p>
+
+  <h3>5. PPL 与 SPTM</h3>
+  <p>本节讲 Apple 把页表与代码签名关键数据的修改权限从普通内核代码中隔离出来的设计（PPL，以及较新芯片上的 SPTM）。</p>
+
+  <h3>6. kalloc_type 与堆隔离</h3>
+  <p>本节讲 XNU 按类型隔离内核堆分配以对抗 UAF 类型混淆，并对照 Linux 的 slab 加固选项。</p>
+
+  <h3>7. 强制访问控制与代码签名</h3>
+  <p>本节讲 XNU 的 MACF 钩子、Sandbox（Seatbelt）、AMFI 代码签名校验与 SIP，并以 Linux LSM/SELinux 作对照。</p>
+
+  <h3>8. 读 CVE 分析</h3>
+  <p>本节给出阅读内核漏洞分析文章的框架：漏洞根因、触发路径、利用原语、被哪项缓解阻断或绕过、补丁如何修复。</p>
+
+  <h2 id="compare">对照表</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td>指针认证</td><td><code>CONFIG_ARM64_PTR_AUTH</code></td><td>arm64e ABI（全面 PAC）</td></tr>
+    <tr><td>页表完整性保护</td><td>无直接对应（主线内核）</td><td>PPL / SPTM</td></tr>
+    <tr><td>堆类型隔离</td><td><code>CONFIG_RANDOM_KMALLOC_CACHES</code></td><td>kalloc_type</td></tr>
+    <tr><td>强制访问控制框架</td><td>LSM（SELinux、AppArmor）</td><td>MACF（<code>security/</code>）+ Sandbox</td></tr>
+    <tr><td>代码签名 / 完整性</td><td>module signing、IMA</td><td>AMFI + 代码签名</td></tr>
+    <tr><td>保护系统文件与内核</td><td>lockdown LSM</td><td>SIP</td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解：PAC 签名与校验（占位）</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 200"
+         data-captions='["（占位）本阶段动画待制作：将逐步展示函数入口用 pacibsp 给返回地址签名、栈上地址被篡改、返回前 autibsp 校验失败导致异常的过程。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="200" y="60" width="500" height="80"/>
+      <text x="230" y="106">PAC：签名返回地址 → 篡改 → 校验失败</text>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <ul>
+      <li>Linux（QEMU）：多次启动后对比 <code>/proc/kallsyms</code> 中 <code>start_kernel</code> 的地址（以 root 读取），观察 KASLR。</li>
+      <li>Linux（QEMU，<code>-cpu max</code>）：用 <code>clang -mbranch-protection=pac-ret</code> 编译一个用户态小程序，反汇编查看 <code>paciasp</code>/<code>autiasp</code>。</li>
+      <li>macOS：用 <code>csrutil status</code> 查看 SIP 状态，用 <code>codesign -dv --entitlements - /bin/ls</code> 查看签名与 entitlements。</li>
+      <li>挑一篇 Project Zero 的 XNU 漏洞分析，按「根因 → 原语 → 缓解」三栏做笔记。</li>
+    </ul>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-7">
+    <div class="q" data-answer="c">
+      <p>1. ARM PAC 的签名（PAC 值）存放在哪里？</p>
+      <label><input type="radio" name="q1" value="a"> 专用的 PAC 寄存器中</label>
+      <label><input type="radio" name="q1" value="b"> 指针所指向的内存旁边</label>
+      <label><input type="radio" name="q1" value="c"> 指针本身未用于寻址的高位中</label>
+      <div class="why" hidden>64 位虚拟地址并不使用全部 64 位，PAC 利用这些高位存放签名；autia 等指令校验成功会去掉签名，失败则使指针失效。</div>
+    </div>
+    <div class="q" data-answer="a">
+      <p>2. PAN（Privileged Access Never）开启后阻止的是什么？</p>
+      <label><input type="radio" name="q2" value="a"> 内核态直接用普通加载/存储访问用户态内存</label>
+      <label><input type="radio" name="q2" value="b"> 用户态访问内核内存</label>
+      <label><input type="radio" name="q2" value="c"> 内核执行用户态页面上的代码</label>
+      <div class="why" hidden>PAN 阻止 EL1 直接读写 EL0 可访问的页面，内核只能经由 copyin/copy_from_user 等受控路径访问；禁止内核执行用户页的是 PXN。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://support.apple.com/guide/security/welcome/web">Apple Platform Security Guide</a> <span class="lvl">必读，PAC、PPL/SPTM、SIP、代码签名的官方说明</span></li>
+    <li><a href="https://security.apple.com/blog/towards-the-next-generation-of-xnu-memory-safety/">Apple Security Research — Towards the next generation of XNU memory safety</a> <span class="lvl">深入，kalloc_type</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/security/self-protection.html">Linux kernel docs — Kernel Self-Protection</a> <span class="lvl">入门，Linux 加固全景</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/arch/arm64/pointer-authentication.html">Linux kernel docs — Pointer authentication in AArch64 Linux</a> <span class="lvl">进阶，PAC 在 Linux 中的使用</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/admin-guide/LSM/index.html">Linux kernel docs — Linux Security Module Usage</a> <span class="lvl">对照，LSM/SELinux</span></li>
+    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual for A-profile</a> <span class="lvl">查手册，PAC/PAN/BTI 定义</span></li>
+    <li><a href="https://googleprojectzero.blogspot.com/">Google Project Zero blog</a> <span class="lvl">实战，内核 CVE 分析</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-6-debugging-and-tooling/index.html">← Phase 6 · Debugging &amp; Tooling</a>
+    <a href="../phase-8-xnu-and-apple-track/index.html">Phase 8 · XNU &amp; the Apple Track →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>

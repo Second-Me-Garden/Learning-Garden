@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 5 · Device Drivers · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 5</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 5 / 9 · skeleton — 内容待写</p>
+  <h1>Device Drivers <span class="en">设备驱动：Linux driver model / devicetree ↔ IOKit / DriverKit，中断与 DMA</span></h1>
+  <p class="lede">驱动是内核与硬件之间的那一层，也是内核里代码量最大、bug 最多的部分。Apple 自己设计芯片和外设，驱动工作（IOKit、DriverKit、DART）是 Apple 内核团队的日常；这一阶段建立 Linux 驱动模型和 IOKit 的对照理解。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>解释 Linux bus/device/driver 三者如何通过 devicetree 的 <code>compatible</code> 匹配并调用 <code>probe</code>。</li>
+      <li>说清中断上半部与下半部的分工，以及何时使用 <code>request_threaded_irq</code>。</li>
+      <li>描述一次 DMA 映射的流程，以及 IOMMU（Apple Silicon 上是 DART）在其中的作用。</li>
+      <li>说出 IOKit 的 matching → <code>probe</code> → <code>start</code> 生命周期，以及 DriverKit dext 与 kext 的区别。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li>Phase 0（异常与中断、MMIO 与 <code>volatile</code>）。</li>
+    <li>Phase 2（物理地址与虚拟地址、页表）。</li>
+    <li>Phase 3（中断上下文中的锁与 per-CPU 数据）。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. Linux 驱动模型</h3>
+  <p>本节讲 <code>struct bus_type</code>/<code>struct device</code>/<code>struct device_driver</code>，以及 devicetree 节点如何驱动匹配和 <code>probe</code>。</p>
+
+  <h3>2. 字符设备与 platform driver</h3>
+  <p>本节讲 <code>file_operations</code> 暴露给用户态的接口，以及 SoC 上最常见的 <code>platform_driver</code> 写法。</p>
+
+  <h3>3. 中断：上半部、下半部、threaded IRQ</h3>
+  <p>本节讲 <code>request_irq</code> 的快速处理、softirq/tasklet/workqueue 下半部，以及 threaded IRQ 如何把慢工作移到内核线程。</p>
+
+  <h3>4. DMA 与 IOMMU</h3>
+  <p>本节讲 <code>dma_map_single</code>/<code>dma_alloc_coherent</code>、cache 一致性，以及 IOMMU 如何限制设备能访问的物理内存。</p>
+
+  <h3>5. XNU IOKit</h3>
+  <p>本节讲 IOKit 的 C++ 类层次（<code>IOService</code>）、IORegistry 与 matching，以及 <code>IOWorkLoop</code>、<code>IOInterruptEventSource</code>、<code>IOMemoryDescriptor</code>。</p>
+
+  <h3>6. DriverKit</h3>
+  <p>本节讲 DriverKit 把第三方驱动移到用户态（dext，作为 System Extension 安装）的架构与限制。</p>
+
+  <h3>7. Apple Silicon DART</h3>
+  <p>本节讲 Apple 的 DART（IOMMU）如何为每个设备提供独立的 I/O 地址空间，以及 Asahi Linux 的 <code>apple-dart</code> 驱动作为公开参考。</p>
+
+  <h2 id="compare">对照表</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td>驱动基类 / 结构</td><td><code>struct device_driver</code></td><td><code>IOService</code></td></tr>
+    <tr><td>设备树 / 设备注册表</td><td>devicetree + sysfs</td><td>IORegistry（<code>ioreg</code>）</td></tr>
+    <tr><td>匹配与初始化</td><td><code>of_match_table</code> → <code>probe</code></td><td><code>IOKitPersonalities</code> → <code>probe</code> / <code>start</code></td></tr>
+    <tr><td>中断处理</td><td><code>request_threaded_irq</code></td><td><code>IOInterruptEventSource</code> + <code>IOWorkLoop</code></td></tr>
+    <tr><td>DMA 内存描述</td><td><code>dma_map_single</code> / scatterlist</td><td><code>IOMemoryDescriptor</code> + <code>IODMACommand</code></td></tr>
+    <tr><td>用户态驱动</td><td>UIO / VFIO</td><td>DriverKit（dext）</td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解：一次中断从设备到驱动（占位）</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 200"
+         data-captions='["（占位）本阶段动画待制作：将逐步展示设备拉起中断后，Linux 走 hardirq 上半部到 threaded handler，XNU 走 IOInterruptEventSource 到 IOWorkLoop 线程的并排路径。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="200" y="60" width="500" height="80"/>
+      <text x="230" y="106">中断：设备 → 上半部 → 下半部 ↔ IOWorkLoop</text>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <ul>
+      <li>Linux（QEMU）：写一个 misc 字符设备驱动，实现 <code>read</code>/<code>write</code>，用 <code>cat</code>/<code>echo</code> 测试。</li>
+      <li>Linux（QEMU）：用 <code>-M virt,dumpdtb=virt.dtb</code> 导出设备树，再用 <code>dtc -I dtb -O dts</code> 反编译阅读。</li>
+      <li>macOS：用 <code>ioreg -l -w0 | less</code> 浏览 IORegistry，找一个设备的 <code>IOProviderClass</code> 与匹配属性。</li>
+      <li>macOS：用 <code>systemextensionsctl list</code> 查看已安装的 System Extension（包括 DriverKit dext）。</li>
+    </ul>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-5">
+    <div class="q" data-answer="b">
+      <p>1. 为什么中断上半部（hardirq handler）要尽量短？</p>
+      <label><input type="radio" name="q1" value="a"> 因为上半部运行在用户态</label>
+      <label><input type="radio" name="q1" value="b"> 因为它运行在中断上下文、不能睡眠，且执行期间会推迟其他中断和任务</label>
+      <label><input type="radio" name="q1" value="c"> 因为上半部无法访问设备寄存器</label>
+      <div class="why" hidden>上半部只做确认中断、读取必要状态等快速工作；耗时工作交给 softirq、workqueue 或 threaded IRQ（可以睡眠的内核线程）。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>2. DriverKit 驱动（dext）运行在哪里？</p>
+      <label><input type="radio" name="q2" value="a"> 内核态，作为 kext 加载</label>
+      <label><input type="radio" name="q2" value="b"> Secure Enclave 中</label>
+      <label><input type="radio" name="q2" value="c"> 用户态进程中，通过 IOKit 与内核通信</label>
+      <div class="why" hidden>DriverKit 的设计目标就是把第三方驱动移出内核：dext 在用户态运行，崩溃不会导致内核 panic。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://www.kernel.org/doc/html/latest/driver-api/driver-model/index.html">Linux kernel docs — Driver Model</a> <span class="lvl">入门，bus/device/driver</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/devicetree/usage-model.html">Linux kernel docs — Linux and the Devicetree</a> <span class="lvl">入门，devicetree 使用模型</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/core-api/dma-api-howto.html">Linux kernel docs — Dynamic DMA mapping Guide</a> <span class="lvl">进阶，DMA API</span></li>
+    <li><a href="https://lwn.net/Kernel/LDD3/">Linux Device Drivers, 3rd Edition (LWN)</a> <span class="lvl">经典，部分 API 已过时</span></li>
+    <li><a href="https://developer.apple.com/library/archive/documentation/DeviceDrivers/Conceptual/IOKitFundamentals/Introduction/Introduction.html">Apple — IOKit Fundamentals（archive）</a> <span class="lvl">入门，IOKit 架构</span></li>
+    <li><a href="https://developer.apple.com/documentation/driverkit">Apple Developer — DriverKit</a> <span class="lvl">查手册，DriverKit API</span></li>
+    <li><a href="https://asahilinux.org/docs/">Asahi Linux docs</a> <span class="lvl">深入，Apple Silicon 硬件与 DART（逆向来源）</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-4-syscalls-vfs-filesystems/index.html">← Phase 4 · Syscalls, VFS &amp; Filesystems</a>
+    <a href="../phase-6-debugging-and-tooling/index.html">Phase 6 · Debugging &amp; Tooling →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>

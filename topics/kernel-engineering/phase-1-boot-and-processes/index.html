@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 1 · Boot &amp; Processes · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 1</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 1 / 9 · 约 1–2 周</p>
+  <h1>Boot &amp; Processes <span class="en">启动与进程：boot chain、进程/线程模型、上下文切换、调度</span></h1>
+  <p class="lede">Phase 0 里你看着 Linux 在 QEMU 里启动到 shell。这一阶段把那段 boot log 拆开：CPU 上电后第一条内核指令在哪、内核怎么把自己变成「PID 1 + 一堆线程」、CPU 怎么从一个线程切到另一个线程，以及每次切换时「下一个是谁」由什么规则决定（CFS/EEVDF ↔ Mach scheduler / clutch）。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>按顺序说出 Linux arm64 和 XNU（Apple Silicon）从 bootloader 到 PID 1 的关键函数，并在源码树里找到它们。</li>
+      <li>解释 Linux「线程就是共享 <code>mm</code> 的 <code>task_struct</code>」和 XNU「Mach <code>task</code> ⊃ <code>thread</code>，BSD <code>proc</code> 挂在 task 上」两种模型的差别，以及为什么 macOS 上推荐 <code>posix_spawn</code>。</li>
+      <li>画出一次上下文切换：哪些寄存器被保存、存到哪、内核栈和页表（<code>TTBR0_EL1</code> + ASID）何时切换、新线程为什么「从自己的切换调用里返回」。</li>
+      <li>用一个具体例子讲清 CFS 和 EEVDF 选任务的区别，以及 XNU 优先级带 + clutch 层级怎样选出下一个线程。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>：exception level、<code>svc</code>/<code>eret</code>、ARM64 寄存器；Lab A 的 QEMU + initramfs 环境（本阶段直接复用）。</li>
+    <li>C：会写 <code>fork</code>/<code>exec</code>/<code>pthread_create</code> 的用户态小程序。</li>
+    <li>知道 AAPCS64 调用约定的大意：<code>x0–x7</code> 传参，<code>x19–x28</code> 是 callee-saved（被调用者负责保存）。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. Boot chain：从 bootloader 到 PID 1</h3>
+  <p><strong>Linux arm64</strong>（规范见 <code>Documentation/arch/arm64/booting.rst</code>）：</p>
+  <ol>
+    <li>固件 / bootloader（QEMU 里是 QEMU 自己；真机上是 U-Boot、UEFI 等）把内核 <code>Image</code> 放进内存，<code>x0</code> = 设备树（DTB）物理地址，MMU 关闭，CPU 处于 EL2 或 EL1。</li>
+    <li><code>Image</code> 开头是 64 字节的 header：第一条指令是跳转到真正入口的分支，后面有 <code>text_offset</code>、<code>image_size</code>、flags，偏移 0x38 处是魔数 <code>"ARM\x64"</code>。</li>
+    <li><code>primary_entry</code>（<code>arch/arm64/kernel/head.S</code>）：保存启动参数、处理 EL2（初始化或降到 EL1）、建立最初的页表。</li>
+    <li><code>__primary_switch</code>：调用 <code>__enable_mmu</code> 写 <code>TTBR0/1_EL1</code> 和 <code>SCTLR_EL1</code> 打开 MMU，之后跳到运行在内核虚拟地址上的 <code>__primary_switched</code>：设好 <code>VBAR_EL1</code>（Phase 0 的向量表）、init 任务的栈，再 <code>bl start_kernel</code>。</li>
+    <li><code>start_kernel()</code>（<code>init/main.c</code>）：一长串 <code>*_init()</code>——内存、中断、定时器、调度器（<code>sched_init</code>）……最后调 <code>rest_init()</code>。</li>
+    <li><code>rest_init()</code> 创建两个内核线程：<code>kernel_init</code>（拿到 PID 1）和 <code>kthreadd</code>（PID 2，以后所有内核线程的父亲）；启动它的那个 init task 自己退化成 CPU 0 的 idle 线程（PID 0，<code>swapper/0</code>）。</li>
+    <li><code>kernel_init</code> 跑完 initcall（驱动、文件系统……），然后 <code>run_init_process()</code> <em>exec</em> 用户态的 <code>/init</code>、<code>/sbin/init</code> 等——PID 1 从内核线程变成用户进程（systemd / busybox init）。</li>
+  </ol>
+  <p><strong>XNU on Apple Silicon</strong>（大致路径；ROM 和 iBoot 不开源，细节来自 Apple 平台安全白皮书和 Asahi 逆向）：</p>
+  <ol>
+    <li>Boot ROM → iBoot（分阶段，逐级验签）→ 加载签名过的 <strong>kernelcache</strong>（XNU + 预链接的 kext 打成一个镜像）和 Apple 设备树，经 <code>boot_args</code> 结构把参数交给内核。</li>
+    <li><code>osfmk/arm64/start.s</code>：汇编入口（主 CPU 走 <code>start_first_cpu</code>），设置异常向量、早期页表、开 MMU，然后跳 C。</li>
+    <li><code>arm_init()</code>（<code>osfmk/arm/arm_init.c</code>）：平台早期初始化（pexpert、pmap、时钟），然后 <code>machine_startup()</code>。</li>
+    <li><code>kernel_bootstrap()</code>（<code>osfmk/kern/startup.c</code>）：初始化 Mach——VM、IPC、task/thread、调度器，创建 <code>kernel_task</code>，然后切到第一个真正的内核线程。</li>
+    <li><code>kernel_bootstrap_thread()</code>：启动其余 CPU、IOKit（<code>PE_init_iokit</code>）、BSD 层 <code>bsd_init()</code>（<code>bsd/kern/bsd_init.c</code>）。</li>
+    <li><code>bsd_init</code> 建立 <code>kernproc</code>（PID 0，对应 <code>kernel_task</code>），再通过 <code>bsd_utaskbootstrap()</code> → <code>load_init_program()</code> exec <code>/sbin/launchd</code>——PID 1。</li>
+  </ol>
+  <div class="note">同一个形状：汇编入口开 MMU → 一个大的 C 初始化函数 → 第一个内核线程 → exec 用户态 PID 1。区别在于 XNU 的 C 初始化分两层（先 Mach 的 <code>kernel_bootstrap</code>，后 BSD 的 <code>bsd_init</code>），中间还要把 IOKit 拉起来。</div>
+
+  <h3>2. 进程与线程模型</h3>
+  <p><strong>Linux</strong> 只有一种可调度实体：<code>struct task_struct</code>（<code>include/linux/sched.h</code>）。「进程」和「线程」的区别只在于创建时 <code>clone</code> 的 flags 共享了什么：</p>
+  <ul>
+    <li><code>fork()</code> ≈ <code>clone</code> 不带共享 flag：新 task 拿到一份写时复制（COW）的 <code>mm_struct</code>、复制的 fd 表。</li>
+    <li><code>pthread_create()</code> ≈ <code>clone(CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | …)</code>：新 task 和调用者<em>共享</em> <code>mm</code>（同一套页表）、fd 表、信号处理；<code>CLONE_THREAD</code> 让它进同一个线程组。</li>
+    <li>用户态的「PID」其实是线程组 ID（<code>tgid</code>）；每个线程自己的 ID 是 TID（<code>gettid()</code>）。全部路径汇到 <code>kernel_clone()</code>（<code>kernel/fork.c</code>）。</li>
+    <li><code>execve()</code>（<code>fs/exec.c</code>）丢掉旧 <code>mm</code>、装入新程序，task 本身（PID）不变。</li>
+  </ul>
+  <p><strong>XNU</strong> 是两套抽象叠在一起：</p>
+  <ul>
+    <li>Mach <code>task</code>（<code>osfmk/kern/task.h</code>）= 资源容器：地址空间（<code>vm_map</code>）+ port 命名空间（<code>ipc_space</code>），本身<em>不</em>执行。</li>
+    <li>Mach <code>thread</code>（<code>osfmk/kern/thread.h</code>）= 执行与调度单位：寄存器状态、内核栈、优先级。task ⊃ 多个 thread。</li>
+    <li>BSD <code>proc</code>（<code>bsd/sys/proc_internal.h</code>）承载 PID、凭证、fd 表、信号；每个用户进程的 proc 与一个 task 一一对应，每个 thread 另有一个 BSD 侧的 <code>uthread</code>。</li>
+    <li><code>fork()</code> 存在（<code>bsd/kern/kern_fork.c</code>），但 Apple 推荐 <code>posix_spawn()</code>（<code>bsd/kern/kern_exec.c</code>）：直接创建新 task 并装入程序，不复制父进程地址空间；而且多线程进程 fork 后子进程只剩调用线程，在 exec 之前只能调 async-signal-safe 函数，很多系统框架不是 fork-safe 的。</li>
+  </ul>
+
+  <h3>3. 上下文切换</h3>
+  <p>切换总发生在<strong>内核态</strong>，并且对被切走的线程来说只是「调用了一个函数，很久以后它返回了」。因为是函数调用，按 AAPCS64 只需保存 callee-saved 寄存器（<code>x19–x28</code>、<code>fp</code>=<code>x29</code>、<code>lr</code>=<code>x30</code>、<code>sp</code>）；用户态的全部寄存器早在异常入口就存进了内核栈上的 <code>pt_regs</code> / saved state（Phase 0）。</p>
+  <ul>
+    <li><strong>Linux arm64</strong>：<code>__schedule()</code> → <code>context_switch()</code>（<code>kernel/sched/core.c</code>）：先 <code>switch_mm_irqs_off()</code> 切地址空间（不同 <code>mm</code> 时写 <code>TTBR0_EL1</code>，ASID 避免整表 TLB flush；内核线程借用前一个 mm），再 <code>switch_to()</code> → <code>__switch_to()</code>（<code>arch/arm64/kernel/process.c</code>，切 FP/SIMD、TLS 等）→ <code>cpu_switch_to(prev, next)</code>（<code>arch/arm64/kernel/entry.S</code>）：把 <code>x19–x28</code>、<code>fp</code>、<code>sp</code>、<code>lr</code> 存进 <code>prev->thread.cpu_context</code>，从 next 的 <code>cpu_context</code> 载入，<code>msr sp_el0</code> 更新 <code>current</code>，<code>ret</code>。</li>
+    <li><strong>XNU arm64</strong>：<code>thread_block()</code> → <code>thread_select()</code> 选出下一个 → <code>thread_invoke()</code>（<code>osfmk/kern/sched_prim.c</code>）→ <code>machine_switch_context()</code>（<code>osfmk/arm64/pcb.c</code>，大致路径：此处同时切 pmap，即 <code>TTBR0</code>/ASID）→ <code>Switch_context</code>（<code>osfmk/arm64/cswitch.s</code>）：存旧线程 callee-saved 寄存器、载入新线程的，更新当前线程指针（大致路径：arm64 上 <code>current_thread()</code> 读的是 <code>TPIDR_EL1</code>）。XNU 还支持 <em>continuation</em>：线程阻塞时可以交出内核栈，醒来后从指定函数重新开始，而不是「返回」。</li>
+    <li>新创建的线程从没调用过切换函数，所以创建时伪造一份上下文：Linux 让 <code>cpu_context.pc</code> 指向 <code>ret_from_fork</code>；XNU 让它从一个线程起始的汇编桩开始（<code>Thread_continue</code>，大致路径）。</li>
+  </ul>
+
+  <h3>4. 调度：选下一个是谁</h3>
+  <p><strong>Linux</strong> 用调度类分层（<code>stop</code> → <code>deadline</code> → <code>rt</code> → <code>fair</code> → <code>idle</code>），普通任务都在 fair 类（<code>kernel/sched/fair.c</code>）。优先级数值 0–139：0–99 实时，100–139 对应 nice −20…19。</p>
+  <ul>
+    <li><strong>CFS</strong>（2.6.23 – 6.5）：每个任务有 <code>vruntime</code> = 实际运行时间 × 1024 / 权重（nice 越低权重越大，vruntime 涨得越慢）。可运行任务按 vruntime 放在红黑树里，永远选最左（最小 vruntime）。公平，但对延迟敏感的任务没有直接表达方式。</li>
+    <li><strong>EEVDF</strong>（Linux 6.6 起取代 CFS）：仍然记 vruntime，另外算出队列的加权平均 <code>V</code>。任务的 <strong>lag</strong> = V − vruntime；lag ≥ 0 的任务才 <em>eligible</em>（没有多拿 CPU）。每个任务有<strong>虚拟截止时间</strong> vd = vruntime + slice / 权重；在 eligible 任务里选 vd 最早的。较短 slice 的任务 vd 更早，因此能更快被选中——延迟需求从此可以表达。</li>
+  </ul>
+  <p><strong>XNU</strong> 优先级 0–127，分 4 个带（<code>osfmk/kern/sched.h</code>）：96–127 实时、80–95 内核线程、64–79 保留（系统高优先级）、0–63 用户。用户线程的 QoS（User-Interactive、User-Initiated、Default、Utility、Background）映射到 0–63 里的基础优先级（大致：UI ≈ 46–47，Default 31，Background 4）。</p>
+  <ul>
+    <li><strong>timeshare + 衰减</strong>：普通线程的有效优先级 <code>sched_pri</code> 从基础优先级出发，随最近 CPU 使用量下降，空闲后回升——防止 CPU 密集线程饿死别人。</li>
+    <li><strong>clutch</strong>（<code>osfmk/kern/sched_clutch.c</code>）：实时线程走单独的 RT 队列直接优先；其余线程三层选择——先在 QoS <em>root bucket</em>（FIXPRI、FG、IN、DF、UT、BG）之间按截止时间做 EDF（高 QoS 有 warp，可以插队，但低 QoS 不会饿死），再在 bucket 内选 <em>thread group</em>（同一 app / 工作负载的线程组）对应的 clutch bucket，最后选 <code>sched_pri</code> 最高的线程。</li>
+    <li><strong>AMP（P/E 核）</strong>：Apple Silicon 上用 clutch 的多 cluster 扩展 <strong>Edge</strong> 调度器：每个 cluster 有自己的运行队列层级，按 QoS、thread group 的性能推荐、负载决定放 P 核还是 E 核，并在 cluster 间迁移/偷取。被绑定到某个 CPU 的线程在该 processor 自己的 run queue 里。</li>
+  </ul>
+
+  <h3>5. <code>ps</code>/<code>top</code> 看到的 vs 内核持有的</h3>
+  <ul>
+    <li>Linux 的 <code>ps</code>/<code>top</code> 只是读 <code>/proc</code>：<code>/proc/&lt;pid&gt;/stat</code>、<code>status</code>，线程在 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/</code>。显示的 PID 是 tgid；<code>ps -L</code> 的 LWP 才是每个 task 的 ID。</li>
+    <li>状态 <code>R</code> 包含「正在跑」和「在运行队列里等」（内核里都是 <code>TASK_RUNNING</code>）；<code>D</code> 是不可中断睡眠。<code>top</code> 的 PR 列对普通任务是 20 + nice，不是内核的 100–139 数值。</li>
+    <li>macOS 的 <code>ps</code>/<code>top</code> 通过 <code>sysctl</code>（<code>KERN_PROC</code>）和 <code>proc_info</code>（libproc）拿数据，看到的是 BSD proc 视角；Mach 线程用 <code>ps -M</code> 看，<code>PRI</code> 列是线程当前优先级。QoS、thread group、跑在 P 还是 E 核，要用 <code>powermetrics</code>、Instruments、<code>spindump</code> 这类工具才看得到。</li>
+    <li>两边都看不到：vruntime / lag / deadline、clutch bucket 的 deadline——只有调度调试接口（Linux <code>/sys/kernel/debug/sched/debug</code>）或 tracing 能看。</li>
+  </ul>
+
+  <h2 id="compare">对照表：Linux ↔ XNU</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux（arm64）</th><th class="xnu">XNU（arm64）</th></tr>
+    <tr><td>内核第一条指令</td><td><code>Image</code> header → <code>primary_entry</code>（<code>arch/arm64/kernel/head.S</code>）</td><td>kernelcache 入口，<code>osfmk/arm64/start.s</code>（<code>start_first_cpu</code>）</td></tr>
+    <tr><td>主 C 初始化</td><td><code>start_kernel()</code> → <code>rest_init()</code>（<code>init/main.c</code>）</td><td><code>arm_init()</code> → <code>kernel_bootstrap()</code> → <code>kernel_bootstrap_thread()</code> → <code>bsd_init()</code></td></tr>
+    <tr><td>PID 1</td><td><code>kernel_init</code> 线程 exec <code>/sbin/init</code>（systemd 等）</td><td><code>load_init_program()</code> exec <code>/sbin/launchd</code></td></tr>
+    <tr><td>PID 0 / idle</td><td>每 CPU 一个 idle task（<code>swapper/N</code>），<code>do_idle()</code>（<code>kernel/sched/idle.c</code>）</td><td><code>kernproc</code> / <code>kernel_task</code>（PID 0）；每 CPU 的 <code>idle_thread</code></td></tr>
+    <tr><td>「进程」结构</td><td><code>task_struct</code> + 共享的 <code>mm_struct</code>、<code>files_struct</code>……</td><td>Mach <code>task</code> + BSD <code>proc</code>（一一对应）</td></tr>
+    <tr><td>「线程」结构</td><td>同样是 <code>task_struct</code>（同一线程组）</td><td>Mach <code>thread</code> + BSD <code>uthread</code></td></tr>
+    <tr><td>创建进程</td><td><code>fork</code>/<code>vfork</code>/<code>clone</code>/<code>clone3</code> → <code>kernel_clone()</code></td><td><code>fork</code>（<code>kern_fork.c</code>）；推荐 <code>posix_spawn</code>（<code>kern_exec.c</code>）</td></tr>
+    <tr><td>创建线程</td><td><code>clone(CLONE_VM | CLONE_THREAD | …)</code></td><td><code>bsdthread_create</code>（libpthread 用）；Mach <code>thread_create</code> 系列</td></tr>
+    <tr><td>上下文切换</td><td><code>context_switch</code> → <code>__switch_to</code> → <code>cpu_switch_to</code></td><td><code>thread_invoke</code> → <code>machine_switch_context</code> → <code>Switch_context</code></td></tr>
+    <tr><td>普通任务调度器</td><td>EEVDF（6.6 起；之前 CFS），<code>kernel/sched/fair.c</code></td><td>timeshare + clutch；Apple Silicon 上 Edge（<code>sched_clutch.c</code>）</td></tr>
+    <tr><td>优先级范围</td><td>0–139（0–99 RT，100–139 = nice −20…19）</td><td>0–127（96+ RT，80–95 内核，64–79 保留，0–63 用户）</td></tr>
+    <tr><td>时间片到期 / 抢占信号</td><td>tick 处理设 <code>TIF_NEED_RESCHED</code></td><td>quantum 到期设 <code>AST_PREEMPT</code>，返回前处理 AST</td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解</h2>
+  <h3>(a) 上下文切换：CPU 从线程 A 切到线程 B</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2200"
+         data-captions='["全图：同一颗 CPU 上线程 A 正在运行，要切到线程 B。左列 Linux arm64，右列 XNU arm64，自上而下 6 步。按「播放」逐步走。",
+           "① 定时器中断打断 A（Apple Silicon 上定时器走 FIQ）。Linux：tick 处理（scheduler_tick，6.10 起叫 sched_tick）发现 A 用完了份额，设 TIF_NEED_RESCHED；XNU：quantum 到期，设 AST_PREEMPT。都在中断返回前处理。",
+           "② 调度器选人。Linux：__schedule → pick_next_task，fair 类用 EEVDF 选出 B。XNU：thread_block → thread_select 在 clutch 层级里选出 B，然后 thread_invoke。",
+           "③ 保存 A。因为切换是一次函数调用，只需存 callee-saved：x19–x28、fp、sp、lr。Linux 存进 A 的 thread.cpu_context（cpu_switch_to）；XNU 存进 A 的内核保存区（Switch_context）。",
+           "④ 换内核栈和地址空间：sp 换成 B 的内核栈；若 B 属于另一个地址空间，写 TTBR0_EL1（带 ASID，免整表 TLB flush）。注意：Linux 实际在 switch_to 之前就在 context_switch 里调 switch_mm_irqs_off；XNU 在 machine_switch_context 里切 pmap（大致路径）。这里为讲解合成一步。",
+           "⑤ 恢复 B：从 B 的保存区载入 x19–x28、fp、sp、lr。Linux 用 msr sp_el0 把 current 指向 B；XNU 更新当前线程指针（TPIDR_EL1，大致路径）。",
+           "⑥ ret：跳到 lr——也就是 B 上次调切换函数时的返回点。B 觉得自己只是从 cpu_switch_to / Switch_context 返回了，一路退回到它的异常出口再 eret 回用户态。新线程的 lr 预先指向 ret_from_fork（Linux）或线程起始桩（XNU）。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="190" y="22" class="small" style="fill: var(--linux)">Linux arm64</text>
+      <text x="630" y="22" class="small" style="fill: var(--xnu)">XNU arm64</text>
+      <line x1="450" y1="30" x2="450" y2="410" class="lane"/>
+
+      <!-- step 1: timer interrupt -->
+      <g data-step="1"><rect class="box linux" x="30" y="35" width="405" height="52"/>
+        <text x="42" y="56" class="mono">IRQ on CPU0 (A running) → sched_tick</text>
+        <text x="42" y="76" class="small">设 TIF_NEED_RESCHED；中断返回前检查 → schedule()</text></g>
+      <g data-step="1"><rect class="box xnu" x="465" y="35" width="405" height="52"/>
+        <text x="477" y="56" class="mono">FIQ timer (A running) → quantum 到期</text>
+        <text x="477" y="76" class="small">设 AST_PREEMPT；返回前处理 AST → thread_block</text></g>
+
+      <!-- step 2: pick next -->
+      <g data-step="2"><rect class="box linux" x="30" y="97" width="405" height="52"/>
+        <text x="42" y="118" class="mono">__schedule → pick_next_task → B</text>
+        <text x="42" y="138" class="small">kernel/sched/core.c；fair 类用 EEVDF 选</text></g>
+      <g data-step="2"><rect class="box xnu" x="465" y="97" width="405" height="52"/>
+        <text x="477" y="118" class="mono">thread_select → B ; thread_invoke</text>
+        <text x="477" y="138" class="small">osfmk/kern/sched_prim.c；clutch 层级里选</text></g>
+
+      <!-- step 3: save A -->
+      <g data-step="3"><rect class="box linux" x="30" y="159" width="405" height="52"/>
+        <text x="42" y="180" class="mono">cpu_switch_to: stp x19..x28, fp, sp, lr</text>
+        <text x="42" y="200" class="small">→ A-&gt;thread.cpu_context（entry.S）</text></g>
+      <g data-step="3"><rect class="box xnu" x="465" y="159" width="405" height="52"/>
+        <text x="477" y="180" class="mono">Switch_context: 存 x19..x28, fp, lr, sp</text>
+        <text x="477" y="200" class="small">→ A 的内核保存区（osfmk/arm64/cswitch.s）</text></g>
+
+      <!-- step 4: stack + address space -->
+      <g data-step="4"><rect class="box linux" x="30" y="221" width="405" height="52"/>
+        <text x="42" y="242" class="mono">sp ← B 内核栈 ; TTBR0_EL1 ← B.mm (ASID)</text>
+        <text x="42" y="262" class="small">switch_mm_irqs_off；同一 mm 的线程跳过</text></g>
+      <g data-step="4"><rect class="box xnu" x="465" y="221" width="405" height="52"/>
+        <text x="477" y="242" class="mono">sp ← B 内核栈 ; TTBR0_EL1 ← B pmap (ASID)</text>
+        <text x="477" y="262" class="small">machine_switch_context 里切 pmap（大致路径）</text></g>
+
+      <!-- step 5: restore B -->
+      <g data-step="5"><rect class="box linux" x="30" y="283" width="405" height="52"/>
+        <text x="42" y="304" class="mono">ldp x19..x28, fp, sp, lr ← B.cpu_context</text>
+        <text x="42" y="324" class="small">msr sp_el0, B → current = B</text></g>
+      <g data-step="5"><rect class="box xnu" x="465" y="283" width="405" height="52"/>
+        <text x="477" y="304" class="mono">载入 B 的 x19..x28, fp, lr, sp</text>
+        <text x="477" y="324" class="small">当前线程指针 ← B（TPIDR_EL1，大致路径）</text></g>
+
+      <!-- step 6: ret into B -->
+      <g data-step="6"><rect class="box" x="30" y="345" width="405" height="52"/>
+        <text x="42" y="366" class="mono">ret → B 从自己的 cpu_switch_to 返回</text>
+        <text x="42" y="386" class="small">新任务：lr 预设为 ret_from_fork</text>
+        <rect class="box" x="465" y="345" width="405" height="52"/>
+        <text x="477" y="366" class="mono">ret → B 从自己的 Switch_context 返回</text>
+        <text x="477" y="386" class="small">新线程：从线程起始桩开始（大致路径）</text>
+        <path class="arrow flow" d="M18 61 L18 371"/>
+        <path class="arrow flow" d="M882 61 L882 371"/></g>
+    </svg>
+  </div>
+
+  <h3>(b) 运行队列与调度决策</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2400"
+         data-captions='["全图：左边是 Linux 一个 CPU 的 fair 运行队列（三个可运行任务），右边是 XNU 的优先级带和 clutch 层级。按「播放」看两边各自怎么选出下一个。",
+           "① 起点。Linux：T1、T2、T3 按 vruntime 排在红黑树里（T1=10，T2=16，T3=34）。XNU：优先级 0–127 分 4 个带——96–127 实时、80–95 内核、64–79 保留、0–63 用户（QoS 映射到这里）。",
+           "② 最简单的规则。CFS：永远选最左节点 = 最小 vruntime，即 T1。XNU：先看实时队列，有 RT 线程就直接运行它，不进 clutch 层级；这里没有 RT 线程，继续往下。",
+           "③ EEVDF 先算加权平均 V（这里 V=20）：lag = V − vruntime ≥ 0 才 eligible，所以 T1、T2 可选，T3 已经多拿了 CPU，不可选。XNU：在 QoS root bucket（FIXPRI、FG、IN、DF、UT、BG）之间按截止时间做 EDF，高 QoS 有 warp 可插队，这里选出 FG。",
+           "④ EEVDF：每个任务的虚拟截止时间 vd = vruntime + slice / 权重；eligible 里 vd 最早的是 T2（28 早于 T1 的 48），所以选 T2——与 CFS 的答案不同。XNU：在 FG 里选 thread group 对应的 clutch bucket，再选 sched_pri 最高的线程（47）。",
+           "⑤ 运行之后。Linux：T2 的 vruntime 按 Δexec × 1024 / 权重增加，重算 vd，放回树里。XNU：timeshare 线程的 sched_pri 随 CPU 使用量衰减；Apple Silicon 上的 Edge 调度器按 QoS、负载和 thread group 的性能推荐把线程放到 P 核或 E 核。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="120" y="22" class="small" style="fill: var(--linux)">Linux · 一个 CPU 的 cfs_rq</text>
+      <text x="560" y="22" class="small" style="fill: var(--xnu)">XNU · Apple Silicon（clutch / Edge）</text>
+      <line x1="450" y1="30" x2="450" y2="410" class="lane"/>
+
+      <!-- Linux: step 1 intro -->
+      <g data-step="1"><text x="40" y="55" class="small">三个可运行任务，按 vruntime 排在红黑树里</text>
+        <text x="40" y="75" class="small">T1 nice 5（权重低），T2、T3 nice 0</text></g>
+      <!-- Linux: axis and tasks (always on) -->
+      <g data-step="1 2 3 4 5"><path class="arrow" d="M40 150 L430 150"/>
+        <text x="360" y="172" class="small">vruntime →</text>
+        <rect class="box linux" x="92" y="137" width="36" height="26"/><text x="100" y="155" class="mono">T1</text><text x="92" y="130" class="small">10</text>
+        <rect class="box linux" x="134" y="137" width="36" height="26"/><text x="142" y="155" class="mono">T2</text><text x="140" y="130" class="small">16</text>
+        <rect class="box linux" x="260" y="137" width="36" height="26"/><text x="268" y="155" class="mono">T3</text><text x="266" y="130" class="small">34</text></g>
+      <!-- Linux: step 2 CFS -->
+      <g data-step="2"><path class="arrow flow" d="M110 192 L110 166"/>
+        <rect class="box linux" x="40" y="192" width="390" height="34"/>
+        <text x="52" y="214" class="small">CFS：选最左节点 = 最小 vruntime → T1</text></g>
+      <!-- Linux: step 3 V and eligibility -->
+      <g data-step="3"><line x1="180" y1="95" x2="180" y2="178" style="stroke: var(--linux); stroke-dasharray: 4 3"/>
+        <text x="186" y="105" class="small">V = 20（加权平均 vruntime）</text>
+        <rect class="box linux" x="40" y="234" width="390" height="34"/>
+        <text x="52" y="256" class="small">eligible：lag = V − vruntime ≥ 0 → T1、T2；T3 不可选</text></g>
+      <!-- Linux: step 4 deadlines -->
+      <g data-step="4"><rect class="box linux" x="110" y="278" width="266" height="9"/><text x="382" y="287" class="small">vd 48</text>
+        <rect class="box linux pulse" x="152" y="294" width="84" height="9"/><text x="242" y="303" class="small">vd 28 ← 最早</text>
+        <rect class="box" x="278" y="310" width="84" height="9"/><text x="368" y="319" class="small">vd 46</text>
+        <text x="40" y="340" class="small">EEVDF：eligible 中虚拟截止时间最早 → T2</text></g>
+      <!-- Linux: step 5 update -->
+      <g data-step="5"><rect class="box linux" x="40" y="352" width="390" height="48"/>
+        <text x="52" y="372" class="small">T2 运行后：vruntime += Δexec × 1024 / weight</text>
+        <text x="52" y="391" class="small">重算 vd，放回树里；下一次调度再比</text></g>
+
+      <!-- XNU: step 1-2 priority bands -->
+      <g data-step="1 2"><rect class="box xnu" x="470" y="40" width="400" height="28"/><text x="480" y="59" class="small">96–127 实时（RT 队列）</text>
+        <rect class="box" x="470" y="72" width="400" height="28"/><text x="480" y="91" class="small">80–95 内核线程</text>
+        <rect class="box" x="470" y="104" width="400" height="28"/><text x="480" y="123" class="small">64–79 保留（系统高优先级）</text>
+        <rect class="box" x="470" y="136" width="400" height="28"/><text x="480" y="155" class="small">0–63 用户 timeshare（QoS 映射到这里）</text></g>
+      <g data-step="2"><text x="470" y="184" class="small">先看 RT 队列：有 RT 线程直接选它，不进 clutch</text></g>
+      <!-- XNU: step 3 root buckets -->
+      <g data-step="3 4"><rect class="box" x="470" y="195" width="60" height="30"/><text x="476" y="215" class="small">FIXPRI</text>
+        <rect class="box xnu pulse" x="537" y="195" width="60" height="30"/><text x="556" y="215" class="small">FG</text>
+        <rect class="box" x="604" y="195" width="60" height="30"/><text x="625" y="215" class="small">IN</text>
+        <rect class="box" x="671" y="195" width="60" height="30"/><text x="691" y="215" class="small">DF</text>
+        <rect class="box" x="738" y="195" width="60" height="30"/><text x="758" y="215" class="small">UT</text>
+        <rect class="box" x="805" y="195" width="60" height="30"/><text x="825" y="215" class="small">BG</text></g>
+      <g data-step="3"><text x="470" y="244" class="small">root bucket 之间按截止时间 EDF（高 QoS 有 warp）→ FG</text></g>
+      <!-- XNU: step 4 thread group, thread -->
+      <g data-step="4"><path class="arrow flow" d="M567 225 L600 258"/>
+        <rect class="box xnu" x="540" y="258" width="150" height="28"/><text x="550" y="277" class="small">clutch bucket: TG A</text>
+        <rect class="box" x="710" y="258" width="150" height="28"/><text x="720" y="277" class="small">clutch bucket: TG B</text>
+        <path class="arrow" d="M600 286 L580 300"/>
+        <rect class="box xnu pulse" x="520" y="300" width="100" height="26"/><text x="530" y="318" class="small">thread pri 47</text>
+        <rect class="box" x="630" y="300" width="100" height="26"/><text x="640" y="318" class="small">thread pri 31</text>
+        <text x="470" y="343" class="small">bucket 内选 clutch bucket，再选 sched_pri 最高的线程</text></g>
+      <!-- XNU: step 5 decay + AMP -->
+      <g data-step="5"><rect class="box xnu" x="470" y="352" width="400" height="48"/>
+        <text x="482" y="372" class="small">timeshare 线程 sched_pri 随 CPU 使用量衰减</text>
+        <text x="482" y="391" class="small">Edge：按 QoS / 负载 / 性能推荐放到 P 核或 E 核</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <h3>Lab A · 在 QEMU Linux 里看启动链、调度器和线程</h3>
+    <ol>
+      <li>复用 Phase 0 的 <code>Image</code> 和 initramfs，命令行加 <code>initcall_debug</code>，看每个 initcall 的耗时：<pre>qemu-system-aarch64 -M virt -cpu cortex-a72 -smp 2 -m 1G -nographic \
+  -kernel arch/arm64/boot/Image -initrd initramfs/initramfs.cpio.gz \
+  -append "console=ttyAMA0 rdinit=/init initcall_debug"</pre>
+        进 shell 后：<pre>dmesg | head -30                     # 最早的输出：Booting Linux on physical CPU 0x0 ...
+dmesg | grep "initcall" | head -20   # calling / initcall ... returned 0 after N usecs
+dmesg | grep -i "run /init"          # kernel_init 交棒给 PID 1 的那一行</pre>
+        对照概念 1：哪些输出来自 <code>start_kernel</code> 的早期阶段，哪些来自 <code>kernel_init</code> 的 initcall？</li>
+      <li>看调度器内部状态（5.13 起从 <code>/proc/sched_debug</code> 移到 debugfs；需要内核开了调度调试选项）：<pre>mount -t debugfs none /sys/kernel/debug
+head -60 /sys/kernel/debug/sched/debug   # 每 CPU 的 cfs_rq、每个任务的 vruntime / deadline 等
+ls /proc/1/task /proc/2/task             # PID 1 = 你的 /init，PID 2 = kthreadd</pre>
+        如果文件不存在，说明内核配置里没开（旧内核看 <code>CONFIG_SCHED_DEBUG</code>）或 debugfs 没挂上；记下来，不要猜。</li>
+      <li>写一个小程序，对比 <code>clone()</code> 和 <code>pthread_create()</code>：<pre>/* threads.c */
+#define _GNU_SOURCE
+#include &lt;sched.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+
+/* 裸 clone 出来的线程没有设置 TLS，不要在里面调 printf 等 libc 函数 */
+static int raw_thread(void *arg) { for (;;) pause(); return 0; }
+static void *posix_thread(void *arg) { for (;;) pause(); return NULL; }
+
+int main(void) {
+  size_t sz = 64 * 1024;
+  char *stack = malloc(sz);
+  clone(raw_thread, stack + sz,
+        CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD, NULL);
+  pthread_t t;
+  pthread_create(&amp;t, NULL, posix_thread, NULL);
+  if (fork() == 0) { for (;;) pause(); }   /* 子进程：独立的 PID 和 mm */
+  printf("main pid=%d\n", getpid());
+  fflush(stdout);
+  for (;;) pause();
+}</pre>
+        用 Phase 0 的 Alpine 容器静态编译并重打 initramfs（在 Phase 0 那条 docker 命令里加 <code>apk add -q build-base</code>、<code>gcc -static -O2 -pthread -o /r/bin/threads threads.c</code>，并用 <code>-v</code> 把 <code>threads.c</code> 挂进去）。启动后：<pre>threads &amp;
+ls /proc/$!/task          # 3 个 TID：主线程、clone 线程、pthread 线程
+cat /proc/$!/status | grep -E "Tgid|Threads"
+ps -o pid,ppid,comm       # fork 出来的子进程有自己的 PID，不在上面的 task/ 里</pre>
+        问自己：三个 TID 的 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/maps</code> 为什么完全一样？fork 子进程的 maps 呢？（busybox 的 <code>ps</code> 选项可能较少，不支持 <code>-o</code> 就直接 <code>ps</code>。）</li>
+    </ol>
+
+    <h3>Lab B · 在 macOS 上看 XNU 的进程、QoS 和调度</h3>
+    <ol>
+      <li>线程视角：<pre>ps -M -p $$                 # 当前 shell 的所有 Mach 线程，PRI 列是线程优先级
+ps -M -p "$(pgrep -n Safari)" | head -20   # 多线程 app：优先级差别很大</pre></li>
+      <li>QoS 与能耗（需要 sudo；不同 macOS 版本的输出列不同，先 <code>man powermetrics</code> 看你的版本支持哪些选项，例如是否有 <code>--show-process-qos</code>）：<pre>sudo powermetrics --samplers tasks -n 1 | head -40</pre></li>
+      <li>调度相关 sysctl 与 PID 1：<pre>sysctl kern.sched                      # 当前调度器名（看看你的机器输出什么）
+sysctl -a | grep -i "^kern.sched" | head
+launchctl print system | head -30      # launchd（PID 1）管理的系统域
+ps -p 1 -o pid,ppid,comm               # PID 1 就是 launchd</pre></li>
+      <li>在 XNU 源码（Phase 0 Lab B 克隆的树）里找到动画中的函数：<pre>cd xnu
+grep -n "start_first_cpu" osfmk/arm64/start.s | head
+grep -n "^arm_init\|^kernel_bootstrap\|^kernel_bootstrap_thread" osfmk/arm/arm_init.c osfmk/kern/startup.c
+grep -n "load_init_program\|bsd_utaskbootstrap" bsd/kern/bsd_init.c bsd/kern/kern_exec.c | head
+grep -n "Switch_context" osfmk/arm64/cswitch.s osfmk/arm64/pcb.c | head
+grep -n "^thread_invoke\|^thread_select" osfmk/kern/sched_prim.c
+grep -n "TH_BUCKET_SHARE_FG\|root_bucket" osfmk/kern/sched_clutch.c | head</pre>
+        某个 grep 没有结果时，先用 <code>grep -rn 名字 osfmk bsd</code> 全树搜，函数可能在新版本里换了文件；把实际位置记下来。</li>
+    </ol>
+    <div class="note">交付物：Lab A 里 <code>ls /proc/&lt;pid&gt;/task</code> 的输出 + Lab B 里 <code>Switch_context</code> 所在文件和行号 + 你用自己的话写的「CFS 与 EEVDF 在动画例子里为什么选了不同的任务」（10 行以内），放进 <code>docs/agent/logs/</code> 当天的日志。</div>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-1">
+    <div class="q" data-answer="b">
+      <p>1. 在 Linux 上，<code>pthread_create()</code> 创建的线程在内核里是什么？</p>
+      <label><input type="radio" name="q1" value="a"> 进程内部的一个用户态结构，内核不知道它存在</label>
+      <label><input type="radio" name="q1" value="b"> 一个新的 <code>task_struct</code>，与调用者共享 <code>mm</code>、fd 表等，并属于同一个线程组</label>
+      <label><input type="radio" name="q1" value="c"> 一个新进程，拥有写时复制的地址空间副本</label>
+      <div class="why" hidden>glibc/musl 用 <code>clone(CLONE_VM | CLONE_THREAD | …)</code> 创建它：调度单位仍是 <code>task_struct</code>，<code>getpid()</code> 返回相同的 tgid，<code>gettid()</code> 不同。c 描述的是 <code>fork()</code>。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>2. 运行队列里有 T1（vruntime 10，vd 48）、T2（vruntime 16，vd 28）、T3（vruntime 34，vd 46），加权平均 V = 20。EEVDF 选谁？</p>
+      <label><input type="radio" name="q2" value="a"> T1：vruntime 最小</label>
+      <label><input type="radio" name="q2" value="b"> T3：它的 lag 最大</label>
+      <label><input type="radio" name="q2" value="c"> T2：在 eligible 的 T1、T2 中虚拟截止时间最早</label>
+      <div class="why" hidden>lag = V − vruntime：T1 = 10、T2 = 4、T3 = −14，所以 T3 不 eligible。eligible 中 vd 最小的是 T2。选 T1 是 CFS 的答案。</div>
+    </div>
+    <div class="q" data-answer="a">
+      <p>3. XNU 中 Mach task、Mach thread 和 BSD proc 的关系是？</p>
+      <label><input type="radio" name="q3" value="a"> task 持有地址空间和 port 空间并包含多个 thread；每个用户进程的 proc 与一个 task 一一对应</label>
+      <label><input type="radio" name="q3" value="b"> 一个 proc 包含多个 task，每个 task 就是一个线程</label>
+      <label><input type="radio" name="q3" value="c"> thread 和 proc 一一对应，task 只在内核线程中使用</label>
+      <div class="why" hidden>task 是资源容器（<code>vm_map</code> + <code>ipc_space</code>），thread 是执行和调度单位；BSD 层的 PID、凭证、fd 表在 proc 里，挂在对应的 task 上；每个 thread 另有 BSD 侧的 uthread。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>4. 为什么 <code>cpu_switch_to</code> / <code>Switch_context</code> 只保存 <code>x19–x28</code>、<code>fp</code>、<code>sp</code>、<code>lr</code>，不保存 <code>x0–x18</code>？</p>
+      <label><input type="radio" name="q4" value="a"> x0–x18 是只读寄存器，不会被改</label>
+      <label><input type="radio" name="q4" value="b"> 切换以普通函数调用的形式发生，按 AAPCS64 调用者本来就不指望 caller-saved 寄存器在调用后保持；用户态寄存器则在异常入口时已存进内核栈</label>
+      <label><input type="radio" name="q4" value="c"> 硬件在切换时自动保存 x0–x18</label>
+      <div class="why" hidden>上下文切换对被切走的线程来说只是「调用了一个函数」，所以只需保存被调用者负责的寄存器。用户态的完整寄存器（含 x0–x18）早在 Phase 0 讲的异常入口就存进了 <code>pt_regs</code> / saved state。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/head.S">linux/arch/arm64/kernel/head.S</a> · <a href="https://github.com/torvalds/linux/blob/master/init/main.c">init/main.c</a> · <a href="https://docs.kernel.org/arch/arm64/booting.html">Booting AArch64 Linux</a> <span class="lvl">源码，概念 1：primary_entry → start_kernel → kernel_init</span></li>
+    <li><a href="https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/process.c">arch/arm64/kernel/process.c</a> · <a href="https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/entry.S">entry.S</a> <span class="lvl">源码，动画 (a)：__switch_to、cpu_switch_to</span></li>
+    <li><a href="https://github.com/torvalds/linux/blob/master/kernel/sched/fair.c">kernel/sched/fair.c</a> · <a href="https://github.com/torvalds/linux/blob/master/kernel/sched/core.c">kernel/sched/core.c</a> <span class="lvl">源码，进阶：EEVDF 实现、__schedule、context_switch</span></li>
+    <li><a href="https://lwn.net/Articles/925371/">LWN — An EEVDF CPU scheduler for Linux</a> <span class="lvl">入门到中级，lag / eligible / deadline 讲得最清楚</span></li>
+    <li><a href="https://docs.kernel.org/scheduler/index.html">Linux kernel docs — Scheduling</a> <span class="lvl">参考，CFS 设计文档与 EEVDF 文档</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/start.s">xnu/osfmk/arm64/start.s</a> · <a href="https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/startup.c">osfmk/kern/startup.c</a> · <a href="https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/arm64/cswitch.s">osfmk/arm64/cswitch.s</a> <span class="lvl">源码，启动链与 Switch_context</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/sched_clutch.c">xnu/osfmk/kern/sched_clutch.c</a> <span class="lvl">源码，进阶：clutch 层级与 Edge；仓库 doc/ 目录下有调度器设计说明</span></li>
+    <li><a href="https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/PrioritizeWorkWithQoS.html">Apple — Prioritize Work with Quality of Service Classes</a> <span class="lvl">入门，QoS 类的含义与用法（应用开发者视角）</span></li>
+    <li>Jonathan Levin, <em>*OS Internals</em> Vol. II: Kernel Mode <span class="lvl">XNU 启动、task/thread、调度的系统讲解</span></li>
+    <li>Robert Love, <em>Linux Kernel Development</em>（3rd ed.）第 3–4 章 <span class="lvl">入门，进程管理与调度（CFS 时代，概念仍适用）</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-0-foundations/index.html">← Phase 0 · Foundations</a>
+    <a href="../phase-2-memory/index.html">Phase 2 · Memory →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>

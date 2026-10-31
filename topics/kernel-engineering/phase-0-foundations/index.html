@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 0 · Foundations · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html">Learning Garden</a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb">Phase 0</span>
+    <span class="spacer"></span>
+    <button class="theme" type="button" title="切换明暗">◐</button>
+  </header>
+
+  <p class="meta">Phase 0 / 9 · 约 1–2 周</p>
+  <h1>Foundations <span class="en">内核基础：特权级、C 系统编程、ARM64、工具链</span></h1>
+  <p class="lede">在读任何一行内核代码之前，先把「内核在 CPU 上到底是怎么跑起来的」这件事搞清楚：用户态和内核态如何切换、内核代码和普通 C 程序有什么不一样、ARM64 上哪些寄存器在管这件事、以及怎么把一个 Linux 内核编出来在 QEMU 里跑。</p>
+
+  <h2 id="goals">目标</h2>
+  <div class="goals">
+    读完并做完实验后，你应该能：
+    <ul>
+      <li>解释 ARM64 的 exception level（EL0–EL3）和 x86 ring 的对应关系，说清 <code>svc</code> → 内核 → <code>eret</code> 这一来一回 CPU 做了什么。</li>
+      <li>说出 freestanding C（内核 C）和用户态 C 的 6 个关键区别，并知道 <code>volatile</code>、内存屏障、内联汇编各解决什么问题。</li>
+      <li>在 macOS（Apple Silicon）上用 LLVM 工具链编译 Linux arm64 内核，并在 QEMU <code>virt</code> 机器上启动到 shell。</li>
+      <li>在 Linux 和 XNU 源码树里找到「同一件事」各自在哪个目录。</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq">前置</h2>
+  <ul>
+    <li>C：指针、结构体、函数指针、位运算；读过 CSAPP 第 1–3、7–9 章更好。</li>
+    <li>知道进程、线程、虚拟内存、系统调用是什么（本阶段不展开，Phase 1–2 展开）。</li>
+    <li>一台 Apple Silicon Mac + Homebrew；磁盘空余 ≥ 10 GB（Linux 源码树 + 构建产物）。</li>
+  </ul>
+
+  <h2 id="concepts">核心概念</h2>
+
+  <h3>1. 内核 = 运行在更高特权级上的那部分代码</h3>
+  <p>CPU 硬件把执行分成若干特权级。ARM64 叫 <strong>exception level</strong>：<code>EL0</code> 用户程序、<code>EL1</code> 操作系统内核、<code>EL2</code> hypervisor、<code>EL3</code> secure monitor（固件）。x86 对应 ring 3 / ring 0（ring 1、2 现代 OS 不用），hypervisor 另有 VMX root mode。「内核态」就是 CPU 处于 EL1（或 ring 0）的状态，此时才能执行特权指令（改页表基址、关中断、访问设备寄存器）。</p>
+  <p>从 EL0 进入 EL1 <em>只有一条路</em>：触发 exception——同步的（<code>svc</code> 系统调用指令、缺页、非法指令）或异步的（IRQ/FIQ 中断、SError）。CPU 跳到 <code>VBAR_EL1</code> 指向的 <strong>exception vector table</strong>（16 个入口，每个 0x80 字节，按「来自哪个 EL × 哪类异常」排布），内核从那里接管。返回用户态也只有一条路：<code>eret</code>。</p>
+  <div class="note">Apple Silicon 补充：据 Asahi Linux 的逆向文档，Apple 的 XNU 在 M 系列芯片上运行于 EL2 并启用 VHE（Virtualization Host Extensions），这样它既是内核也是 Hypervisor.framework 的宿主；用户态仍是 EL0。本阶段只区分 user / kernel 两级即可，EL2 细节放到 Phase 8。</div>
+
+  <h3>2. 系统调用：一次受控的「越级」</h3>
+  <p>用户程序调 <code>write()</code>，libc 把系统调用号放进约定寄存器、参数放进 <code>x0–x5</code>，执行 <code>svc #0</code>。CPU 自动把返回地址存入 <code>ELR_EL1</code>、处理器状态存入 <code>SPSR_EL1</code>、异常原因存入 <code>ESR_EL1</code>，切到 EL1，跳到向量表「来自 lower EL（AArch64）的同步异常」入口（<code>VBAR_EL1 + 0x400</code>）。内核入口汇编把所有通用寄存器压到内核栈，再按号查表分发到具体处理函数；返回时把结果写回 <code>x0</code>，恢复寄存器，<code>eret</code>。下面的动画一步步走这条路，Linux 和 XNU 并排。</p>
+  <p>一个细节值得记住：<strong>Linux arm64 用 <code>x8</code> 传系统调用号，XNU arm64 用 <code>x16</code></strong>；XNU 里正数是 BSD syscall（<code>sysent[]</code>），负数是 Mach trap（<code>mach_trap_table[]</code>）——这是 XNU「两个内核叠在一起」在 ABI 上的直接痕迹。</p>
+
+  <h3>3. 内核 C 和你写过的 C 不一样</h3>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>区别</th><th>用户态 C</th><th>内核 C（freestanding）</th></tr>
+    <tr><td>标准库</td><td>有 libc、malloc、printf</td><td>没有 libc。内核自带 <code>kmalloc</code>/<code>printk</code>（Linux）、<code>kalloc</code>/<code>printf</code>（XNU），没有 <code>stdio.h</code></td></tr>
+    <tr><td>栈</td><td>几 MB，可随意递归</td><td>每线程 16 KB（Linux arm64）/ 16 KB（XNU arm64）；大数组、深递归直接栈溢出</td></tr>
+    <tr><td>浮点</td><td>随便用</td><td>默认禁止——保存/恢复 FP/SIMD 寄存器太贵；Linux 用 <code>kernel_neon_begin()</code> 显式包起来</td></tr>
+    <tr><td>内存</td><td>只有虚拟地址</td><td>要分清虚拟地址、物理地址、DMA 地址；<code>volatile</code> 访问设备寄存器（MMIO）</td></tr>
+    <tr><td>并发</td><td>线程由你创建</td><td>中断随时打断你；任何共享数据都要考虑锁、关中断、内存屏障（<code>dmb</code>/<code>dsb</code>/<code>isb</code>）</td></tr>
+    <tr><td>错误处理</td><td>崩了就崩了</td><td>内核里一个空指针 = 整机 panic。返回 <code>-errno</code>（Linux）/ <code>KERN_*</code>（Mach）/ <code>errno</code>（BSD 层）</td></tr>
+    <tr><td>编译器</td><td>-O2 随便</td><td>大量 <code>__attribute__</code>（<code>section</code>、<code>aligned</code>、<code>noreturn</code>）、内联汇编、链接脚本决定每段代码放在哪</td></tr>
+  </table>
+  </div>
+
+  <h3>4. ARM64 你现在就要认识的寄存器</h3>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>寄存器</th><th>作用</th><th>什么时候会碰到</th></tr>
+    <tr><td><code>x0–x30</code>、<code>sp</code>、<code>pc</code></td><td>通用寄存器；<code>x0–x7</code> 传参/返回，<code>x29</code> FP，<code>x30</code> LR</td><td>读任何汇编、看 panic 里的寄存器 dump</td></tr>
+    <tr><td><code>VBAR_EL1</code></td><td>异常向量表基址</td><td>内核启动时设置；Phase 1</td></tr>
+    <tr><td><code>ELR_EL1</code> / <code>SPSR_EL1</code> / <code>ESR_EL1</code> / <code>FAR_EL1</code></td><td>异常返回地址 / 进入前的 PSTATE / 异常原因 / 出错地址</td><td>系统调用、缺页（Phase 2）、崩溃分析（Phase 6）</td></tr>
+    <tr><td><code>TTBR0_EL1</code> / <code>TTBR1_EL1</code></td><td>用户 / 内核页表基址</td><td>Phase 2 页表</td></tr>
+    <tr><td><code>SCTLR_EL1</code></td><td>系统控制：开 MMU、cache、对齐检查</td><td>启动早期；Phase 1</td></tr>
+    <tr><td><code>DAIF</code></td><td>Debug/SError/IRQ/FIQ 屏蔽位</td><td>关中断 = <code>msr daifset, #2</code>；Phase 3</td></tr>
+  </table>
+  </div>
+
+  <h3>5. 两棵源码树长什么样</h3>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td>架构相关（异常入口、页表、上下文切换）</td><td><code>arch/arm64/</code></td><td><code>osfmk/arm64/</code>、<code>osfmk/arm/</code></td></tr>
+    <tr><td>进程、调度、IPC 核心</td><td><code>kernel/</code></td><td><code>osfmk/kern/</code>（Mach）、<code>osfmk/ipc/</code></td></tr>
+    <tr><td>内存管理</td><td><code>mm/</code></td><td><code>osfmk/vm/</code></td></tr>
+    <tr><td>POSIX 层：进程表、信号、文件、socket</td><td>散在 <code>kernel/</code>、<code>fs/</code>、<code>net/</code></td><td><code>bsd/</code>（整个 BSD 层叠在 Mach 之上）</td></tr>
+    <tr><td>文件系统</td><td><code>fs/</code></td><td><code>bsd/vfs/</code>；APFS 不开源</td></tr>
+    <tr><td>驱动框架</td><td><code>drivers/</code> + devicetree</td><td><code>iokit/</code>（C++）；用户态 DriverKit 另有 SDK</td></tr>
+    <tr><td>基础库（链表、原子、字符串）</td><td><code>lib/</code>、<code>include/linux/</code></td><td><code>libkern/</code></td></tr>
+    <tr><td>平台专家层（早期启动、设备树）</td><td><code>arch/arm64/boot/</code>、<code>drivers/of/</code></td><td><code>pexpert/</code></td></tr>
+    <tr><td>系统调用表</td><td><code>arch/arm64/include/asm/unistd.h</code>、<code>include/uapi/asm-generic/unistd.h</code></td><td><code>bsd/kern/syscalls.master</code>、<code>osfmk/kern/syscall_sw.c</code></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram">动画图解：一次系统调用的异常进入与返回（ARM64）</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2000"
+         data-captions='["全图：上半 EL0 用户态，下半 EL1 内核态；左列 Linux，右列 XNU。按「播放」逐步走。",
+           "① 用户程序调 write()。libc 把系统调用号放进 x8（Linux）/ x16（XNU），参数放进 x0–x2，执行 svc #0。",
+           "② CPU 硬件动作：PC→ELR_EL1，PSTATE→SPSR_EL1，原因（EC=SVC）→ESR_EL1；切到 EL1；跳到 VBAR_EL1 + 0x400（来自 lower EL 的同步异常）。",
+           "③ 入口汇编把 x0–x30、sp、ELR、SPSR 压到内核栈。Linux：entry.S 的 kernel_entry → el0t_64_sync；XNU：locore.s 的 Lel0_synchronous_vector_64 → fleh_synchronous。",
+           "④ 按号分发。Linux：el0_svc → invoke_syscall → sys_call_table[x8] → __arm64_sys_write。XNU：sleh_synchronous 看 ESR 是 SVC → x16 正数走 unix_syscall（sysent[]），负数走 mach_syscall（mach_trap_table[]）。",
+           "⑤ 处理函数返回，结果写进栈上保存的 x0；入口汇编恢复寄存器；eret：PC←ELR_EL1，PSTATE←SPSR_EL1，回到 EL0 的下一条指令。"]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <!-- EL bands -->
+      <rect x="10" y="30" width="880" height="110" rx="8" style="fill: none; stroke: var(--line); stroke-dasharray: 4 4"/>
+      <text x="20" y="50" class="small">EL0 · user</text>
+      <rect x="10" y="170" width="880" height="235" rx="8" style="fill: none; stroke: var(--line); stroke-dasharray: 4 4"/>
+      <text x="20" y="190" class="small">EL1 · kernel</text>
+      <text x="200" y="22" class="small" style="fill: var(--linux)">Linux</text>
+      <text x="640" y="22" class="small" style="fill: var(--xnu)">XNU</text>
+      <line x1="450" y1="30" x2="450" y2="405" class="lane"/>
+
+      <!-- step 1: user code -->
+      <g data-step="1"><rect class="box linux" x="60" y="65" width="330" height="60"/>
+        <text x="72" y="88" class="mono">write(fd, buf, n)</text>
+        <text x="72" y="110" class="mono">mov x8, #64 ; svc #0</text></g>
+      <g data-step="1"><rect class="box xnu" x="500" y="65" width="330" height="60"/>
+        <text x="512" y="88" class="mono">write(fd, buf, n)</text>
+        <text x="512" y="110" class="mono">mov x16, #4 ; svc #0x80</text></g>
+
+      <!-- step 2: hardware -->
+      <g data-step="2"><path class="arrow" d="M225 125 L225 200"/><path class="arrow" d="M665 125 L665 200"/>
+        <rect class="box" x="300" y="140" width="300" height="38" style="fill: var(--surface)"/>
+        <text x="312" y="156" class="small">CPU: ELR_EL1←PC, SPSR_EL1←PSTATE, ESR_EL1←EC</text>
+        <text x="312" y="171" class="small">EL0→EL1, PC←VBAR_EL1 + 0x400</text></g>
+
+      <!-- step 3: entry asm -->
+      <g data-step="3"><rect class="box linux" x="60" y="200" width="330" height="50"/>
+        <text x="72" y="220" class="mono">entry.S: kernel_entry</text>
+        <text x="72" y="240" class="small">el0t_64_sync — 保存 x0–x30 到 pt_regs</text></g>
+      <g data-step="3"><rect class="box xnu" x="500" y="200" width="330" height="50"/>
+        <text x="512" y="220" class="mono">locore.s: fleh_synchronous</text>
+        <text x="512" y="240" class="small">保存到 arm_saved_state（thread 的 PCB）</text></g>
+
+      <!-- step 4: dispatch -->
+      <g data-step="4"><path class="arrow" d="M225 250 L225 275"/><path class="arrow" d="M665 250 L665 275"/>
+        <rect class="box linux" x="60" y="275" width="330" height="60"/>
+        <text x="72" y="295" class="mono">el0_svc → invoke_syscall</text>
+        <text x="72" y="315" class="mono">sys_call_table[x8] → __arm64_sys_write</text>
+        <rect class="box xnu" x="500" y="275" width="330" height="60"/>
+        <text x="512" y="295" class="mono">sleh_synchronous → x16 &gt; 0 ?</text>
+        <text x="512" y="315" class="mono">unix_syscall / mach_syscall</text></g>
+
+      <!-- step 5: return -->
+      <g data-step="5"><path class="arrow" d="M225 335 L225 360"/><path class="arrow" d="M665 335 L665 360"/>
+        <rect class="box" x="60" y="360" width="330" height="36"/>
+        <text x="72" y="383" class="mono">x0 = ret ; kernel_exit ; eret</text>
+        <rect class="box" x="500" y="360" width="330" height="36"/>
+        <text x="512" y="383" class="mono">x0 = ret ; exception_return ; eret</text>
+        <path class="arrow flow" d="M400 378 C 440 378, 440 95, 400 95"/>
+        <path class="arrow flow" d="M840 378 C 880 378, 880 95, 840 95"/></g>
+    </svg>
+  </div>
+
+  <h2 id="lab">动手实验</h2>
+  <div class="lab">
+    <h3>Lab A · 在 macOS 上编译 Linux arm64 内核并在 QEMU 里启动</h3>
+    <ol>
+      <li>工具链：<pre>brew install qemu llvm lld make
+export PATH="$(brew --prefix llvm)/bin:$(brew --prefix make)/libexec/gnubin:$PATH"</pre>
+        Linux 内核支持纯 LLVM 构建（<code>LLVM=1</code>），不需要 GNU 交叉 gcc。macOS 自带的 <code>make</code> 太旧，用 Homebrew 的 gmake。</li>
+      <li>源码：<pre>git clone --depth 1 https://github.com/torvalds/linux.git
+cd linux
+make LLVM=1 ARCH=arm64 defconfig
+make LLVM=1 ARCH=arm64 -j"$(sysctl -n hw.ncpu)" Image</pre>
+        注意：macOS 默认文件系统<strong>大小写不敏感</strong>，内核树里有同名不同大小写的文件会冲突。保险做法：先建一个大小写敏感的 APFS 卷（磁盘工具 → 新增卷 → APFS（区分大小写）），把源码放进去。</li>
+      <li>先不带 rootfs 直接启动，看 boot log 走到哪里：<pre>qemu-system-aarch64 -M virt -cpu cortex-a72 -m 1G -nographic \
+  -kernel arch/arm64/boot/Image -append "console=ttyAMA0 earlycon"</pre>
+        你会看到内核初始化全过程，最后 panic：<code>VFS: Unable to mount root fs</code>——这是预期的，它证明内核本身已经跑完了 Phase 1 要讲的整条启动链。<kbd>Ctrl-a</kbd> <kbd>x</kbd> 退出 QEMU。</li>
+      <li>给它一个最小 initramfs（busybox）。在 macOS 上直接编 busybox 很麻烦，走 Linux 容器（Docker Desktop 或 OrbStack）：<pre>docker run --platform linux/arm64 --rm -v "$PWD/initramfs:/out" alpine:3.20 sh -c '
+  apk add -q busybox-static &&
+  mkdir -p /r/bin /r/proc /r/sys /r/dev &&
+  cp /bin/busybox.static /r/bin/busybox &&
+  for c in sh ls cat echo mount uname dmesg; do ln -s busybox /r/bin/$c; done &&
+  printf "#!/bin/sh\nmount -t proc none /proc\nmount -t sysfs none /sys\nexec /bin/sh\n" > /r/init &&
+  chmod +x /r/init &&
+  cd /r && find . | cpio -o -H newc | gzip > /out/initramfs.cpio.gz'</pre>
+        然后：<pre>qemu-system-aarch64 -M virt -cpu cortex-a72 -m 1G -nographic \
+  -kernel arch/arm64/boot/Image -initrd initramfs/initramfs.cpio.gz \
+  -append "console=ttyAMA0 rdinit=/init"</pre>
+        进 shell 后试 <code>uname -a</code>、<code>cat /proc/cpuinfo</code>、<code>dmesg | head -40</code>。</li>
+      <li>看看你刚才动画里的东西真的存在：<pre>llvm-objdump -d vmlinux --disassemble-symbols=el0t_64_sync | head -40
+grep -n "el0t_64_sync\|kernel_entry" arch/arm64/kernel/entry.S | head</pre></li>
+    </ol>
+
+    <h3>Lab B · 在 macOS 上看 XNU 的痕迹</h3>
+    <ol>
+      <li>内核版本与构建：<pre>uname -a
+sysctl kern.version kern.osproductversion hw.ncpu machdep.cpu.brand_string</pre></li>
+      <li>已加载的内核扩展（现在大多数是 Apple 自己的，第三方驱动已迁到 DriverKit）：<pre>kmutil showloaded --list-only | head -30</pre></li>
+      <li>内核日志（相当于 dmesg）：<pre>log show --last 5m --predicate 'process == "kernel"' | tail -50</pre></li>
+      <li>看一个进程的系统调用（<code>dtruss</code> 需要关 SIP，先用文件系统视角的 <code>fs_usage</code>）：<pre>sudo fs_usage -w -f filesys -t 5 2>/dev/null | head -50</pre></li>
+      <li>下载 XNU 源码，找到动画里的函数：<pre>git clone --depth 1 https://github.com/apple-oss-distributions/xnu.git
+cd xnu
+grep -n "fleh_synchronous\|sleh_synchronous" osfmk/arm64/locore.s osfmk/arm64/sleh.c | head
+grep -n "^[0-9]" bsd/kern/syscalls.master | head -20   # BSD syscall 表
+grep -n "MACH_TRAP" osfmk/kern/syscall_sw.c | head       # Mach trap 表</pre></li>
+    </ol>
+    <div class="note">交付物：一张 QEMU 里 <code>uname -a</code> 的截图 + 你用自己的话写的「svc 到 eret 发生了什么」（10 行以内），放进 <code>docs/agent/logs/</code> 当天的日志。</div>
+  </div>
+
+  <h2 id="quiz">自测</h2>
+  <form class="quiz" data-quiz="kernel/phase-0">
+    <div class="q" data-answer="a">
+      <p>1. ARM64 上，普通应用程序运行在哪个 exception level？</p>
+      <label><input type="radio" name="q1" value="a"> EL0</label>
+      <label><input type="radio" name="q1" value="b"> EL1</label>
+      <label><input type="radio" name="q1" value="c"> EL2</label>
+      <div class="why" hidden>EL0 = user，EL1 = kernel，EL2 = hypervisor，EL3 = secure monitor。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>2. 执行 <code>svc</code> 之后，用户态的返回地址被硬件保存在哪里？</p>
+      <label><input type="radio" name="q2" value="a"> x30（LR）</label>
+      <label><input type="radio" name="q2" value="b"> ESR_EL1</label>
+      <label><input type="radio" name="q2" value="c"> ELR_EL1</label>
+      <div class="why" hidden>ELR_EL1 存返回地址，SPSR_EL1 存进入前的 PSTATE，ESR_EL1 存异常原因。x30 是函数调用的 LR，异常不会碰它。</div>
+    </div>
+    <div class="q" data-answer="b">
+      <p>3. XNU arm64 上系统调用号放在哪个寄存器？负数的号表示什么？</p>
+      <label><input type="radio" name="q3" value="a"> x8；负数表示出错</label>
+      <label><input type="radio" name="q3" value="b"> x16；负数是 Mach trap</label>
+      <label><input type="radio" name="q3" value="c"> x0；负数是 BSD syscall</label>
+      <div class="why" hidden>XNU 用 x16（Linux 用 x8）。正数查 sysent[]（BSD），负数查 mach_trap_table[]（Mach）。</div>
+    </div>
+    <div class="q" data-answer="c">
+      <p>4. 为什么内核代码默认不能用浮点运算？</p>
+      <label><input type="radio" name="q4" value="a"> ARM64 内核态没有浮点单元</label>
+      <label><input type="radio" name="q4" value="b"> 编译器不支持</label>
+      <label><input type="radio" name="q4" value="c"> 进入内核时不保存 FP/SIMD 寄存器，用了就会破坏用户态的值；要用必须显式保存（如 kernel_neon_begin）</label>
+      <div class="why" hidden>保存 32 个 128 位寄存器太贵，所以异常入口默认只保存通用寄存器。</div>
+    </div>
+    <button type="submit">检查答案</button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources">资料</h2>
+  <ul class="res">
+    <li><a href="https://csapp.cs.cmu.edu/">CSAPP — Computer Systems: A Programmer's Perspective</a> <span class="lvl">基础，第 1–3、7–9 章</span></li>
+    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual for A-profile (Arm ARM)</a> <span class="lvl">查手册，D1 章 exception model</span></li>
+    <li><a href="https://developer.arm.com/documentation/102412/latest">Arm — Learn the architecture: AArch64 Exception Model</a> <span class="lvl">入门，比 Arm ARM 友好得多</span></li>
+    <li><a href="https://www.kernel.org/doc/html/latest/kbuild/llvm.html">Linux kernel docs — Building with Clang/LLVM</a> <span class="lvl">Lab A</span></li>
+    <li><a href="https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/entry.S">linux/arch/arm64/kernel/entry.S</a> <span class="lvl">源码，动画第 ③ 步</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl">源码；osfmk/arm64/locore.s、sleh.c</span></li>
+    <li><a href="https://kernelnewbies.org/">kernelnewbies.org</a> <span class="lvl">新手社区、术语表</span></li>
+    <li>Robert Love, <em>Linux Kernel Development</em>（3rd ed.）<span class="lvl">全书薄、讲思路，Phase 0–4 的主线读物</span></li>
+    <li>Jonathan Levin, <em>*OS Internals</em> Vol. I–III <span class="lvl">XNU/Darwin 最系统的书；Vol. II 是内核</span></li>
+    <li><a href="https://asahilinux.org/docs/">Asahi Linux docs</a> <span class="lvl">Apple Silicon 启动与 EL2 细节（逆向来源）</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../index.html">← Kernel Engineering</a>
+    <a href="../phase-1-boot-and-processes/index.html">Phase 1 · Boot &amp; Processes →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+</body>
+</html>
