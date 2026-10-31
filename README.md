@@ -31,7 +31,7 @@ docs/agent/                   Shadow project memory
 
 ## Writing a phase
 
-Copy `topics/kernel-engineering/phase-0-foundations/index.html`. Sections in order: 目标 → 前置 → 核心概念 → 对照表 → 动画图解 → 动手实验 → 自测 → 资料。
+Follow `docs/authoring/PAGE_CONTRACT.md` (page skeleton, bilingual pairing, diagrams, code, quiz, bibliography, checks) and the topic's syllabus under `docs/authoring/`. Copy `topics/kernel-engineering/phase-1-boot-and-processes/index.html` as the exemplar. Sections in order: 目标 → 前置 → 核心概念 → 对照表 → 动画图解 → 动手实验 → 自测 → 资料 → 参考书目。
 
 An animated diagram is an inline `<svg data-diagram data-captions='[...]'>` whose parts carry `data-step="N"`; `assets/diagram.js` adds the controls. Step 0 is the full picture; steps 1..N highlight that step's parts and dim the rest. Use `class="pulse"` or `class="flow"` on a part for continuous motion.
 

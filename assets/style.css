@@ -16,6 +16,8 @@
   --accent-ink: #ffffff;
   --linux: #9a6200;
   --xnu: #3a4fa0;
+  --ros: #1f5fbf;
+  --gz: #c2410c;
   --ok: #1f6f4a;
   --warn: #9a6200;
   --radius: 6px;
@@ -48,7 +50,7 @@
     --accent: #5fbf8e;
     --accent-ink: #0d1a12;
     --linux: #e0a63a;
-    --xnu: #8fa3ea;
+    --xnu: #8fa3ea; --ros: #7fb0ff; --gz: #f59e5b;
     --ok: #5fbf8e;
     --warn: #e0a63a;
     --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
@@ -69,7 +71,7 @@
   --accent: #5fbf8e;
   --accent-ink: #0d1a12;
   --linux: #e0a63a;
-  --xnu: #8fa3ea;
+  --xnu: #8fa3ea; --ros: #7fb0ff; --gz: #f59e5b;
   --ok: #5fbf8e;
   --warn: #e0a63a;
   --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
@@ -284,7 +286,7 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .cmp { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 .cmp th, .cmp td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .cmp th { font-weight: 600; color: var(--ink-2); font-size: 13px; }
-.cmp th.linux { color: var(--linux); } .cmp th.xnu { color: var(--xnu); }
+.cmp th.linux { color: var(--linux); } .cmp th.xnu { color: var(--xnu); } .cmp th.ros { color: var(--ros); } .cmp th.gz { color: var(--gz); }
 .table-wrap { overflow-x: auto; }
 
 /* Diagram frame */
@@ -304,7 +306,7 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .diagram text.mono { font-family: var(--mono); font-size: 12px; }
 .diagram text.small { font-size: 11px; fill: var(--ink-3); }
 .diagram .box { fill: var(--surface-2); stroke: var(--line); stroke-width: 1.2; rx: 6; }
-.diagram .box.linux { stroke: var(--linux); } .diagram .box.xnu { stroke: var(--xnu); }
+.diagram .box.linux { stroke: var(--linux); } .diagram .box.xnu { stroke: var(--xnu); } .diagram .box.ros { stroke: var(--ros); } .diagram .box.gz { stroke: var(--gz); }
 .diagram .arrow { stroke: var(--ink-3); stroke-width: 1.6; fill: none; marker-end: url(#arr); }
 .diagram .lane { fill: none; stroke: var(--line); stroke-dasharray: 3 4; }
 .diagram [data-step] { transition: opacity .35s ease, fill .35s ease, stroke .35s ease, transform .35s ease; }
