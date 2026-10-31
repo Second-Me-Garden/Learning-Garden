@@ -79,18 +79,38 @@
     render();
   }
 
-  // Header: once its original spot scrolls out of view, body.scrolled is set and
-  // the header shrinks into a centred pill (or docks into the rail on wide lesson pages).
-  function headerSentinel() {
+  // Header: at rest it scrolls away with the page. Past SHOW px a pill (already in its
+  // final shape) slides in from the top; back above HIDE px it slides out. The gap between
+  // the two thresholds stops it flickering at the boundary. A spacer keeps the header's
+  // layout height while the pill is fixed.
+  function headerDock() {
     const header = document.querySelector('header.top');
-    if (!header || !('IntersectionObserver' in window) || document.querySelector('.top-sentinel')) return;
-    const sentinel = document.createElement('div'); sentinel.className = 'top-sentinel'; sentinel.setAttribute('aria-hidden', 'true');
-    header.parentNode.insertBefore(sentinel, header);
-    new IntersectionObserver((entries) => {
-      document.body.classList.toggle('scrolled', !entries[0].isIntersecting);
-    }, { rootMargin: '-1px 0px 0px 0px', threshold: 0 }).observe(sentinel);
+    if (!header || document.querySelector('.top-spacer')) return;
+    const SHOW = 220, HIDE = 100, OUT_MS = 260;
+    const spacer = document.createElement('div'); spacer.className = 'top-spacer'; spacer.setAttribute('aria-hidden', 'true');
+    header.parentNode.insertBefore(spacer, header);
+    let on = false, leaving = null, ticking = false;
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function measure() { if (!on) document.documentElement.style.setProperty('--top-h', header.offsetHeight + 'px'); }
+    function update() {
+      ticking = false;
+      const y = window.scrollY;
+      if (!on && y > SHOW) {
+        on = true; if (leaving) { clearTimeout(leaving); leaving = null; }
+        document.body.classList.remove('leaving'); document.body.classList.add('scrolled');
+      } else if (on && y < HIDE && !leaving) {
+        if (reduce) { on = false; document.body.classList.remove('scrolled'); return; }
+        document.body.classList.add('leaving');
+        leaving = setTimeout(() => { leaving = null; on = false; document.body.classList.remove('scrolled', 'leaving'); }, OUT_MS);
+      }
+    }
+    function onScroll() { if (!ticking) { ticking = true; requestAnimationFrame(update); } }
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    update();
   }
-  function init() { document.querySelectorAll('.diagram').forEach(setup); headerSentinel(); }
+  function init() { document.querySelectorAll('.diagram').forEach(setup); headerDock(); }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 
   // Theme toggle (optional button.theme in the header). Persists per browser.

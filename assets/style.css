@@ -110,23 +110,29 @@ img, svg { max-width: 100%; }
 /* No fixed measure: Chinese text is denser than Latin, and lists carry code blocks that need the full column. */
 
 /* Header */
-.top-sentinel { height: 0; }
+.top-spacer { height: 0; }
+body.scrolled .top-spacer { height: var(--top-h, 0px); }
 .top {
   display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
-  position: sticky; top: 0; z-index: 5; box-sizing: border-box;
+  position: relative; z-index: 5; box-sizing: border-box;
   width: 100%; max-width: var(--maxw); margin: 0 auto 28px;
   padding: 11px 2px; border: 1px solid transparent; border-radius: 0;
   font-size: 15px; color: var(--ink-2); background: transparent;
 }
 .top .crumb { font-size: 15px; }
 .top .crumb.current, .top .crumb[aria-current="page"] { color: var(--ink); font-weight: 600; }
-@media (prefers-reduced-motion: no-preference) {
-  .top { transition: max-width .45s cubic-bezier(.3,.7,.2,1), padding .45s cubic-bezier(.3,.7,.2,1), top .45s cubic-bezier(.3,.7,.2,1), border-radius .45s cubic-bezier(.3,.7,.2,1), background-color .3s ease, border-color .3s ease, box-shadow .3s ease, font-size .3s ease; }
-  .top .brand .wordmark { transition: font-size .3s ease; }
-}
-/* Scrolled: a centred glass pill over the content that passes beneath it. */
-body.scrolled .top { top: 12px; max-width: 880px; flex-wrap: nowrap; padding: 5px 8px 5px 18px; font-size: 15px; border-radius: 26px; color: var(--pill-ink-2);
+/* Scrolled: a centred glass pill, fixed over the content, already in its final shape.
+   It slides in from the top once the page has scrolled past the hero, and slides out again
+   on the way back up (thresholds and hysteresis live in diagram.js). */
+body.scrolled .top { position: fixed; top: 12px; left: 50%; transform: translate(-50%, 0); width: min(880px, 100% - 16px); max-width: none; margin: 0;
+  flex-wrap: nowrap; padding: 5px 8px 5px 18px; font-size: 15px; border-radius: 26px; color: var(--pill-ink-2);
   background: var(--pill-solid); border-color: var(--pill-rim); box-shadow: inset 0 1px 0 var(--pill-sheen), var(--pill-shadow); }
+@media (prefers-reduced-motion: no-preference) {
+  body.scrolled .top { animation: pill-in .42s cubic-bezier(.2,.8,.2,1) both; }
+  body.scrolled.leaving .top { animation: pill-out .26s ease-in both; }
+}
+@keyframes pill-in { from { opacity: 0; transform: translate(-50%, -28px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes pill-out { from { opacity: 1; transform: translate(-50%, 0); } to { opacity: 0; transform: translate(-50%, -28px); } }
 body.scrolled .top .brand .wordmark { font-size: 22px; }
 body.scrolled .top .crumb { white-space: nowrap; }
 body.scrolled .top .crumb.current, body.scrolled .top .crumb[aria-current="page"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -143,7 +149,7 @@ body.scrolled .top button.theme, body.scrolled .top button.lang { border-color: 
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   body.scrolled .top { background: var(--pill-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
-@media (max-width: 800px) { body.scrolled .top { max-width: calc(100% - 8px); } }
+@media (max-width: 800px) { body.scrolled .top { width: calc(100% - 8px); } }
 .top .brand { display: inline-flex; align-items: center; gap: 14px; color: var(--ink); text-decoration: none; }
 .top .brand .wordmark { font-family: "Fraunces", var(--display); font-size: 26px; font-weight: 600; font-variation-settings: "opsz" 36, "SOFT" 50, "WONK" 0; letter-spacing: 0; line-height: 1; white-space: nowrap; }
 .mark { position: relative; display: inline-grid; place-items: center; width: 56px; height: 56px; flex: none; isolation: isolate; }
@@ -344,16 +350,11 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 /* Header docks into the rail on scroll (wide screens only). */
 @media (min-width: 1480px) {
   body.lesson { --rail-w: min(220px, calc((100vw - 960px) / 2 - 64px)); }
-  body.lesson header.top { transform-origin: left top; will-change: transform, opacity; }
-  body.lesson.scrolled header.top { transform: translate(calc(18px - var(--rail-w) - 52px), 48px) scale(.9); opacity: 0; visibility: hidden; pointer-events: none;
-    top: 0; max-width: var(--maxw); padding: 11px 2px; font-size: 15px; border-radius: 0; background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  body.lesson.scrolled header.top { display: none; }
   .rail-crumb { display: grid; grid-template-columns: 1fr; gap: 4px; overflow: hidden;
     max-height: 0; opacity: 0; transform: translateY(-10px); margin-bottom: 0; }
   body.scrolled .rail-crumb { max-height: 140px; opacity: 1; transform: none; margin-bottom: 14px; }
   @media (prefers-reduced-motion: no-preference) {
-    body.lesson header.top { transition: transform .38s cubic-bezier(.3,.7,.2,1), opacity .15s ease, visibility 0s .38s; }
-    body.lesson.scrolled header.top { transition: transform .38s cubic-bezier(.3,.7,.2,1), opacity .15s ease, visibility 0s .38s; }
-    body.lesson:not(.scrolled) header.top { transition: transform .38s cubic-bezier(.3,.7,.2,1), opacity .15s ease .1s, visibility 0s; }
     .rail-crumb { transition: max-height .38s cubic-bezier(.3,.7,.2,1), opacity .3s ease .08s, transform .38s cubic-bezier(.3,.7,.2,1), margin-bottom .38s; }
   }
 }
