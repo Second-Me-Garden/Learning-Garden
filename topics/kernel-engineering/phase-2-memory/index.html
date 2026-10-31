@@ -21,95 +21,129 @@
     <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
   </header>
 
-  <p class="meta">Phase 2 / 9 · 约 1–2 周</p>
-  <p class="note untranslated" lang="en">This page has not been translated yet — the Chinese text is shown. Navigation, diagram controls and quiz results are already in English.</p>
-  <h1>Memory <span class="en">虚拟内存、ARM64 页表、缺页路径、分配器（buddy/slab ↔ Mach VM/zalloc）</span></h1>
-  <p class="lede">进程看到的每一个地址都是「假的」：CPU 的 MMU 按页表把虚拟地址翻译成物理地址，翻不出来就触发异常交给内核补救。这一阶段把这条链从硬件走到软件：ARM64 页表长什么样、一次 <code>ldr</code> 碰到没映射的页时内核做了什么、内核自己又从哪里拿内存——Linux 和 XNU 并排对照。</p>
+  <p class="meta" lang="zh-CN">Phase 2 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 2 / 9 · about 1–2 weeks</p>
+  <h1>Memory <span class="en" lang="zh-CN">虚拟内存、ARM64 页表、缺页路径、分配器（buddy/slab ↔ Mach VM/zalloc）</span><span class="en" lang="en">Virtual memory, ARM64 page tables, the page-fault path, allocators (buddy/slab ↔ Mach VM/zalloc)</span></h1>
+  <p class="lede" lang="zh-CN">进程看到的每一个地址都是「假的」：CPU 的 MMU 按页表把虚拟地址翻译成物理地址，翻不出来就触发异常交给内核补救。这一阶段把这条链从硬件走到软件：ARM64 页表长什么样、一次 <code>ldr</code> 碰到没映射的页时内核做了什么、内核自己又从哪里拿内存——Linux 和 XNU 并排对照。</p>
+  <p class="lede" lang="en">Every address a process sees is “fake”: the CPU’s MMU translates virtual addresses into physical ones through page tables, and when a translation fails it raises an exception and hands the problem to the kernel to fix. This phase follows that chain from hardware to software: what ARM64 page tables look like, what the kernel does when one <code>ldr</code> hits an unmapped page, and where the kernel itself gets memory from — Linux and XNU side by side.</p>
 
-  <h2 id="goals">目标</h2>
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
   <div class="goals">
-    读完并做完实验后，你应该能：
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
     <ul>
-      <li>给一个 48-bit 虚拟地址，手工切出 L0–L3 索引和页内偏移，说清 <code>TTBR0_EL1</code> / <code>TTBR1_EL1</code> 怎么选、TLB 和 ASID 在哪一步起作用；说出 Apple Silicon 16 KB 页为什么只要 3 级表。</li>
-      <li>从 data abort 一路讲到缺页处理完成：<code>ESR_EL1</code>/<code>FAR_EL1</code> 记了什么，Linux 的 <code>do_page_fault</code> → <code>handle_mm_fault</code> 与 XNU 的 <code>vm_fault</code> 各自怎么找区域、分匿名页 / 读文件 / 做 COW。</li>
-      <li>画出两个内核的内存对象层次：<code>mm_struct</code>/<code>vm_area_struct</code>/<code>struct page</code> ↔ <code>vm_map</code>/<code>vm_map_entry</code>/<code>vm_object</code>/<code>vm_page</code>，以及 buddy + SLUB ↔ <code>pmap</code> + <code>zalloc</code>/<code>kalloc_type</code> 的分工。</li>
-      <li>用 <code>/proc</code>（Linux）和 <code>vmmap</code>/<code>vm_stat</code>/<code>footprint</code>（macOS）亲眼看到 demand paging：<code>mmap</code> 64 MB 后 RSS 几乎不动，逐页写入后才增长。</li>
+      <li lang="zh-CN">给一个 48-bit 虚拟地址，手工切出 L0–L3 索引和页内偏移，说清 <code>TTBR0_EL1</code> / <code>TTBR1_EL1</code> 怎么选、TLB 和 ASID 在哪一步起作用；说出 Apple Silicon 16 KB 页为什么只要 3 级表。</li>
+      <li lang="en">Given a 48-bit virtual address, slice out the L0–L3 indexes and the page offset by hand, explain how <code>TTBR0_EL1</code> / <code>TTBR1_EL1</code> is chosen and at which step the TLB and ASID come into play; say why Apple Silicon’s 16 KB pages need only 3 levels of tables.</li>
+      <li lang="zh-CN">从 data abort 一路讲到缺页处理完成：<code>ESR_EL1</code>/<code>FAR_EL1</code> 记了什么，Linux 的 <code>do_page_fault</code> → <code>handle_mm_fault</code> 与 XNU 的 <code>vm_fault</code> 各自怎么找区域、分匿名页 / 读文件 / 做 COW。</li>
+      <li lang="en">Explain the whole way from a data abort to a completed page fault: what <code>ESR_EL1</code>/<code>FAR_EL1</code> record, and how Linux’s <code>do_page_fault</code> → <code>handle_mm_fault</code> and XNU’s <code>vm_fault</code> each find the region and allocate an anonymous page / read the file / do COW.</li>
+      <li lang="zh-CN">画出两个内核的内存对象层次：<code>mm_struct</code>/<code>vm_area_struct</code>/<code>struct page</code> ↔ <code>vm_map</code>/<code>vm_map_entry</code>/<code>vm_object</code>/<code>vm_page</code>，以及 buddy + SLUB ↔ <code>pmap</code> + <code>zalloc</code>/<code>kalloc_type</code> 的分工。</li>
+      <li lang="en">Draw the memory-object hierarchy of both kernels: <code>mm_struct</code>/<code>vm_area_struct</code>/<code>struct page</code> ↔ <code>vm_map</code>/<code>vm_map_entry</code>/<code>vm_object</code>/<code>vm_page</code>, and the division of labour between buddy + SLUB ↔ <code>pmap</code> + <code>zalloc</code>/<code>kalloc_type</code>.</li>
+      <li lang="zh-CN">用 <code>/proc</code>（Linux）和 <code>vmmap</code>/<code>vm_stat</code>/<code>footprint</code>（macOS）亲眼看到 demand paging：<code>mmap</code> 64 MB 后 RSS 几乎不动，逐页写入后才增长。</li>
+      <li lang="en">See demand paging with your own eyes using <code>/proc</code> (Linux) and <code>vmmap</code>/<code>vm_stat</code>/<code>footprint</code> (macOS): after an <code>mmap</code> of 64 MB the RSS barely moves, and it grows only as you write page by page.</li>
     </ul>
   </div>
 
-  <h2 id="prereq">前置</h2>
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
   <ul>
-    <li>Phase 0：exception level、<code>svc</code>/<code>eret</code>、<code>ESR_EL1</code>/<code>FAR_EL1</code> 是什么；QEMU 里能启动带 busybox initramfs 的 Linux arm64 内核。</li>
-    <li>Phase 1：进程/线程模型、<code>fork</code>/<code>exec</code>、上下文切换时页表基址怎么跟着换（<code>task_struct</code>→<code>mm</code>，Mach <code>task</code>→<code>map</code>）。</li>
-    <li>C：位运算（移位、掩码）要熟，本阶段大量「取第 x 到 y 位」。</li>
+    <li lang="zh-CN">Phase 0：exception level、<code>svc</code>/<code>eret</code>、<code>ESR_EL1</code>/<code>FAR_EL1</code> 是什么；QEMU 里能启动带 busybox initramfs 的 Linux arm64 内核。</li>
+    <li lang="en">Phase 0: what exception levels, <code>svc</code>/<code>eret</code> and <code>ESR_EL1</code>/<code>FAR_EL1</code> are; you can boot a Linux arm64 kernel with a busybox initramfs in QEMU.</li>
+    <li lang="zh-CN">Phase 1：进程/线程模型、<code>fork</code>/<code>exec</code>、上下文切换时页表基址怎么跟着换（<code>task_struct</code>→<code>mm</code>，Mach <code>task</code>→<code>map</code>）。</li>
+    <li lang="en">Phase 1: the process/thread model, <code>fork</code>/<code>exec</code>, and how the page-table base is switched along with a context switch (<code>task_struct</code>→<code>mm</code>, Mach <code>task</code>→<code>map</code>).</li>
+    <li lang="zh-CN">C：位运算（移位、掩码）要熟，本阶段大量「取第 x 到 y 位」。</li>
+    <li lang="en">C: be fluent with bit operations (shifts, masks); this phase is full of “take bits x to y”.</li>
   </ul>
 
-  <h2 id="concepts">核心概念</h2>
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
-  <h3>1. 虚拟内存与地址空间：ARM64 的两半</h3>
-  <p>ARM64 把 64 位虚拟地址空间切成两半，各用一个页表基址寄存器：<strong>低半（高位全 0）走 <code>TTBR0_EL1</code>，给用户态；高半（高位全 1）走 <code>TTBR1_EL1</code>，给内核</strong>。中间的「非规范」地址直接触发 translation fault。启用 Top Byte Ignore（TBI）时最高 8 位不参与翻译，选择哪个 TTBR 看 bit 55。好处：切换进程只需换 <code>TTBR0_EL1</code>，内核那一半所有进程共享、不用动。有效位数由 <code>TCR_EL1</code> 的 <code>T0SZ</code>/<code>T1SZ</code> 决定。</p>
-  <p>以 Linux arm64 经典配置 <strong>48-bit VA + 4 KB 页</strong>为例：页内偏移 12 位；每张页表 4 KB / 8 B = 512 项 = 9 位索引；48 − 12 = 36 = 4 × 9，所以是 <strong>4 级表 L0–L3</strong>：</p>
-  <pre>VA:  [63:48] 全0→TTBR0 / 全1→TTBR1 | [47:39] L0 | [38:30] L1 | [29:21] L2 | [20:12] L3 | [11:0] offset
+  <h3 lang="zh-CN">1. 虚拟内存与地址空间：ARM64 的两半</h3><h3 lang="en">1. Virtual memory and address spaces: the two halves of ARM64</h3>
+  <p lang="zh-CN">ARM64 把 64 位虚拟地址空间切成两半，各用一个页表基址寄存器：<strong>低半（高位全 0）走 <code>TTBR0_EL1</code>，给用户态；高半（高位全 1）走 <code>TTBR1_EL1</code>，给内核</strong>。中间的「非规范」地址直接触发 translation fault。启用 Top Byte Ignore（TBI）时最高 8 位不参与翻译，选择哪个 TTBR 看 bit 55。好处：切换进程只需换 <code>TTBR0_EL1</code>，内核那一半所有进程共享、不用动。有效位数由 <code>TCR_EL1</code> 的 <code>T0SZ</code>/<code>T1SZ</code> 决定。</p>
+  <p lang="en">ARM64 splits the 64-bit virtual address space into two halves, each with its own page-table base register: <strong>the low half (top bits all 0) goes through <code>TTBR0_EL1</code>, for user mode; the high half (top bits all 1) goes through <code>TTBR1_EL1</code>, for the kernel</strong>. “Non-canonical” addresses in between raise a translation fault directly. With Top Byte Ignore (TBI) enabled, the top 8 bits take no part in translation and bit 55 selects the TTBR. The benefit: switching processes only requires a new <code>TTBR0_EL1</code>; the kernel half is shared by every process and stays untouched. The number of significant bits is set by <code>T0SZ</code>/<code>T1SZ</code> in <code>TCR_EL1</code>.</p>
+  <p lang="zh-CN">以 Linux arm64 经典配置 <strong>48-bit VA + 4 KB 页</strong>为例：页内偏移 12 位；每张页表 4 KB / 8 B = 512 项 = 9 位索引；48 − 12 = 36 = 4 × 9，所以是 <strong>4 级表 L0–L3</strong>：</p>
+  <p lang="en">Take the classic Linux arm64 configuration, <strong>48-bit VA + 4 KB pages</strong>: the page offset is 12 bits; each page table is 4 KB / 8 B = 512 entries = a 9-bit index; 48 − 12 = 36 = 4 × 9, so there are <strong>4 levels of tables, L0–L3</strong>:</p>
+  <pre lang="zh-CN">VA:  [63:48] 全0→TTBR0 / 全1→TTBR1 | [47:39] L0 | [38:30] L1 | [29:21] L2 | [20:12] L3 | [11:0] offset
 Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB），内核从 0xffff_0000_0000_0000 起</pre>
-  <p><strong>Apple Silicon 用 16 KB 页</strong>：XNU 在 M 系列上的默认页大小是 16 KB（<code>pagesize</code> 输出 16384；Intel Mac 是 4 KB）。16 KB 粒度下偏移 14 位，每张表 16 KB / 8 B = 2048 项 = 11 位索引；14 + 3 × 11 = 47，所以 <strong>47-bit VA 只要 3 级表（L1–L3）</strong>，少走一级、TLB 每项覆盖面是 4 KB 页的 4 倍。Linux arm64 也能编成 16 KB 或 64 KB 页（<code>CONFIG_ARM64_16K_PAGES</code> / <code>CONFIG_ARM64_64K_PAGES</code>），Asahi Linux 在 Apple Silicon 上就用 16 KB——但发行版通用内核默认仍是 4 KB。</p>
-  <p><strong>TLB 与 ASID</strong>：每次访存都走 4 级表太慢，MMU 把翻译结果缓存在 TLB。用户映射在描述符里置 <code>nG</code>（non-global），TLB 项会带上当前 ASID（8 或 16 位，放在 TTBR0 还是 TTBR1 的高位由 <code>TCR_EL1.A1</code> 决定；Linux arm64 放在 <code>TTBR1_EL1</code>）；不同进程的同一 VA 因 ASID 不同可以同时留在 TLB 里，切进程不必全刷。内核映射是 global 的，所有 ASID 共用。</p>
-  <div class="note">寄存器名这里统一写 <code>_EL1</code>。Phase 0 提过 XNU 在 M 系列上运行于 EL2 + VHE；VHE 下软件写 <code>_EL1</code> 名字的寄存器会被重定向到对应的 EL2 寄存器，概念不变。</div>
+  <pre lang="en">VA:  [63:48] all 0→TTBR0 / all 1→TTBR1 | [47:39] L0 | [38:30] L1 | [29:21] L2 | [20:12] L3 | [11:0] offset
+Linux user space 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff (256 TB); the kernel starts at 0xffff_0000_0000_0000</pre>
+  <p lang="zh-CN"><strong>Apple Silicon 用 16 KB 页</strong>：XNU 在 M 系列上的默认页大小是 16 KB（<code>pagesize</code> 输出 16384；Intel Mac 是 4 KB）。16 KB 粒度下偏移 14 位，每张表 16 KB / 8 B = 2048 项 = 11 位索引；14 + 3 × 11 = 47，所以 <strong>47-bit VA 只要 3 级表（L1–L3）</strong>，少走一级、TLB 每项覆盖面是 4 KB 页的 4 倍。Linux arm64 也能编成 16 KB 或 64 KB 页（<code>CONFIG_ARM64_16K_PAGES</code> / <code>CONFIG_ARM64_64K_PAGES</code>），Asahi Linux 在 Apple Silicon 上就用 16 KB——但发行版通用内核默认仍是 4 KB。</p>
+  <p lang="en"><strong>Apple Silicon uses 16 KB pages</strong>: XNU’s default page size on M-series chips is 16 KB (<code>pagesize</code> prints 16384; Intel Macs use 4 KB). With a 16 KB granule the offset is 14 bits and each table is 16 KB / 8 B = 2048 entries = an 11-bit index; 14 + 3 × 11 = 47, so <strong>a 47-bit VA needs only 3 levels of tables (L1–L3)</strong>: one level fewer to walk, and each TLB entry covers 4 times as much as with 4 KB pages. Linux arm64 can also be built with 16 KB or 64 KB pages (<code>CONFIG_ARM64_16K_PAGES</code> / <code>CONFIG_ARM64_64K_PAGES</code>), and Asahi Linux uses 16 KB on Apple Silicon — but the generic kernels of distributions still default to 4 KB.</p>
+  <p lang="zh-CN"><strong>TLB 与 ASID</strong>：每次访存都走 4 级表太慢，MMU 把翻译结果缓存在 TLB。用户映射在描述符里置 <code>nG</code>（non-global），TLB 项会带上当前 ASID（8 或 16 位，放在 TTBR0 还是 TTBR1 的高位由 <code>TCR_EL1.A1</code> 决定；Linux arm64 放在 <code>TTBR1_EL1</code>）；不同进程的同一 VA 因 ASID 不同可以同时留在 TLB 里，切进程不必全刷。内核映射是 global 的，所有 ASID 共用。</p>
+  <p lang="en"><strong>TLB and ASID</strong>: walking 4 levels of tables on every memory access would be too slow, so the MMU caches translations in the TLB. User mappings set <code>nG</code> (non-global) in the descriptor, so their TLB entries carry the current ASID (8 or 16 bits; whether it sits in the high bits of TTBR0 or TTBR1 is decided by <code>TCR_EL1.A1</code>; Linux arm64 puts it in <code>TTBR1_EL1</code>); the same VA in different processes can stay in the TLB at the same time because the ASIDs differ, so a process switch does not need a full flush. Kernel mappings are global and shared by all ASIDs.</p>
+  <div class="note" lang="zh-CN">寄存器名这里统一写 <code>_EL1</code>。Phase 0 提过 XNU 在 M 系列上运行于 EL2 + VHE；VHE 下软件写 <code>_EL1</code> 名字的寄存器会被重定向到对应的 EL2 寄存器，概念不变。</div>
+  <div class="note" lang="en">Register names are written as <code>_EL1</code> throughout. As Phase 0 mentioned, XNU on M-series chips runs at EL2 + VHE; under VHE, software accesses to <code>_EL1</code>-named registers are redirected to the corresponding EL2 registers, and the concepts are unchanged.</div>
 
-  <h3>2. 页表遍历、TLB 与描述符</h3>
-  <p>TLB miss 时，硬件 table walker 从 TTBR 给出的 L0 表基址开始，每级用 VA 的一段索引取出 8 字节描述符，看最低两位：</p>
+  <h3 lang="zh-CN">2. 页表遍历、TLB 与描述符</h3><h3 lang="en">2. Page-table walks, the TLB and descriptors</h3>
+  <p lang="zh-CN">TLB miss 时，硬件 table walker 从 TTBR 给出的 L0 表基址开始，每级用 VA 的一段索引取出 8 字节描述符，看最低两位：</p>
+  <p lang="en">On a TLB miss, the hardware table walker starts from the L0 table base given by the TTBR, uses one slice of the VA as the index at each level to fetch an 8-byte descriptor, and looks at its lowest two bits:</p>
   <ul>
-    <li><code>bit0 = 0</code>：invalid → translation fault（缺页的最常见原因）。</li>
-    <li>L0–L2 上 <code>0b11</code> = <strong>table</strong> 描述符：指向下一级表。</li>
-    <li>L1/L2 上 <code>0b01</code> = <strong>block</strong> 描述符：直接映射一大块（4 KB 粒度下 L1 = 1 GB、L2 = 2 MB，就是「大页」/ THP 的硬件基础）。</li>
-    <li>L3 上 <code>0b11</code> = <strong>page</strong> 描述符：给出 4 KB 页的输出地址（OA）。</li>
+    <li lang="zh-CN"><code>bit0 = 0</code>：invalid → translation fault（缺页的最常见原因）。</li>
+    <li lang="en"><code>bit0 = 0</code>: invalid → translation fault (the most common cause of a page fault).</li>
+    <li lang="zh-CN">L0–L2 上 <code>0b11</code> = <strong>table</strong> 描述符：指向下一级表。</li>
+    <li lang="en"><code>0b11</code> at L0–L2 = a <strong>table</strong> descriptor: points to the next-level table.</li>
+    <li lang="zh-CN">L1/L2 上 <code>0b01</code> = <strong>block</strong> 描述符：直接映射一大块（4 KB 粒度下 L1 = 1 GB、L2 = 2 MB，就是「大页」/ THP 的硬件基础）。</li>
+    <li lang="en"><code>0b01</code> at L1/L2 = a <strong>block</strong> descriptor: maps a large block directly (with a 4 KB granule, L1 = 1 GB and L2 = 2 MB; this is the hardware basis of “huge pages” / THP).</li>
+    <li lang="zh-CN">L3 上 <code>0b11</code> = <strong>page</strong> 描述符：给出 4 KB 页的输出地址（OA）。</li>
+    <li lang="en"><code>0b11</code> at L3 = a <strong>page</strong> descriptor: gives the output address (OA) of a 4 KB page.</li>
   </ul>
-  <p>block/page 描述符里的属性位决定「能不能访问、怎么缓存」：<code>AttrIndx[4:2]</code> 是一个下标，指向 <code>MAIR_EL1</code> 里 8 组内存类型之一（Normal Write-Back、Device-nGnRE……，页表里不直接写缓存属性）；<code>AP[7:6]</code> 管只读/可写与 EL0 是否可访问；<code>SH[9:8]</code> 共享域；<code>AF[10]</code> access flag，为 0 时第一次访问触发 access flag fault（内核借此统计「最近用过」，有 FEAT_HAFDBS 的 CPU 可由硬件自动置位）；<code>nG[11]</code>；高位的 <code>PXN[53]</code>/<code>UXN[54]</code> 分别禁止 EL1 / EL0 在此执行。</p>
-  <p>改页表后 TLB 里的旧项不会自己消失：内核要发 <code>TLBI</code>（如按 VA+ASID 的 <code>tlbi vae1is</code>）再 <code>dsb ish</code>、<code>isb</code>。Linux 封装为 <code>flush_tlb_page()</code>/<code>flush_tlb_range()</code>（<code>arch/arm64/include/asm/tlbflush.h</code>）；XNU 在 <code>pmap</code> 层内部处理。Arm 还要求修改有效映射时遵守 break-before-make（先置无效、刷 TLB、再写新值）。延伸阅读：《Computer Systems: A Programmer's Perspective》第 9 章「虚拟内存」；《Operating Systems: Three Easy Pieces》第 18–20 章（分页、TLB、多级页表）。</p>
+  <p lang="zh-CN">block/page 描述符里的属性位决定「能不能访问、怎么缓存」：<code>AttrIndx[4:2]</code> 是一个下标，指向 <code>MAIR_EL1</code> 里 8 组内存类型之一（Normal Write-Back、Device-nGnRE……，页表里不直接写缓存属性）；<code>AP[7:6]</code> 管只读/可写与 EL0 是否可访问；<code>SH[9:8]</code> 共享域；<code>AF[10]</code> access flag，为 0 时第一次访问触发 access flag fault（内核借此统计「最近用过」，有 FEAT_HAFDBS 的 CPU 可由硬件自动置位）；<code>nG[11]</code>；高位的 <code>PXN[53]</code>/<code>UXN[54]</code> 分别禁止 EL1 / EL0 在此执行。</p>
+  <p lang="en">The attribute bits in block/page descriptors decide “can it be accessed, and how is it cached”: <code>AttrIndx[4:2]</code> is an index pointing to one of the 8 memory types in <code>MAIR_EL1</code> (Normal Write-Back, Device-nGnRE…; the page table does not hold cache attributes directly); <code>AP[7:6]</code> controls read-only/writable and whether EL0 may access it; <code>SH[9:8]</code> is the shareability domain; <code>AF[10]</code> is the access flag — when it is 0, the first access raises an access flag fault (the kernel uses this to track “recently used”; on CPUs with FEAT_HAFDBS the hardware can set it automatically); <code>nG[11]</code>; and the high bits <code>PXN[53]</code>/<code>UXN[54]</code> forbid execution here at EL1 / EL0 respectively.</p>
+  <p lang="zh-CN">改页表后 TLB 里的旧项不会自己消失：内核要发 <code>TLBI</code>（如按 VA+ASID 的 <code>tlbi vae1is</code>）再 <code>dsb ish</code>、<code>isb</code>。Linux 封装为 <code>flush_tlb_page()</code>/<code>flush_tlb_range()</code>（<code>arch/arm64/include/asm/tlbflush.h</code>）；XNU 在 <code>pmap</code> 层内部处理。Arm 还要求修改有效映射时遵守 break-before-make（先置无效、刷 TLB、再写新值）。延伸阅读：《Computer Systems: A Programmer's Perspective》第 9 章「虚拟内存」；《Operating Systems: Three Easy Pieces》第 18–20 章（分页、TLB、多级页表）。</p>
+  <p lang="en">After a page-table change, stale TLB entries do not disappear on their own: the kernel has to issue a <code>TLBI</code> (for example <code>tlbi vae1is</code>, by VA+ASID), then <code>dsb ish</code> and <code>isb</code>. Linux wraps this as <code>flush_tlb_page()</code>/<code>flush_tlb_range()</code> (<code>arch/arm64/include/asm/tlbflush.h</code>); XNU handles it inside the <code>pmap</code> layer. Arm also requires break-before-make when changing a valid mapping (invalidate first, flush the TLB, then write the new value). Further reading: <em>Computer Systems: A Programmer's Perspective</em>, Chapter 9, “Virtual Memory”; <em>Operating Systems: Three Easy Pieces</em>, Chapters 18–20 (paging, TLBs, multi-level page tables).</p>
 
-  <h3>3. 缺页路径：从 data abort 到重新执行</h3>
-  <p>翻译失败或权限不符时，CPU 产生同步异常 <strong>data abort</strong>（取指失败则是 instruction abort）：<code>ESR_EL1.EC = 0x24</code> 表示来自更低 EL（用户态），<code>0x25</code> 表示同一 EL（内核自己访问出错，例如 <code>copy_from_user</code> 碰到未映射的用户页）。ISS 里的 <code>DFSC</code> 区分 translation / access flag / permission fault 以及出错的表级，<code>WnR</code> 位说明是读还是写；出错的虚拟地址在 <code>FAR_EL1</code>。<code>ELR_EL1</code> 指向出错的那条指令本身——修好映射后 <code>eret</code>，同一条指令重新执行，用户程序完全无感。</p>
-  <p><strong>Linux</strong>：<code>el0t_64_sync</code> → <code>el0t_64_sync_handler</code> 按 EC 分发到 <code>el0_da</code>（<code>arch/arm64/kernel/entry-common.c</code>）→ <code>do_mem_abort(far, esr, regs)</code> 按 DFSC 查 <code>fault_info[]</code> 表，translation fault 走 <code>do_translation_fault</code>，permission fault 直接进 <code>do_page_fault</code>（都在 <code>arch/arm64/mm/fault.c</code>）。<code>do_page_fault</code> 在当前进程的 <code>mm_struct</code> 里找覆盖该地址的 VMA（<code>vm_area_struct</code>，自 6.1 起存放在 <code>mm-&gt;mm_mt</code> maple tree 中；新内核先尝试 per-VMA 锁 <code>lock_vma_under_rcu</code>，失败再拿 <code>mmap_lock</code>），检查 VMA 权限，然后调通用的 <code>handle_mm_fault</code>（<code>mm/memory.c</code>）。后者逐级分配缺失的页表，最后在 <code>handle_pte_fault</code> 分情况：</p>
+  <h3 lang="zh-CN">3. 缺页路径：从 data abort 到重新执行</h3><h3 lang="en">3. The page-fault path: from data abort to re-execution</h3>
+  <p lang="zh-CN">翻译失败或权限不符时，CPU 产生同步异常 <strong>data abort</strong>（取指失败则是 instruction abort）：<code>ESR_EL1.EC = 0x24</code> 表示来自更低 EL（用户态），<code>0x25</code> 表示同一 EL（内核自己访问出错，例如 <code>copy_from_user</code> 碰到未映射的用户页）。ISS 里的 <code>DFSC</code> 区分 translation / access flag / permission fault 以及出错的表级，<code>WnR</code> 位说明是读还是写；出错的虚拟地址在 <code>FAR_EL1</code>。<code>ELR_EL1</code> 指向出错的那条指令本身——修好映射后 <code>eret</code>，同一条指令重新执行，用户程序完全无感。</p>
+  <p lang="en">When translation fails or the permissions do not match, the CPU raises a synchronous exception, a <strong>data abort</strong> (an instruction abort if an instruction fetch failed): <code>ESR_EL1.EC = 0x24</code> means it came from a lower EL (user mode), <code>0x25</code> the same EL (the kernel’s own access faulted, for example <code>copy_from_user</code> hitting an unmapped user page). <code>DFSC</code> in the ISS distinguishes translation / access flag / permission faults and the table level that faulted, and the <code>WnR</code> bit says whether it was a read or a write; the faulting virtual address is in <code>FAR_EL1</code>. <code>ELR_EL1</code> points at the faulting instruction itself — once the mapping is fixed, <code>eret</code> re-executes the same instruction, and the user program notices nothing.</p>
+  <p lang="zh-CN"><strong>Linux</strong>：<code>el0t_64_sync</code> → <code>el0t_64_sync_handler</code> 按 EC 分发到 <code>el0_da</code>（<code>arch/arm64/kernel/entry-common.c</code>）→ <code>do_mem_abort(far, esr, regs)</code> 按 DFSC 查 <code>fault_info[]</code> 表，translation fault 走 <code>do_translation_fault</code>，permission fault 直接进 <code>do_page_fault</code>（都在 <code>arch/arm64/mm/fault.c</code>）。<code>do_page_fault</code> 在当前进程的 <code>mm_struct</code> 里找覆盖该地址的 VMA（<code>vm_area_struct</code>，自 6.1 起存放在 <code>mm-&gt;mm_mt</code> maple tree 中；新内核先尝试 per-VMA 锁 <code>lock_vma_under_rcu</code>，失败再拿 <code>mmap_lock</code>），检查 VMA 权限，然后调通用的 <code>handle_mm_fault</code>（<code>mm/memory.c</code>）。后者逐级分配缺失的页表，最后在 <code>handle_pte_fault</code> 分情况：</p>
+  <p lang="en"><strong>Linux</strong>: <code>el0t_64_sync</code> → <code>el0t_64_sync_handler</code> dispatches on EC to <code>el0_da</code> (<code>arch/arm64/kernel/entry-common.c</code>) → <code>do_mem_abort(far, esr, regs)</code> looks up the <code>fault_info[]</code> table by DFSC; translation faults go to <code>do_translation_fault</code>, permission faults straight to <code>do_page_fault</code> (both in <code>arch/arm64/mm/fault.c</code>). <code>do_page_fault</code> looks up the VMA covering the address in the current process’s <code>mm_struct</code> (a <code>vm_area_struct</code>, stored in the <code>mm-&gt;mm_mt</code> maple tree since 6.1; newer kernels first try the per-VMA lock <code>lock_vma_under_rcu</code> and take <code>mmap_lock</code> only if that fails), checks the VMA’s permissions, and then calls the generic <code>handle_mm_fault</code> (<code>mm/memory.c</code>). That function allocates any missing page tables level by level, and finally <code>handle_pte_fault</code> splits into cases:</p>
   <ul>
-    <li><strong>匿名页首次访问</strong>（堆、栈、<code>MAP_ANONYMOUS</code>）：<code>do_anonymous_page</code>——读访问可映射共享的零页，写访问才真正分一页清零。这就是 demand paging。</li>
-    <li><strong>文件映射</strong>：<code>do_fault</code> → 读 page cache，没有就发起 I/O（major fault）；私有映射被写时走 <code>do_cow_fault</code>。</li>
-    <li><strong>COW</strong>：<code>fork</code> 后父子共享物理页、PTE 都置只读；任一方写 → permission fault → <code>do_wp_page</code> 复制一页（若该页只剩自己一个使用者则直接改回可写）。</li>
+    <li lang="zh-CN"><strong>匿名页首次访问</strong>（堆、栈、<code>MAP_ANONYMOUS</code>）：<code>do_anonymous_page</code>——读访问可映射共享的零页，写访问才真正分一页清零。这就是 demand paging。</li>
+    <li lang="en"><strong>First access to an anonymous page</strong> (heap, stack, <code>MAP_ANONYMOUS</code>): <code>do_anonymous_page</code> — a read can map the shared zero page; only a write actually allocates a zeroed page. This is demand paging.</li>
+    <li lang="zh-CN"><strong>文件映射</strong>：<code>do_fault</code> → 读 page cache，没有就发起 I/O（major fault）；私有映射被写时走 <code>do_cow_fault</code>。</li>
+    <li lang="en"><strong>File mapping</strong>: <code>do_fault</code> → read from the page cache, starting I/O if the page is not there (a major fault); a write to a private mapping goes through <code>do_cow_fault</code>.</li>
+    <li lang="zh-CN"><strong>COW</strong>：<code>fork</code> 后父子共享物理页、PTE 都置只读；任一方写 → permission fault → <code>do_wp_page</code> 复制一页（若该页只剩自己一个使用者则直接改回可写）。</li>
+    <li lang="en"><strong>COW</strong>: after <code>fork</code>, parent and child share physical pages and all PTEs are set read-only; a write by either side → permission fault → <code>do_wp_page</code> copies one page (if the page has only this one user left, it is simply made writable again).</li>
   </ul>
-  <p>找不到 VMA 或权限不符 → 用户态收到 <code>SIGSEGV</code>；内核态则查异常修复表（<code>fixup_exception</code>），查不到就 oops。</p>
-  <p><strong>XNU</strong>：<code>fleh_synchronous</code> → <code>sleh_synchronous</code>（<code>osfmk/arm64/sleh.c</code>）按 EC（<code>ESR_EC_DABORT_EL0</code>）调 <code>handle_abort</code>，用户态再进 <code>handle_user_abort</code> → <code>vm_fault</code>（<code>osfmk/vm/vm_fault.c</code>）。Mach VM 的模型和 Linux 同构但命名不同：任务的地址空间是 <code>vm_map</code>，由一串 <code>vm_map_entry</code>（对应 VMA）组成，每个 entry 指向一个 <code>vm_object</code>（「一段可被映射的内存」，背后挂 pager：vnode pager 读文件，匿名内存由 compressor / swap 承担），object 里是 <code>vm_page</code>。<code>vm_fault</code> 的大致路径：在 map 中查到 entry 和 object → <code>vm_fault_page</code> 在 object（及其 shadow 链）中找页，没有就向 pager 要或给零页 → <code>vm_fault_enter</code> → <code>pmap_enter</code> 写入硬件页表。<strong>COW 用 shadow object 实现</strong>：写一个 copy-on-write 的 entry 时，在原 object 前面叠一个新的 shadow object（<code>vm_object_shadow</code>），被写的页复制进 shadow，未写的页继续从下层 object 读。延伸阅读：《Understanding the Linux Kernel》第 9 章「进程地址空间」（含缺页异常处理程序）；《Understanding the Linux Virtual Memory Manager》第 4 章「进程地址空间」。</p>
+  <p lang="zh-CN">找不到 VMA 或权限不符 → 用户态收到 <code>SIGSEGV</code>；内核态则查异常修复表（<code>fixup_exception</code>），查不到就 oops。</p>
+  <p lang="en">No VMA found, or the permissions do not match → user mode gets <code>SIGSEGV</code>; in kernel mode the exception fixup table is consulted (<code>fixup_exception</code>), and if there is no entry the result is an oops.</p>
+  <p lang="zh-CN"><strong>XNU</strong>：<code>fleh_synchronous</code> → <code>sleh_synchronous</code>（<code>osfmk/arm64/sleh.c</code>）按 EC（<code>ESR_EC_DABORT_EL0</code>）调 <code>handle_abort</code>，用户态再进 <code>handle_user_abort</code> → <code>vm_fault</code>（<code>osfmk/vm/vm_fault.c</code>）。Mach VM 的模型和 Linux 同构但命名不同：任务的地址空间是 <code>vm_map</code>，由一串 <code>vm_map_entry</code>（对应 VMA）组成，每个 entry 指向一个 <code>vm_object</code>（「一段可被映射的内存」，背后挂 pager：vnode pager 读文件，匿名内存由 compressor / swap 承担），object 里是 <code>vm_page</code>。<code>vm_fault</code> 的大致路径：在 map 中查到 entry 和 object → <code>vm_fault_page</code> 在 object（及其 shadow 链）中找页，没有就向 pager 要或给零页 → <code>vm_fault_enter</code> → <code>pmap_enter</code> 写入硬件页表。<strong>COW 用 shadow object 实现</strong>：写一个 copy-on-write 的 entry 时，在原 object 前面叠一个新的 shadow object（<code>vm_object_shadow</code>），被写的页复制进 shadow，未写的页继续从下层 object 读。延伸阅读：《Understanding the Linux Kernel》第 9 章「进程地址空间」（含缺页异常处理程序）；《Understanding the Linux Virtual Memory Manager》第 4 章「进程地址空间」。</p>
+  <p lang="en"><strong>XNU</strong>: <code>fleh_synchronous</code> → <code>sleh_synchronous</code> (<code>osfmk/arm64/sleh.c</code>) calls <code>handle_abort</code> based on EC (<code>ESR_EC_DABORT_EL0</code>), and for user mode it continues into <code>handle_user_abort</code> → <code>vm_fault</code> (<code>osfmk/vm/vm_fault.c</code>). The Mach VM model is isomorphic to Linux’s but uses different names: a task’s address space is a <code>vm_map</code>, made of a chain of <code>vm_map_entry</code>s (corresponding to VMAs); each entry points to a <code>vm_object</code> (“a piece of mappable memory”, backed by a pager: the vnode pager reads files, and anonymous memory is handled by the compressor / swap), and the object holds <code>vm_page</code>s. The approximate path of <code>vm_fault</code>: find the entry and object in the map → <code>vm_fault_page</code> looks for the page in the object (and its shadow chain), asking the pager or supplying a zero page if it is not there → <code>vm_fault_enter</code> → <code>pmap_enter</code> writes the hardware page table. <strong>COW is implemented with shadow objects</strong>: when a copy-on-write entry is written, a new shadow object is stacked in front of the original object (<code>vm_object_shadow</code>); written pages are copied into the shadow, and unwritten pages are still read from the object below. Further reading: <em>Understanding the Linux Kernel</em>, Chapter 9, “Process Address Space” (including the page fault exception handler); <em>Understanding the Linux Virtual Memory Manager</em>, Chapter 4, “Process Address Space”.</p>
 
-  <h3>4. 物理内存与内核分配器</h3>
-  <p><strong>Linux</strong>：每页物理内存有一个 <code>struct page</code>（新代码越来越多用 <code>struct folio</code> 表示「一组连续页」）。物理内存按 node → zone（arm64 上有 <code>ZONE_DMA</code>/<code>ZONE_DMA32</code>/<code>ZONE_NORMAL</code>/<code>ZONE_MOVABLE</code>，没有 HIGHMEM）组织，每个 zone 用 <strong>buddy allocator</strong> 管理：按 2<sup>order</sup> 页分块挂在 free list 上，<code>alloc_pages(gfp, order)</code> 不够就拆大块、释放时与「伙伴」合并（<code>/proc/buddyinfo</code> 就是每个 order 的空闲块数）。小对象走 <strong>SLUB</strong>（6.8 起唯一的 slab 实现）：<code>kmem_cache_create</code> 建同类对象缓存，<code>kmalloc</code> 是按大小分档的通用缓存。需要虚拟连续、物理可以不连续的大块用 <code>vmalloc</code>。内核通过 linear map（<code>phys_to_virt</code>/<code>virt_to_phys</code>）直接访问全部物理内存。</p>
-  <p><strong>XNU</strong>：架构相关的页表操作全部收在 <strong><code>pmap</code></strong> 层（<code>pmap_enter</code>、<code>pmap_remove</code>、<code>pmap_protect</code>……，arm 实现在 <code>osfmk/arm/pmap/</code>，旧版本是 <code>osfmk/arm/pmap.c</code>），机器无关的 Mach VM 只调这组接口——比 Linux 用通用的 pgd/pud/pmd/pte 抽象更彻底地隔离了硬件。物理页由 <code>vm_page</code> 描述，空闲页放在 free queue 上（<code>vm_page_grab</code> 取页）。内核小对象走 <strong>zone allocator</strong>：<code>zalloc</code>/<code>zfree</code> 按 zone（固定大小对象池）分配；<code>kalloc</code> 系列在其上按大小分档。iOS 15 / macOS 12 起引入 <strong><code>kalloc_type</code></strong>：按类型签名把不同类型的对象隔离到不同 zone（数据型走 <code>kalloc_data</code>），使 use-after-free 难以把一个类型的对象「换成」另一个类型——这是安全加固，不是性能优化。大块内核内存用 <code>kmem_alloc</code>（<code>osfmk/vm/vm_kern.c</code>）。</p>
-  <div class="note">Apple Silicon 上页表并不由普通内核代码直接写：PPL（较新设备上是 SPTM）把页表修改关进一个更高权限的小环境里，<code>pmap</code> 调用会跨过这道边界。这是 Phase 7 的主题，这里只需知道「<code>pmap_enter</code> 背后还有一层保护」。</div>
-  <p>延伸阅读：《Understanding the Linux Virtual Memory Manager》第 6 章「物理页分配」与第 8 章「Slab 分配器」；《Linux Kernel Development》第 12 章「内存管理」。</p>
+  <h3 lang="zh-CN">4. 物理内存与内核分配器</h3><h3 lang="en">4. Physical memory and kernel allocators</h3>
+  <p lang="zh-CN"><strong>Linux</strong>：每页物理内存有一个 <code>struct page</code>（新代码越来越多用 <code>struct folio</code> 表示「一组连续页」）。物理内存按 node → zone（arm64 上有 <code>ZONE_DMA</code>/<code>ZONE_DMA32</code>/<code>ZONE_NORMAL</code>/<code>ZONE_MOVABLE</code>，没有 HIGHMEM）组织，每个 zone 用 <strong>buddy allocator</strong> 管理：按 2<sup>order</sup> 页分块挂在 free list 上，<code>alloc_pages(gfp, order)</code> 不够就拆大块、释放时与「伙伴」合并（<code>/proc/buddyinfo</code> 就是每个 order 的空闲块数）。小对象走 <strong>SLUB</strong>（6.8 起唯一的 slab 实现）：<code>kmem_cache_create</code> 建同类对象缓存，<code>kmalloc</code> 是按大小分档的通用缓存。需要虚拟连续、物理可以不连续的大块用 <code>vmalloc</code>。内核通过 linear map（<code>phys_to_virt</code>/<code>virt_to_phys</code>）直接访问全部物理内存。</p>
+  <p lang="en"><strong>Linux</strong>: every page of physical memory has a <code>struct page</code> (newer code increasingly uses <code>struct folio</code> for “a group of contiguous pages”). Physical memory is organised as node → zone (on arm64 there are <code>ZONE_DMA</code>/<code>ZONE_DMA32</code>/<code>ZONE_NORMAL</code>/<code>ZONE_MOVABLE</code>, and no HIGHMEM), and each zone is managed by the <strong>buddy allocator</strong>: blocks of 2<sup>order</sup> pages hang on free lists; when <code>alloc_pages(gfp, order)</code> finds none of the right size it splits a larger block, and on free it merges with its “buddy” (<code>/proc/buddyinfo</code> shows the number of free blocks of each order). Small objects go through <strong>SLUB</strong> (the only slab implementation since 6.8): <code>kmem_cache_create</code> builds a cache of same-type objects, and <code>kmalloc</code> is the general-purpose set of caches by size class. Large chunks that must be virtually contiguous but may be physically non-contiguous use <code>vmalloc</code>. The kernel accesses all of physical memory directly through the linear map (<code>phys_to_virt</code>/<code>virt_to_phys</code>).</p>
+  <p lang="zh-CN"><strong>XNU</strong>：架构相关的页表操作全部收在 <strong><code>pmap</code></strong> 层（<code>pmap_enter</code>、<code>pmap_remove</code>、<code>pmap_protect</code>……，arm 实现在 <code>osfmk/arm/pmap/</code>，旧版本是 <code>osfmk/arm/pmap.c</code>），机器无关的 Mach VM 只调这组接口——比 Linux 用通用的 pgd/pud/pmd/pte 抽象更彻底地隔离了硬件。物理页由 <code>vm_page</code> 描述，空闲页放在 free queue 上（<code>vm_page_grab</code> 取页）。内核小对象走 <strong>zone allocator</strong>：<code>zalloc</code>/<code>zfree</code> 按 zone（固定大小对象池）分配；<code>kalloc</code> 系列在其上按大小分档。iOS 15 / macOS 12 起引入 <strong><code>kalloc_type</code></strong>：按类型签名把不同类型的对象隔离到不同 zone（数据型走 <code>kalloc_data</code>），使 use-after-free 难以把一个类型的对象「换成」另一个类型——这是安全加固，不是性能优化。大块内核内存用 <code>kmem_alloc</code>（<code>osfmk/vm/vm_kern.c</code>）。</p>
+  <p lang="en"><strong>XNU</strong>: all architecture-specific page-table operations are confined to the <strong><code>pmap</code></strong> layer (<code>pmap_enter</code>, <code>pmap_remove</code>, <code>pmap_protect</code>…; the arm implementation is in <code>osfmk/arm/pmap/</code>, or <code>osfmk/arm/pmap.c</code> in older versions), and the machine-independent Mach VM calls only this interface — a more thorough isolation from the hardware than Linux’s generic pgd/pud/pmd/pte abstraction. Physical pages are described by <code>vm_page</code>, and free pages sit on a free queue (<code>vm_page_grab</code> takes a page). Small kernel objects go through the <strong>zone allocator</strong>: <code>zalloc</code>/<code>zfree</code> allocate by zone (a pool of fixed-size objects); the <code>kalloc</code> family builds size classes on top of it. iOS 15 / macOS 12 introduced <strong><code>kalloc_type</code></strong>: it uses type signatures to isolate objects of different types into different zones (data-only types go to <code>kalloc_data</code>), which makes it hard for a use-after-free to “swap” an object of one type for one of another type — this is security hardening, not a performance optimisation. Large blocks of kernel memory use <code>kmem_alloc</code> (<code>osfmk/vm/vm_kern.c</code>).</p>
+  <div class="note" lang="zh-CN">Apple Silicon 上页表并不由普通内核代码直接写：PPL（较新设备上是 SPTM）把页表修改关进一个更高权限的小环境里，<code>pmap</code> 调用会跨过这道边界。这是 Phase 7 的主题，这里只需知道「<code>pmap_enter</code> 背后还有一层保护」。</div>
+  <div class="note" lang="en">On Apple Silicon, page tables are not written directly by ordinary kernel code: PPL (SPTM on newer devices) locks page-table modification inside a small, more privileged environment, and <code>pmap</code> calls cross that boundary. This is the subject of Phase 7; here you only need to know that “there is one more layer of protection behind <code>pmap_enter</code>”.</div>
+  <p lang="zh-CN">延伸阅读：《Understanding the Linux Virtual Memory Manager》第 6 章「物理页分配」与第 8 章「Slab 分配器」；《Linux Kernel Development》第 12 章「内存管理」。</p>
+  <p lang="en">Further reading: <em>Understanding the Linux Virtual Memory Manager</em>, Chapter 6, “Physical Page Allocation”, and Chapter 8, “Slab Allocator”; <em>Linux Kernel Development</em>, Chapter 12, “Memory Management”.</p>
 
-  <h3>5. 用户态视角：mmap、malloc 与 RSS</h3>
-  <p>用户程序拿内存只有两类系统调用：<code>brk</code>（移动堆顶）和 <code>mmap</code>（映射一段匿名或文件内存）。glibc <code>malloc</code> 小块从堆（<code>brk</code>）和 arena 切，大块（默认阈值 128 KB 起，可动态调整）直接 <code>mmap</code>。macOS 上 BSD 层的 <code>mmap</code> 最终落到 Mach 的 <code>mach_vm_map</code>；也可以直接调 Mach 接口 <code>mach_vm_allocate</code>/<code>mach_vm_map</code>（旧名 <code>vm_allocate</code>/<code>vm_map</code>）；libmalloc 主要基于这些 VM 区域，而不是 <code>brk</code>。</p>
-  <p>两个数字要分清：<strong>VSZ</strong>（虚拟大小）= 映射了多少地址；<strong>RSS</strong>（驻留集）= 其中当前真有物理页的部分。<code>mmap</code> 只改 VSZ，缺页才让 RSS 增长。macOS 上 Apple 更推荐看 <strong>footprint</strong>（<code>phys_footprint</code>：脏页 + 被压缩的页等，算「这个进程真正占的内存」），工具是 <code>vmmap</code> 和 <code>footprint</code>。</p>
+  <h3 lang="zh-CN">5. 用户态视角：mmap、malloc 与 RSS</h3><h3 lang="en">5. The user-space view: mmap, malloc and RSS</h3>
+  <p lang="zh-CN">用户程序拿内存只有两类系统调用：<code>brk</code>（移动堆顶）和 <code>mmap</code>（映射一段匿名或文件内存）。glibc <code>malloc</code> 小块从堆（<code>brk</code>）和 arena 切，大块（默认阈值 128 KB 起，可动态调整）直接 <code>mmap</code>。macOS 上 BSD 层的 <code>mmap</code> 最终落到 Mach 的 <code>mach_vm_map</code>；也可以直接调 Mach 接口 <code>mach_vm_allocate</code>/<code>mach_vm_map</code>（旧名 <code>vm_allocate</code>/<code>vm_map</code>）；libmalloc 主要基于这些 VM 区域，而不是 <code>brk</code>。</p>
+  <p lang="en">User programs have only two kinds of system calls for getting memory: <code>brk</code> (move the top of the heap) and <code>mmap</code> (map a range of anonymous or file-backed memory). glibc <code>malloc</code> carves small blocks out of the heap (<code>brk</code>) and arenas, and uses <code>mmap</code> directly for large blocks (the threshold starts at 128 KB by default and is adjusted dynamically). On macOS, the BSD-layer <code>mmap</code> ends up in Mach’s <code>mach_vm_map</code>; you can also call the Mach interfaces <code>mach_vm_allocate</code>/<code>mach_vm_map</code> directly (old names <code>vm_allocate</code>/<code>vm_map</code>); libmalloc is built mainly on these VM regions rather than on <code>brk</code>.</p>
+  <p lang="zh-CN">两个数字要分清：<strong>VSZ</strong>（虚拟大小）= 映射了多少地址；<strong>RSS</strong>（驻留集）= 其中当前真有物理页的部分。<code>mmap</code> 只改 VSZ，缺页才让 RSS 增长。macOS 上 Apple 更推荐看 <strong>footprint</strong>（<code>phys_footprint</code>：脏页 + 被压缩的页等，算「这个进程真正占的内存」），工具是 <code>vmmap</code> 和 <code>footprint</code>。</p>
+  <p lang="en">Keep two numbers apart: <strong>VSZ</strong> (virtual size) = how many addresses are mapped; <strong>RSS</strong> (resident set size) = the part of that which currently has real physical pages. <code>mmap</code> changes only VSZ; only page faults make RSS grow. On macOS, Apple recommends looking at the <strong>footprint</strong> instead (<code>phys_footprint</code>: dirty pages + compressed pages and so on, counted as “the memory this process really occupies”); the tools are <code>vmmap</code> and <code>footprint</code>.</p>
 
-  <h2 id="compare">对照表</h2>
+  <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
-    <tr><td>进程地址空间</td><td><code>struct mm_struct</code>（<code>task-&gt;mm</code>）</td><td><code>vm_map</code>（<code>task-&gt;map</code>）+ 其硬件侧 <code>pmap</code></td></tr>
-    <tr><td>地址区域</td><td><code>vm_area_struct</code>（VMA），存在 <code>mm_mt</code> maple tree</td><td><code>vm_map_entry</code>，在 <code>vm_map</code> 中按地址有序链接</td></tr>
-    <tr><td>区域背后的内容</td><td>文件：<code>address_space</code>（page cache）；匿名：<code>anon_vma</code></td><td><code>vm_object</code> + pager；COW 用 shadow object 链</td></tr>
-    <tr><td>物理页描述</td><td><code>struct page</code> / <code>struct folio</code></td><td><code>struct vm_page</code>（<code>vm_page_t</code>）</td></tr>
-    <tr><td>页表操作层</td><td>通用 pgd/p4d/pud/pmd/pte 抽象 + <code>arch/arm64/mm/</code></td><td><code>pmap</code> 接口（<code>osfmk/arm/pmap/</code>）</td></tr>
-    <tr><td>缺页入口</td><td><code>el0_da</code> → <code>do_mem_abort</code> → <code>do_page_fault</code> → <code>handle_mm_fault</code></td><td><code>sleh_synchronous</code> → <code>handle_abort</code> → <code>vm_fault</code></td></tr>
-    <tr><td>物理页分配</td><td>buddy：<code>alloc_pages</code> / <code>__get_free_pages</code></td><td><code>vm_page_grab</code>，free queue</td></tr>
-    <tr><td>内核小对象</td><td>SLUB：<code>kmalloc</code>、<code>kmem_cache_alloc</code></td><td><code>zalloc</code>、<code>kalloc_type</code>、<code>kalloc_data</code></td></tr>
-    <tr><td>内核大块虚拟内存</td><td><code>vmalloc</code></td><td><code>kmem_alloc</code></td></tr>
-    <tr><td>默认页大小（arm64）</td><td>4 KB（可配 16 KB / 64 KB）</td><td>Apple Silicon 16 KB（Intel Mac 4 KB）</td></tr>
-    <tr><td>用户态映射接口</td><td><code>mmap</code>/<code>munmap</code>/<code>mprotect</code>/<code>brk</code></td><td>BSD <code>mmap</code> 等 + Mach <code>mach_vm_allocate</code>/<code>mach_vm_map</code></td></tr>
-    <tr><td>回收与换出</td><td><code>kswapd</code>、LRU、swap</td><td>pageout（<code>osfmk/vm/vm_pageout.c</code>）、memory compressor + swap</td></tr>
-    <tr><td>观察工具</td><td><code>/proc/&lt;pid&gt;/maps</code>、<code>smaps</code>、<code>/proc/meminfo</code>、<code>buddyinfo</code>、<code>slabinfo</code></td><td><code>vmmap</code>、<code>vm_stat</code>、<code>footprint</code>、<code>zprint</code>、<code>sysctl vm.*</code></td></tr>
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
+    <tr><td><span lang="zh-CN">进程地址空间</span><span lang="en">Process address space</span></td><td><span lang="zh-CN"><code>struct mm_struct</code>（<code>task-&gt;mm</code>）</span><span lang="en"><code>struct mm_struct</code> (<code>task-&gt;mm</code>)</span></td><td><span lang="zh-CN"><code>vm_map</code>（<code>task-&gt;map</code>）+ 其硬件侧 <code>pmap</code></span><span lang="en"><code>vm_map</code> (<code>task-&gt;map</code>) + its hardware-side <code>pmap</code></span></td></tr>
+    <tr><td><span lang="zh-CN">地址区域</span><span lang="en">Address region</span></td><td><span lang="zh-CN"><code>vm_area_struct</code>（VMA），存在 <code>mm_mt</code> maple tree</span><span lang="en"><code>vm_area_struct</code> (VMA), stored in the <code>mm_mt</code> maple tree</span></td><td><span lang="zh-CN"><code>vm_map_entry</code>，在 <code>vm_map</code> 中按地址有序链接</span><span lang="en"><code>vm_map_entry</code>, linked in address order within the <code>vm_map</code></span></td></tr>
+    <tr><td><span lang="zh-CN">区域背后的内容</span><span lang="en">What backs a region</span></td><td><span lang="zh-CN">文件：<code>address_space</code>（page cache）；匿名：<code>anon_vma</code></span><span lang="en">file: <code>address_space</code> (page cache); anonymous: <code>anon_vma</code></span></td><td><span lang="zh-CN"><code>vm_object</code> + pager；COW 用 shadow object 链</span><span lang="en"><code>vm_object</code> + pager; COW uses a shadow object chain</span></td></tr>
+    <tr><td><span lang="zh-CN">物理页描述</span><span lang="en">Physical page descriptor</span></td><td><code>struct page</code> / <code>struct folio</code></td><td><span lang="zh-CN"><code>struct vm_page</code>（<code>vm_page_t</code>）</span><span lang="en"><code>struct vm_page</code> (<code>vm_page_t</code>)</span></td></tr>
+    <tr><td><span lang="zh-CN">页表操作层</span><span lang="en">Page-table operations layer</span></td><td><span lang="zh-CN">通用 pgd/p4d/pud/pmd/pte 抽象 + <code>arch/arm64/mm/</code></span><span lang="en">generic pgd/p4d/pud/pmd/pte abstraction + <code>arch/arm64/mm/</code></span></td><td><span lang="zh-CN"><code>pmap</code> 接口（<code>osfmk/arm/pmap/</code>）</span><span lang="en">the <code>pmap</code> interface (<code>osfmk/arm/pmap/</code>)</span></td></tr>
+    <tr><td><span lang="zh-CN">缺页入口</span><span lang="en">Page-fault entry</span></td><td><code>el0_da</code> → <code>do_mem_abort</code> → <code>do_page_fault</code> → <code>handle_mm_fault</code></td><td><code>sleh_synchronous</code> → <code>handle_abort</code> → <code>vm_fault</code></td></tr>
+    <tr><td><span lang="zh-CN">物理页分配</span><span lang="en">Physical page allocation</span></td><td><span lang="zh-CN">buddy：<code>alloc_pages</code> / <code>__get_free_pages</code></span><span lang="en">buddy: <code>alloc_pages</code> / <code>__get_free_pages</code></span></td><td><span lang="zh-CN"><code>vm_page_grab</code>，free queue</span><span lang="en"><code>vm_page_grab</code>, free queue</span></td></tr>
+    <tr><td><span lang="zh-CN">内核小对象</span><span lang="en">Small kernel objects</span></td><td><span lang="zh-CN">SLUB：<code>kmalloc</code>、<code>kmem_cache_alloc</code></span><span lang="en">SLUB: <code>kmalloc</code>, <code>kmem_cache_alloc</code></span></td><td><span lang="zh-CN"><code>zalloc</code>、<code>kalloc_type</code>、<code>kalloc_data</code></span><span lang="en"><code>zalloc</code>, <code>kalloc_type</code>, <code>kalloc_data</code></span></td></tr>
+    <tr><td><span lang="zh-CN">内核大块虚拟内存</span><span lang="en">Large kernel virtual memory</span></td><td><code>vmalloc</code></td><td><code>kmem_alloc</code></td></tr>
+    <tr><td><span lang="zh-CN">默认页大小（arm64）</span><span lang="en">Default page size (arm64)</span></td><td><span lang="zh-CN">4 KB（可配 16 KB / 64 KB）</span><span lang="en">4 KB (16 KB / 64 KB configurable)</span></td><td><span lang="zh-CN">Apple Silicon 16 KB（Intel Mac 4 KB）</span><span lang="en">Apple Silicon 16 KB (Intel Mac 4 KB)</span></td></tr>
+    <tr><td><span lang="zh-CN">用户态映射接口</span><span lang="en">User-space mapping interfaces</span></td><td><code>mmap</code>/<code>munmap</code>/<code>mprotect</code>/<code>brk</code></td><td><span lang="zh-CN">BSD <code>mmap</code> 等 + Mach <code>mach_vm_allocate</code>/<code>mach_vm_map</code></span><span lang="en">BSD <code>mmap</code> etc. + Mach <code>mach_vm_allocate</code>/<code>mach_vm_map</code></span></td></tr>
+    <tr><td><span lang="zh-CN">回收与换出</span><span lang="en">Reclaim and swap-out</span></td><td><span lang="zh-CN"><code>kswapd</code>、LRU、swap</span><span lang="en"><code>kswapd</code>, LRU, swap</span></td><td><span lang="zh-CN">pageout（<code>osfmk/vm/vm_pageout.c</code>）、memory compressor + swap</span><span lang="en">pageout (<code>osfmk/vm/vm_pageout.c</code>), memory compressor + swap</span></td></tr>
+    <tr><td><span lang="zh-CN">观察工具</span><span lang="en">Observation tools</span></td><td><span lang="zh-CN"><code>/proc/&lt;pid&gt;/maps</code>、<code>smaps</code>、<code>/proc/meminfo</code>、<code>buddyinfo</code>、<code>slabinfo</code></span><span lang="en"><code>/proc/&lt;pid&gt;/maps</code>, <code>smaps</code>, <code>/proc/meminfo</code>, <code>buddyinfo</code>, <code>slabinfo</code></span></td><td><span lang="zh-CN"><code>vmmap</code>、<code>vm_stat</code>、<code>footprint</code>、<code>zprint</code>、<code>sysctl vm.*</code></span><span lang="en"><code>vmmap</code>, <code>vm_stat</code>, <code>footprint</code>, <code>zprint</code>, <code>sysctl vm.*</code></span></td></tr>
   </table>
   </div>
 
-  <h2 id="diagram">动画图解</h2>
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
 
-  <h3>A · ARM64 页表遍历（48-bit VA，4 KB 粒度）</h3>
+  <h3 lang="zh-CN">A · ARM64 页表遍历（48-bit VA，4 KB 粒度）</h3><h3 lang="en">A · ARM64 page-table walk (48-bit VA, 4 KB granule)</h3>
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
          data-captions='["全图：上方是一个 48-bit 虚拟地址被切成的位段；中间一排是 TTBR 和 L0–L3 四级页表；左下是 TLB 这条捷径，右下是最终物理地址。按「播放」逐步走。",
@@ -118,18 +152,25 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
            "③ TLB miss：从 TTBR 取 L0 表物理基址，用 [47:39] 选中一项。它必须是 table 描述符（低两位 0b11），给出 L1 表基址；若无效则 translation fault level 0。",
            "④ L1：用 [38:30] 选项。table 描述符继续往下；block 描述符（0b01）则直接映射 1 GB，遍历到此结束。",
            "⑤ L2：用 [29:21] 选项。table 继续；block 则映射 2 MB——这正是 Linux THP 用到的大页。",
-           "⑥ L3：用 [20:12] 选中 page 描述符，检查 AP、UXN/PXN、AF，按 AttrIndx 去 MAIR_EL1 取内存类型；PA = 描述符输出地址 [47:12] 拼上 VA [11:0]。结果回填 TLB，下次同一页直接命中。"]'>
+           "⑥ L3：用 [20:12] 选中 page 描述符，检查 AP、UXN/PXN、AF，按 AttrIndx 去 MAIR_EL1 取内存类型；PA = 描述符输出地址 [47:12] 拼上 VA [11:0]。结果回填 TLB，下次同一页直接命中。"]'
+         data-captions-en='["The whole picture: at the top, a 48-bit virtual address cut into bit fields; in the middle row, the TTBR and the four page-table levels L0–L3; bottom left, the TLB shortcut; bottom right, the final physical address. Press Play to step through.",
+           "① Slice the address: [47:39] is the L0 index, [38:30] L1, [29:21] L2, [20:12] L3, 9 bits each (512 entries per table); [11:0] is the page offset, 12 bits = 4 KB.",
+           "② Look at the top bits first: [63:48] all 0 uses TTBR0_EL1 (user), all 1 uses TTBR1_EL1 (kernel); with TBI enabled, bit 55 decides. At the same time the MMU looks up the TLB with the VA page number + the current ASID — on a hit it gets the PA directly and all four following steps are skipped.",
+           "③ TLB miss: take the physical base of the L0 table from the TTBR and select an entry with [47:39]. It must be a table descriptor (low two bits 0b11), giving the base of the L1 table; if it is invalid, the result is a translation fault at level 0.",
+           "④ L1: select an entry with [38:30]. A table descriptor continues downward; a block descriptor (0b01) maps 1 GB directly, and the walk ends here.",
+           "⑤ L2: select an entry with [29:21]. A table continues; a block maps 2 MB — exactly the huge page that Linux THP uses.",
+           "⑥ L3: [20:12] selects the page descriptor; AP, UXN/PXN and AF are checked, and AttrIndx picks the memory type from MAIR_EL1; PA = the output address [47:12] of the descriptor joined with VA [11:0]. The result is filled back into the TLB, so the next access to the same page hits directly."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="60" y="22" class="small">VA（48-bit 有效，4 KB 粒度）</text>
+      <text x="60" y="22" class="small" lang="zh-CN">VA（48-bit 有效，4 KB 粒度）</text><text x="60" y="22" class="small" lang="en">VA (48 significant bits, 4 KB granule)</text>
 
       <!-- VA bit fields -->
       <g data-step="1 2"><rect class="box" x="60" y="50" width="120" height="40"/>
         <text x="66" y="44" class="small">63</text>
-        <text x="70" y="75" class="mono">[63:48] 选TTBR</text></g>
+        <text x="70" y="75" class="mono" lang="zh-CN">[63:48] 选TTBR</text><text x="70" y="75" class="mono" lang="en">[63:48] →TTBR</text></g>
       <g data-step="1 3"><rect class="box" x="180" y="50" width="120" height="40"/>
         <text x="184" y="44" class="small">47</text>
         <text x="192" y="75" class="mono">L0 [47:39]</text></g>
@@ -151,26 +192,26 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
       <g data-step="2"><path class="arrow" d="M100 90 L70 160"/>
         <rect class="box" x="20" y="160" width="100" height="90"/>
         <text x="28" y="180" class="mono">TTBR0/1</text>
-        <text x="28" y="200" class="small">高位全0→TTBR0</text>
-        <text x="28" y="216" class="small">高位全1→TTBR1</text>
-        <text x="28" y="236" class="small">ASID（Linux 在 TTBR1）</text></g>
+        <text x="28" y="200" class="small" lang="zh-CN">高位全0→TTBR0</text><text x="28" y="200" class="small" lang="en">top all 0→TTBR0</text>
+        <text x="28" y="216" class="small" lang="zh-CN">高位全1→TTBR1</text><text x="28" y="216" class="small" lang="en">top all 1→TTBR1</text>
+        <text x="28" y="236" class="small" lang="zh-CN">ASID（Linux 在 TTBR1）</text><text x="28" y="236" class="small" lang="en">Linux ASID→TTBR1</text></g>
       <g data-step="2"><path class="arrow flow" d="M62 88 C 6 120, 6 300, 30 310"/>
         <path class="arrow flow" d="M300 335 L530 335"/>
-        <text x="330" y="328" class="small">hit：跳过整个遍历</text></g>
+        <text x="330" y="328" class="small" lang="zh-CN">hit：跳过整个遍历</text><text x="330" y="328" class="small" lang="en">hit: skip the whole walk</text></g>
       <g data-step="2 6"><rect class="box pulse" x="30" y="300" width="270" height="70"/>
         <text x="42" y="322" class="mono">TLB</text>
-        <text x="42" y="342" class="small">键：VA[47:12] + ASID（nG 页）</text>
-        <text x="42" y="360" class="small">值：PA 页基址 + 属性</text></g>
+        <text x="42" y="342" class="small" lang="zh-CN">键：VA[47:12] + ASID（nG 页）</text><text x="42" y="342" class="small" lang="en">key: VA[47:12] + ASID (nG pages)</text>
+        <text x="42" y="360" class="small" lang="zh-CN">值：PA 页基址 + 属性</text><text x="42" y="360" class="small" lang="en">value: PA page base + attributes</text></g>
 
       <!-- step 3: L0 -->
       <g data-step="3"><path class="arrow" d="M120 205 L140 205"/>
         <path class="arrow" d="M240 90 L195 160"/>
         <rect class="box linux" x="140" y="160" width="110" height="90"/>
         <text x="148" y="180" class="mono">L0 table</text>
-        <text x="148" y="196" class="small">512 项 × 8 B</text>
+        <text x="148" y="196" class="small" lang="zh-CN">512 项 × 8 B</text><text x="148" y="196" class="small" lang="en">512 × 8 B</text>
         <rect x="148" y="206" width="94" height="20" style="fill: none; stroke: var(--ink-3)"/>
         <text x="152" y="221" class="small">table desc</text>
-        <text x="148" y="243" class="small">→ L1 基址</text></g>
+        <text x="148" y="243" class="small" lang="zh-CN">→ L1 基址</text><text x="148" y="243" class="small" lang="en">→ L1 base</text></g>
 
       <!-- step 4: L1 -->
       <g data-step="4"><path class="arrow" d="M250 205 L270 205"/>
@@ -180,7 +221,7 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
         <text x="278" y="196" class="small">block = 1 GB</text>
         <rect x="278" y="206" width="94" height="20" style="fill: none; stroke: var(--ink-3)"/>
         <text x="282" y="221" class="small">table/block</text>
-        <text x="278" y="243" class="small">→ L2 基址</text></g>
+        <text x="278" y="243" class="small" lang="zh-CN">→ L2 基址</text><text x="278" y="243" class="small" lang="en">→ L2 base</text></g>
 
       <!-- step 5: L2 -->
       <g data-step="5"><path class="arrow" d="M380 205 L400 205"/>
@@ -190,7 +231,7 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
         <text x="408" y="196" class="small">block = 2 MB</text>
         <rect x="408" y="206" width="94" height="20" style="fill: none; stroke: var(--ink-3)"/>
         <text x="412" y="221" class="small">table/block</text>
-        <text x="408" y="243" class="small">→ L3 基址</text></g>
+        <text x="408" y="243" class="small" lang="zh-CN">→ L3 基址</text><text x="408" y="243" class="small" lang="en">→ L3 base</text></g>
 
       <!-- step 6: L3 + PA -->
       <g data-step="6"><path class="arrow" d="M510 205 L530 205"/>
@@ -200,20 +241,20 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
         <text x="538" y="196" class="small">page = 4 KB</text>
         <rect x="538" y="206" width="94" height="20" style="fill: none; stroke: var(--ink-3)"/>
         <text x="542" y="221" class="small">page desc</text>
-        <text x="538" y="243" class="small">OA + 属性位</text>
+        <text x="538" y="243" class="small" lang="zh-CN">OA + 属性位</text><text x="538" y="243" class="small" lang="en">OA + attr bits</text>
         <path class="arrow" d="M600 250 L600 300"/>
         <path class="arrow" d="M740 90 L740 300"/>
         <path class="arrow flow" d="M560 250 C 520 290, 360 290, 300 305"/>
         <rect class="box" x="530" y="300" width="350" height="70"/>
         <text x="542" y="322" class="mono">PA = OA[47:12] ‖ VA[11:0]</text>
-        <text x="542" y="342" class="small">AttrIndx → MAIR_EL1；AP、UXN/PXN、AF、SH 检查</text>
-        <text x="542" y="360" class="small">权限不符 → permission fault</text></g>
+        <text x="542" y="342" class="small" lang="zh-CN">AttrIndx → MAIR_EL1；AP、UXN/PXN、AF、SH 检查</text><text x="542" y="342" class="small" lang="en">AttrIndx → MAIR_EL1; check AP, UXN/PXN, AF, SH</text>
+        <text x="542" y="360" class="small" lang="zh-CN">权限不符 → permission fault</text><text x="542" y="360" class="small" lang="en">permissions do not match → permission fault</text></g>
 
-      <text x="20" y="392" class="small">16 KB 粒度（Apple Silicon）：偏移 14 位、每级 11 位，47-bit VA = 14 + 3×11，只需 L1–L3 三级。</text>
+      <text x="20" y="392" class="small" lang="zh-CN">16 KB 粒度（Apple Silicon）：偏移 14 位、每级 11 位，47-bit VA = 14 + 3×11，只需 L1–L3 三级。</text><text x="20" y="392" class="small" lang="en">16 KB granule (Apple Silicon): 14-bit offset, 11 bits per level, 47-bit VA = 14 + 3×11, so only three levels, L1–L3.</text>
     </svg>
   </div>
 
-  <h3>B · 缺页路径（Linux ↔ XNU）</h3>
+  <h3 lang="zh-CN">B · 缺页路径（Linux ↔ XNU）</h3><h3 lang="en">B · The page-fault path (Linux ↔ XNU)</h3>
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
          data-captions='["全图：上半 EL0 用户态，下半 EL1 内核态；左列 Linux，右列 XNU。一次读写碰到还没有物理页的地址，看两个内核怎么补上。",
@@ -222,7 +263,14 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
            "③ 原因和地址被记下：ESR_EL1.EC = 0x24（来自 lower EL 的 data abort），ISS 里 DFSC 说明是 translation / permission fault 及其级别，WnR 说明读还是写；FAR_EL1 = 出错的 VA。Linux：el0t_64_sync → el0_da；XNU：fleh_synchronous → sleh_synchronous 看到 ESR_EC_DABORT_EL0。",
            "④ 找区域。Linux：do_mem_abort → do_translation_fault / do_page_fault，在 mm_struct 的 maple tree 里找 VMA 并检查权限。XNU：handle_abort → handle_user_abort → vm_fault，在 vm_map 里查到 vm_map_entry 和它的 vm_object。找不到 → SIGSEGV / EXC_BAD_ACCESS。",
            "⑤ 拿到物理页。匿名首次访问：分一页清零（读可先映射零页）；文件映射：从 page cache / pager 读，可能要等 I/O；写共享只读页：COW 复制一页。Linux 在 handle_mm_fault → handle_pte_fault 里分派；XNU 在 vm_fault_page 里沿 shadow 链找页或向 pager 要。",
-           "⑥ 写入页表并返回：Linux 设置 PTE（set_pte_at 一类辅助函数）；XNU vm_fault_enter → pmap_enter。然后 eret 回到 ELR_EL1——还是那条 ldr，这次翻译成功，程序毫无察觉。"]'>
+           "⑥ 写入页表并返回：Linux 设置 PTE（set_pte_at 一类辅助函数）；XNU vm_fault_enter → pmap_enter。然后 eret 回到 ELR_EL1——还是那条 ldr，这次翻译成功，程序毫无察觉。"]'
+         data-captions-en='["The whole picture: EL0 user mode on top, EL1 kernel mode below; Linux on the left, XNU on the right. A load or store hits an address that has no physical page yet; watch how the two kernels fill it in.",
+           "① The user program executes ldr x0, [x1], where x1 points to an anonymous page that was just mmapped and never touched (or to a shared page that is about to be written after fork). The L3 descriptor is invalid (or read-only).",
+           "② MMU translation fails → synchronous exception, data abort: the hardware saves the address of this ldr in ELR_EL1 and PSTATE in SPSR_EL1, switches to EL1 and jumps to VBAR_EL1 + 0x400.",
+           "③ The cause and the address are recorded: ESR_EL1.EC = 0x24 (data abort from a lower EL); DFSC in the ISS says translation / permission fault and its level, and WnR says read or write; FAR_EL1 = the faulting VA. Linux: el0t_64_sync → el0_da; XNU: fleh_synchronous → sleh_synchronous sees ESR_EC_DABORT_EL0.",
+           "④ Find the region. Linux: do_mem_abort → do_translation_fault / do_page_fault looks up the VMA in the maple tree of the mm_struct and checks permissions. XNU: handle_abort → handle_user_abort → vm_fault finds the vm_map_entry and its vm_object in the vm_map. Not found → SIGSEGV / EXC_BAD_ACCESS.",
+           "⑤ Get a physical page. First access to anonymous memory: allocate a zeroed page (a read can map the zero page first); file mapping: read from the page cache / pager, possibly waiting for I/O; write to a shared read-only page: COW copies one page. Linux dispatches in handle_mm_fault → handle_pte_fault; XNU, in vm_fault_page, follows the shadow chain to find the page or asks the pager.",
+           "⑥ Write the page table and return: Linux sets the PTE (with a set_pte_at style helper); XNU does vm_fault_enter → pmap_enter. Then eret returns to ELR_EL1 — the same ldr, which now translates successfully, and the program notices nothing."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -240,30 +288,30 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
       <!-- step 1: user access -->
       <g data-step="1"><rect class="box linux" x="60" y="55" width="330" height="45"/>
         <text x="72" y="74" class="mono">ldr x0, [x1]</text>
-        <text x="72" y="92" class="small">x1 → mmap 出来、未访问过的页</text></g>
+        <text x="72" y="92" class="small" lang="zh-CN">x1 → mmap 出来、未访问过的页</text><text x="72" y="92" class="small" lang="en">x1 → a page from mmap, never accessed</text></g>
       <g data-step="1"><rect class="box xnu" x="500" y="55" width="330" height="45"/>
         <text x="512" y="74" class="mono">ldr x0, [x1]</text>
-        <text x="512" y="92" class="small">x1 → mach_vm_allocate / mmap 出来的页</text></g>
+        <text x="512" y="92" class="small" lang="zh-CN">x1 → mach_vm_allocate / mmap 出来的页</text><text x="512" y="92" class="small" lang="en">x1 → a page from mach_vm_allocate / mmap</text></g>
 
       <!-- step 2: hardware data abort -->
       <g data-step="2"><path class="arrow" d="M225 100 L225 180"/><path class="arrow" d="M665 100 L665 180"/>
         <rect class="box" x="290" y="114" width="320" height="38" style="fill: var(--surface)"/>
-        <text x="302" y="130" class="small">MMU: L3 无效 → Data Abort；ELR_EL1←这条 ldr</text>
+        <text x="302" y="130" class="small" lang="zh-CN">MMU: L3 无效 → Data Abort；ELR_EL1←这条 ldr</text><text x="302" y="130" class="small" lang="en">MMU: L3 invalid → Data Abort; ELR_EL1←this ldr</text>
         <text x="302" y="145" class="small">EL0→EL1, PC←VBAR_EL1 + 0x400</text></g>
 
       <!-- step 3: ESR / FAR -->
       <g data-step="3"><rect class="box linux" x="60" y="180" width="330" height="40"/>
         <text x="72" y="197" class="mono">el0t_64_sync → el0_da</text>
-        <text x="72" y="213" class="small">ESR.EC=0x24, DFSC, WnR；FAR_EL1 = VA</text></g>
+        <text x="72" y="213" class="small" lang="zh-CN">ESR.EC=0x24, DFSC, WnR；FAR_EL1 = VA</text><text x="72" y="213" class="small" lang="en">ESR.EC=0x24, DFSC, WnR; FAR_EL1 = VA</text></g>
       <g data-step="3"><rect class="box xnu" x="500" y="180" width="330" height="40"/>
         <text x="512" y="197" class="mono">fleh_ → sleh_synchronous</text>
-        <text x="512" y="213" class="small">ESR_EC_DABORT_EL0；FAR_EL1 = VA</text></g>
+        <text x="512" y="213" class="small" lang="zh-CN">ESR_EC_DABORT_EL0；FAR_EL1 = VA</text><text x="512" y="213" class="small" lang="en">ESR_EC_DABORT_EL0; FAR_EL1 = VA</text></g>
 
       <!-- step 4: find region -->
       <g data-step="4"><path class="arrow" d="M225 220 L225 235"/><path class="arrow" d="M665 220 L665 235"/>
         <rect class="box linux" x="60" y="235" width="330" height="40"/>
         <text x="72" y="252" class="mono">do_mem_abort → do_page_fault</text>
-        <text x="72" y="268" class="small">mm_struct 的 maple tree 里找 VMA，查权限</text>
+        <text x="72" y="268" class="small" lang="zh-CN">mm_struct 的 maple tree 里找 VMA，查权限</text><text x="72" y="268" class="small" lang="en">find the VMA in the mm_struct maple tree, check perms</text>
         <rect class="box xnu" x="500" y="235" width="330" height="40"/>
         <text x="512" y="252" class="mono">handle_user_abort → vm_fault</text>
         <text x="512" y="268" class="small">vm_map → vm_map_entry → vm_object</text></g>
@@ -275,23 +323,24 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
         <text x="72" y="323" class="small">do_anonymous_page | do_fault | do_wp_page (COW)</text>
         <rect class="box xnu" x="500" y="290" width="330" height="40"/>
         <text x="512" y="307" class="mono">vm_fault_page</text>
-        <text x="512" y="323" class="small">零页 | pager 读文件 | shadow object 复制 (COW)</text></g>
+        <text x="512" y="323" class="small" lang="zh-CN">零页 | pager 读文件 | shadow object 复制 (COW)</text><text x="512" y="323" class="small" lang="en">zero page | pager reads file | shadow copy (COW)</text></g>
 
       <!-- step 6: install + eret -->
       <g data-step="6"><path class="arrow" d="M225 330 L225 345"/><path class="arrow" d="M665 330 L665 345"/>
         <rect class="box" x="60" y="345" width="330" height="40"/>
-        <text x="72" y="370" class="mono">set PTE ; eret → 重新执行 ldr</text>
+        <text x="72" y="370" class="mono" lang="zh-CN">set PTE ; eret → 重新执行 ldr</text><text x="72" y="370" class="mono" lang="en">set PTE ; eret → re-execute ldr</text>
         <rect class="box" x="500" y="345" width="330" height="40"/>
-        <text x="512" y="370" class="mono">pmap_enter ; eret → 重新执行 ldr</text>
+        <text x="512" y="370" class="mono" lang="zh-CN">pmap_enter ; eret → 重新执行 ldr</text><text x="512" y="370" class="mono" lang="en">pmap_enter ; eret → re-execute ldr</text>
         <path class="arrow flow" d="M400 365 C 440 365, 440 78, 400 78"/>
         <path class="arrow flow" d="M840 365 C 880 365, 880 78, 840 78"/></g>
     </svg>
   </div>
 
-  <h2 id="lab">动手实验</h2>
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
   <div class="lab">
-    <h3>准备 · 一个让 demand paging 现形的小程序</h3>
-    <p>把下面存为 <code>touch64.c</code>。它 <code>mmap</code> 64 MB 匿名内存，然后分 4 段、每 4 KB 写一个字节，每段之后打印 RSS 和这一段触发的 minor fault 数。同一份源码在 Linux（读 <code>/proc/self/status</code> 的 <code>VmRSS</code>）和 macOS（Mach <code>task_info</code>）上都能编。</p>
+    <h3 lang="zh-CN">准备 · 一个让 demand paging 现形的小程序</h3><h3 lang="en">Setup · A small program that makes demand paging visible</h3>
+    <p lang="zh-CN">把下面存为 <code>touch64.c</code>。它 <code>mmap</code> 64 MB 匿名内存，然后分 4 段、每 4 KB 写一个字节，每段之后打印 RSS 和这一段触发的 minor fault 数。同一份源码在 Linux（读 <code>/proc/self/status</code> 的 <code>VmRSS</code>）和 macOS（Mach <code>task_info</code>）上都能编。</p>
+    <p lang="en">Save the following as <code>touch64.c</code>. It <code>mmap</code>s 64 MB of anonymous memory, then writes one byte every 4 KB in 4 segments, and after each segment prints the RSS and the number of minor faults that segment triggered. The same source builds on Linux (reading <code>VmRSS</code> from <code>/proc/self/status</code>) and on macOS (Mach <code>task_info</code>).</p>
 <pre>#define _GNU_SOURCE
 #include &lt;stdio.h&gt;
 #include &lt;unistd.h&gt;
@@ -344,107 +393,123 @@ int main(void) {
   return 0;
 }</pre>
 
-    <h3>Lab A · Linux（Phase 0 的 QEMU 环境）</h3>
+    <h3 lang="zh-CN">Lab A · Linux（Phase 0 的 QEMU 环境）</h3><h3 lang="en">Lab A · Linux (the QEMU setup from Phase 0)</h3>
     <ol>
-      <li>在 Linux arm64 容器里静态编译（musl 静态二进制可以直接扔进 busybox initramfs）：<pre>docker run --platform linux/arm64 --rm -v "$PWD:/w" -w /w alpine:3.20 sh -c \
+      <li><span lang="zh-CN">在 Linux arm64 容器里静态编译（musl 静态二进制可以直接扔进 busybox initramfs）：</span><span lang="en">Build it statically in a Linux arm64 container (a static musl binary can be dropped straight into the busybox initramfs):</span><pre>docker run --platform linux/arm64 --rm -v "$PWD:/w" -w /w alpine:3.20 sh -c \
   'apk add -q build-base &amp;&amp; gcc -static -O1 -o touch64 touch64.c'</pre></li>
-      <li>重做 Phase 0 的 initramfs：在那条 <code>docker run</code> 里再加 <code>-v "$PWD:/w"</code>，在 <code>cd /r</code> 之前加 <code>cp /w/touch64 /r/bin/ &amp;&amp;</code>，并把 busybox 链接列表扩成 <code>sh ls cat echo mount uname dmesg grep head sleep</code>。然后按 Phase 0 的 QEMU 命令启动。</li>
-      <li>先看全局：<pre>cat /proc/meminfo | head -20      # MemTotal / MemFree / AnonPages / Slab / VmallocUsed
+      <li lang="zh-CN">重做 Phase 0 的 initramfs：在那条 <code>docker run</code> 里再加 <code>-v "$PWD:/w"</code>，在 <code>cd /r</code> 之前加 <code>cp /w/touch64 /r/bin/ &amp;&amp;</code>，并把 busybox 链接列表扩成 <code>sh ls cat echo mount uname dmesg grep head sleep</code>。然后按 Phase 0 的 QEMU 命令启动。</li>
+      <li lang="en">Rebuild the Phase 0 initramfs: in that <code>docker run</code>, also add <code>-v "$PWD:/w"</code>, add <code>cp /w/touch64 /r/bin/ &amp;&amp;</code> before <code>cd /r</code>, and extend the busybox link list to <code>sh ls cat echo mount uname dmesg grep head sleep</code>. Then boot with the Phase 0 QEMU command.</li>
+      <li><span lang="zh-CN">先看全局：</span><span lang="en">Look at the global picture first:</span><pre>cat /proc/meminfo | head -20      # MemTotal / MemFree / AnonPages / Slab / VmallocUsed
 cat /proc/buddyinfo              # 每个 zone、每个 order（1,2,4,…页）的空闲块数
 head -20 /proc/slabinfo          # 每个 kmem_cache 的对象数与大小；不存在时检查 CONFIG_SLUB_DEBUG</pre></li>
-      <li>跑实验，边跑边看地址空间：<pre>touch64 &amp;
+      <li><span lang="zh-CN">跑实验，边跑边看地址空间：</span><span lang="en">Run the experiment and watch the address space while it runs:</span><pre>touch64 &amp;
 sleep 1; cat /proc/$!/maps        # 找到一段 64 MB 的匿名区（rw-p，无文件名）
 grep -E "VmSize|VmRSS" /proc/$!/status
 wait</pre>
-        预期：<code>pagesize=4096</code>（这就是 <code>getconf PAGESIZE</code> 给的值；完整发行版里可直接跑 <code>getconf PAGESIZE</code>，busybox 环境用程序里的 <code>sysconf</code> 代替）；<code>after mmap</code> 时 RSS 只有几百 KB，之后每段 RSS 增长约 16 MB、<code>+faults</code> 约 4096（16 MB / 4 KB）。VmSize 一开始就包含了整整 64 MB——VSZ 与 RSS 的区别就在这里。</li>
-      <li>若 <code>+faults</code> 远少于 4096、RSS 按 2 MB 跳：那是 THP（透明大页）用 L2 block 映射了 2 MB。<code>cat /sys/kernel/mm/transparent_hugepage/enabled</code>，<code>echo never &gt; …/enabled</code> 后再跑一次对比（需要内核开了 <code>CONFIG_TRANSPARENT_HUGEPAGE</code> 且已挂载 sysfs）。</li>
-      <li>在源码里找到动画 B 的 Linux 列：<pre>grep -n "el0_da" arch/arm64/kernel/entry-common.c | head
+        <span lang="zh-CN">预期：<code>pagesize=4096</code>（这就是 <code>getconf PAGESIZE</code> 给的值；完整发行版里可直接跑 <code>getconf PAGESIZE</code>，busybox 环境用程序里的 <code>sysconf</code> 代替）；<code>after mmap</code> 时 RSS 只有几百 KB，之后每段 RSS 增长约 16 MB、<code>+faults</code> 约 4096（16 MB / 4 KB）。VmSize 一开始就包含了整整 64 MB——VSZ 与 RSS 的区别就在这里。</span><span lang="en">Expected: <code>pagesize=4096</code> (this is the value <code>getconf PAGESIZE</code> gives; on a full distribution you can run <code>getconf PAGESIZE</code> directly, while in the busybox environment the program’s <code>sysconf</code> stands in for it); at <code>after mmap</code> the RSS is only a few hundred KB, and then each segment grows RSS by about 16 MB with <code>+faults</code> about 4096 (16 MB / 4 KB). VmSize includes the full 64 MB from the start — that is exactly the difference between VSZ and RSS.</span></li>
+      <li lang="zh-CN">若 <code>+faults</code> 远少于 4096、RSS 按 2 MB 跳：那是 THP（透明大页）用 L2 block 映射了 2 MB。<code>cat /sys/kernel/mm/transparent_hugepage/enabled</code>，<code>echo never &gt; …/enabled</code> 后再跑一次对比（需要内核开了 <code>CONFIG_TRANSPARENT_HUGEPAGE</code> 且已挂载 sysfs）。</li>
+      <li lang="en">If <code>+faults</code> is far below 4096 and RSS jumps in 2 MB steps, that is THP (transparent huge pages) mapping 2 MB with an L2 block. Run <code>cat /sys/kernel/mm/transparent_hugepage/enabled</code>, then <code>echo never &gt; …/enabled</code> and run again to compare (needs a kernel built with <code>CONFIG_TRANSPARENT_HUGEPAGE</code> and sysfs mounted).</li>
+      <li><span lang="zh-CN">在源码里找到动画 B 的 Linux 列：</span><span lang="en">Find the Linux column of diagram B in the source:</span><pre>grep -n "el0_da" arch/arm64/kernel/entry-common.c | head
 grep -n "do_mem_abort\|do_translation_fault\|do_page_fault" arch/arm64/mm/fault.c | head
 grep -n "handle_mm_fault\|handle_pte_fault\|do_anonymous_page\|do_wp_page" mm/memory.c | head</pre></li>
     </ol>
 
-    <h3>Lab B · macOS（Apple Silicon）</h3>
+    <h3 lang="zh-CN">Lab B · macOS（Apple Silicon）</h3><h3 lang="en">Lab B · macOS (Apple Silicon)</h3>
     <ol>
-      <li>页大小与全局统计：<pre>pagesize                         # Apple Silicon 上输出 16384
+      <li><span lang="zh-CN">页大小与全局统计：</span><span lang="en">Page size and global statistics:</span><pre>pagesize                         # Apple Silicon 上输出 16384
 sysctl hw.pagesize vm.pages
 vm_stat                          # 第一行会写 page size of 16384 bytes；各计数单位都是「页」</pre></li>
-      <li>编译同一个程序并观察：<pre>clang -O1 -o touch64 touch64.c
+      <li><span lang="zh-CN">编译同一个程序并观察：</span><span lang="en">Build the same program and observe:</span><pre>clang -O1 -o touch64 touch64.c
 ./touch64 &amp;
 sleep 1; vmmap -summary $!       # 看 VIRTUAL SIZE / RESIDENT SIZE 两列
 vmmap $! | grep -i vm_allocate   # 匿名 mmap 区通常标为 VM_ALLOCATE
 footprint $!                     # Apple 推荐的「真实占用」口径
 wait</pre>
-        预期：<code>pagesize=16384</code>；RSS 每段同样增长约 16 MB，但 <code>+faults</code> 大约只有 Linux 的 1/4（约 1024）——每 4 KB 写一次，可一页是 16 KB，同一页里后三次写不再缺页。注意 macOS 的 <code>ru_minflt</code> 口径与 Linux 不完全相同，以数量级对比为准。</li>
-      <li>看看内核 zone：<code>sudo zprint | head -30</code>（每个 zalloc zone 的元素大小与占用；<code>kalloc.type</code> 开头的就是 kalloc_type 的分档）。</li>
-      <li>在 XNU 源码里找到动画 B 的 XNU 列（沿用 Phase 0 克隆的 <code>xnu</code>）：<pre>cd xnu
+        <span lang="zh-CN">预期：<code>pagesize=16384</code>；RSS 每段同样增长约 16 MB，但 <code>+faults</code> 大约只有 Linux 的 1/4（约 1024）——每 4 KB 写一次，可一页是 16 KB，同一页里后三次写不再缺页。注意 macOS 的 <code>ru_minflt</code> 口径与 Linux 不完全相同，以数量级对比为准。</span><span lang="en">Expected: <code>pagesize=16384</code>; RSS again grows by about 16 MB per segment, but <code>+faults</code> is only about 1/4 of the Linux figure (about 1024) — the program writes every 4 KB, but a page is 16 KB, so the last three writes into the same page no longer fault. Note that macOS does not count <code>ru_minflt</code> exactly the way Linux does; compare orders of magnitude.</span></li>
+      <li lang="zh-CN">看看内核 zone：<code>sudo zprint | head -30</code>（每个 zalloc zone 的元素大小与占用；<code>kalloc.type</code> 开头的就是 kalloc_type 的分档）。</li>
+      <li lang="en">Look at the kernel zones: <code>sudo zprint | head -30</code> (element size and usage of each zalloc zone; the ones starting with <code>kalloc.type</code> are the kalloc_type size classes).</li>
+      <li><span lang="zh-CN">在 XNU 源码里找到动画 B 的 XNU 列（沿用 Phase 0 克隆的 <code>xnu</code>）：</span><span lang="en">Find the XNU column of diagram B in the XNU source (reuse the <code>xnu</code> clone from Phase 0):</span><pre>cd xnu
 grep -n "handle_user_abort\|^handle_abort" osfmk/arm64/sleh.c | head
 grep -n "^vm_fault(\|^vm_fault_page(\|^vm_fault_enter(" osfmk/vm/vm_fault.c
 grep -rn "^pmap_enter" osfmk/ | head     # pmap 实现位置随版本变化：osfmk/arm/pmap/ 或 osfmk/arm/pmap.c
 grep -rn "^vm_object_shadow" osfmk/vm/ | head
 grep -rln "kalloc_type" osfmk/kern/ | head</pre>
-        XNU 的函数定义习惯把返回类型单独放一行，所以 <code>^函数名</code> 能直接定位定义。若某个 <code>grep</code> 没有结果，说明该版本改了名或位置，用不带 <code>^</code> 的 <code>grep -rn</code> 再搜一遍，别凭记忆补。</li>
+        <span lang="zh-CN">XNU 的函数定义习惯把返回类型单独放一行，所以 <code>^函数名</code> 能直接定位定义。若某个 <code>grep</code> 没有结果，说明该版本改了名或位置，用不带 <code>^</code> 的 <code>grep -rn</code> 再搜一遍，别凭记忆补。</span><span lang="en">XNU function definitions conventionally put the return type on its own line, so <code>^function_name</code> finds a definition directly. If a <code>grep</code> finds nothing, that version renamed or moved it; search again with <code>grep -rn</code> without the <code>^</code>, and do not fill the gap from memory.</span></li>
     </ol>
-    <div class="note">交付物：两台机器上 <code>touch64</code> 的输出并排贴进当天日志，加 5 行解释：为什么 mmap 之后 RSS 不变、为什么 macOS 的 fault 数约是 Linux 的 1/4、THP 打开时又会怎样。</div>
+    <div class="note" lang="zh-CN">交付物：两台机器上 <code>touch64</code> 的输出并排贴进当天日志，加 5 行解释：为什么 mmap 之后 RSS 不变、为什么 macOS 的 fault 数约是 Linux 的 1/4、THP 打开时又会怎样。</div>
+    <div class="note" lang="en">Deliverables: paste the <code>touch64</code> output from both machines side by side into that day’s log, plus a 5-line explanation: why RSS does not change after mmap, why the macOS fault count is about 1/4 of the Linux one, and what happens when THP is on.</div>
   </div>
 
-  <h2 id="quiz">自测</h2>
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
   <form class="quiz" data-quiz="kernel/phase-2">
     <div class="q" data-answer="b">
-      <p>1. Apple Silicon Mac 上 macOS 的默认页大小是多少？</p>
+      <p lang="zh-CN">1. Apple Silicon Mac 上 macOS 的默认页大小是多少？</p>
+      <p lang="en">1. What is the default macOS page size on an Apple Silicon Mac?</p>
       <label><input type="radio" name="q1" value="a"> 4 KB</label>
       <label><input type="radio" name="q1" value="b"> 16 KB</label>
       <label><input type="radio" name="q1" value="c"> 64 KB</label>
-      <div class="why" hidden>XNU 在 Apple Silicon 上用 16 KB 页（<code>pagesize</code> 输出 16384）；Intel Mac 和大多数 Linux arm64 发行版内核是 4 KB。16 KB 粒度下 47-bit VA 只需三级页表。</div>
+      <div class="why" hidden><span lang="zh-CN">XNU 在 Apple Silicon 上用 16 KB 页（<code>pagesize</code> 输出 16384）；Intel Mac 和大多数 Linux arm64 发行版内核是 4 KB。16 KB 粒度下 47-bit VA 只需三级页表。</span><span lang="en">XNU uses 16 KB pages on Apple Silicon (<code>pagesize</code> prints 16384); Intel Macs and most Linux arm64 distribution kernels use 4 KB. With a 16 KB granule, a 47-bit VA needs only three levels of page tables.</span></div>
     </div>
     <div class="q" data-answer="b">
-      <p>2. 一个高位全 1 的地址（如 <code>0xffff_8000_1234_5000</code>）由哪个寄存器提供页表基址？</p>
+      <p lang="zh-CN">2. 一个高位全 1 的地址（如 <code>0xffff_8000_1234_5000</code>）由哪个寄存器提供页表基址？</p>
+      <p lang="en">2. For an address whose top bits are all 1 (such as <code>0xffff_8000_1234_5000</code>), which register provides the page-table base?</p>
       <label><input type="radio" name="q2" value="a"> TTBR0_EL1</label>
       <label><input type="radio" name="q2" value="b"> TTBR1_EL1</label>
       <label><input type="radio" name="q2" value="c"> VBAR_EL1</label>
-      <div class="why" hidden>高半（高位全 1）是内核地址，走 TTBR1_EL1；低半是用户地址，走 TTBR0_EL1，切换进程时只换 TTBR0。VBAR_EL1 是异常向量表基址，与翻译无关。</div>
+      <div class="why" hidden><span lang="zh-CN">高半（高位全 1）是内核地址，走 TTBR1_EL1；低半是用户地址，走 TTBR0_EL1，切换进程时只换 TTBR0。VBAR_EL1 是异常向量表基址，与翻译无关。</span><span lang="en">The high half (top bits all 1) holds kernel addresses and goes through TTBR1_EL1; the low half holds user addresses and goes through TTBR0_EL1, and only TTBR0 is changed on a process switch. VBAR_EL1 is the exception vector table base and has nothing to do with translation.</span></div>
     </div>
     <div class="q" data-answer="c">
-      <p>3. <code>fork</code> 之后，copy-on-write 的物理页复制在什么时候真正发生？</p>
-      <label><input type="radio" name="q3" value="a"> <code>fork</code> 返回之前，内核一次性复制全部可写页</label>
-      <label><input type="radio" name="q3" value="b"> 子进程第一次读这一页时</label>
-      <label><input type="radio" name="q3" value="c"> 父或子任一方第一次写这一页、触发对共享只读页的写保护缺页时</label>
-      <div class="why" hidden>fork 只复制页表并把共享页都设为只读；读不会触发复制。第一次写触发 permission fault，Linux 在 do_wp_page、XNU 通过 shadow object 才复制那一页。</div>
+      <p lang="zh-CN">3. <code>fork</code> 之后，copy-on-write 的物理页复制在什么时候真正发生？</p>
+      <p lang="en">3. After <code>fork</code>, when does the copy-on-write copy of a physical page actually happen?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN"><code>fork</code> 返回之前，内核一次性复制全部可写页</span><span lang="en">Before <code>fork</code> returns, the kernel copies all writable pages at once</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">子进程第一次读这一页时</span><span lang="en">The first time the child reads the page</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">父或子任一方第一次写这一页、触发对共享只读页的写保护缺页时</span><span lang="en">The first time either the parent or the child writes the page, triggering a write-protection fault on the shared read-only page</span></label>
+      <div class="why" hidden><span lang="zh-CN">fork 只复制页表并把共享页都设为只读；读不会触发复制。第一次写触发 permission fault，Linux 在 do_wp_page、XNU 通过 shadow object 才复制那一页。</span><span lang="en">fork copies only the page tables and marks the shared pages read-only; a read does not trigger a copy. The first write triggers a permission fault, and only then does Linux (in do_wp_page) or XNU (through a shadow object) copy that page.</span></div>
     </div>
     <div class="q" data-answer="b">
-      <p>4. 48-bit VA、4 KB 页、4 级页表下，L2 表的索引取自 VA 的哪几位？</p>
+      <p lang="zh-CN">4. 48-bit VA、4 KB 页、4 级页表下，L2 表的索引取自 VA 的哪几位？</p>
+      <p lang="en">4. With a 48-bit VA, 4 KB pages and 4-level page tables, which VA bits form the L2 table index?</p>
       <label><input type="radio" name="q4" value="a"> [47:39]</label>
       <label><input type="radio" name="q4" value="b"> [29:21]</label>
       <label><input type="radio" name="q4" value="c"> [20:12]</label>
-      <div class="why" hidden>偏移 [11:0] 12 位，往上每级 9 位：L3 = [20:12]，L2 = [29:21]，L1 = [38:30]，L0 = [47:39]。L2 若是 block 描述符就直接映射 2 MB（2<sup>21</sup>）。</div>
+      <div class="why" hidden><span lang="zh-CN">偏移 [11:0] 12 位，往上每级 9 位：L3 = [20:12]，L2 = [29:21]，L1 = [38:30]，L0 = [47:39]。L2 若是 block 描述符就直接映射 2 MB（2<sup>21</sup>）。</span><span lang="en">The offset [11:0] is 12 bits, and each level above takes 9 bits: L3 = [20:12], L2 = [29:21], L1 = [38:30], L0 = [47:39]. If the L2 entry is a block descriptor, it maps 2 MB (2<sup>21</sup>) directly.</span></div>
     </div>
-    <button type="submit">检查答案</button>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
     <div class="result"></div>
   </form>
 
-  <h2 id="resources">资料</h2>
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
   <ul class="res">
-    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual for A-profile (Arm ARM)</a> <span class="lvl">查手册，VMSA 章节（新版 D8，旧版 D5）：描述符格式、TCR/MAIR、fault 编码</span></li>
-    <li><a href="https://developer.arm.com/documentation/101811/latest">Arm — Learn the architecture: AArch64 memory management</a> <span class="lvl">入门，先读这份再翻 Arm ARM</span></li>
-    <li><a href="https://docs.kernel.org/arch/arm64/memory.html">Linux kernel docs — Memory Layout on AArch64 Linux（Documentation/arch/arm64/memory.rst）</a> <span class="lvl">进阶，4K/16K/64K 各配置下的地址布局</span></li>
-    <li><a href="https://docs.kernel.org/mm/index.html">Linux kernel docs — Memory Management</a> <span class="lvl">进阶，页表、buddy、slab、THP 各专题</span></li>
-    <li><a href="https://www.kernel.org/doc/gorman/">Mel Gorman — Understanding the Linux Virtual Memory Manager（免费在线）</a> <span class="lvl">基础，基于 2.4/2.6，概念仍然适用，细节以现代源码为准</span></li>
-    <li><a href="https://github.com/torvalds/linux/blob/master/arch/arm64/mm/fault.c">linux/arch/arm64/mm/fault.c</a> + <code>mm/memory.c</code> <span class="lvl">源码，动画 B 左列</span></li>
-    <li><a href="https://github.com/apple-oss-distributions/xnu/tree/main/osfmk/vm">apple-oss-distributions/xnu — osfmk/vm/</a> <span class="lvl">源码；vm_fault.c、vm_map.c、vm_object.c、vm_resident.c</span></li>
-    <li>Jonathan Levin, <em>*OS Internals</em> Vol. II（Kernel Mode）VM 章节 <span class="lvl">进阶，Mach VM 与 pmap 最系统的讲解</span></li>
-    <li><a href="https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/ManagingMemory.html">Apple — Memory Usage Performance Guidelines</a> + <code>man vmmap</code> <span class="lvl">基础，用户态视角（归档文档，工具部分仍可用）</span></li>
-    <li><a href="https://security.apple.com/blog/towards-the-next-generation-of-xnu-memory-safety/">Apple Security Research — Towards the next generation of XNU memory safety: kalloc_type</a> <span class="lvl">进阶，类型隔离分配器的设计动机；Phase 7 前导</span></li>
+    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual for A-profile (Arm ARM)</a> <span class="lvl" lang="zh-CN">查手册，VMSA 章节（新版 D8，旧版 D5）：描述符格式、TCR/MAIR、fault 编码</span><span class="lvl" lang="en">Reference manual, the VMSA chapter (D8 in newer editions, D5 in older ones): descriptor formats, TCR/MAIR, fault encodings</span></li>
+    <li><a href="https://developer.arm.com/documentation/101811/latest">Arm — Learn the architecture: AArch64 memory management</a> <span class="lvl" lang="zh-CN">入门，先读这份再翻 Arm ARM</span><span class="lvl" lang="en">Beginner: read this first, then turn to the Arm ARM</span></li>
+    <li><a href="https://docs.kernel.org/arch/arm64/memory.html"><span lang="zh-CN">Linux kernel docs — Memory Layout on AArch64 Linux（Documentation/arch/arm64/memory.rst）</span><span lang="en">Linux kernel docs — Memory Layout on AArch64 Linux (Documentation/arch/arm64/memory.rst)</span></a> <span class="lvl" lang="zh-CN">进阶，4K/16K/64K 各配置下的地址布局</span><span class="lvl" lang="en">Advanced: the address layout in each of the 4K/16K/64K configurations</span></li>
+    <li><a href="https://docs.kernel.org/mm/index.html">Linux kernel docs — Memory Management</a> <span class="lvl" lang="zh-CN">进阶，页表、buddy、slab、THP 各专题</span><span class="lvl" lang="en">Advanced: separate topics on page tables, buddy, slab and THP</span></li>
+    <li><a href="https://www.kernel.org/doc/gorman/"><span lang="zh-CN">Mel Gorman — Understanding the Linux Virtual Memory Manager（免费在线）</span><span lang="en">Mel Gorman — Understanding the Linux Virtual Memory Manager (free online)</span></a> <span class="lvl" lang="zh-CN">基础，基于 2.4/2.6，概念仍然适用，细节以现代源码为准</span><span class="lvl" lang="en">Foundations: based on 2.4/2.6; the concepts still apply, but modern source is authoritative for details</span></li>
+    <li><a href="https://github.com/torvalds/linux/blob/master/arch/arm64/mm/fault.c">linux/arch/arm64/mm/fault.c</a> + <code>mm/memory.c</code> <span class="lvl" lang="zh-CN">源码，动画 B 左列</span><span class="lvl" lang="en">Source: the left column of diagram B</span></li>
+    <li><a href="https://github.com/apple-oss-distributions/xnu/tree/main/osfmk/vm">apple-oss-distributions/xnu — osfmk/vm/</a> <span class="lvl" lang="zh-CN">源码；vm_fault.c、vm_map.c、vm_object.c、vm_resident.c</span><span class="lvl" lang="en">Source; vm_fault.c, vm_map.c, vm_object.c, vm_resident.c</span></li>
+    <li>Jonathan Levin, <em>*OS Internals</em> <span lang="zh-CN">Vol. II（Kernel Mode）VM 章节</span><span lang="en">Vol. II (Kernel Mode), the VM chapters</span> <span class="lvl" lang="zh-CN">进阶，Mach VM 与 pmap 最系统的讲解</span><span class="lvl" lang="en">Advanced: the most systematic treatment of Mach VM and pmap</span></li>
+    <li><a href="https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/ManagingMemory.html">Apple — Memory Usage Performance Guidelines</a> + <code>man vmmap</code> <span class="lvl" lang="zh-CN">基础，用户态视角（归档文档，工具部分仍可用）</span><span class="lvl" lang="en">Foundations: the user-space view (an archived document; the tools part is still usable)</span></li>
+    <li><a href="https://security.apple.com/blog/towards-the-next-generation-of-xnu-memory-safety/">Apple Security Research — Towards the next generation of XNU memory safety: kalloc_type</a> <span class="lvl" lang="zh-CN">进阶，类型隔离分配器的设计动机；Phase 7 前导</span><span class="lvl" lang="en">Advanced: the design motivation for the type-isolating allocator; a lead-in to Phase 7</span></li>
   </ul>
 
-  <h2 id="books">参考书目</h2>
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
   <ol class="books">
-    <li>Mel Gorman, 《Understanding the Linux Virtual Memory Manager》, Prentice Hall, 2004. <span class="lvl">第 3 章页表管理、第 4 章进程地址空间、第 6 章 buddy、第 8 章 slab，对应概念 2–4；基于 2.4 / 2.6，细节以现代源码为准 · 「免费在线」<a href="https://www.kernel.org/doc/gorman/">www.kernel.org/doc/gorman</a></span></li>
-    <li>Daniel P. Bovet &amp; Marco Cesati, 《Understanding the Linux Kernel》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 2 章「内存寻址」、第 8 章「内存管理」、第 9 章「进程地址空间」，对应概念 1–4（x86 页表，结构可类比）</span></li>
-    <li>Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 12 章「内存管理」、第 15 章「进程地址空间」，对应概念 3–5</span></li>
-    <li>Randal E. Bryant &amp; David R. O'Hallaron, 《Computer Systems: A Programmer's Perspective》, 3rd ed., Pearson, 2016. <span class="lvl">第 9 章「虚拟内存」：地址翻译、TLB、多级页表、mmap 与 malloc，对应概念 1、2、5</span></li>
-    <li>Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 13–23 章：地址空间、地址翻译、分页、TLB、多级页表、换页 · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
-    <li>Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 3 章「内存管理」：分页与页面置换的通论</span></li>
-    <li>Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, 《The Design and Implementation of the FreeBSD Operating System》, 2nd ed., Addison-Wesley, 2014. <span class="lvl">内存管理相关章节：FreeBSD 的 VM 源自 Mach VM，vm_map / vm_object / shadow object 可直接对照 XNU（概念 3–4）</span></li>
-    <li>Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. II 的 Mach VM 与 pmap 相关章节，对应概念 3–4 的 XNU 一列</span></li>
+    <li lang="zh-CN">Mel Gorman, 《Understanding the Linux Virtual Memory Manager》, Prentice Hall, 2004. <span class="lvl">第 3 章页表管理、第 4 章进程地址空间、第 6 章 buddy、第 8 章 slab，对应概念 2–4；基于 2.4 / 2.6，细节以现代源码为准 · 「免费在线」<a href="https://www.kernel.org/doc/gorman/">www.kernel.org/doc/gorman</a></span></li>
+    <li lang="en">Mel Gorman, <em>Understanding the Linux Virtual Memory Manager</em>, Prentice Hall, 2004. <span class="lvl">Chapter 3 page table management, Chapter 4 process address space, Chapter 6 buddy, Chapter 8 slab, matching concepts 2–4; based on 2.4 / 2.6, modern source is authoritative for details · free online: <a href="https://www.kernel.org/doc/gorman/">www.kernel.org/doc/gorman</a></span></li>
+    <li lang="zh-CN">Daniel P. Bovet &amp; Marco Cesati, 《Understanding the Linux Kernel》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 2 章「内存寻址」、第 8 章「内存管理」、第 9 章「进程地址空间」，对应概念 1–4（x86 页表，结构可类比）</span></li>
+    <li lang="en">Daniel P. Bovet &amp; Marco Cesati, <em>Understanding the Linux Kernel</em>, 3rd ed., O'Reilly, 2005. <span class="lvl">Chapter 2 “Memory Addressing”, Chapter 8 “Memory Management”, Chapter 9 “Process Address Space”, matching concepts 1–4 (x86 page tables, structurally comparable)</span></li>
+    <li lang="zh-CN">Robert Love, 《Linux Kernel Development》, 3rd ed., Addison-Wesley, 2010. <span class="lvl">第 12 章「内存管理」、第 15 章「进程地址空间」，对应概念 3–5</span></li>
+    <li lang="en">Robert Love, <em>Linux Kernel Development</em>, 3rd ed., Addison-Wesley, 2010. <span class="lvl">Chapter 12 “Memory Management”, Chapter 15 “The Process Address Space”, matching concepts 3–5</span></li>
+    <li lang="zh-CN">Randal E. Bryant &amp; David R. O'Hallaron, 《Computer Systems: A Programmer's Perspective》, 3rd ed., Pearson, 2016. <span class="lvl">第 9 章「虚拟内存」：地址翻译、TLB、多级页表、mmap 与 malloc，对应概念 1、2、5</span></li>
+    <li lang="en">Randal E. Bryant &amp; David R. O'Hallaron, <em>Computer Systems: A Programmer's Perspective</em>, 3rd ed., Pearson, 2016. <span class="lvl">Chapter 9 “Virtual Memory”: address translation, TLBs, multi-level page tables, mmap and malloc, matching concepts 1, 2 and 5</span></li>
+    <li lang="zh-CN">Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, v1.00, 2018. <span class="lvl">第 13–23 章：地址空间、地址翻译、分页、TLB、多级页表、换页 · 「免费在线」<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li lang="en">Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, <em>Operating Systems: Three Easy Pieces</em>, v1.00, 2018. <span class="lvl">Chapters 13–23: address spaces, address translation, paging, TLBs, multi-level page tables, swapping · free online: <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a></span></li>
+    <li lang="zh-CN">Andrew S. Tanenbaum &amp; Herbert Bos, 《Modern Operating Systems》, 4th ed., Pearson, 2015. <span class="lvl">第 3 章「内存管理」：分页与页面置换的通论</span></li>
+    <li lang="en">Andrew S. Tanenbaum &amp; Herbert Bos, <em>Modern Operating Systems</em>, 4th ed., Pearson, 2015. <span class="lvl">Chapter 3 “Memory Management”: a general treatment of paging and page replacement</span></li>
+    <li lang="zh-CN">Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, 《The Design and Implementation of the FreeBSD Operating System》, 2nd ed., Addison-Wesley, 2014. <span class="lvl">内存管理相关章节：FreeBSD 的 VM 源自 Mach VM，vm_map / vm_object / shadow object 可直接对照 XNU（概念 3–4）</span></li>
+    <li lang="en">Marshall Kirk McKusick, George V. Neville-Neil &amp; Robert N. M. Watson, <em>The Design and Implementation of the FreeBSD Operating System</em>, 2nd ed., Addison-Wesley, 2014. <span class="lvl">The memory-management chapters: FreeBSD’s VM descends from Mach VM, so vm_map / vm_object / shadow object compare directly with XNU (concepts 3–4)</span></li>
+    <li lang="zh-CN">Jonathan Levin, 《*OS Internals》Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019（馆藏目录日期；零售标注 2016–2019 不等）. <span class="lvl">Vol. II 的 Mach VM 与 pmap 相关章节，对应概念 3–4 的 XNU 一列</span></li>
+    <li lang="en">Jonathan Levin, <em>*OS Internals</em> Vol. I: User Mode; Vol. II: Kernel Mode; Vol. III: Security &amp; Insecurity, 2nd ed., Technologeeks Press, 2019 (library catalogue date; retail listings vary from 2016 to 2019). <span class="lvl">The Vol. II chapters on Mach VM and pmap, matching the XNU column of concepts 3–4</span></li>
   </ol>
 
   <nav class="pn">
