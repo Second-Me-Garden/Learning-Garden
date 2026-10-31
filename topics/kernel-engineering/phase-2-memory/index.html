@@ -46,7 +46,7 @@
   <pre>VA:  [63:48] 全0→TTBR0 / 全1→TTBR1 | [47:39] L0 | [38:30] L1 | [29:21] L2 | [20:12] L3 | [11:0] offset
 Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB），内核从 0xffff_0000_0000_0000 起</pre>
   <p><strong>Apple Silicon 用 16 KB 页</strong>：XNU 在 M 系列上的默认页大小是 16 KB（<code>pagesize</code> 输出 16384；Intel Mac 是 4 KB）。16 KB 粒度下偏移 14 位，每张表 16 KB / 8 B = 2048 项 = 11 位索引；14 + 3 × 11 = 47，所以 <strong>47-bit VA 只要 3 级表（L1–L3）</strong>，少走一级、TLB 每项覆盖面是 4 KB 页的 4 倍。Linux arm64 也能编成 16 KB 或 64 KB 页（<code>CONFIG_ARM64_16K_PAGES</code> / <code>CONFIG_ARM64_64K_PAGES</code>），Asahi Linux 在 Apple Silicon 上就用 16 KB——但发行版通用内核默认仍是 4 KB。</p>
-  <p><strong>TLB 与 ASID</strong>：每次访存都走 4 级表太慢，MMU 把翻译结果缓存在 TLB。用户映射在描述符里置 <code>nG</code>（non-global），TLB 项会带上当前 ASID（放在 <code>TTBR0_EL1</code> 高位，8 或 16 位）；不同进程的同一 VA 因 ASID 不同可以同时留在 TLB 里，切进程不必全刷。内核映射是 global 的，所有 ASID 共用。</p>
+  <p><strong>TLB 与 ASID</strong>：每次访存都走 4 级表太慢，MMU 把翻译结果缓存在 TLB。用户映射在描述符里置 <code>nG</code>（non-global），TLB 项会带上当前 ASID（8 或 16 位，放在 TTBR0 还是 TTBR1 的高位由 <code>TCR_EL1.A1</code> 决定；Linux arm64 放在 <code>TTBR1_EL1</code>）；不同进程的同一 VA 因 ASID 不同可以同时留在 TLB 里，切进程不必全刷。内核映射是 global 的，所有 ASID 共用。</p>
   <div class="note">寄存器名这里统一写 <code>_EL1</code>。Phase 0 提过 XNU 在 M 系列上运行于 EL2 + VHE；VHE 下软件写 <code>_EL1</code> 名字的寄存器会被重定向到对应的 EL2 寄存器，概念不变。</div>
 
   <h3>2. 页表遍历、TLB 与描述符</h3>
@@ -73,7 +73,7 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
 
   <h3>4. 物理内存与内核分配器</h3>
   <p><strong>Linux</strong>：每页物理内存有一个 <code>struct page</code>（新代码越来越多用 <code>struct folio</code> 表示「一组连续页」）。物理内存按 node → zone（arm64 上有 <code>ZONE_DMA</code>/<code>ZONE_DMA32</code>/<code>ZONE_NORMAL</code>/<code>ZONE_MOVABLE</code>，没有 HIGHMEM）组织，每个 zone 用 <strong>buddy allocator</strong> 管理：按 2<sup>order</sup> 页分块挂在 free list 上，<code>alloc_pages(gfp, order)</code> 不够就拆大块、释放时与「伙伴」合并（<code>/proc/buddyinfo</code> 就是每个 order 的空闲块数）。小对象走 <strong>SLUB</strong>（6.8 起唯一的 slab 实现）：<code>kmem_cache_create</code> 建同类对象缓存，<code>kmalloc</code> 是按大小分档的通用缓存。需要虚拟连续、物理可以不连续的大块用 <code>vmalloc</code>。内核通过 linear map（<code>phys_to_virt</code>/<code>virt_to_phys</code>）直接访问全部物理内存。</p>
-  <p><strong>XNU</strong>：架构相关的页表操作全部收在 <strong><code>pmap</code></strong> 层（<code>pmap_enter</code>、<code>pmap_remove</code>、<code>pmap_protect</code>……，arm 实现在 <code>osfmk/arm/pmap/</code>，旧版本是 <code>osfmk/arm/pmap.c</code>），机器无关的 Mach VM 只调这组接口——比 Linux 用通用的 pgd/pud/pmd/pte 抽象更彻底地隔离了硬件。物理页由 <code>vm_page</code> 描述，空闲页放在 free queue 上（<code>vm_page_grab</code> 取页）。内核小对象走 <strong>zone allocator</strong>：<code>zalloc</code>/<code>zfree</code> 按 zone（固定大小对象池）分配；<code>kalloc</code> 系列在其上按大小分档。macOS 13 / iOS 16 起引入 <strong><code>kalloc_type</code></strong>：按类型签名把不同类型的对象隔离到不同 zone（数据型走 <code>kalloc_data</code>），使 use-after-free 难以把一个类型的对象「换成」另一个类型——这是安全加固，不是性能优化。大块内核内存用 <code>kmem_alloc</code>（<code>osfmk/vm/vm_kern.c</code>）。</p>
+  <p><strong>XNU</strong>：架构相关的页表操作全部收在 <strong><code>pmap</code></strong> 层（<code>pmap_enter</code>、<code>pmap_remove</code>、<code>pmap_protect</code>……，arm 实现在 <code>osfmk/arm/pmap/</code>，旧版本是 <code>osfmk/arm/pmap.c</code>），机器无关的 Mach VM 只调这组接口——比 Linux 用通用的 pgd/pud/pmd/pte 抽象更彻底地隔离了硬件。物理页由 <code>vm_page</code> 描述，空闲页放在 free queue 上（<code>vm_page_grab</code> 取页）。内核小对象走 <strong>zone allocator</strong>：<code>zalloc</code>/<code>zfree</code> 按 zone（固定大小对象池）分配；<code>kalloc</code> 系列在其上按大小分档。iOS 15 / macOS 12 起引入 <strong><code>kalloc_type</code></strong>：按类型签名把不同类型的对象隔离到不同 zone（数据型走 <code>kalloc_data</code>），使 use-after-free 难以把一个类型的对象「换成」另一个类型——这是安全加固，不是性能优化。大块内核内存用 <code>kmem_alloc</code>（<code>osfmk/vm/vm_kern.c</code>）。</p>
   <div class="note">Apple Silicon 上页表并不由普通内核代码直接写：PPL（较新设备上是 SPTM）把页表修改关进一个更高权限的小环境里，<code>pmap</code> 调用会跨过这道边界。这是 Phase 7 的主题，这里只需知道「<code>pmap_enter</code> 背后还有一层保护」。</div>
 
   <h3>5. 用户态视角：mmap、malloc 与 RSS</h3>
@@ -146,7 +146,7 @@ Linux 用户空间 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff（256 TB）�
         <text x="28" y="180" class="mono">TTBR0/1</text>
         <text x="28" y="200" class="small">高位全0→TTBR0</text>
         <text x="28" y="216" class="small">高位全1→TTBR1</text>
-        <text x="28" y="236" class="small">TTBR0 带 ASID</text></g>
+        <text x="28" y="236" class="small">ASID（Linux 在 TTBR1）</text></g>
       <g data-step="2"><path class="arrow flow" d="M62 88 C 6 120, 6 300, 30 310"/>
         <path class="arrow flow" d="M300 335 L530 335"/>
         <text x="330" y="328" class="small">hit：跳过整个遍历</text></g>

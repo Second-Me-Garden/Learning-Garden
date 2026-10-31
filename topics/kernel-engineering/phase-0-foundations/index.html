@@ -46,7 +46,7 @@
   <div class="note">Apple Silicon 补充：据 Asahi Linux 的逆向文档，Apple 的 XNU 在 M 系列芯片上运行于 EL2 并启用 VHE（Virtualization Host Extensions），这样它既是内核也是 Hypervisor.framework 的宿主；用户态仍是 EL0。本阶段只区分 user / kernel 两级即可，EL2 细节放到 Phase 8。</div>
 
   <h3>2. 系统调用：一次受控的「越级」</h3>
-  <p>用户程序调 <code>write()</code>，libc 把系统调用号放进约定寄存器、参数放进 <code>x0–x5</code>，执行 <code>svc #0</code>。CPU 自动把返回地址存入 <code>ELR_EL1</code>、处理器状态存入 <code>SPSR_EL1</code>、异常原因存入 <code>ESR_EL1</code>，切到 EL1，跳到向量表「来自 lower EL（AArch64）的同步异常」入口（<code>VBAR_EL1 + 0x400</code>）。内核入口汇编把所有通用寄存器压到内核栈，再按号查表分发到具体处理函数；返回时把结果写回 <code>x0</code>，恢复寄存器，<code>eret</code>。下面的动画一步步走这条路，Linux 和 XNU 并排。</p>
+  <p>用户程序调 <code>write()</code>，libc 把系统调用号放进约定寄存器、参数放进 <code>x0–x5</code>，执行 <code>svc</code>（Linux 用 <code>svc #0</code>，XNU 的 libsystem 用 <code>svc #0x80</code>；立即数内核不看）。CPU 自动把返回地址存入 <code>ELR_EL1</code>、处理器状态存入 <code>SPSR_EL1</code>、异常原因存入 <code>ESR_EL1</code>，切到 EL1，跳到向量表「来自 lower EL（AArch64）的同步异常」入口（<code>VBAR_EL1 + 0x400</code>）。内核入口汇编把所有通用寄存器压到内核栈，再按号查表分发到具体处理函数；返回时把结果写回 <code>x0</code>，恢复寄存器，<code>eret</code>。下面的动画一步步走这条路，Linux 和 XNU 并排。</p>
   <p>一个细节值得记住：<strong>Linux arm64 用 <code>x8</code> 传系统调用号，XNU arm64 用 <code>x16</code></strong>；XNU 里正数是 BSD syscall（<code>sysent[]</code>），负数是 Mach trap（<code>mach_trap_table[]</code>）——这是 XNU「两个内核叠在一起」在 ABI 上的直接痕迹。</p>
 
   <h3>3. 内核 C 和你写过的 C 不一样</h3>
@@ -88,7 +88,7 @@
     <tr><td>驱动框架</td><td><code>drivers/</code> + devicetree</td><td><code>iokit/</code>（C++）；用户态 DriverKit 另有 SDK</td></tr>
     <tr><td>基础库（链表、原子、字符串）</td><td><code>lib/</code>、<code>include/linux/</code></td><td><code>libkern/</code></td></tr>
     <tr><td>平台专家层（早期启动、设备树）</td><td><code>arch/arm64/boot/</code>、<code>drivers/of/</code></td><td><code>pexpert/</code></td></tr>
-    <tr><td>系统调用表</td><td><code>arch/arm64/include/asm/unistd.h</code>、<code>include/uapi/asm-generic/unistd.h</code></td><td><code>bsd/kern/syscalls.master</code>、<code>osfmk/kern/syscall_sw.c</code></td></tr>
+    <tr><td>系统调用表</td><td><code>arch/arm64/include/asm/unistd.h</code>、<code>include/uapi/asm-generic/unistd.h</code>（约 6.11 起改由 <code>scripts/syscall.tbl</code> 生成）</td><td><code>bsd/kern/syscalls.master</code>、<code>osfmk/kern/syscall_sw.c</code></td></tr>
   </table>
   </div>
 
@@ -96,9 +96,9 @@
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 420" data-interval="2000"
          data-captions='["全图：上半 EL0 用户态，下半 EL1 内核态；左列 Linux，右列 XNU。按「播放」逐步走。",
-           "① 用户程序调 write()。libc 把系统调用号放进 x8（Linux）/ x16（XNU），参数放进 x0–x2，执行 svc #0。",
+           "① 用户程序调 write()。libc 把系统调用号放进 x8（Linux）/ x16（XNU），参数放进 x0–x2，执行 svc（Linux svc #0 / XNU svc #0x80）。",
            "② CPU 硬件动作：PC→ELR_EL1，PSTATE→SPSR_EL1，原因（EC=SVC）→ESR_EL1；切到 EL1；跳到 VBAR_EL1 + 0x400（来自 lower EL 的同步异常）。",
-           "③ 入口汇编把 x0–x30、sp、ELR、SPSR 压到内核栈。Linux：entry.S 的 kernel_entry → el0t_64_sync；XNU：locore.s 的 Lel0_synchronous_vector_64 → fleh_synchronous。",
+           "③ 入口汇编把 x0–x30、sp、ELR、SPSR 压到内核栈。Linux：entry.S 向量跳到 el0t_64_sync，它展开 kernel_entry 宏保存 pt_regs，再调 el0t_64_sync_handler；XNU：locore.s 的 Lel0_synchronous_vector_64 → fleh_synchronous。",
            "④ 按号分发。Linux：el0_svc → invoke_syscall → sys_call_table[x8] → __arm64_sys_write。XNU：sleh_synchronous 看 ESR 是 SVC → x16 正数走 unix_syscall（sysent[]），负数走 mach_syscall（mach_trap_table[]）。",
            "⑤ 处理函数返回，结果写进栈上保存的 x0；入口汇编恢复寄存器；eret：PC←ELR_EL1，PSTATE←SPSR_EL1，回到 EL0 的下一条指令。"]'>
       <defs>
@@ -131,8 +131,8 @@
 
       <!-- step 3: entry asm -->
       <g data-step="3"><rect class="box linux" x="60" y="200" width="330" height="50"/>
-        <text x="72" y="220" class="mono">entry.S: kernel_entry</text>
-        <text x="72" y="240" class="small">el0t_64_sync — 保存 x0–x30 到 pt_regs</text></g>
+        <text x="72" y="220" class="mono">entry.S: el0t_64_sync</text>
+        <text x="72" y="240" class="small">kernel_entry 宏保存 x0–x30 到 pt_regs → el0t_64_sync_handler</text></g>
       <g data-step="3"><rect class="box xnu" x="500" y="200" width="330" height="50"/>
         <text x="512" y="220" class="mono">locore.s: fleh_synchronous</text>
         <text x="512" y="240" class="small">保存到 arm_saved_state（thread 的 PCB）</text></g>

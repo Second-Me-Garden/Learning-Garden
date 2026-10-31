@@ -71,7 +71,7 @@
     <tr><th>这件事</th><th class="linux">Linux</th><th class="xnu">XNU</th></tr>
     <tr><td>指针认证</td><td><code>CONFIG_ARM64_PTR_AUTH</code></td><td>arm64e ABI（全面 PAC）</td></tr>
     <tr><td>页表完整性保护</td><td>无直接对应（主线内核）</td><td>PPL / SPTM</td></tr>
-    <tr><td>堆类型隔离</td><td><code>CONFIG_RANDOM_KMALLOC_CACHES</code></td><td>kalloc_type</td></tr>
+    <tr><td>堆类型隔离</td><td><code>CONFIG_RANDOM_KMALLOC_CACHES</code>（按调用点随机分散缓存，非类型隔离，近似对应）</td><td>kalloc_type</td></tr>
     <tr><td>强制访问控制框架</td><td>LSM（SELinux、AppArmor）</td><td>MACF（<code>security/</code>）+ Sandbox</td></tr>
     <tr><td>代码签名 / 完整性</td><td>module signing、IMA</td><td>AMFI + 代码签名</td></tr>
     <tr><td>保护系统文件与内核</td><td>lockdown LSM</td><td>SIP</td></tr>

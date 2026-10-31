@@ -81,7 +81,7 @@
   <h3>3. 上下文切换</h3>
   <p>切换总发生在<strong>内核态</strong>，并且对被切走的线程来说只是「调用了一个函数，很久以后它返回了」。因为是函数调用，按 AAPCS64 只需保存 callee-saved 寄存器（<code>x19–x28</code>、<code>fp</code>=<code>x29</code>、<code>lr</code>=<code>x30</code>、<code>sp</code>）；用户态的全部寄存器早在异常入口就存进了内核栈上的 <code>pt_regs</code> / saved state（Phase 0）。</p>
   <ul>
-    <li><strong>Linux arm64</strong>：<code>__schedule()</code> → <code>context_switch()</code>（<code>kernel/sched/core.c</code>）：先 <code>switch_mm_irqs_off()</code> 切地址空间（不同 <code>mm</code> 时写 <code>TTBR0_EL1</code>，ASID 避免整表 TLB flush；内核线程借用前一个 mm），再 <code>switch_to()</code> → <code>__switch_to()</code>（<code>arch/arm64/kernel/process.c</code>，切 FP/SIMD、TLS 等）→ <code>cpu_switch_to(prev, next)</code>（<code>arch/arm64/kernel/entry.S</code>）：把 <code>x19–x28</code>、<code>fp</code>、<code>sp</code>、<code>lr</code> 存进 <code>prev->thread.cpu_context</code>，从 next 的 <code>cpu_context</code> 载入，<code>msr sp_el0</code> 更新 <code>current</code>，<code>ret</code>。</li>
+    <li><strong>Linux arm64</strong>：<code>__schedule()</code> → <code>context_switch()</code>（<code>kernel/sched/core.c</code>）：先 <code>switch_mm_irqs_off()</code> 切地址空间（不同 <code>mm</code> 时写 <code>TTBR0_EL1</code> 换用户页表；ASID 放在哪个 TTBR 由 <code>TCR_EL1.A1</code> 决定，Linux arm64 放在 <code>TTBR1_EL1</code> 高位，靠它避免整表 TLB flush；内核线程借用前一个 mm），再 <code>switch_to()</code> → <code>__switch_to()</code>（<code>arch/arm64/kernel/process.c</code>，切 FP/SIMD、TLS 等）→ <code>cpu_switch_to(prev, next)</code>（<code>arch/arm64/kernel/entry.S</code>）：把 <code>x19–x28</code>、<code>fp</code>、<code>sp</code>、<code>lr</code> 存进 <code>prev->thread.cpu_context</code>，从 next 的 <code>cpu_context</code> 载入，<code>msr sp_el0</code> 更新 <code>current</code>，<code>ret</code>。</li>
     <li><strong>XNU arm64</strong>：<code>thread_block()</code> → <code>thread_select()</code> 选出下一个 → <code>thread_invoke()</code>（<code>osfmk/kern/sched_prim.c</code>）→ <code>machine_switch_context()</code>（<code>osfmk/arm64/pcb.c</code>，大致路径：此处同时切 pmap，即 <code>TTBR0</code>/ASID）→ <code>Switch_context</code>（<code>osfmk/arm64/cswitch.s</code>）：存旧线程 callee-saved 寄存器、载入新线程的，更新当前线程指针（大致路径：arm64 上 <code>current_thread()</code> 读的是 <code>TPIDR_EL1</code>）。XNU 还支持 <em>continuation</em>：线程阻塞时可以交出内核栈，醒来后从指定函数重新开始，而不是「返回」。</li>
     <li>新创建的线程从没调用过切换函数，所以创建时伪造一份上下文：Linux 让 <code>cpu_context.pc</code> 指向 <code>ret_from_fork</code>；XNU 让它从一个线程起始的汇编桩开始（<code>Thread_continue</code>，大致路径）。</li>
   </ul>
@@ -90,7 +90,7 @@
   <p><strong>Linux</strong> 用调度类分层（<code>stop</code> → <code>deadline</code> → <code>rt</code> → <code>fair</code> → <code>idle</code>），普通任务都在 fair 类（<code>kernel/sched/fair.c</code>）。优先级数值 0–139：0–99 实时，100–139 对应 nice −20…19。</p>
   <ul>
     <li><strong>CFS</strong>（2.6.23 – 6.5）：每个任务有 <code>vruntime</code> = 实际运行时间 × 1024 / 权重（nice 越低权重越大，vruntime 涨得越慢）。可运行任务按 vruntime 放在红黑树里，永远选最左（最小 vruntime）。公平，但对延迟敏感的任务没有直接表达方式。</li>
-    <li><strong>EEVDF</strong>（Linux 6.6 起取代 CFS）：仍然记 vruntime，另外算出队列的加权平均 <code>V</code>。任务的 <strong>lag</strong> = V − vruntime；lag ≥ 0 的任务才 <em>eligible</em>（没有多拿 CPU）。每个任务有<strong>虚拟截止时间</strong> vd = vruntime + slice / 权重；在 eligible 任务里选 vd 最早的。较短 slice 的任务 vd 更早，因此能更快被选中——延迟需求从此可以表达。</li>
+    <li><strong>EEVDF</strong>（Linux 6.6 起取代 CFS）：仍然记 vruntime，另外算出队列的加权平均 <code>V</code>。任务的 <strong>lag</strong> = V − vruntime；lag ≥ 0 的任务才 <em>eligible</em>（没有多拿 CPU）。每个任务有<strong>虚拟截止时间</strong> vd = vruntime + slice / 权重；在 eligible 任务里选 vd 最早的。较短 slice 的任务 vd 更早，因此能更快被选中——延迟需求从此可以表达（任务自定义 slice 经 <code>sched_attr.sched_runtime</code>，约 6.12 起）。</li>
   </ul>
   <p><strong>XNU</strong> 优先级 0–127，分 4 个带（<code>osfmk/kern/sched.h</code>）：96–127 实时、80–95 内核线程、64–79 保留（系统高优先级）、0–63 用户。用户线程的 QoS（User-Interactive、User-Initiated、Default、Utility、Background）映射到 0–63 里的基础优先级（大致：UI ≈ 46–47，Default 31，Background 4）。</p>
   <ul>
@@ -134,7 +134,7 @@
            "① 定时器中断打断 A（Apple Silicon 上定时器走 FIQ）。Linux：tick 处理（scheduler_tick，6.10 起叫 sched_tick）发现 A 用完了份额，设 TIF_NEED_RESCHED；XNU：quantum 到期，设 AST_PREEMPT。都在中断返回前处理。",
            "② 调度器选人。Linux：__schedule → pick_next_task，fair 类用 EEVDF 选出 B。XNU：thread_block → thread_select 在 clutch 层级里选出 B，然后 thread_invoke。",
            "③ 保存 A。因为切换是一次函数调用，只需存 callee-saved：x19–x28、fp、sp、lr。Linux 存进 A 的 thread.cpu_context（cpu_switch_to）；XNU 存进 A 的内核保存区（Switch_context）。",
-           "④ 换内核栈和地址空间：sp 换成 B 的内核栈；若 B 属于另一个地址空间，写 TTBR0_EL1（带 ASID，免整表 TLB flush）。注意：Linux 实际在 switch_to 之前就在 context_switch 里调 switch_mm_irqs_off；XNU 在 machine_switch_context 里切 pmap（大致路径）。这里为讲解合成一步。",
+           "④ 换内核栈和地址空间：sp 换成 B 的内核栈；若 B 属于另一个地址空间，写 TTBR0_EL1 换用户页表（Linux 的 ASID 在 TTBR1_EL1 高位，免整表 TLB flush）。注意：Linux 实际在 switch_to 之前就在 context_switch 里调 switch_mm_irqs_off；XNU 在 machine_switch_context 里切 pmap（大致路径）。这里为讲解合成一步。",
            "⑤ 恢复 B：从 B 的保存区载入 x19–x28、fp、sp、lr。Linux 用 msr sp_el0 把 current 指向 B；XNU 更新当前线程指针（TPIDR_EL1，大致路径）。",
            "⑥ ret：跳到 lr——也就是 B 上次调切换函数时的返回点。B 觉得自己只是从 cpu_switch_to / Switch_context 返回了，一路退回到它的异常出口再 eret 回用户态。新线程的 lr 预先指向 ret_from_fork（Linux）或线程起始桩（XNU）。"]'>
       <defs>
@@ -172,7 +172,7 @@
 
       <!-- step 4: stack + address space -->
       <g data-step="4"><rect class="box linux" x="30" y="221" width="405" height="52"/>
-        <text x="42" y="242" class="mono">sp ← B 内核栈 ; TTBR0_EL1 ← B.mm (ASID)</text>
+        <text x="42" y="242" class="mono">sp ← B 内核栈 ; TTBR0_EL1 ← B.mm，ASID 在 TTBR1</text>
         <text x="42" y="262" class="small">switch_mm_irqs_off；同一 mm 的线程跳过</text></g>
       <g data-step="4"><rect class="box xnu" x="465" y="221" width="405" height="52"/>
         <text x="477" y="242" class="mono">sp ← B 内核栈 ; TTBR0_EL1 ← B pmap (ASID)</text>
@@ -204,7 +204,7 @@
          data-captions='["全图：左边是 Linux 一个 CPU 的 fair 运行队列（三个可运行任务），右边是 XNU 的优先级带和 clutch 层级。按「播放」看两边各自怎么选出下一个。",
            "① 起点。Linux：T1、T2、T3 按 vruntime 排在红黑树里（T1=10，T2=16，T3=34）。XNU：优先级 0–127 分 4 个带——96–127 实时、80–95 内核、64–79 保留、0–63 用户（QoS 映射到这里）。",
            "② 最简单的规则。CFS：永远选最左节点 = 最小 vruntime，即 T1。XNU：先看实时队列，有 RT 线程就直接运行它，不进 clutch 层级；这里没有 RT 线程，继续往下。",
-           "③ EEVDF 先算加权平均 V（这里 V=20）：lag = V − vruntime ≥ 0 才 eligible，所以 T1、T2 可选，T3 已经多拿了 CPU，不可选。XNU：在 QoS root bucket（FIXPRI、FG、IN、DF、UT、BG）之间按截止时间做 EDF，高 QoS 有 warp 可插队，这里选出 FG。",
+           "③ EEVDF 先算加权平均 V（按权重算约 23，图中取 V≈23）：lag = V − vruntime ≥ 0 才 eligible，所以 T1、T2 可选，T3 已经多拿了 CPU，不可选。XNU：在 QoS root bucket（FIXPRI、FG、IN、DF、UT、BG）之间按截止时间做 EDF，高 QoS 有 warp 可插队，这里选出 FG。",
            "④ EEVDF：每个任务的虚拟截止时间 vd = vruntime + slice / 权重；eligible 里 vd 最早的是 T2（28 早于 T1 的 48），所以选 T2——与 CFS 的答案不同。XNU：在 FG 里选 thread group 对应的 clutch bucket，再选 sched_pri 最高的线程（47）。",
            "⑤ 运行之后。Linux：T2 的 vruntime 按 Δexec × 1024 / 权重增加，重算 vd，放回树里。XNU：timeshare 线程的 sched_pri 随 CPU 使用量衰减；Apple Silicon 上的 Edge 调度器按 QoS、负载和 thread group 的性能推荐把线程放到 P 核或 E 核。"]'>
       <defs>
@@ -231,7 +231,7 @@
         <text x="52" y="214" class="small">CFS：选最左节点 = 最小 vruntime → T1</text></g>
       <!-- Linux: step 3 V and eligibility -->
       <g data-step="3"><line x1="180" y1="95" x2="180" y2="178" style="stroke: var(--linux); stroke-dasharray: 4 3"/>
-        <text x="186" y="105" class="small">V = 20（加权平均 vruntime）</text>
+        <text x="186" y="105" class="small">V ≈ 23（加权平均 vruntime）</text>
         <rect class="box linux" x="40" y="234" width="390" height="34"/>
         <text x="52" y="256" class="small">eligible：lag = V − vruntime ≥ 0 → T1、T2；T3 不可选</text></g>
       <!-- Linux: step 4 deadlines -->
@@ -350,7 +350,7 @@ grep -n "TH_BUCKET_SHARE_FG\|root_bucket" osfmk/kern/sched_clutch.c | head</pre>
       <div class="why" hidden>glibc/musl 用 <code>clone(CLONE_VM | CLONE_THREAD | …)</code> 创建它：调度单位仍是 <code>task_struct</code>，<code>getpid()</code> 返回相同的 tgid，<code>gettid()</code> 不同。c 描述的是 <code>fork()</code>。</div>
     </div>
     <div class="q" data-answer="c">
-      <p>2. 运行队列里有 T1（vruntime 10，vd 48）、T2（vruntime 16，vd 28）、T3（vruntime 34，vd 46），加权平均 V = 20。EEVDF 选谁？</p>
+      <p>2. 运行队列里有 T1（vruntime 10，vd 48）、T2（vruntime 16，vd 28）、T3（vruntime 34，vd 46），加权平均 V ≈ 23。EEVDF 选谁？</p>
       <label><input type="radio" name="q2" value="a"> T1：vruntime 最小</label>
       <label><input type="radio" name="q2" value="b"> T3：它的 lag 最大</label>
       <label><input type="radio" name="q2" value="c"> T2：在 eligible 的 T1、T2 中虚拟截止时间最早</label>
