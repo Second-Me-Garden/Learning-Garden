@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>实验环境 · Lab environment · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page" lang="zh-CN">实验环境</span><span class="crumb current" aria-current="page" lang="en">Lab environment</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">环境准备 · 做任何实验之前</p><p class="meta" lang="en">Environment setup · before any lab</p>
+  <h1><span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span> <span class="en" lang="zh-CN">Lab environment: a rented L4, an H100 when Hopper is needed, and this Mac</span><span class="en" lang="en">A rented L4, an H100 when Hopper is needed, and this Mac</span></h1>
+  <p class="lede" lang="zh-CN">SGLang 是跑在 NVIDIA GPU 上的推理服务，它的大部分内核至少要 Ada 级的卡，有几个只在 Hopper 及更新的卡上有。这台 Mac 没有 NVIDIA GPU，所以本专题的实验分在三层：一台租来的 L4 跑完整的 SGLang；一台租来的 H100 只在用到至少要 Hopper 的内核时才开；这台 Mac 跑每一课的 Metal 孪生实验。账户、SSH 密钥、容器和账单的规则不在这里重复，见 <a href="../../gpu-cuda/lab-setup/index.html">GPU 编程专题的实验环境页</a>。<strong>哪些跑过、哪些没跑过，页面上都标明了：</strong>Mac 上的 Metal 程序和工具链检查是 2026-11-01 在这台 Apple M5 上实际运行的，输出原样贴出；云端的所有步骤都<strong>未运行</strong>，是 2026-11-01 根据 SGLang v0.5.22 的文档和源码整理的，因为租 GPU 要花钱，开账户之前本页不在云端执行任何东西。</p>
+  <p class="lede" lang="en">SGLang is an inference server that runs on NVIDIA GPUs; most of its kernels need at least an Ada-class card, and a few exist only on Hopper and newer. This Mac has no NVIDIA GPU, so the labs of this topic run on three tiers: a rented L4 runs the whole of SGLang; a rented H100 is started only when a lab uses a kernel that needs at least Hopper; and this Mac runs the Metal twin of every lesson. The rules for accounts, SSH keys, the container and the bill are not repeated here; see <a href="../../gpu-cuda/lab-setup/index.html">the lab environment page of the GPU Programming topic</a>. <strong>The page marks what was run and what was not:</strong> the Metal program and the toolchain checks on the Mac were actually run on this Apple M5 on 2026-11-01, and their output is pasted as it came; every cloud step is <strong>not run</strong>, assembled on 2026-11-01 from the SGLang documentation and source at v0.5.22, because renting a GPU costs money and this page runs nothing in the cloud before an account is opened.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出为什么分三层，以及每个 Phase 的 Lab A 和 Lab B 各在哪一层跑。</li>
+      <li lang="en">Say why there are three tiers, and on which tier the Lab A and the Lab B of each phase run.</li>
+      <li lang="zh-CN">在租来的 L4 上用 <code>lmsysorg/sglang:v0.5.23</code> 镜像启动 <code>python -m sglang.launch_server</code>，只在本机回环地址上提供服务，发一个请求，再用 <code>bench_one_batch</code>、torch profiler 和 <code>nsys</code> 看一个解码步。</li>
+      <li lang="en">Start <code>python -m sglang.launch_server</code> from the <code>lmsysorg/sglang:v0.5.23</code> image on a rented L4, serving only on the loopback address, send one request, then look at one decode step with <code>bench_one_batch</code>, the torch profiler and <code>nsys</code>.</li>
+      <li lang="zh-CN">判断一个实验什么时候必须换到 H100，并按当天的价格估出它的花费。</li>
+      <li lang="en">Decide when a lab has to move to the H100, and estimate its cost from the price of the day.</li>
+      <li lang="zh-CN">只用 Command Line Tools 在这台 Mac 上编译并运行 Metal 探针，读出 SIMD-group 宽度、每个 threadgroup 的线程上限和 GPU 时间。</li>
+      <li lang="en">Build and run the Metal probe on this Mac with the Command Line Tools alone, and read the SIMD-group width, the per-threadgroup thread limit and the GPU time.</li>
+    </ul>
+  </div>
+
+  <h2 id="why" lang="zh-CN">为什么这样分层</h2><h2 id="why-en" lang="en">Why these tiers</h2>
+  <ul>
+    <li lang="zh-CN"><strong>这台 Mac 跑不了本专题研究的那条路径。</strong>SGLang v0.5.22 的安装文档写明它需要 CUDA 13，而 CUDA 只跑在 NVIDIA GPU 上。SGLang 也有一个 Apple 芯片后端（文档页 Apple Silicon with Metal），但它用的是 MLX，要先 <code>pip install</code>，跑的也不是本专题要读的 CUDA 内核，所以不用。</li>
+    <li lang="en"><strong>This Mac cannot run the path this topic studies.</strong> The SGLang v0.5.22 install documentation states that it requires CUDA 13, and CUDA runs only on NVIDIA GPUs. SGLang does have an Apple-silicon backend (the documentation page Apple Silicon with Metal), but it uses MLX, needs a <code>pip install</code> first, and does not run the CUDA kernels this topic reads, so it is not used.</li>
+    <li lang="zh-CN"><strong>免费的 Colab T4 不够。</strong>Triton v3.9.0 的 README 要求 compute capability 8.0 或更高，T4 是 7.5（<code>sm_75</code>），本专题的 Triton 内核在上面都跑不了。L4 是 Ada（<code>sm_89</code>），有 FP8，24 GB 显存，SGLang 的安装文档把它列在 FlashInfer 支持的卡里。所以 L4 是最便宜的一层。</li>
+    <li lang="en"><strong>The free Colab T4 is not enough.</strong> The Triton v3.9.0 README requires compute capability 8.0 or higher, and the T4 is 7.5 (<code>sm_75</code>), so none of this topic’s Triton kernels run on it. The L4 is Ada (<code>sm_89</code>), has FP8 and 24 GB of memory, and the SGLang install documentation lists it among the cards FlashInfer supports. So the L4 is the cheapest tier.</li>
+    <li lang="zh-CN"><strong>有几个内核至少要 Hopper。</strong>FA3、DeepGEMM、DeepEP 和 FlashMLA 都不支持 Ada（概念 3 给出各自 README 的原话）。H100 每小时的价格是 L4 的好几倍，所以只有用到它们的那几步实验才开 H100。</li>
+    <li lang="en"><strong>A few kernels need at least Hopper.</strong> FA3, DeepGEMM, DeepEP and FlashMLA do not support Ada (concept 3 quotes each README). An H100 costs several times as much per hour as an L4, so the H100 is started only for the few lab steps that use them.</li>
+    <li lang="zh-CN"><strong>每个内核想法都在本机再跑一遍。</strong>Metal 的 grid、threadgroup、SIMD-group 和 CUDA 的 grid、block、warp 一一对应。Mac 上的 Metal 孪生实验不花钱、不排队，而且是真跑出来的数字，用它检验你对 CUDA 那一侧的理解。</li>
+    <li lang="en"><strong>Every kernel idea runs a second time here.</strong> Metal’s grid, threadgroup and SIMD-group map one to one onto CUDA’s grid, block and warp. The Metal twin on the Mac costs nothing, never queues, and gives numbers that were really measured; use it to test what you understood on the CUDA side.</li>
+  </ul>
+  <div class="note" lang="zh-CN">租用 GPU 是花钱的决定，不是实验步骤。本页的云端部分只描述路径；开账户、选服务商、付费之前先定预算（概念 5 给出当天的价格），并且只在决定之后才执行那些命令。</div><div class="note" lang="en">Renting a GPU is a decision to spend money, not a lab step. The cloud part of this page only describes the path; set a budget before you open an account, choose a provider or pay (concept 5 gives the prices of the day), and run those commands only after that decision.</div>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 三层环境，各管哪些实验</h3><h3 lang="en">1. Three tiers and the labs each one serves</h3>
+  <p lang="zh-CN">每一课有两个实验。Lab A 是 SGLang 或 CUDA，在云端跑；Lab B 是同一个内核想法的 Metal 版本，在这台 Mac 上跑。按本专题的大纲分配如下：</p><p lang="en">Every lesson has two labs. Lab A is SGLang or CUDA and runs in the cloud; Lab B is the Metal version of the same kernel idea and runs on this Mac. Following the syllabus of this topic, they are assigned like this:</p>
+  <ul>
+    <li lang="zh-CN"><strong>第一层 · 租用的 L4</strong>：Phase 0–8 的 Lab A 默认都在这里。SSH 登录，在 SGLang 的官方容器里启动服务器、跑基准和剖析器。</li>
+    <li lang="en"><strong>Tier 1 · a rented L4</strong>: by default, Lab A of Phases 0–8 runs here. Log in over SSH, then start the server, the benchmarks and the profilers inside SGLang’s official container.</li>
+    <li lang="zh-CN"><strong>第二层 · 租用的 H100</strong>：只用于 Lab A 里标明要 Hopper 的部分，目前是 Phase 2 的 FA3 对 FA2 和 Phase 4 的 DeepGEMM 分组 GEMM。FlashMLA 和 DeepEP 在 Phase 2 和 Phase 4 里讲，是否上机以那两课为准。</li>
+    <li lang="en"><strong>Tier 2 · a rented H100</strong>: only for the parts of a Lab A marked as needing Hopper, so far FA3 against FA2 in Phase 2 and the DeepGEMM grouped GEMM in Phase 4. FlashMLA and DeepEP are explained in Phases 2 and 4; whether they run on a machine is decided in those two lessons.</li>
+    <li lang="zh-CN"><strong>第三层 · 这台 Mac</strong>：每一课的 Lab B。Swift 程序加运行时编译的 Metal Shading Language（MSL）kernel，不需要 Xcode。</li>
+    <li lang="en"><strong>Tier 3 · this Mac</strong>: Lab B of every lesson. A Swift program plus a Metal Shading Language (MSL) kernel compiled at run time, with no Xcode needed.</li>
+  </ul>
+  <p lang="zh-CN">只在 Blackwell 上才有的内核（NVFP4、MXFP4）只讲解，不上机：本专题不租 Blackwell。</p><p lang="en">Kernels that exist only on Blackwell (NVFP4, MXFP4) are explained but never run: this topic rents no Blackwell card.</p>
+  <p lang="zh-CN">延伸阅读：Hwu、Kirk、El Hajj《Programming Massively Parallel Processors》第 5 版第 1 章 Introduction（为什么要异构计算，CPU 和 GPU 各擅长什么）。</p><p lang="en">Further reading: chapter 1, Introduction, of Hwu, Kirk and El Hajj, <em>Programming Massively Parallel Processors</em>, 5th ed. (why heterogeneous computing, and what the CPU and the GPU are each good at).</p>
+
+  <h3 lang="zh-CN">2. 第一层：租用的 L4 上的 SGLang</h3><h3 lang="en">2. Tier 1: SGLang on a rented L4</h3>
+  <p lang="zh-CN">版本事实都是 2026-11-01 读取的：</p><p lang="en">The version facts below were read on 2026-11-01:</p>
+  <ul>
+    <li lang="zh-CN">镜像 <code>lmsysorg/sglang:v0.5.23</code> 在 Docker Hub 上存在，2026-10-30 推送，有 amd64 和 arm64 两个平台，amd64 那一份约 16.1 GB。同一天还推送了 <code>-runtime</code>、<code>-cu130</code> 等变体；本页用不带后缀的那一个。</li>
+    <li lang="en">The image <code>lmsysorg/sglang:v0.5.23</code> exists on Docker Hub, pushed on 2026-10-30, for amd64 and arm64; the amd64 one is about 16.1 GB. Variants such as <code>-runtime</code> and <code>-cu130</code> were pushed the same day; this page uses the one without a suffix.</li>
+    <li lang="zh-CN">SGLang v0.5.22 的 <code>docs/docs/get-started/install.mdx</code>：SGLang 需要 CUDA 13，CUDA 12 这条线在 0.5.19 结束；镜像里是 CUDA 13 环境，主机需要兼容 CUDA 13 的驱动和 NVIDIA Container Toolkit；不用镜像时要 Python 3.11 或更高。驱动版本怎么看，见 GPU 专题环境页的概念 3。</li>
+    <li lang="en">From <code>docs/docs/get-started/install.mdx</code> of SGLang v0.5.22: SGLang requires CUDA 13, and the CUDA 12 lane ended with 0.5.19; the images ship a CUDA 13 environment and the host needs a CUDA 13-compatible driver plus the NVIDIA Container Toolkit; without the image you need Python 3.11 or higher. For how to read the driver version, see concept 3 of the GPU topic’s lab page.</li>
+    <li lang="zh-CN">v0.5.22 的 <code>docker/Dockerfile</code> 默认用 <code>CUDA_VERSION=13.0.3</code> 和 <code>PYTHON_VERSION=3.12</code>，完整镜像那一段装了 <code>nsight-systems-cli</code>，注释说 runtime 镜像不带 nsight 这类开发工具。v0.5.23 镜像实际用的版本以容器里 <code>python3 --version</code> 和 <code>nsys --version</code> 的输出为准。</li>
+    <li lang="en">The <code>docker/Dockerfile</code> of v0.5.22 defaults to <code>CUDA_VERSION=13.0.3</code> and <code>PYTHON_VERSION=3.12</code>; its full-image stage installs <code>nsight-systems-cli</code>, and a comment says the runtime image leaves out dev tools such as nsight. What the v0.5.23 image actually holds is whatever <code>python3 --version</code> and <code>nsys --version</code> print inside the container.</li>
+  </ul>
+  <p lang="zh-CN"><strong>模型选 <code>Qwen/Qwen3-0.6B</code>。</strong>SGLang 的文档没有为 L4 点名任何模型；它的 Quickstart 在示例里用的就是 <code>Qwen/Qwen3-0.6B</code>。Hugging Face 上这个模型页存在（2026-11-01 读取）：751,632,384 个参数，BF16，权重是一个 1,503,300,328 字节（约 1.5 GB）的 <code>model.safetensors</code>，28 层，Apache-2.0 许可，<strong>不是 gated 模型，不需要 Hugging Face token</strong>。L4 有 24 GB，权重只占很小一部分，剩下的显存留给 KV 缓存。模型小，解码步里的每个内核都很短，这正好让 CUDA 图和启动开销在 trace 里看得清楚（推断）。</p><p lang="en"><strong>The model is <code>Qwen/Qwen3-0.6B</code>.</strong> The SGLang documentation names no model for an L4; its Quickstart uses <code>Qwen/Qwen3-0.6B</code> as the example. The model page exists on Hugging Face (read 2026-11-01): 751,632,384 parameters in BF16, with weights in one <code>model.safetensors</code> of 1,503,300,328 bytes (about 1.5 GB), 28 layers, the Apache-2.0 license, and it is <strong>not gated, so no Hugging Face token is needed</strong>. The L4 has 24 GB, the weights take a small part of it, and the rest of the memory is left for the KV cache. A small model makes every kernel of a decode step short, which makes CUDA graphs and launch overhead easy to see in a trace (inference).</p>
+  <p lang="zh-CN">登录租来的主机后，先看 GPU，再拉镜像，起一个有名字的容器。注意这里<strong>没有</strong> <code>-p</code>：SGLang 文档里的示例写的是 <code>-p 30000:30000</code> 和 <code>--host 0.0.0.0</code>，在一台公网主机上照抄就会把服务开给整个互联网（概念 5）。本页让服务器只在容器内部的回环地址上听，请求也从容器内部发：</p><p lang="en">After logging in to the rented host, check the GPU first, then pull the image and start a named container. Note that there is <strong>no</strong> <code>-p</code> here: the examples in the SGLang documentation use <code>-p 30000:30000</code> and <code>--host 0.0.0.0</code>, and copying them on a public host opens the server to the whole internet (concept 5). This page keeps the server listening on the loopback address inside the container, and sends requests from inside the container too:</p>
+<pre data-lang="sh" data-file="on the rented L4 host"># 未运行 · not run; assembled from the SGLang documentation at v0.5.22 on 2026-11-01
+nvidia-smi                                  # 应为 NVIDIA L4；驱动要兼容 CUDA 13
+docker pull lmsysorg/sglang:v0.5.23         # 约 16 GB，拉取要一些时间和磁盘
+mkdir -p "$HOME/hf-cache" "$HOME/llm-lab/profiles"
+docker run --rm -it --name sglang-lab --gpus all --ipc=host \
+  -v "$HOME/hf-cache":/root/.cache/huggingface \
+  -v "$HOME/llm-lab":/work \
+  lmsysorg/sglang:v0.5.23 bash
+# 以下在容器里
+python3 --version                           # 要 3.11 或更高
+python3 -c "import sglang; print(sglang.__version__)"   # 应为 0.5.23
+nsys --version                              # 完整镜像应自带；没有就按 SGLang 剖析文档用 apt 装 nsight-systems-cli</pre>
+  <p lang="zh-CN">服务器的默认监听地址本来就是 <code>127.0.0.1</code>、端口 30000（v0.5.22 的 <code>python/sglang/srt/arg_groups/fields/serving.py</code> 第 65–66 行）。下面仍然把 <code>--host 127.0.0.1</code> 写出来，让命令自己说明它只听本机：</p><p lang="en">The server already listens on <code>127.0.0.1</code>, port 30000, by default (lines 65–66 of <code>python/sglang/srt/arg_groups/fields/serving.py</code> at v0.5.22). The command below still spells out <code>--host 127.0.0.1</code>, so that it says by itself that it listens only locally:</p>
+<pre data-lang="sh" data-file="in the container, terminal 1"># 未运行 · not run; assembled from the SGLang documentation at v0.5.22 on 2026-11-01
+export SGLANG_TORCH_PROFILER_DIR=/work/profiles
+python3 -m sglang.launch_server --model-path Qwen/Qwen3-0.6B --host 127.0.0.1 --port 30000
+# 等到打印 The server is fired up and ready to roll!</pre>
+  <p lang="zh-CN">第二个终端用 <code>docker exec</code> 进同一个容器，发一个请求。请求体和 Quickstart 里的一样，答案在 <code>choices[0].message.content</code>：</p><p lang="en">In a second terminal, enter the same container with <code>docker exec</code> and send one request. The request body is the one from the Quickstart, and the answer is in <code>choices[0].message.content</code>:</p>
+<pre data-lang="sh" data-file="on the host, terminal 2"># 未运行 · not run; assembled from the SGLang documentation at v0.5.22 on 2026-11-01
+docker exec -it sglang-lab bash
+curl -s http://127.0.0.1:30000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "What is the capital of France?"}]}'</pre>
+  <p lang="zh-CN">三个测量工具，都来自 v0.5.22 的 <code>docs/docs/developer_guide/benchmark_and_profiling.mdx</code>：</p><p lang="en">Three measuring tools, all from <code>docs/docs/developer_guide/benchmark_and_profiling.mdx</code> at v0.5.22:</p>
+  <ul>
+    <li lang="zh-CN"><strong><code>bench_one_batch</code></strong> 是最底层的工具：不起服务器，直接建一个 <code>ModelRunner</code>，对一个固定的静态批次调用 <code>extend()</code> 和 <code>decode()</code>，绕过调度器。文档说它最适合剖析单个内核的性能。v0.5.22 里它的模块是 <code>sglang.benchmark.one_batch</code>（源码 <code>python/sglang/benchmark/one_batch.py</code>）。它自己加载模型，跑之前先停掉服务器，免得两份模型抢同一块显存（推断）。</li>
+    <li lang="en"><strong><code>bench_one_batch</code></strong> is the lowest-level tool: it starts no server, builds a <code>ModelRunner</code> directly and calls <code>extend()</code> and <code>decode()</code> on one fixed static batch, bypassing the scheduler. The documentation says it suits profiling individual kernels best. At v0.5.22 its module is <code>sglang.benchmark.one_batch</code> (source <code>python/sglang/benchmark/one_batch.py</code>). It loads the model itself, so stop the server first, or two copies of the model compete for the same GPU memory (inference).</li>
+    <li lang="zh-CN"><strong>torch profiler</strong>：服务器上用 <code>/start_profile</code> 接口开始剖析，trace 写进 <code>SGLANG_TORCH_PROFILER_DIR</code>；<code>one_batch</code> 上加 <code>--profile</code>，用 <code>--profile-stage decode</code> 只剖析解码。trace 在 <a href="https://ui.perfetto.dev/">ui.perfetto.dev</a> 或 Chrome 的 <code>chrome://tracing</code> 里打开。</li>
+    <li lang="en"><strong>The torch profiler</strong>: on the server, the <code>/start_profile</code> endpoint starts profiling and the trace goes to <code>SGLANG_TORCH_PROFILER_DIR</code>; on <code>one_batch</code>, add <code>--profile</code>, and <code>--profile-stage decode</code> profiles only the decode. Open the trace in <a href="https://ui.perfetto.dev/">ui.perfetto.dev</a> or in Chrome’s <code>chrome://tracing</code>.</li>
+    <li lang="zh-CN"><strong>Nsight Systems（<code>nsys</code>）</strong>：文档给的单批次命令带 <code>--trace-fork-before-exec=true --cuda-graph-trace=node</code>，后一个选项让 CUDA 图里的每个节点都单独出现在时间线上。</li>
+    <li lang="en"><strong>Nsight Systems (<code>nsys</code>)</strong>: the single-batch command in the documentation carries <code>--trace-fork-before-exec=true --cuda-graph-trace=node</code>; the second option makes every node of a CUDA graph appear on its own in the timeline.</li>
+  </ul>
+<pre data-lang="sh" data-file="in the container, server stopped"># 未运行 · not run; assembled from the SGLang documentation at v0.5.22 on 2026-11-01
+# 一个批次的延迟：batch 1，输入 256 个 token，输出 32 个
+python3 -m sglang.benchmark.one_batch --model-path Qwen/Qwen3-0.6B --batch-size 1 --input-len 256 --output-len 32
+# 同一个批次，只用 torch profiler 剖析解码；默认只剖析一个解码步
+python3 -m sglang.benchmark.one_batch --model-path Qwen/Qwen3-0.6B --batch-size 1 --input-len 256 --output-len 32 \
+  --profile --profile-stage decode
+# 同一个批次交给 nsys
+nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node --force-overwrite=true -o /work/profiles/one_batch_qwen3 \
+  python3 -m sglang.benchmark.one_batch --model-path Qwen/Qwen3-0.6B --batch-size 1 --input-len 256 --output-len 32 \
+  --profile --profile-activities CUDA_PROFILER</pre>
+  <p lang="zh-CN">trace 文件落在主机的 <code>~/llm-lab/profiles/</code>（容器里的 <code>/work/profiles</code>），用 GPU 专题环境页里的 <code>rsync</code> 那一行把它拷回 Mac 再打开。</p><p lang="en">The trace files land in <code>~/llm-lab/profiles/</code> on the host (<code>/work/profiles</code> in the container); copy them back to the Mac with the <code>rsync</code> line from the GPU topic’s lab page and open them there.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 6 章 Performance considerations（为什么要测、测什么）；Chip Huyen《AI Engineering》第 9 章 Inference Optimization 的 Inference Overview 和 Inference Performance Metrics 两节（推理服务的整体和它的性能指标）。SGLang 自己的命令没有对应的书章，依据是上面的 benchmark_and_profiling 文档页。</p><p lang="en">Further reading: chapter 6 of PMPP, Performance considerations (why and what to measure); the sections Inference Overview and Inference Performance Metrics of chapter 9, Inference Optimization, of Chip Huyen’s <em>AI Engineering</em> (inference serving as a whole and its performance metrics). No book chapter covers SGLang’s own commands; they rest on the benchmark_and_profiling documentation page above.</p>
+
+  <h3 lang="zh-CN">3. 第二层：只为至少要 Hopper 的内核租 H100</h3><h3 lang="en">3. Tier 2: an H100 only for the kernels that need at least Hopper</h3>
+  <p lang="zh-CN">四个库的硬件要求，都是 2026-11-01 从各自的 README 读到的：</p><p lang="en">The hardware requirements of the four libraries, all read from their READMEs on 2026-11-01:</p>
+  <ul>
+    <li lang="zh-CN"><strong>FA3</strong>：FlashAttention v2.8.3.post2 的 README 写的是 FlashAttention-3 为 Hopper 优化，要求 H100 / H800 和 CUDA 12.3 以上；代码在仓库的 <code>hopper/</code> 目录。</li>
+    <li lang="en"><strong>FA3</strong>: the FlashAttention v2.8.3.post2 README says FlashAttention-3 is optimized for Hopper and requires an H100 / H800 and CUDA 12.3 or later; the code is in the <code>hopper/</code> directory of the repository.</li>
+    <li lang="zh-CN"><strong>DeepGEMM</strong>：要求 SM90 或 SM100 架构的 NVIDIA GPU。</li>
+    <li lang="en"><strong>DeepGEMM</strong>: requires an NVIDIA GPU of the SM90 or SM100 architecture.</li>
+    <li lang="zh-CN"><strong>DeepEP</strong>：要求 Hopper 或更新的 GPU，机内通信要 NVLink。它做的是专家并行在多块 GPU 之间的分发与合并，所以一块 H100 跑不出它的本职工作，要一台多卡、带 NVLink 的机器（推断，以 Phase 4 为准）。</li>
+    <li lang="en"><strong>DeepEP</strong>: requires Hopper or newer GPUs and NVLink for communication inside a machine. It does expert-parallel dispatch and combine across several GPUs, so a single H100 cannot show its actual job; that needs a multi-GPU machine with NVLink (inference; Phase 4 decides).</li>
+    <li lang="zh-CN"><strong>FlashMLA</strong>：README 顶部写着 2026-09-30 的版本<strong>去掉了 Hopper 支持</strong>，要在 Hopper 上用，得切到它指定的提交 <code>ba89a3466e9470ad08ab39738d4e7bb66989e1e7</code>。SGLang v0.5.22 用的是 FlashMLA 的哪个版本，本页没有核对。</li>
+    <li lang="en"><strong>FlashMLA</strong>: the top of the README says the release of 2026-09-30 <strong>removed Hopper support</strong>; to use it on Hopper you switch to the commit it names, <code>ba89a3466e9470ad08ab39738d4e7bb66989e1e7</code>. Which FlashMLA version SGLang v0.5.22 uses was not checked for this page.</li>
+  </ul>
+  <p lang="zh-CN">H100 这一层的环境和 L4 一样：同一个 <code>lmsysorg/sglang:v0.5.23</code> 镜像、同样只听本机、同样用完就停。不同的只有价格。如果租的是 RunPod 这种容器式的 pod（你拿到的本身就是一个容器，里面通常不能再跑 Docker），就把这个镜像直接选成 pod 的镜像；GPU 专题环境页的概念 3 讲了这两种机器的区别。</p><p lang="en">The H100 tier is set up the same way as the L4: the same <code>lmsysorg/sglang:v0.5.23</code> image, the same local-only listening, the same stop when done. Only the price differs. If you rent a container-style pod such as RunPod’s (what you get is itself a container, which usually cannot run Docker inside), choose this image as the pod image directly; concept 3 of the GPU topic’s lab page explains the difference between the two kinds of machine.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 里没有讲这几个库的章节。依据是上面四个 README 和 FlashAttention-3 的论文（Shah 等，arXiv:2407.08608），见资料。</p><p lang="en">Further reading: no chapter of PMPP covers these libraries. The concept rests on the four READMEs above and on the FlashAttention-3 paper (Shah et al., arXiv:2407.08608); see Resources.</p>
+
+  <h3 lang="zh-CN">4. 第三层：这台 Mac 上的 Metal</h3><h3 lang="en">4. Tier 3: Metal on this Mac</h3>
+  <p lang="zh-CN">实验机只装了 Command Line Tools，没有完整的 Xcode。Swift 编译器在，离线的 Metal 编译器不在（2026-11-01 实验机输出）：</p><p lang="en">The lab machine has only the Command Line Tools, not the full Xcode. The Swift compiler is there; the offline Metal compiler is not (lab Mac output, 2026-11-01):</p>
+<pre data-lang="sh">$ sw_vers -productVersion
+27.2
+$ xcode-select -p
+/Library/Developer/CommandLineTools
+$ swiftc --version
+swift-driver version: 1.168.6 Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)
+Target: arm64-apple-macosx27.2.0
+$ xcrun -sdk macosx metal --version
+xcrun: error: unable to find utility "metal", not a developer tool or in PATH
+$ echo $?
+72</pre>
+  <p lang="zh-CN">所以本专题每一页都用<strong>运行时编译</strong>，和 GPU 专题一样：MSL 源码作为字符串放在 Swift 程序里，程序运行时调用 <code>MTLDevice.makeLibrary(source:options:)</code> 编译成库，再建成计算管线状态后派发。计时只看 GPU 自己报的执行时间（<code>gpuStartTime</code> 到 <code>gpuEndTime</code>），不看整个进程的运行时间，因为每次运行都要先编译一次 kernel。SGLang 的 Apple 文档页也写明：要编译它可选的原生 Metal 内核，需要完整 Xcode 里的 Metal 编译器，单独的 Command Line Tools 不够。这是不走那条路的又一个原因。</p><p lang="en">So every page of this topic uses <strong>runtime compilation</strong>, as the GPU topic does: the MSL source sits as a string inside the Swift program, which calls <code>MTLDevice.makeLibrary(source:options:)</code> at run time to compile it into a library, builds a compute pipeline state and dispatches it. Timing looks only at the execution time the GPU reports itself (<code>gpuStartTime</code> to <code>gpuEndTime</code>), never at the whole process run time, because every run compiles the kernel first. SGLang’s Apple documentation page also states that building its optional native Metal kernels needs the Metal compiler from the full Xcode application, and the standalone Command Line Tools are not enough. That is one more reason not to take that route.</p>
+  <p lang="zh-CN">硬件这一侧（<code>system_profiler SPDisplaysDataType</code>，2026-11-01）：Apple M5，GPU 10 核，Metal Support 显示 Metal 4。Lab B 的程序再读出两个以后每课都要用的数：SIMD-group 宽度（<code>threadExecutionWidth</code>，对应 CUDA 的 warp）和每个 threadgroup 的线程上限（<code>maxTotalThreadsPerThreadgroup</code>，对应 CUDA 的每 block 线程上限）。</p><p lang="en">On the hardware side (<code>system_profiler SPDisplaysDataType</code>, 2026-11-01): Apple M5, a 10-core GPU, and Metal Support shows Metal 4. The Lab B program reads two more numbers that every later lesson uses: the SIMD-group width (<code>threadExecutionWidth</code>, the counterpart of the CUDA warp) and the per-threadgroup thread limit (<code>maxTotalThreadsPerThreadgroup</code>, the counterpart of CUDA’s per-block thread limit).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 4 章 Compute architecture and scheduling（warp 和 SIMD 硬件，读完再看 Metal 的 SIMD-group 就是同一件事）。</p><p lang="en">Further reading: chapter 4 of PMPP, Compute architecture and scheduling (warps and SIMD hardware; after it, Metal’s SIMD-group reads as the same thing).</p>
+
+  <h3 lang="zh-CN">5. 安全规则与费用</h3><h3 lang="en">5. Safety rules and the cost</h3>
+  <p lang="zh-CN">一个推理服务器是一个网络服务：谁能连上它的端口，谁就能用你的 GPU 生成文本，还能调用 <code>/start_profile</code> 这类管理接口让它往磁盘写文件。租来的机器又直接连在公网上。所以除了 GPU 专题环境页的那张安全表（密钥登录、只开 22 端口、凭据只留在 Mac、用完停机），这里再加几条：</p><p lang="en">An inference server is a network service: whoever can reach its port can use your GPU to generate text, and can call management endpoints such as <code>/start_profile</code> that make it write files to disk. And the rented machine sits directly on the internet. So on top of the safety table of the GPU topic’s lab page (key logins, only port 22 open, credentials kept on the Mac, stop when done), add these rules:</p>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">事项</span><span lang="en">Matter</span></th><th><span lang="zh-CN">这样做</span><span lang="en">Do this</span></th><th><span lang="zh-CN">不要这样做</span><span lang="en">Never this</span></th></tr>
+    <tr><td><span lang="zh-CN">监听地址</span><span lang="en">Listening address</span></td><td><span lang="zh-CN"><code>--host 127.0.0.1</code>（也是默认值）；容器不带 <code>-p</code>，请求用 <code>docker exec</code> 从容器里发</span><span lang="en"><code>--host 127.0.0.1</code> (also the default); no <code>-p</code> on the container, and requests sent from inside it with <code>docker exec</code></span></td><td><span lang="zh-CN">照抄文档示例的 <code>--host 0.0.0.0</code> 和 <code>-p 30000:30000</code></span><span lang="en">Copying <code>--host 0.0.0.0</code> and <code>-p 30000:30000</code> from the documentation examples</span></td></tr>
+    <tr><td><span lang="zh-CN">从 Mac 访问</span><span lang="en">Reaching it from the Mac</span></td><td><span lang="zh-CN">不需要：trace 文件用 <code>rsync</code> 拷回来在本机打开</span><span lang="en">Not needed: copy the trace files back with <code>rsync</code> and open them locally</span></td><td><span lang="zh-CN">在防火墙、安全组或 pod 设置里打开 30000 端口</span><span lang="en">Opening port 30000 in a firewall, a security group or the pod settings</span></td></tr>
+    <tr><td><span lang="zh-CN">API key</span><span lang="en">API key</span></td><td><span lang="zh-CN"><code>--api-key</code> 存在，但它只是第二道门；第一道是不暴露端口</span><span lang="en"><code>--api-key</code> exists, but it is only the second door; the first is not exposing the port</span></td><td><span lang="zh-CN">以为设了 <code>--api-key</code> 就可以开到公网上</span><span lang="en">Assuming that <code>--api-key</code> makes it fine to serve on the public address</span></td></tr>
+    <tr><td><span lang="zh-CN">Hugging Face token</span><span lang="en">Hugging Face token</span></td><td><span lang="zh-CN">本页的模型不需要 token；以后换 gated 模型时，按安装文档在主机上 <code>export HF_TOKEN</code>，再用 <code>--env HF_TOKEN</code> 传进容器</span><span lang="en">This page’s model needs no token; for a gated model later, <code>export HF_TOKEN</code> on the host as the install documentation says, and pass it into the container with <code>--env HF_TOKEN</code></span></td><td><span lang="zh-CN">把 token 写进 notebook、单元格输出、脚本、命令行参数、实验日志或 git 仓库</span><span lang="en">Putting the token in a notebook, a cell output, a script, a command-line argument, the lab log or a git repository</span></td></tr>
+    <tr><td><span lang="zh-CN">镜像</span><span lang="en">Image</span></td><td><span lang="zh-CN">官方的 <code>lmsysorg/sglang</code>，固定标签 <code>v0.5.23</code></span><span lang="en">The official <code>lmsysorg/sglang</code>, pinned to the tag <code>v0.5.23</code></span></td><td><span lang="zh-CN">用 <code>latest</code>，或以 root 跑来路不明的镜像</span><span lang="en">Using <code>latest</code>, or running images of unknown origin as root</span></td></tr>
+    <tr><td><span lang="zh-CN">结束</span><span lang="en">Finishing</span></td><td><span lang="zh-CN">Ctrl+C 停服务器，退出容器，再在控制台停止或销毁机器并看账单</span><span lang="en">Ctrl+C to stop the server, leave the container, then stop or terminate the machine in the console and check the bill</span></td><td><span lang="zh-CN">关掉终端就走</span><span lang="en">Closing the terminal and walking away</span></td></tr>
+    <tr><td><span lang="zh-CN">Mac 上的 Metal</span><span lang="en">Metal on the Mac</span></td><td><span lang="zh-CN">普通用户态程序，不要 sudo，SIP 一直开着；最坏是一个进程卡住，<kbd>Ctrl-c</kbd> 结束</span><span lang="en">An ordinary user-space program: no sudo, SIP stays on; the worst case is a hung process, ended with <kbd>Ctrl-c</kbd></span></td><td>—</td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">价格来自 RunPod 的定价页（页面写着 2026-10-28 更新，2026-11-01 读取），每块 GPU 每小时的美元价，<strong>开机前到服务商页面查当天的价格</strong>：</p><p lang="en">Prices from RunPod’s pricing page (marked as updated on 2026-10-28, read on 2026-11-01), in US dollars per GPU per hour; <strong>check the provider page on the day before you start a machine</strong>:</p>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">GPU</span><span lang="en">GPU</span></th><th><span lang="zh-CN">Community Cloud</span><span lang="en">Community Cloud</span></th><th><span lang="zh-CN">Secure Cloud</span><span lang="en">Secure Cloud</span></th><th><span lang="zh-CN">本专题用于</span><span lang="en">Used for in this topic</span></th></tr>
+    <tr><td>L4 · 24 GB</td><td>0.44</td><td>0.59</td><td><span lang="zh-CN">第一层，所有 Lab A</span><span lang="en">Tier 1, every Lab A</span></td></tr>
+    <tr><td>H100 PCIe · 80 GB</td><td>1.99</td><td>2.89</td><td><span lang="zh-CN">第二层，单卡的 Hopper 内核</span><span lang="en">Tier 2, single-GPU Hopper kernels</span></td></tr>
+    <tr><td>H100 NVL · 94 GB</td><td>2.59</td><td>3.19</td><td><span lang="zh-CN">第二层的另一种选择</span><span lang="en">Another tier 2 option</span></td></tr>
+    <tr><td>H100 SXM · 80 GB</td><td>2.69</td><td>3.99</td><td><span lang="zh-CN">第二层；多卡 NVLink 机器按卡数乘</span><span lang="en">Tier 2; multiply by the GPU count for a multi-GPU NVLink machine</span></td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">算一个例子（是例子，不是估算）：在 L4 上做 10 小时实验约 4.40 到 5.90 美元；在一块 H100 SXM 上做 3 小时约 8.07 到 11.97 美元。再加上镜像约 16 GB 的磁盘和停机期间的存储费。在同一档云里比，H100 每小时是 L4 的 4.5 到 6.8 倍，所以在 L4 上能做的事都在 L4 上做完，H100 上只跑必须的那几步。</p><p lang="en">One worked example (an example, not an estimate): 10 hours of labs on an L4 come to about 4.40 to 5.90 dollars; 3 hours on one H100 SXM, about 8.07 to 11.97 dollars. Add the disk for the roughly 16 GB image and storage charges while the machine is stopped. Within the same cloud tier, an H100 hour costs 4.5 to 6.8 times an L4 hour, so finish everything the L4 can do on the L4, and run only the steps that must run there on the H100.</p>
+  <p lang="zh-CN">延伸阅读：这一节没有对应的书章，规则来自文档：SGLang 安装文档（端口和 <code>HF_TOKEN</code>）、v0.5.22 源码里的默认监听地址、所选服务商的安全和计费文档（见资料）。</p><p lang="en">Further reading: no book chapter covers this section; the rules come from documentation: the SGLang install documentation (ports and <code>HF_TOKEN</code>), the default listening address in the v0.5.22 source, and the security and billing documentation of the provider you choose (see Resources).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">项目</span><span lang="en">Item</span></th><th class="cuda"><span lang="zh-CN">第一层 · L4</span><span lang="en">Tier 1 · L4</span></th><th class="cuda"><span lang="zh-CN">第二层 · H100</span><span lang="en">Tier 2 · H100</span></th><th class="metal"><span lang="zh-CN">第三层 · 这台 Mac</span><span lang="en">Tier 3 · this Mac</span></th></tr>
+    <tr><td><span lang="zh-CN">GPU</span><span lang="en">GPU</span></td><td><span lang="zh-CN">NVIDIA L4，Ada，<code>sm_89</code>，24 GB</span><span lang="en">NVIDIA L4, Ada, <code>sm_89</code>, 24 GB</span></td><td><span lang="zh-CN">NVIDIA H100，Hopper，<code>sm_90</code>，80 GB</span><span lang="en">NVIDIA H100, Hopper, <code>sm_90</code>, 80 GB</span></td><td><span lang="zh-CN">Apple M5 GPU，10 核，Metal 4</span><span lang="en">Apple M5 GPU, 10 cores, Metal 4</span></td></tr>
+    <tr><td><span lang="zh-CN">软件</span><span lang="en">Software</span></td><td><span lang="zh-CN"><code>lmsysorg/sglang:v0.5.23</code> 镜像，CUDA 13</span><span lang="en">The <code>lmsysorg/sglang:v0.5.23</code> image, CUDA 13</span></td><td><span lang="zh-CN">同一个镜像，加上要 Hopper 的库</span><span lang="en">The same image, plus the libraries that need Hopper</span></td><td><span lang="zh-CN">Command Line Tools 里的 <code>swiftc</code>，MSL 运行时编译</span><span lang="en"><code>swiftc</code> from the Command Line Tools, MSL compiled at run time</span></td></tr>
+    <tr><td><span lang="zh-CN">用于</span><span lang="en">Used for</span></td><td><span lang="zh-CN">所有 Lab A：服务器、<code>bench_one_batch</code>、torch profiler、<code>nsys</code></span><span lang="en">Every Lab A: the server, <code>bench_one_batch</code>, the torch profiler, <code>nsys</code></span></td><td><span lang="zh-CN">Lab A 里的 FA3、DeepGEMM 等步骤</span><span lang="en">The FA3, DeepGEMM and similar steps of a Lab A</span></td><td><span lang="zh-CN">每一课的 Lab B</span><span lang="en">Lab B of every lesson</span></td></tr>
+    <tr><td><span lang="zh-CN">花费</span><span lang="en">Cost</span></td><td><span lang="zh-CN">每小时 0.44 到 0.59 美元（2026-11-01）</span><span lang="en">0.44 to 0.59 dollars per hour (2026-11-01)</span></td><td><span lang="zh-CN">每块每小时 1.99 到 3.99 美元（2026-11-01）</span><span lang="en">1.99 to 3.99 dollars per GPU per hour (2026-11-01)</span></td><td><span lang="zh-CN">免费</span><span lang="en">Free</span></td></tr>
+    <tr><td><span lang="zh-CN">限制</span><span lang="en">Limits</span></td><td><span lang="zh-CN">没有 FA3、DeepGEMM、DeepEP、FlashMLA；公网上的 root 主机</span><span lang="en">No FA3, DeepGEMM, DeepEP or FlashMLA; a root host on the internet</span></td><td><span lang="zh-CN">贵；DeepEP 要多卡 NVLink；FlashMLA 要旧提交</span><span lang="en">Expensive; DeepEP needs multi-GPU NVLink; FlashMLA needs an older commit</span></td><td><span lang="zh-CN">不是 CUDA，跑不了 SGLang 的 CUDA 路径；没有 <code>xcrun metal</code></span><span lang="en">Not CUDA, so not SGLang’s CUDA path; no <code>xcrun metal</code></span></td></tr>
+    <tr><td><span lang="zh-CN">本页是否运行过</span><span lang="en">Run for this page</span></td><td><span lang="zh-CN">未运行，根据文档整理</span><span lang="en">Not run; assembled from documentation</span></td><td><span lang="zh-CN">未运行，根据文档整理</span><span lang="en">Not run; assembled from documentation</span></td><td><span lang="zh-CN">2026-11-01 实际运行</span><span lang="en">Actually run on 2026-11-01</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解：SGLang 的四层和三台机器</h2><h2 id="diagram-en" lang="en">Animated diagram: the four layers of SGLang and the three machines</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="2600"
+         data-captions='["全图：左边是简报里 SGLang 的四层，从 LLM 程序一直到 GPU 内核；右边是本专题用到的三台机器。租来的 L4 跑完整的四层，H100 只跑至少要 Hopper 的内核，这台 Mac 只跑内核层的 Metal 孪生实验。按播放逐个看。",
+           "1. 前端是程序层：用 gen、select、fork 写成的 LLM 程序天然共享前缀。v0.5.22 的源码在 python/sglang/lang/。",
+           "2. 运行时（SRT）调度器做连续批处理，用 radix 树管理 KV 缓存，并做分块预填充。源码在 srt/managers/ 和 srt/mem_cache/。这一层的设计决定了内核看到的数据布局。",
+           "3. 模型执行器把每次前向拆成注意力、GEMM、MoE、RMSNorm、RoPE、采样这些算子，源码在 srt/model_executor/。剖析器里看到的就是这些算子背后的内核。",
+           "4. 内核层是本专题的主角：SGLang 自己的 python/sglang/kernels/，加上 FlashInfer、Triton、CUTLASS、FA3、FlashMLA、DeepGEMM、DeepEP 这些上游库。它们都跑在 NVIDIA GPU 上。",
+           "5. 第一层是一台租来的 L4：Ada，sm_89，24 GB。lmsysorg/sglang:v0.5.23 镜像里四层都在，跑 Qwen3-0.6B 这个约 1.5 GB 的小模型。服务器只听本机回环地址，按小时计费，用完就停。",
+           "6. 第二层是租来的 H100：Hopper，sm_90。FA3、DeepGEMM、DeepEP 至少要 Hopper，FlashMLA 在 Hopper 上要用它指定的旧提交。只有用到这些内核的实验步骤才开这一层。",
+           "7. 第三层就是这台 Mac：Apple M5，SIMD-group 宽 32。它跑不了 SGLang 的 CUDA 路径，所以只做内核层的 Metal 孪生实验：Swift 在运行时编译 MSL，不花钱，数字是实测的。",
+           "8. 本页的两个实验：Lab A 在 L4 上启动服务器、发一个请求、在 torch profiler 里读一个解码步，未运行；Lab B 是 Mac 上的 Metal 探针，已实测。"]'
+         data-captions-en='["The whole picture: on the left, the four layers of SGLang from the brief, from LLM programs down to GPU kernels; on the right, the three machines this topic uses. The rented L4 runs all four layers, the H100 runs only the kernels that need at least Hopper, and this Mac runs only the Metal twins of the kernel layer. Press Play to walk through it.",
+           "1. The frontend is the program layer: LLM programs written with gen, select and fork naturally share prefixes. At v0.5.22 the source is in python/sglang/lang/.",
+           "2. The runtime (SRT) scheduler does continuous batching, manages the KV cache with a radix tree, and does chunked prefill. The source is in srt/managers/ and srt/mem_cache/. The design of this layer decides the data layouts the kernels see.",
+           "3. The model executor breaks each forward pass into ops such as attention, GEMMs, MoE, RMSNorm, RoPE and sampling; the source is in srt/model_executor/. What the profilers show are the kernels behind these ops.",
+           "4. The kernel layer is the subject of this topic: the kernels SGLang ships in python/sglang/kernels/, plus upstream libraries such as FlashInfer, Triton, CUTLASS, FA3, FlashMLA, DeepGEMM and DeepEP. They all run on NVIDIA GPUs.",
+           "5. Tier 1 is a rented L4: Ada, sm_89, 24 GB. The lmsysorg/sglang:v0.5.23 image holds all four layers and serves Qwen3-0.6B, a small model of about 1.5 GB. The server listens only on the loopback address; the machine bills by the hour, so stop it when done.",
+           "6. Tier 2 is a rented H100: Hopper, sm_90. FA3, DeepGEMM and DeepEP need at least Hopper, and FlashMLA on Hopper needs the older commit its README names. Only the lab steps that use these kernels start this tier.",
+           "7. Tier 3 is this Mac: Apple M5, SIMD-group width 32. It cannot run the CUDA path of SGLang, so it does only the Metal twins of the kernel layer: Swift compiles MSL at run time, it costs nothing, and the numbers are measured.",
+           "8. The two labs of this page: Lab A launches the server on the L4, sends one request and reads one decode step in the torch profiler, not run; Lab B is the Metal probe on the Mac, run."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="16" class="small" lang="zh-CN">SGLang 的四层（简报）</text><text x="30" y="16" class="small" lang="en">The four layers of SGLang (the brief)</text>
+      <text x="540" y="16" class="small" lang="zh-CN">三台机器</text><text x="540" y="16" class="small" lang="en">The three machines</text>
+      <line x1="505" y1="6" x2="505" y2="378" class="lane"/>
+
+      <!-- step 1: frontend -->
+      <g data-step="1"><rect class="box" x="30" y="28" width="440" height="76"/>
+        <text x="44" y="52" lang="zh-CN">1. 前端 · 程序层</text><text x="44" y="52" lang="en">1. Frontend · program layer</text>
+        <text x="44" y="74" class="mono">python/sglang/lang/ · gen · select · fork</text>
+        <text x="44" y="94" class="small" lang="zh-CN">天然共享前缀的 LLM 程序</text><text x="44" y="94" class="small" lang="en">LLM programs that share prefixes</text></g>
+      <path class="arrow" d="M250 104 L250 114"/>
+
+      <!-- step 2: runtime -->
+      <g data-step="2"><rect class="box" x="30" y="116" width="440" height="76"/>
+        <text x="44" y="140" lang="zh-CN">2. 运行时（SRT）调度器</text><text x="44" y="140" lang="en">2. Runtime (SRT) scheduler</text>
+        <text x="44" y="162" class="mono">srt/managers/ · srt/mem_cache/</text>
+        <text x="44" y="182" class="small" lang="zh-CN">连续批处理 · radix 树 KV 缓存 · 分块预填充</text><text x="44" y="182" class="small" lang="en">Continuous batching · radix-tree KV cache · chunked prefill</text></g>
+      <path class="arrow" d="M250 192 L250 202"/>
+
+      <!-- step 3: model executor -->
+      <g data-step="3"><rect class="box" x="30" y="204" width="440" height="76"/>
+        <text x="44" y="228" lang="zh-CN">3. 模型执行器</text><text x="44" y="228" lang="en">3. Model executor</text>
+        <text x="44" y="250" class="mono">srt/model_executor/</text>
+        <text x="44" y="270" class="small" lang="zh-CN">注意力 · GEMM · MoE · RMSNorm · RoPE · 采样</text><text x="44" y="270" class="small" lang="en">Attention · GEMM · MoE · RMSNorm · RoPE · sampling</text></g>
+      <path class="arrow" d="M250 280 L250 290"/>
+
+      <!-- step 4: kernel layer -->
+      <g data-step="4"><rect class="box cuda" x="30" y="292" width="440" height="76"/>
+        <text x="44" y="316" lang="zh-CN">4. 内核层</text><text x="44" y="316" lang="en">4. Kernel layer</text>
+        <text x="44" y="338" class="mono">python/sglang/kernels/ · FlashInfer · Triton</text>
+        <text x="44" y="358" class="mono">CUTLASS · FA3 · FlashMLA · DeepGEMM · DeepEP</text></g>
+
+      <!-- step 5: the L4 runs all four layers -->
+      <g data-step="5"><path d="M476 30 L486 30 L486 366 L476 366" style="fill: none; stroke: var(--ink-3); stroke-width: 1.6"/>
+        <path class="arrow" d="M486 84 L538 84"/>
+        <rect class="box cuda" x="540" y="28" width="330" height="112"/>
+        <text x="554" y="52" lang="zh-CN">第一层 · 租用的 L4</text><text x="554" y="52" lang="en">Tier 1 · a rented L4</text>
+        <text x="554" y="74" class="mono">Ada · sm_89 · 24 GB</text>
+        <text x="554" y="96" class="mono">lmsysorg/sglang:v0.5.23</text>
+        <text x="554" y="118" class="small" lang="zh-CN">Qwen3-0.6B · 四层全在这里跑 · 按小时计费</text><text x="554" y="118" class="small" lang="en">Qwen3-0.6B · all four layers run here · hourly</text></g>
+
+      <!-- step 6: the H100 for Hopper-only kernels -->
+      <g data-step="6"><path class="arrow" d="M470 316 L516 316 L516 210 L538 210"/>
+        <rect class="box cuda" x="540" y="160" width="330" height="100"/>
+        <text x="554" y="184" lang="zh-CN">第二层 · 租用的 H100</text><text x="554" y="184" lang="en">Tier 2 · a rented H100</text>
+        <text x="554" y="206" class="mono">Hopper · sm_90 · 80 GB</text>
+        <text x="554" y="228" class="mono">FA3 · DeepGEMM · DeepEP · FlashMLA</text>
+        <text x="554" y="248" class="small" lang="zh-CN">只用于至少要 Hopper 的内核</text><text x="554" y="248" class="small" lang="en">Only for kernels that need at least Hopper</text></g>
+
+      <!-- step 7: this Mac for the Metal twins -->
+      <g data-step="7"><path class="arrow" d="M470 346 L538 346"/>
+        <rect class="box metal" x="540" y="280" width="330" height="86"/>
+        <text x="554" y="304" lang="zh-CN">第三层 · 这台 Mac</text><text x="554" y="304" lang="en">Tier 3 · this Mac</text>
+        <text x="554" y="326" class="mono">Apple M5 · SIMD 32 · Metal 4</text>
+        <text x="554" y="348" class="small" lang="zh-CN">Metal 孪生 · 运行时编译 · 已实测</text><text x="554" y="348" class="small" lang="en">Metal twins · compiled at run time · run</text></g>
+
+      <!-- step 8: the two labs of this page -->
+      <g data-step="8"><rect class="box" x="30" y="392" width="840" height="64"/>
+        <text x="44" y="418" lang="zh-CN">Lab A：在 L4 上启动服务器、发一个请求、读一个解码步（未运行）</text><text x="44" y="418" lang="en">Lab A: launch the server on the L4, send one request, read one decode step (not run)</text>
+        <text x="44" y="442" lang="zh-CN">Lab B：这台 Mac 上的 Metal 探针（已实测）· 只有第一层和第二层花钱</text><text x="44" y="442" lang="en">Lab B: the Metal probe on this Mac (run) · only tiers 1 and 2 cost money</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 L4 上启动 SGLang，发一个请求，读一个解码步</h3><h3 lang="en">Lab A · Launch SGLang on the L4, send one request, read one decode step</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01，根据 SGLang v0.5.22 的文档整理。本实验的命令和参数都核对过 v0.5.22 的文档和源码，但没有在任何 GPU 上执行过；下面说「应当看到」的地方都是根据文档的推断。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-11-01, assembled from the SGLang documentation at v0.5.22. Every command and flag in this lab was checked against the v0.5.22 documentation and source, but none has been executed on any GPU; wherever the steps say what you should see, that is inference from the documentation.</div>
+    <ol>
+      <li><span lang="zh-CN">按概念 2 起容器并检查版本，把 <code>nvidia-smi</code>、<code>python3 --version</code> 和 <code>sglang.__version__</code> 三段输出记下来。然后在终端 1 里启动服务器（概念 2 的命令），等到它打印 <code>The server is fired up and ready to roll!</code>。</span><span lang="en">Start the container and check the versions as in concept 2, keeping the outputs of <code>nvidia-smi</code>, <code>python3 --version</code> and <code>sglang.__version__</code>. Then start the server in terminal 1 (the command in concept 2) and wait until it prints <code>The server is fired up and ready to roll!</code>.</span></li>
+      <li><span lang="zh-CN">在终端 2（<code>docker exec</code> 进去的那个）里先让服务器剖析接下来的 5 个前向步，打开 <code>detailed_annotations</code>，让 trace 里每一步的标记带上批大小和 KV 长度；再发一个请求：</span><span lang="en">In terminal 2 (the one entered with <code>docker exec</code>), first tell the server to profile its next 5 forward steps with <code>detailed_annotations</code> on, so that each step marker in the trace carries the batch size and KV lengths; then send one request:</span><pre data-lang="sh" data-file="in the container, terminal 2"># 未运行 · not run; assembled from the SGLang documentation at v0.5.22 on 2026-11-01
+curl -s -X POST http://127.0.0.1:30000/start_profile \
+  -H "Content-Type: application/json" \
+  -d '{"output_dir": "/work/profiles", "num_steps": 5, "activities": ["CPU", "GPU"], "detailed_annotations": true}'
+curl -s http://127.0.0.1:30000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "What is the capital of France?"}], "max_tokens": 64}'
+ls -l /work/profiles/   # 5 步之后剖析自动停止，trace 写在这里</pre><span lang="zh-CN">指定了 <code>num_steps</code>，剖析在 5 步之后自己停，不用再调 <code>/stop_profile</code>。这 5 步里第一步应当是预填充（<code>EXTEND</code>），后面是解码（<code>DECODE</code>）（推断）。</span><span lang="en">With <code>num_steps</code> given, profiling stops by itself after 5 steps and <code>/stop_profile</code> is not needed. Of the 5 steps, the first should be the prefill (<code>EXTEND</code>) and the rest decodes (<code>DECODE</code>) (inference).</span></li>
+      <li><span lang="zh-CN">把 trace 拷回 Mac，在 <a href="https://ui.perfetto.dev/">ui.perfetto.dev</a> 里打开（<code>&lt;IP&gt;</code> 和用户名按 GPU 专题环境页）：</span><span lang="en">Copy the trace back to the Mac and open it in <a href="https://ui.perfetto.dev/">ui.perfetto.dev</a> (<code>&lt;IP&gt;</code> and the user name as on the GPU topic’s lab page):</span><pre data-lang="sh" data-file="on the Mac"># 未运行 · not run; assembled from the SGLang documentation at v0.5.22 on 2026-11-01
+rsync -av -e "ssh -i ~/.ssh/gpu_lab" ubuntu@&lt;IP&gt;:llm-lab/profiles/ ~/llm-lab/profiles/</pre></li>
+      <li><span lang="zh-CN">读一个解码步。在 GPU 那条时间线上找一个 <code>step[DECODE bs=1 …]</code> 标记（格式见剖析文档的 Detailed annotations 一节），把它下面的内核按时间顺序列出来，记下每个的名字和耗时。你应当能认出注意力（默认后端是 FlashInfer）、几个 GEMM、RMSNorm、RoPE、激活和采样这几类；具体的内核名以 trace 为准。再看这一步的总时间里，内核本身占多少，空隙占多少。</span><span lang="en">Read one decode step. On the GPU timeline, find a <code>step[DECODE bs=1 …]</code> marker (the format is in the Detailed annotations section of the profiling documentation) and list the kernels under it in time order, with the name and duration of each. You should recognize attention (the default backend is FlashInfer), several GEMMs, RMSNorm, RoPE, the activation and sampling; the exact kernel names are whatever the trace shows. Then look at how much of the step’s total time is kernels and how much is gaps.</span></li>
+      <li><span lang="zh-CN">再关掉解码的 CUDA 图跑一次，比较同一个解码步。剖析文档说，要从 trace 里的内核找回 SGLang 的 Python 源码，得关掉 CUDA 图；v0.5.22 里旧的 <code>--disable-cuda-graph</code> 已标为弃用，新写法是 <code>--cuda-graph-backend-decode disabled</code>（<code>python/sglang/srt/arg_groups/fields/exec_.py</code> 第 551 行，可选值 full、breakable、disabled）。两次的差就是 Phase 3 要讲的启动开销。</span><span lang="en">Run once more with CUDA graphs off for decode and compare the same decode step. The profiling documentation says that to trace kernels back to SGLang’s Python source you must turn CUDA graphs off; at v0.5.22 the old <code>--disable-cuda-graph</code> is marked deprecated and the new form is <code>--cuda-graph-backend-decode disabled</code> (line 551 of <code>python/sglang/srt/arg_groups/fields/exec_.py</code>, values full, breakable and disabled). The difference between the two runs is the launch overhead Phase 3 is about.</span><pre data-lang="sh" data-file="in the container, terminal 1"># 未运行 · not run; assembled from the SGLang documentation at v0.5.22 on 2026-11-01
+python3 -m sglang.launch_server --model-path Qwen/Qwen3-0.6B --host 127.0.0.1 --port 30000 \
+  --cuda-graph-backend-decode disabled</pre></li>
+      <li><span lang="zh-CN">停掉服务器，跑概念 2 里的三条 <code>one_batch</code> 命令，把延迟输出、torch profiler 的 trace 和 <code>nsys</code> 的报告都拷回 Mac。然后按 GPU 专题环境页的规则停机，并到账单页确认。</span><span lang="en">Stop the server, run the three <code>one_batch</code> commands of concept 2, and copy the latency output, the torch profiler trace and the <code>nsys</code> report back to the Mac. Then stop the machine under the rules of the GPU topic’s lab page, and confirm on the billing page.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 在这台 Mac 上跑 Metal 探针</h3><h3 lang="en">Lab B · Run the Metal probe on this Mac</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01。下面的输出都来自这台 Mac 上的实际运行。程序和 GPU 专题环境页 Lab B 的那一个相同。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01. The outputs below come from actual runs on this Mac. The program is the same as the one in Lab B of the GPU topic’s lab page.</div>
+    <ol>
+      <li><span lang="zh-CN">确认工具链（对照概念 4 的输出）：</span><span lang="en">Confirm the toolchain (compare with the output in concept 4):</span><pre data-lang="sh">mkdir -p ~/llm-lab &amp;&amp; cd ~/llm-lab
+xcode-select -p
+swiftc --version
+xcrun -sdk macosx metal --version   # 预期失败：Command Line Tools 里没有它</pre></li>
+      <li><span lang="zh-CN">写出程序。MSL kernel 放在三引号字符串里，<code>makeLibrary(source:options:)</code> 在运行时编译它；<code>dispatchThreads</code> 派发 2<sup>20</sup> 个线程，每个 threadgroup 的大小取 <code>threadExecutionWidth</code>：</span><span lang="en">Write the program. The MSL kernel sits in a triple-quoted string and <code>makeLibrary(source:options:)</code> compiles it at run time; <code>dispatchThreads</code> dispatches 2<sup>20</sup> threads, with a threadgroup size of <code>threadExecutionWidth</code>:</span><pre data-lang="swift" data-file="metal_add.swift">// metal_add.swift: Metal 向量加法，kernel 在运行时从源码编译（不需要 xcrun metal）
+import Metal
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+kernel void add(device const float* a [[buffer(0)]],
+                device const float* b [[buffer(1)]],
+                device float*       c [[buffer(2)]],
+                uint i [[thread_position_in_grid]]) {
+    c[i] = a[i] + b[i];
+}
+"""
+
+guard let dev = MTLCreateSystemDefaultDevice() else { print("no device"); exit(1) }
+let lib = try dev.makeLibrary(source: src, options: nil)  // 运行时编译 MSL
+let fn  = lib.makeFunction(name: "add")!
+let pso = try dev.makeComputePipelineState(function: fn)
+
+let n = 1 &lt;&lt; 20
+// 默认是共享存储：CPU 和 GPU 读写同一块内存
+let a = dev.makeBuffer(length: n * 4)!
+let b = dev.makeBuffer(length: n * 4)!
+let c = dev.makeBuffer(length: n * 4)!
+let pa = a.contents().bindMemory(to: Float.self, capacity: n)
+let pb = b.contents().bindMemory(to: Float.self, capacity: n)
+for i in 0..&lt;n { pa[i] = Float(i); pb[i] = 2 }
+
+let q = dev.makeCommandQueue()!
+let cb = q.makeCommandBuffer()!
+let enc = cb.makeComputeCommandEncoder()!
+enc.setComputePipelineState(pso)
+enc.setBuffer(a, offset: 0, index: 0)
+enc.setBuffer(b, offset: 0, index: 1)
+enc.setBuffer(c, offset: 0, index: 2)
+let w = pso.threadExecutionWidth               // SIMD-group 宽度，对应 CUDA 的 warp
+let maxT = pso.maxTotalThreadsPerThreadgroup   // 对应 CUDA 每 block 的线程上限
+enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+enc.endEncoding()
+cb.commit()
+cb.waitUntilCompleted()
+
+let pc = c.contents().bindMemory(to: Float.self, capacity: n)
+print("device=\(dev.name) simdWidth=\(w) maxThreadsPerThreadgroup=\(maxT) "
+    + "c[12345]=\(pc[12345]) gpuTime_ms=\((cb.gpuEndTime - cb.gpuStartTime) * 1000)")</pre></li>
+      <li><span lang="zh-CN">编译并运行三次：</span><span lang="en">Build it and run it three times:</span><pre data-lang="sh">$ swiftc -O metal_add.swift -o metal_add
+$ for i in 1 2 3; do ./metal_add; done
+device=Apple M5 simdWidth=32 maxThreadsPerThreadgroup=1024 c[12345]=12347.0 gpuTime_ms=0.2504166623111814
+device=Apple M5 simdWidth=32 maxThreadsPerThreadgroup=1024 c[12345]=12347.0 gpuTime_ms=0.34012499963864684
+device=Apple M5 simdWidth=32 maxThreadsPerThreadgroup=1024 c[12345]=12347.0 gpuTime_ms=0.11237498256377876
+# 2026-11-01 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2）</pre><span lang="zh-CN">读法：SIMD-group 宽 32，和 CUDA 的 warp 一样宽；每个 threadgroup 最多 1024 个线程，和 CUDA 每 block 的上限相同；<code>c[12345]</code> 是 12347（12345 + 2），结果对。</span><span lang="en">How to read it: the SIMD-group is 32 wide, the same width as a CUDA warp; a threadgroup holds at most 1024 threads, the same as CUDA’s per-block limit; <code>c[12345]</code> is 12347 (12345 + 2), so the result is right.</span></li>
+      <li><span lang="zh-CN">看 GPU 时间的波动。这三次在 0.112 ms 到 0.340 ms 之间，差了 3 倍。读两个数组、写一个数组共 12,582,912 字节（3 × 2<sup>20</sup> × 4），按 0.112 ms 算约 112 GB/s，按 0.340 ms 算只有约 37 GB/s。每次运行是一个新进程，只派发一次，GPU 可能还没升到高频（推断）。所以一次派发的时间不是测量结果：Phase 0 的 Lab B 会预热、重复、取中位数，并说明为什么解码步看的正是这个带宽数。</span><span lang="en">Look at the spread of the GPU time. These three runs range from 0.112 ms to 0.340 ms, a factor of 3. Reading two arrays and writing one moves 12,582,912 bytes (3 × 2<sup>20</sup> × 4): at 0.112 ms that is about 112 GB/s, at 0.340 ms only about 37 GB/s. Each run is a new process with a single dispatch, and the GPU may not have clocked up yet (inference). So the time of one dispatch is not a measurement: Lab B of Phase 0 warms up, repeats and takes the median, and explains why a decode step is governed by exactly this bandwidth number.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的三段版本输出、请求的回答、<code>/work/profiles</code> 里的 trace、一个解码步的内核清单（名字和耗时）、开关 CUDA 图两次的对比，以及 <code>one_batch</code> 的延迟输出和 <code>nsys</code> 报告；Lab B 的 <code>xcrun metal</code> 报错和三行 <code>metal_add</code> 输出。写进当天日志，并记下你的数字和本页哪里不同。还没有租用账户时，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, the three version outputs, the answer to the request, the trace in <code>/work/profiles</code>, the kernel list of one decode step (names and durations), the comparison with CUDA graphs on and off, and the <code>one_batch</code> latency output and <code>nsys</code> report; from Lab B, the <code>xcrun metal</code> error and the three <code>metal_add</code> output lines. Write them into that day’s log, and note where your numbers differ from this page. Until a rental account exists, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/lab-setup">
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">1. 为什么本专题的 Lab A 不放在免费的 Colab T4 上？</p><p lang="en">1. Why does Lab A of this topic not run on the free Colab T4?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">T4 的 16 GB 显存装不下 Qwen3-0.6B</span><span lang="en">The T4’s 16 GB of memory cannot hold Qwen3-0.6B</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">CUDA 13 已经不支持 T4 的 <code>sm_75</code></span><span lang="en">CUDA 13 no longer supports the T4’s <code>sm_75</code></span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">Triton 要求 compute capability 8.0 或更高，T4 只有 7.5，本专题的 Triton 内核在上面都跑不了</span><span lang="en">Triton requires compute capability 8.0 or higher and the T4 is only 7.5, so none of this topic’s Triton kernels run on it</span></label>
+      <div class="why" hidden><span lang="zh-CN">Qwen3-0.6B 的权重约 1.5 GB，16 GB 绰绰有余，显存不是问题。CUDA 13 去掉的是 Turing 之前的架构，<code>sm_75</code> 仍然支持（GPU 专题就以它为目标）。卡住的是 Triton v3.9.0 README 写的 8.0 下限，再加上 FP8 这类 Ada 才有的特性。</span><span lang="en">Qwen3-0.6B’s weights are about 1.5 GB, so 16 GB is plenty and memory is not the problem. CUDA 13 removed the architectures before Turing, and <code>sm_75</code> is still supported (the GPU topic targets it). What blocks the T4 is the 8.0 floor in the Triton v3.9.0 README, plus features such as FP8 that arrive with Ada.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">2. 在一台公网上的租用主机里，怎样启动 SGLang 服务器才对？</p><p lang="en">2. On a rented host on the internet, what is the right way to start the SGLang server?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">容器不带 <code>-p</code>，服务器用 <code>--host 127.0.0.1</code>，请求用 <code>docker exec</code> 从容器里发</span><span lang="en">No <code>-p</code> on the container, <code>--host 127.0.0.1</code> on the server, and requests sent from inside the container with <code>docker exec</code></span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">照抄文档的 <code>-p 30000:30000</code> 和 <code>--host 0.0.0.0</code>，再加一个 <code>--api-key</code></span><span lang="en">Copy <code>-p 30000:30000</code> and <code>--host 0.0.0.0</code> from the documentation and add an <code>--api-key</code></span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">用 <code>--host 0.0.0.0</code>，但换一个不常见的端口，扫描器就找不到了</span><span lang="en">Use <code>--host 0.0.0.0</code> but pick an unusual port, so scanners will not find it</span></label>
+      <div class="why" hidden><span lang="zh-CN">文档的示例是在可信网络里用的写法，在公网主机上它把服务和 <code>/start_profile</code> 这类管理接口开给所有人；<code>--api-key</code> 只是第二道门。换端口挡不住扫描，扫描器会扫所有端口。不暴露端口才是第一道门，而本页的实验根本不需要从外面连。</span><span lang="en">The documentation examples are written for a trusted network; on a public host they open the server and management endpoints such as <code>/start_profile</code> to everyone, and <code>--api-key</code> is only the second door. An unusual port does not stop scanners, which sweep every port. Not exposing the port is the first door, and the labs of this page never need an outside connection at all.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 下面哪一步必须换到 H100 这一层？</p><p lang="en">3. Which of these steps has to move to the H100 tier?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">用 FlashInfer 的解码注意力给 Qwen3-0.6B 服务</span><span lang="en">Serving Qwen3-0.6B with FlashInfer decode attention</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">跑 DeepGEMM 的 FP8 分组 GEMM</span><span lang="en">Running DeepGEMM’s FP8 grouped GEMM</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">用 <code>nsys --cuda-graph-trace=node</code> 剖析一个解码步</span><span lang="en">Profiling a decode step with <code>nsys --cuda-graph-trace=node</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">DeepGEMM 的 README 要求 SM90 或 SM100，L4 是 SM89。FlashInfer 支持 L4，安装文档把 L4 列在它支持的卡里；<code>nsys</code> 在 L4 上就能用，完整的 SGLang 镜像里就带着它。所以那两步留在便宜的 L4 上。</span><span lang="en">DeepGEMM’s README requires SM90 or SM100, and the L4 is SM89. FlashInfer supports the L4, which the install documentation lists among its cards; <code>nsys</code> works on the L4 and ships in the full SGLang image. So those two steps stay on the cheap L4.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">4. <code>python -m sglang.benchmark.one_batch</code>（也就是 <code>bench_one_batch</code>）测的是什么？</p><p lang="en">4. What does <code>python -m sglang.benchmark.one_batch</code> (that is, <code>bench_one_batch</code>) measure?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">一个正在运行的服务器处理一个 HTTP 批次的端到端延迟</span><span lang="en">The end-to-end latency of one HTTP batch on a running server</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">很多并发客户端下的稳态吞吐，包括首 token 延迟</span><span lang="en">Steady-state throughput under many concurrent clients, including time to first token</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">直接建一个 <code>ModelRunner</code>，对一个静态批次跑预填充和解码，绕过调度器</span><span lang="en">It builds a <code>ModelRunner</code> directly and runs prefill and decode on one static batch, bypassing the scheduler</span></label>
+      <div class="why" hidden><span lang="zh-CN">经过 HTTP 和调度器的单批次测量是 <code>bench_one_batch_server</code>，并发下的稳态指标是 <code>bench_serving</code>。<code>bench_one_batch</code> 不起服务器，预填充和解码分开跑，数字不像真实服务，但最适合剖析单个内核，所以 Lab A 用它看解码步。</span><span lang="en">The single-batch measurement through HTTP and the scheduler is <code>bench_one_batch_server</code>, and steady-state metrics under concurrency come from <code>bench_serving</code>. <code>bench_one_batch</code> starts no server and runs prefill and decode separately; its numbers are unlike real serving, but it suits profiling individual kernels best, which is why Lab A uses it for the decode step.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docs/docs/get-started/install.mdx">SGLang v0.5.22 — Install</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docs/docs/get-started/quickstart.mdx">Quickstart</a> <span class="lvl" lang="zh-CN">官方：CUDA 13、Python 3.11 以上、镜像、<code>HF_TOKEN</code>、第一个请求（2026-11-01 读取）</span><span class="lvl" lang="en">Official: CUDA 13, Python 3.11 or higher, the images, <code>HF_TOKEN</code>, the first request (read 2026-11-01)</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docs/docs/developer_guide/benchmark_and_profiling.mdx">SGLang v0.5.22 — Benchmark and Profiling</a> <span class="lvl" lang="zh-CN">官方：四个基准工具、torch profiler、<code>/start_profile</code>、Nsight Systems；Lab A 的主参考</span><span class="lvl" lang="en">Official: the four benchmark tools, the torch profiler, <code>/start_profile</code>, Nsight Systems; the main reference of Lab A</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/benchmark/one_batch.py">one_batch.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/serving.py">fields/serving.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docker/Dockerfile">docker/Dockerfile</a> <span class="lvl" lang="zh-CN">源码：<code>one_batch</code> 的参数、默认监听地址、镜像里装了什么</span><span class="lvl" lang="en">Source: the <code>one_batch</code> flags, the default listening address, what the image installs</span></li>
+    <li><a href="https://hub.docker.com/r/lmsysorg/sglang/tags">Docker Hub — lmsysorg/sglang</a> <span class="lvl" lang="zh-CN">镜像标签列表；确认 <code>v0.5.23</code> 仍在</span><span class="lvl" lang="en">The image tag list; confirm <code>v0.5.23</code> is still there</span></li>
+    <li><a href="https://huggingface.co/Qwen/Qwen3-0.6B">Hugging Face — Qwen/Qwen3-0.6B</a> <span class="lvl" lang="zh-CN">模型页：参数量、层数、许可</span><span class="lvl" lang="en">The model page: parameter count, layers, license</span></li>
+    <li><a href="https://github.com/Dao-AILab/flash-attention/tree/v2.8.3.post2/hopper">FlashAttention-3 (hopper/)</a> · <a href="https://github.com/deepseek-ai/DeepGEMM">DeepGEMM</a> · <a href="https://github.com/deepseek-ai/DeepEP">DeepEP</a> · <a href="https://github.com/deepseek-ai/FlashMLA">FlashMLA</a> <span class="lvl" lang="zh-CN">四个至少要 Hopper 的库；硬件要求见各自 README（2026-11-01 读取）</span><span class="lvl" lang="en">The four libraries that need at least Hopper; hardware requirements in each README (read 2026-11-01)</span></li>
+    <li><a href="https://arxiv.org/abs/2407.08608">Shah et al. — FlashAttention-3 (arXiv:2407.08608)</a> · <a href="https://arxiv.org/abs/2312.07104">Zheng et al. — SGLang (arXiv:2312.07104)</a> <span class="lvl" lang="zh-CN">论文：为什么 FA3 绑在 Hopper 上；SGLang 前端语言和 RadixAttention 的原始设计</span><span class="lvl" lang="en">Papers: why FA3 is tied to Hopper; the original design of SGLang’s frontend language and RadixAttention</span></li>
+    <li><a href="https://ui.perfetto.dev/">Perfetto UI</a> · <a href="https://pytorch.org/tutorials/recipes/recipes/profiler_recipe.html">PyTorch — Profiler recipe</a> · <a href="https://docs.nvidia.com/nsight-systems/UserGuide/index.html">Nsight Systems User Guide</a> <span class="lvl" lang="zh-CN">打开和读 trace 的工具</span><span class="lvl" lang="en">The tools for opening and reading traces</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal/mtldevice/makelibrary(source:options:)">Apple — makeLibrary(source:options:)</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docs/docs/hardware-platforms/apple_metal.mdx">SGLang — Apple Silicon with Metal</a> <span class="lvl" lang="zh-CN">运行时编译；SGLang 自己的 Mac 路径，以及它为什么要完整 Xcode</span><span class="lvl" lang="en">Runtime compilation; SGLang’s own Mac path, and why it needs the full Xcode</span></li>
+    <li><a href="https://www.runpod.io/pricing">RunPod — pricing</a> <span class="lvl" lang="zh-CN">开机前查当天价格</span><span class="lvl" lang="en">Check the price of the day before you start a machine</span></li>
+    <li><a href="../../gpu-cuda/lab-setup/index.html">GPU Programming with CUDA — 实验环境 · Lab environment</a> <span class="lvl" lang="zh-CN">本站：账户、SSH 密钥、容器、计数器权限和账单规则</span><span class="lvl" lang="en">This site: accounts, SSH keys, the container, counter permissions and the bill rules</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 1 章 Introduction 对应概念 1；第 4 章 Compute architecture and scheduling 对应概念 4 和 Lab B；第 6 章 Performance considerations 对应概念 2 和 Lab A</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 1, Introduction, for concept 1; chapter 4, Compute architecture and scheduling, for concept 4 and Lab B; chapter 6, Performance considerations, for concept 2 and Lab A</span></li>
+    <li lang="zh-CN">Chip Huyen, 《AI Engineering: Building Applications with Foundation Models》, O’Reilly Media, 2024, ISBN 9781098166304. <span class="lvl">第 9 章 Inference Optimization 的 Inference Overview、Inference Performance Metrics 和 AI Accelerators 三节对应概念 2 和 Lab A。这本书讲推理服务的整体，不讲本专题的具体内核</span></li>
+    <li lang="en">Chip Huyen, <em>AI Engineering: Building Applications with Foundation Models</em>, O’Reilly Media, 2024, ISBN 9781098166304. <span class="lvl">The sections Inference Overview, Inference Performance Metrics and AI Accelerators of chapter 9, Inference Optimization, for concept 2 and Lab A. The book covers inference serving as a whole, not the specific kernels of this topic</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../index.html"><span lang="zh-CN">← 推理引擎与 GPU 内核（SGLang）· LLM Inference Kernels (SGLang)</span><span lang="en">← LLM Inference Kernels (SGLang)</span></a>
+    <a href="../phase-0-the-stack/index.html"><span lang="zh-CN">Phase 0 · 自顶向下的栈 →</span><span lang="en">Phase 0 · The Stack, Top to Bottom →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
