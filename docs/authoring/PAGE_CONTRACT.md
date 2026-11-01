@@ -52,7 +52,7 @@ The five Chinese headings 目标, 核心概念, 动画图解, 资料, 参考书�
 1. `p.meta` (Phase N / total · duration), `h1` with a `span.en` subtitle pair, `p.lede` pair.
 2. 目标 / Goals: `div.goals` with an intro span pair and a `ul` of paired `li`.
 3. 前置 / Prerequisites: `ul` of paired `li`.
-4. 核心概念 / Core concepts: `h3` pairs numbered `1.` `2.` … ; paragraphs, lists, `div.note` pairs; each concept ends with a 延伸阅读 / Further reading pointer to a chapter of a book in the bibliography.
+4. 核心概念 / Core concepts: `h3` pairs numbered `1.` `2.` … ; paragraphs, lists, `div.note` pairs; each concept ends with a 延伸阅读 / Further reading pointer to a chapter of a book in the bibliography. When no book in the bibliography covers a concept, the pointer says so plainly and names the documentation page the concept rests on instead (so far only the cloud safety-and-budget concept of the GPU lab-setup page).
 5. 对照表 / Comparison: `div.table-wrap > table.cmp`, header cells with `span` pairs; the two compared sides get coloured `th` classes (see Colours).
 6. 动画图解 / Animated diagrams: two diagrams, `h3` pairs titled (a) and (b).
 7. 动手实验 / Hands-on labs: `div.lab` with `h3` pairs Lab A and Lab B, `ol` steps, `pre` blocks, and a closing `div.note` pair naming the deliverables.
@@ -95,7 +95,7 @@ A lab-setup page whose labs run on the host rather than in a VM uses 为什么�
 
 ## Code blocks
 
-`<pre data-lang="sh" data-file="run-sim.sh">…</pre>`. `data-lang` in sh, py, cpp, c, yaml, xml, cmake; `data-file` optional. HTML-escape `<`, `>` and `&`. Comments inside code may be Chinese. For `sh` blocks the copy button strips leading `$ ` prompts, so a prompt is allowed but not required.
+`<pre data-lang="sh" data-file="run-sim.sh">…</pre>`. `data-lang` in sh, py, cpp, c, yaml, xml, cmake, swift, metal (the code header shows the value as written); `data-file` optional. HTML-escape `<`, `>` and `&`. Comments inside code may be Chinese. For `sh` blocks the copy button strips leading `$ ` prompts, so a prompt is allowed but not required.
 
 ## Quiz
 

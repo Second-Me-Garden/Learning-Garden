@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>实验环境 · Lab environment · GPU Programming with CUDA</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">GPU Programming with CUDA</a>
+    <span class="crumb current" aria-current="page" lang="zh-CN">实验环境</span><span class="crumb current" aria-current="page" lang="en">Lab environment</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">环境准备 · 做任何实验之前</p><p class="meta" lang="en">Environment setup · before any lab</p>
+  <h1><span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span> <span class="en" lang="zh-CN">Lab environment: Colab, a rented GPU, and this Mac</span><span class="en" lang="en">Colab, a rented GPU, and this Mac</span></h1>
+  <p class="lede" lang="zh-CN">这台 Mac 没有 NVIDIA GPU，macOS 上也早就没有 CUDA 了，所以这个专题的实验分在三层：Google Colab 免费的 T4 跑 Phase 0–3 的 CUDA 实验；一台用 SSH 登录的租用 GPU 机器跑 Phase 4–7，因为剖析器（profiler）要一个真正的 shell；这台 Mac 跑每一课的 Metal 孪生实验。本页把三层逐个搭好。<strong>哪些跑过、哪些没跑过，页面上都标明了：</strong>Mac 上的 Metal 程序和工具链检查是 2026-10-31 在这台 Apple M5 上实际运行的，输出原样贴出；云端的所有步骤都<strong>未运行</strong>，是 2026-10-31 根据 NVIDIA、Google 和服务商的文档整理的，因为租 GPU 要花钱，开账户之前本页不在云端执行任何东西。</p>
+  <p class="lede" lang="en">This Mac has no NVIDIA GPU, and CUDA left macOS long ago, so the labs in this topic run on three tiers: Google Colab’s free T4 for the CUDA labs of Phases 0–3; a rented GPU machine you log in to over SSH for Phases 4–7, because the profilers need a real shell; and this Mac for the Metal twin of every lesson. This page sets up the three tiers one by one. <strong>The page marks what was run and what was not:</strong> the Metal program and the toolchain checks on the Mac were actually run on this Apple M5 on 2026-10-31, and their output is pasted as it came; every cloud step is <strong>not run</strong>, assembled on 2026-10-31 from the NVIDIA, Google and provider documentation, because renting a GPU costs money and this page runs nothing in the cloud before an account is opened.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading and doing the lab, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出为什么分三层，以及每个 Phase 的 Lab A 和 Lab B 各在哪一层跑。</li>
+      <li lang="en">Say why there are three tiers, and on which tier the Lab A and the Lab B of each phase run.</li>
+      <li lang="zh-CN">在 Colab 里开一个 T4 运行时，用 <code>!nvidia-smi</code> 和 <code>!nvcc --version</code> 看清 GPU 和工具链，再用 <code>-arch=sm_75</code> 编译并运行一个向量加法。</li>
+      <li lang="en">Open a T4 runtime in Colab, check the GPU and the toolchain with <code>!nvidia-smi</code> and <code>!nvcc --version</code>, then build and run a vector add with <code>-arch=sm_75</code>.</li>
+      <li lang="zh-CN">安全地用一台租来的 GPU 机器：只用密钥登录、在 <code>nvidia/cuda</code> 容器里确认 <code>ncu</code> 和 <code>nsys</code> 能用、用完停机，并估出整个专题的费用。</li>
+      <li lang="en">Use a rented GPU machine safely: log in with keys only, confirm <code>ncu</code> and <code>nsys</code> work inside the <code>nvidia/cuda</code> container, stop the machine when done, and estimate the cost of the whole topic.</li>
+      <li lang="zh-CN">只用 Command Line Tools 在这台 Mac 上编译并运行 Metal 向量加法，读出 SIMD-group 宽度、每个 threadgroup 的线程上限和 GPU 时间。</li>
+      <li lang="en">Build and run the Metal vector add on this Mac with the Command Line Tools alone, and read the SIMD-group width, the per-threadgroup thread limit and the GPU time.</li>
+    </ul>
+  </div>
+
+  <h2 id="why" lang="zh-CN">为什么这样分层</h2><h2 id="why-en" lang="en">Why these tiers</h2>
+  <ul>
+    <li lang="zh-CN"><strong>这台 Mac 跑不了 CUDA。</strong>CUDA 只能跑在 NVIDIA GPU 上，而 Apple 芯片的 Mac 里是 Apple 自己的 GPU。NVIDIA 在 CUDA 10.2 的发布说明里写明，10.2 是最后一个支持 macOS 的版本。所以每个 CUDA 实验都要去云端找一块 NVIDIA GPU。</li>
+    <li lang="en"><strong>This Mac cannot run CUDA.</strong> CUDA runs only on NVIDIA GPUs, and an Apple-silicon Mac has Apple’s own GPU. NVIDIA’s CUDA 10.2 release notes state that 10.2 is the last release to support macOS. So every CUDA lab has to find an NVIDIA GPU in the cloud.</li>
+    <li lang="zh-CN"><strong>前四课用免费层就够。</strong>Phase 0–3 只需要 <code>nvcc</code>、计时和结果检查，Colab 的 notebook 里用 <code>!</code> 就能跑命令，T4（<code>sm_75</code>）支持本专题用到的所有基础特性。不花钱，代价是排队和断线。</li>
+    <li lang="en"><strong>The free tier is enough for the first four lessons.</strong> Phases 0–3 need only <code>nvcc</code>, timing and result checks; a Colab notebook runs commands with <code>!</code>, and the T4 (<code>sm_75</code>) supports every basic feature this topic uses. It costs nothing; the price is queues and dropped sessions.</li>
+    <li lang="zh-CN"><strong>剖析要一台自己说了算的机器。</strong>从 Phase 4 起要用 Nsight Compute（<code>ncu</code>）和 Nsight Systems（<code>nsys</code>）。<code>ncu</code> 要读 GPU 的性能计数器，NVIDIA 的说明是：要么用管理员权限运行，要么在容器里时由主机放开权限或用 <code>--cap-add=SYS_ADMIN</code> 启动容器。在一台你有 root 的租用机器上，这些都由你决定。</li>
+    <li lang="en"><strong>Profiling needs a machine you control.</strong> From Phase 4 on you use Nsight Compute (<code>ncu</code>) and Nsight Systems (<code>nsys</code>). <code>ncu</code> reads the GPU’s performance counters, and NVIDIA’s instructions say it must run with administrative privileges, or, inside a container, the host must allow it or the container must start with <code>--cap-add=SYS_ADMIN</code>. On a rented machine where you are root, all of this is your call.</li>
+    <li lang="zh-CN"><strong>每个想法都在本机再跑一遍。</strong>Metal 的 grid、threadgroup、SIMD-group 和 CUDA 的 grid、block、warp 一一对应。Mac 上的 Metal 孪生实验不花钱、不排队，而且是真跑出来的数字，用它检验你对 CUDA 那一侧的理解。</li>
+    <li lang="en"><strong>Every idea runs a second time here.</strong> Metal’s grid, threadgroup and SIMD-group map one to one onto CUDA’s grid, block and warp. The Metal twin on the Mac costs nothing, never queues, and gives numbers that were really measured; use it to test what you understood on the CUDA side.</li>
+  </ul>
+  <div class="note" lang="zh-CN">租用 GPU 是花钱的决定，不是实验步骤。本页的云端部分只描述路径；开账户、选服务商、付费之前先定预算（概念 5 给出一个估算），并且只在决定之后才执行那些命令。</div><div class="note" lang="en">Renting a GPU is a decision to spend money, not a lab step. The cloud part of this page only describes the path; set a budget before you open an account, choose a provider or pay (concept 5 gives one estimate), and run those commands only after that decision.</div>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 三层环境，各管哪几课</h3><h3 lang="en">1. Three tiers and the lessons each one serves</h3>
+  <p lang="zh-CN">每一课有两个实验。Lab A 是 CUDA，在云端跑；Lab B 是同一个想法的 Metal 版本，在这台 Mac 上跑。云端分两层，分界线在 Phase 4，也就是开始用剖析器的地方：</p><p lang="en">Every lesson has two labs. Lab A is CUDA and runs in the cloud; Lab B is the Metal version of the same idea and runs on this Mac. The cloud has two tiers, and the line between them is Phase 4, where the profilers start:</p>
+  <ul>
+    <li lang="zh-CN"><strong>第一层 · Colab 免费 T4</strong>：Phase 0–3 的 Lab A。浏览器里的 notebook，工具链预装。</li>
+    <li lang="en"><strong>Tier 1 · Colab free T4</strong>: Lab A of Phases 0–3. A notebook in the browser with the toolchain preinstalled.</li>
+    <li lang="zh-CN"><strong>第二层 · 租用的 GPU 机器</strong>：Phase 4–7 的 Lab A。SSH 登录，在 NVIDIA 的 CUDA 容器里跑 <code>ncu</code>、<code>nsys</code>、<code>compute-sanitizer</code>。</li>
+    <li lang="en"><strong>Tier 2 · a rented GPU machine</strong>: Lab A of Phases 4–7. Log in over SSH and run <code>ncu</code>, <code>nsys</code> and <code>compute-sanitizer</code> in NVIDIA’s CUDA container.</li>
+    <li lang="zh-CN"><strong>第三层 · 这台 Mac</strong>：每一课的 Lab B。Swift 程序加运行时编译的 Metal Shading Language（MSL）kernel，不需要 Xcode。</li>
+    <li lang="en"><strong>Tier 3 · this Mac</strong>: Lab B of every lesson. A Swift program plus a Metal Shading Language (MSL) kernel compiled at run time, with no Xcode needed.</li>
+  </ul>
+  <p lang="zh-CN">所有 CUDA 实验都以 <code>sm_75</code>（Turing，T4 的架构）为目标，这样免费的 T4 和租来的更新的卡都能跑。用到更新硬件才有的特性时，那一课会单独说明。CUDA 13 已经去掉了 Turing 之前的架构（Maxwell、Pascal、Volta），所以 <code>sm_75</code> 也是 13.x 还支持的最老目标。</p><p lang="en">Every CUDA lab targets <code>sm_75</code> (Turing, the T4’s architecture), so both the free T4 and a newer rented card can run it. When a lesson uses a feature that needs newer hardware, it says so. CUDA 13 removed the architectures before Turing (Maxwell, Pascal, Volta), so <code>sm_75</code> is also the oldest target 13.x still supports.</p>
+  <p lang="zh-CN">延伸阅读：Hwu、Kirk、El Hajj《Programming Massively Parallel Processors》第 4 版第 1 章 Introduction（为什么要异构计算，CPU 和 GPU 各擅长什么）。</p><p lang="en">Further reading: chapter 1, Introduction, of Hwu, Kirk and El Hajj, <em>Programming Massively Parallel Processors</em>, 4th ed. (why heterogeneous computing, and what the CPU and the GPU are each good at).</p>
+
+  <h3 lang="zh-CN">2. 第一层：Colab 免费 T4</h3><h3 lang="en">2. Tier 1: the free Colab T4</h3>
+  <p lang="zh-CN">打开 <a href="https://colab.research.google.com/">colab.research.google.com</a>，新建 notebook，在菜单 Runtime → Change runtime type 里选 T4 GPU（菜单名以 Colab 当前界面为准）。然后在单元格里先看清楚自己拿到了什么：</p><p lang="en">Open <a href="https://colab.research.google.com/">colab.research.google.com</a>, create a notebook, and choose T4 GPU under Runtime → Change runtime type (the menu names are whatever the current Colab interface shows). Then check in a cell what you were given:</p>
+<pre data-lang="sh" data-file="Colab cell"># 未运行 · not run; assembled from the Colab and CUDA documentation on 2026-10-31
+!nvidia-smi       # GPU 型号（应为 Tesla T4）、驱动版本、显存 16 GB 左右
+!nvcc --version   # Colab 预装的 CUDA 版本；任何 13.x 都可以，本专题用不到更新的东西</pre>
+  <p lang="zh-CN">Colab 的单元格默认是 Python。<code>!</code> 开头的一行交给 shell 执行；<code>%%writefile</code> 放在单元格第一行，把整个单元格写成一个文件。CUDA 实验就是这两步：一个单元格写源文件，下一个单元格编译并运行。Lab A 用的就是这个流程。</p><p lang="en">Colab cells are Python by default. A line starting with <code>!</code> goes to the shell; <code>%%writefile</code> on the first line of a cell writes the whole cell to a file. A CUDA lab is just those two steps: one cell writes the source file, the next one builds and runs it. Lab A uses exactly this flow.</p>
+  <p lang="zh-CN">免费层的限制，来自 Colab 的 FAQ（2026-10-31 读取）：资源不保证，用量上限会浮动；免费版对 GPU 这类昂贵资源限制很严；虚拟机空闲一段时间会被删除，并且有最长寿命。实际意义是：<code>/content</code> 里的文件会随虚拟机一起消失。每次实验结束前把源文件存进 Google Drive：</p><p lang="en">The limits of the free tier, from the Colab FAQ (read 2026-10-31): resources are not guaranteed and usage limits fluctuate; the free version heavily restricts expensive resources such as GPUs; virtual machines are deleted when idle for a while and have a maximum lifetime. In practice the files in <code>/content</code> vanish with the VM. Save your source files to Google Drive before every session ends:</p>
+<pre data-lang="py" data-file="Colab cell"># 未运行 · not run; assembled from the Colab documentation on 2026-10-31
+from google.colab import drive
+drive.mount('/content/drive')
+!mkdir -p /content/drive/MyDrive/gpu-lab &amp;&amp; cp add.cu /content/drive/MyDrive/gpu-lab/</pre>
+  <div class="note" lang="zh-CN">notebook 会存进 Drive，也常被分享出去，单元格和输出里的东西都可能被别人看到。<strong>不要把任何凭据写进 notebook</strong>：API token、云账户密钥、SSH 私钥都不行。本专题的 Colab 实验也不需要任何凭据。</div><div class="note" lang="en">Notebooks are saved to Drive and often shared, so anything in a cell or its output may be seen by others. <strong>Never put a credential in a notebook</strong>: no API tokens, cloud account keys or SSH private keys. The Colab labs of this topic need no credentials at all.</div>
+  <p lang="zh-CN">延伸阅读：Sanders、Kandrot《CUDA by Example》第 2 章 Getting Started（开发环境）和第 3 章 Introduction to CUDA C（第一个程序、查询设备属性）；PMPP 第 2 章 Heterogeneous data parallel computing（向量加法、<code>cudaMalloc</code>、<code>cudaMemcpy</code>、kernel 启动）。</p><p lang="en">Further reading: chapter 2, Getting Started (the development environment), and chapter 3, Introduction to CUDA C (a first program, querying device properties), of Sanders and Kandrot, <em>CUDA by Example</em>; chapter 2 of PMPP, Heterogeneous data parallel computing (vector addition, <code>cudaMalloc</code>, <code>cudaMemcpy</code>, the kernel launch).</p>
+
+  <h3 lang="zh-CN">3. 第二层：租用的 GPU 机器</h3><h3 lang="en">3. Tier 2: a rented GPU machine</h3>
+  <p lang="zh-CN">本专题固定用 <strong>CUDA 13.4 Update 2</strong>（发布说明 2026-10-31 读取），租用机器上的容器标签是 <code>nvidia/cuda:13.4.3-devel-ubuntu24.04</code>。下面的版本事实都是 2026-10-31 从 NVIDIA 的发布说明和 Docker Hub 读到的：</p><p lang="en">This topic pins <strong>CUDA 13.4 Update 2</strong> (release notes read 2026-10-31), and the container tag on the rented machine is <code>nvidia/cuda:13.4.3-devel-ubuntu24.04</code>. The version facts below were read from NVIDIA’s release notes and Docker Hub on 2026-10-31:</p>
+  <ul>
+    <li lang="zh-CN">13.4 Update 2 的组件：<code>nvcc</code> 13.4.92，Nsight Compute 2026.3.1.2，Nsight Systems 2026.3.2.476。</li>
+    <li lang="en">Components of 13.4 Update 2: <code>nvcc</code> 13.4.92, Nsight Compute 2026.3.1.2, Nsight Systems 2026.3.2.476.</li>
+    <li lang="zh-CN">驱动分支：CUDA 13.4 对应 R615，13.3 对应 R610，13.2 对应 R595。次版本兼容（minor version compatibility）：任何 13.x 的程序在 580 或更新的驱动上都能跑，只有 13.4 的新特性要 R615 或更新。所以租来的机器上 <code>nvidia-smi</code> 显示的驱动只要不低于 580 就行。从 Linux 上的 13.4 起，驱动不再和 Toolkit 打包，要单独安装。</li>
+    <li lang="en">Driver branches: CUDA 13.4 goes with R615, 13.3 with R610, 13.2 with R595. Under minor version compatibility any 13.x application runs on a driver of 580 or newer; only the new 13.4 features need R615 or later. So the driver that <code>nvidia-smi</code> shows on the rented machine only needs to be 580 or newer. From 13.4 on Linux, the driver is no longer bundled with the toolkit and is installed separately.</li>
+    <li lang="zh-CN">CUDA 13 去掉了 Turing 之前的架构，<code>sm_75</code> 是还支持的最老目标。本专题的实验用不到比 13.x 更新的东西，所以 Colab 上预装的任何 13.x 都可以；单元格里的 <code>!nvcc --version</code> 会打印它的版本。</li>
+    <li lang="en">CUDA 13 removed the architectures before Turing, so <code>sm_75</code> is the oldest supported target. The labs need nothing newer than 13.x, so any 13.x toolkit preinstalled on Colab is fine; the <code>!nvcc --version</code> cell prints which one it is.</li>
+    <li lang="zh-CN">Docker Hub 上的 <code>13.4.3-devel-ubuntu24.04</code> 推送于 2026-10-17，镜像里设的是 <code>CUDA_VERSION=13.4.3</code>，比上面读到的发布说明（Update 2）多一个更新；以容器里 <code>nvcc --version</code> 的输出为准。它的构建层装了 <code>cuda-command-line-tools-13-4</code> 和 <code>cuda-nsight-compute-13-4</code>，所以 <code>ncu</code> 在镜像里；<code>nsys</code> 只在镜像里找得到时才被链接进 PATH，要自己确认。</li>
+    <li lang="en">On Docker Hub, <code>13.4.3-devel-ubuntu24.04</code> was pushed on 2026-10-17, and the image sets <code>CUDA_VERSION=13.4.3</code>, one update past the release notes read above (Update 2); what <code>nvcc --version</code> prints inside the container is authoritative. Its build layers install <code>cuda-command-line-tools-13-4</code> and <code>cuda-nsight-compute-13-4</code>, so <code>ncu</code> is in the image; <code>nsys</code> is linked onto the PATH only if a copy is found in the image, so check it yourself.</li>
+  </ul>
+  <p lang="zh-CN">登录用密钥，不用密码。在 Mac 上生成一把只给这台 GPU 机器用的密钥，只把公钥交给服务商：</p><p lang="en">Log in with a key, not a password. On the Mac, generate a key used only for the GPU machine, and give the provider only the public half:</p>
+<pre data-lang="sh" data-file="on the Mac"># 未运行 · not run; assembled from the OpenSSH and provider documentation on 2026-10-31
+ssh-keygen -t ed25519 -f ~/.ssh/gpu_lab -C gpu-lab   # 设一个口令（passphrase）
+cat ~/.ssh/gpu_lab.pub                              # 只把 .pub 粘进服务商控制台
+ssh -i ~/.ssh/gpu_lab ubuntu@&lt;IP&gt;                   # 用户名因服务商而异，常见 ubuntu 或 root
+rsync -av -e "ssh -i ~/.ssh/gpu_lab" ~/gpu-lab/ ubuntu@&lt;IP&gt;:gpu-lab/   # 把实验文件传上去</pre>
+  <p lang="zh-CN">登录后先看 GPU 和驱动，再进 NVIDIA 的 CUDA 容器。<code>--gpus all</code> 要求主机装了 NVIDIA Container Toolkit；很多 GPU 机器的镜像自带，没有就按它的安装指南装。<code>--cap-add=SYS_ADMIN</code> 是给 <code>ncu</code> 读性能计数器用的，来自 NVIDIA 的 ERR_NVGPUCTRPERM 说明页：</p><p lang="en">After logging in, check the GPU and the driver first, then enter NVIDIA’s CUDA container. <code>--gpus all</code> needs the NVIDIA Container Toolkit on the host; many GPU machine images include it, and if not, install it from its guide. <code>--cap-add=SYS_ADMIN</code> lets <code>ncu</code> read the performance counters, as NVIDIA’s ERR_NVGPUCTRPERM page describes:</p>
+<pre data-lang="sh" data-file="on the rented machine"># 未运行 · not run; assembled from the CUDA, Container Toolkit and Nsight documentation on 2026-10-31
+nvidia-smi                       # GPU 型号、驱动版本（要 ≥ 580）、右上角的 CUDA Version
+docker run --rm -it --gpus all --cap-add=SYS_ADMIN \
+  -v "$HOME/gpu-lab":/work -w /work \
+  nvidia/cuda:13.4.3-devel-ubuntu24.04 bash
+# 以下在容器里
+nvcc --version                   # 应为 release 13.4
+ncu --version                    # Nsight Compute
+nsys --version                   # Nsight Systems；如果找不到，按 Nsight Systems 文档安装（check）
+nvcc -arch=sm_75 add.cu -o add &amp;&amp; ncu ./add   # 打印出剖析报告就说明计数器可用</pre>
+  <p lang="zh-CN">两种机器要分清。<strong>整台虚拟机</strong>（比如 GCP 的 G2 实例）上你是 root，可以按上面跑 Docker、放开计数器。<strong>容器式租用</strong>（RunPod 的 pod 这类，你拿到的本身就是一个容器）通常不能再在里面跑 Docker，就直接选 <code>nvidia/cuda</code> 的 devel 镜像当 pod 的镜像；计数器权限由主机决定，你在里面改不了（推断，未在任何服务商上验证）。所以付费跑满几个小时之前，先用一个很小的 kernel 跑一次 <code>ncu</code>：如果报 <code>ERR_NVGPUCTRPERM</code>，换一台整机。</p><p lang="en">Tell the two kinds of machine apart. On a <strong>full virtual machine</strong> (a GCP G2 instance, for example) you are root and can run Docker and allow the counters as above. A <strong>container-style rental</strong> (a RunPod pod and the like, where what you get is itself a container) usually cannot run Docker inside; choose the <code>nvidia/cuda</code> devel image as the pod image instead. The counter permission is then decided by the host and you cannot change it from inside (inference, not verified on any provider). So before you pay for hours, run <code>ncu</code> once on a tiny kernel: if it reports <code>ERR_NVGPUCTRPERM</code>, switch to a full machine.</p>
+  <p lang="zh-CN"><strong>用完就停机。</strong>关掉 SSH 窗口不会停机，在容器里 <code>exit</code> 也只是退出容器，机器还在计费。在服务商控制台或命令行里停止（stop）或销毁（terminate），再到账单页确认它确实停了。有的服务商只有销毁才停止计费，停机后磁盘通常仍按存储收费。GCP 的例子：</p><p lang="en"><strong>Stop the machine when you are done.</strong> Closing the SSH window does not stop it, and <code>exit</code> in the container only leaves the container; the machine is still billing. Stop or terminate it from the provider console or command line, then confirm on the billing page that it really stopped. On some providers only terminating ends the billing, and a stopped machine usually still pays for its disk. A GCP example:</p>
+<pre data-lang="sh" data-file="on the Mac"># 未运行 · not run; assembled from the Google Cloud documentation on 2026-10-31
+gcloud compute instances stop &lt;实例名&gt; --zone=&lt;区域&gt;</pre>
+  <p lang="zh-CN">延伸阅读：PMPP 第 6 章 Performance considerations（为什么要测、测什么，剖析器从这一章的问题出发）。</p><p lang="en">Further reading: chapter 6 of PMPP, Performance considerations (why and what to measure; the profilers start from the questions of this chapter).</p>
+
+  <h3 lang="zh-CN">4. 第三层：这台 Mac 上的 Metal</h3><h3 lang="en">4. Tier 3: Metal on this Mac</h3>
+  <p lang="zh-CN">实验机只装了 Command Line Tools，没有完整的 Xcode。Swift 编译器在，离线的 Metal 编译器不在（2026-10-31 实验机输出）：</p><p lang="en">The lab machine has only the Command Line Tools, not the full Xcode. The Swift compiler is there; the offline Metal compiler is not (lab Mac output, 2026-10-31):</p>
+<pre data-lang="sh">$ sw_vers -productVersion
+27.2
+$ xcode-select -p
+/Library/Developer/CommandLineTools
+$ swiftc --version
+swift-driver version: 1.168.6 Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)
+Target: arm64-apple-macosx27.2.0
+$ xcrun -sdk macosx metal --version
+xcrun: error: unable to find utility "metal", not a developer tool or in PATH
+$ echo $?
+72</pre>
+  <p lang="zh-CN">所以本专题每一页都用<strong>运行时编译</strong>：MSL 源码作为字符串放在 Swift 程序里，程序运行时调用 <code>MTLDevice.makeLibrary(source:options:)</code> 编译成库，再从库里取出 kernel 函数，建成计算管线状态（compute pipeline state）后派发。好处是不需要 Xcode，也不需要 <code>.metallib</code> 文件；代价是每次运行都要编译一次 kernel，所以计时只看 GPU 自己报的执行时间（<code>gpuStartTime</code> 到 <code>gpuEndTime</code>），不看整个进程的运行时间。</p><p lang="en">So every page of this topic uses <strong>runtime compilation</strong>: the MSL source sits as a string inside the Swift program, which calls <code>MTLDevice.makeLibrary(source:options:)</code> at run time to compile it into a library, takes the kernel function from the library, builds a compute pipeline state and dispatches it. The gain is no Xcode and no <code>.metallib</code> file; the cost is one kernel compilation per run, so timing looks only at the execution time the GPU reports itself (<code>gpuStartTime</code> to <code>gpuEndTime</code>), never at the whole process run time.</p>
+  <p lang="zh-CN">硬件这一侧（<code>system_profiler SPDisplaysDataType</code>，2026-10-31）：Apple M5，GPU 10 核，Metal Support 显示 Metal 4。Lab B 的程序会再读出两个以后每课都要用的数：SIMD-group 宽度（<code>threadExecutionWidth</code>，对应 CUDA 的 warp）和每个 threadgroup 的线程上限（<code>maxTotalThreadsPerThreadgroup</code>，对应 CUDA 的每 block 线程上限）。</p><p lang="en">On the hardware side (<code>system_profiler SPDisplaysDataType</code>, 2026-10-31): Apple M5, a 10-core GPU, and Metal Support shows Metal 4. The Lab B program reads two more numbers that every later lesson uses: the SIMD-group width (<code>threadExecutionWidth</code>, the counterpart of the CUDA warp) and the per-threadgroup thread limit (<code>maxTotalThreadsPerThreadgroup</code>, the counterpart of CUDA’s per-block thread limit).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 4 章 Compute architecture and scheduling（warp 和 SIMD 硬件，读完再看 Metal 的 SIMD-group 就是同一件事）。</p><p lang="en">Further reading: chapter 4 of PMPP, Compute architecture and scheduling (warps and SIMD hardware; after it, Metal’s SIMD-group reads as the same thing).</p>
+
+  <h3 lang="zh-CN">5. 安全规则与费用预算</h3><h3 lang="en">5. Safety rules and the cost budget</h3>
+  <p lang="zh-CN">租来的机器是一台直接连在公网上、你拥有 root 的 Linux 主机。扫描器几分钟内就会找上门，所以规则要在开机前就定好：</p><p lang="en">A rented machine is a Linux host on the internet on which you have root. Scanners find it within minutes, so settle the rules before it boots:</p>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">事项</span><span lang="en">Matter</span></th><th><span lang="zh-CN">这样做</span><span lang="en">Do this</span></th><th><span lang="zh-CN">不要这样做</span><span lang="en">Never this</span></th></tr>
+    <tr><td><span lang="zh-CN">登录</span><span lang="en">Logging in</span></td><td><span lang="zh-CN">ed25519 密钥加口令；在 <code>/etc/ssh/sshd_config</code> 里设 <code>PasswordAuthentication no</code></span><span lang="en">An ed25519 key with a passphrase; set <code>PasswordAuthentication no</code> in <code>/etc/ssh/sshd_config</code></span></td><td><span lang="zh-CN">密码登录、和别人共用一把密钥</span><span lang="en">Password logins, a key shared with someone else</span></td></tr>
+    <tr><td><span lang="zh-CN">端口</span><span lang="en">Ports</span></td><td><span lang="zh-CN">只开 22；Jupyter 这类网页工具走隧道：<code>ssh -i ~/.ssh/gpu_lab -L 8888:localhost:8888 ubuntu@&lt;IP&gt;</code></span><span lang="en">Open only 22; reach web tools such as Jupyter through a tunnel: <code>ssh -i ~/.ssh/gpu_lab -L 8888:localhost:8888 ubuntu@&lt;IP&gt;</code></span></td><td><span lang="zh-CN">把 Jupyter 直接开在公网地址上</span><span lang="en">Serving Jupyter on the public address</span></td></tr>
+    <tr><td><span lang="zh-CN">凭据</span><span lang="en">Credentials</span></td><td><span lang="zh-CN">SSH 私钥和云账户密钥只留在 Mac 上</span><span lang="en">SSH private keys and cloud account keys stay on the Mac</span></td><td><span lang="zh-CN">写进 notebook、单元格输出、Drive、git 仓库或租来的机器</span><span lang="en">Putting them in a notebook, a cell output, Drive, a git repository or the rented machine</span></td></tr>
+    <tr><td><span lang="zh-CN">软件</span><span lang="en">Software</span></td><td><span lang="zh-CN">只用 NVIDIA 官方的 <code>nvidia/cuda</code> 镜像和发行版自带的包</span><span lang="en">Only NVIDIA’s official <code>nvidia/cuda</code> images and the distribution’s own packages</span></td><td><span lang="zh-CN">以 root 跑来路不明的脚本或镜像</span><span lang="en">Running scripts or images of unknown origin as root</span></td></tr>
+    <tr><td><span lang="zh-CN">结束</span><span lang="en">Finishing</span></td><td><span lang="zh-CN">在控制台停止或销毁，再到账单页确认</span><span lang="en">Stop or terminate in the console, then confirm on the billing page</span></td><td><span lang="zh-CN">关掉终端就走</span><span lang="en">Closing the terminal and walking away</span></td></tr>
+    <tr><td><span lang="zh-CN">Mac 上的 Metal</span><span lang="en">Metal on the Mac</span></td><td><span lang="zh-CN">普通用户态程序，不要 sudo，SIP 一直开着；最坏是一个进程卡住，<kbd>Ctrl-c</kbd> 结束</span><span lang="en">An ordinary user-space program: no sudo, SIP stays on; the worst case is a hung process, ended with <kbd>Ctrl-c</kbd></span></td><td>—</td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">费用估算（未运行；小时数是推断，价格 2026-10-31 读取，<strong>开机前到服务商页面查当天的价格</strong>）。Phase 0–3 在 Colab 免费层，Lab B 在 Mac 上，都不花钱；要付费的只有 Phase 4–7 的 Lab A：</p><p lang="en">A cost estimate (not run; the hours are inference and the prices were read on 2026-10-31; <strong>check the provider page today before you start a machine</strong>). Phases 0–3 use the free Colab tier and every Lab B runs on the Mac, so they cost nothing; only Lab A of Phases 4–7 is paid:</p>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">项目</span><span lang="en">Item</span></th><th><span lang="zh-CN">估计小时数</span><span lang="en">Estimated hours</span></th></tr>
+    <tr><td><span lang="zh-CN">Phase 4 剖析与优化</span><span lang="en">Phase 4, profiling and optimization</span></td><td>6</td></tr>
+    <tr><td><span lang="zh-CN">Phase 5 流与图</span><span lang="en">Phase 5, streams and graphs</span></td><td>5</td></tr>
+    <tr><td><span lang="zh-CN">Phase 6 内存管理</span><span lang="en">Phase 6, memory management</span></td><td>5</td></tr>
+    <tr><td><span lang="zh-CN">Phase 7 作品项目</span><span lang="en">Phase 7, the capstone</span></td><td>8</td></tr>
+    <tr><td><span lang="zh-CN">开机、装环境、重来</span><span lang="en">Booting, setup and do-overs</span></td><td>2</td></tr>
+    <tr><td><span lang="zh-CN"><strong>合计</strong></span><span lang="en"><strong>Total</strong></span></td><td><strong>26</strong></td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">按 NVIDIA L4（Ada，<code>sm_89</code>，24 GB）算：RunPod 的定价页 2026-10-31 列出 L4 每小时 0.44 美元（Community Cloud）和 0.59 美元（Secure Cloud），26 小时约 11 到 15 美元。GCP 的 G2 L4 实例按 2026-08-04 的记录约每小时 0.71 美元，26 小时约 19 美元（这个价格本页没有重新核对）。再加上停机期间的磁盘费。把这个数当上限的量级，不是报价。</p><p lang="en">At NVIDIA L4 rates (Ada, <code>sm_89</code>, 24 GB): RunPod’s pricing page on 2026-10-31 listed the L4 at 0.44 US dollars per hour (Community Cloud) and 0.59 (Secure Cloud), so 26 hours come to about 11 to 15 dollars. A GCP G2 L4 instance was about 0.71 dollars per hour in a record dated 2026-08-04, about 19 dollars for 26 hours (this page did not recheck that price). Add disk charges while the machine is stopped. Treat the figure as an order of magnitude for the ceiling, not a quote.</p>
+  <p lang="zh-CN">延伸阅读：这一节没有对应的书章，规则来自文档：NVIDIA 的 ERR_NVGPUCTRPERM 说明页（计数器权限）、所选服务商的安全和计费文档（见资料）。</p><p lang="en">Further reading: no book chapter covers this section; the rules come from documentation: NVIDIA’s ERR_NVGPUCTRPERM page (counter permissions) and the security and billing documentation of the provider you choose (see Resources).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">项目</span><span lang="en">Item</span></th><th><span lang="zh-CN">第一层 · Colab</span><span lang="en">Tier 1 · Colab</span></th><th><span lang="zh-CN">第二层 · 租用机器</span><span lang="en">Tier 2 · rented machine</span></th><th><span lang="zh-CN">第三层 · 这台 Mac</span><span lang="en">Tier 3 · this Mac</span></th></tr>
+    <tr><td><span lang="zh-CN">GPU</span><span lang="en">GPU</span></td><td><span lang="zh-CN">NVIDIA T4，Turing，<code>sm_75</code>，16 GB</span><span lang="en">NVIDIA T4, Turing, <code>sm_75</code>, 16 GB</span></td><td><span lang="zh-CN">例如 L4，Ada，<code>sm_89</code>，24 GB</span><span lang="en">For example an L4, Ada, <code>sm_89</code>, 24 GB</span></td><td><span lang="zh-CN">Apple M5 GPU，10 核，Metal 4</span><span lang="en">Apple M5 GPU, 10 cores, Metal 4</span></td></tr>
+    <tr><td><span lang="zh-CN">怎么连</span><span lang="en">How you reach it</span></td><td><span lang="zh-CN">浏览器里的 notebook</span><span lang="en">A notebook in the browser</span></td><td><span lang="zh-CN">SSH 密钥</span><span lang="en">An SSH key</span></td><td><span lang="zh-CN">就在面前</span><span lang="en">It is in front of you</span></td></tr>
+    <tr><td><span lang="zh-CN">工具链</span><span lang="en">Toolchain</span></td><td><span lang="zh-CN">预装，版本用 <code>!nvcc --version</code> 查</span><span lang="en">Preinstalled; check the version with <code>!nvcc --version</code></span></td><td><span lang="zh-CN"><code>nvidia/cuda:13.4.3-devel-ubuntu24.04</code> 容器</span><span lang="en">The <code>nvidia/cuda:13.4.3-devel-ubuntu24.04</code> container</span></td><td><span lang="zh-CN">Command Line Tools 里的 <code>swiftc</code>，MSL 运行时编译</span><span lang="en"><code>swiftc</code> from the Command Line Tools, MSL compiled at run time</span></td></tr>
+    <tr><td><span lang="zh-CN">用于</span><span lang="en">Used for</span></td><td><span lang="zh-CN">Phase 0–3 的 Lab A</span><span lang="en">Lab A of Phases 0–3</span></td><td><span lang="zh-CN">Phase 4–7 的 Lab A：<code>ncu</code>、<code>nsys</code>、<code>compute-sanitizer</code></span><span lang="en">Lab A of Phases 4–7: <code>ncu</code>, <code>nsys</code>, <code>compute-sanitizer</code></span></td><td><span lang="zh-CN">每一课的 Lab B</span><span lang="en">Lab B of every lesson</span></td></tr>
+    <tr><td><span lang="zh-CN">花费</span><span lang="en">Cost</span></td><td><span lang="zh-CN">免费</span><span lang="en">Free</span></td><td><span lang="zh-CN">按小时，整个专题约 11 到 19 美元（估算）</span><span lang="en">Hourly; about 11 to 19 dollars for the whole topic (estimate)</span></td><td><span lang="zh-CN">免费</span><span lang="en">Free</span></td></tr>
+    <tr><td><span lang="zh-CN">限制</span><span lang="en">Limits</span></td><td><span lang="zh-CN">排队、空闲断开、会话最长寿命，文件随虚拟机消失</span><span lang="en">Queues, idle disconnects, a maximum session lifetime; files vanish with the VM</span></td><td><span lang="zh-CN">是公网上的 root 主机；容器式租用可能读不到计数器</span><span lang="en">A root host on the internet; a container-style rental may not reach the counters</span></td><td><span lang="zh-CN">不是 CUDA；没有 <code>xcrun metal</code></span><span lang="en">Not CUDA; no <code>xcrun metal</code></span></td></tr>
+    <tr><td><span lang="zh-CN">本页是否运行过</span><span lang="en">Run for this page</span></td><td><span lang="zh-CN">未运行，根据文档整理</span><span lang="en">Not run; assembled from documentation</span></td><td><span lang="zh-CN">未运行，根据文档整理</span><span lang="en">Not run; assembled from documentation</span></td><td><span lang="zh-CN">2026-10-31 实际运行</span><span lang="en">Actually run on 2026-10-31</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解：三层环境和每个工具在哪里跑</h2><h2 id="diagram-en" lang="en">Animated diagram: the three tiers and where each tool runs</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 450" data-interval="2600"
+         data-captions='["全图：左边两层在云端，用 NVIDIA GPU 跑 CUDA；右边一层就是这台 Mac，用 Apple GPU 跑 Metal。左上是作为客户端的 Mac，最下面是每一课的实验去哪一层。按播放逐个看。",
+           "1. 你的 Mac 是客户端：浏览器打开 Colab，终端用 ssh 连租来的机器。SSH 私钥和所有凭据只留在这台 Mac 上。",
+           "2. 第一层 Colab notebook：用 %%writefile 写出 add.cu，用 !nvcc -arch=sm_75 编译并运行。工具链已经预装，不用安装。",
+           "3. Colab 背后是一块 T4：Turing 架构，sm_75，16 GB。免费，但会排队，空闲会被回收，会话有最长寿命，文件要存进 Drive。",
+           "4. 第二层是一台租来的 Linux 主机：你是 root，它直接连在公网上。只用密钥登录，只开 22 端口，按小时计费，用完就停。",
+           "5. 主机上跑 NVIDIA 的 nvidia/cuda 13.4.3 devel 容器，里面有 nvcc 和 ncu。剖析器要读 GPU 计数器，需要主机允许，所以从 Phase 4 起用这一层。",
+           "6. 第三层就是这台 Mac：Swift 程序在运行时把 MSL 源码编译成 kernel。Command Line Tools 里没有离线编译器 xcrun metal，所以每一页都走运行时编译。",
+           "7. Apple M5 的 GPU：实测 SIMD-group 宽 32，每个 threadgroup 最多 1024 个线程，CPU 和 GPU 共用统一内存。不花钱，每个 Lab B 都在这里真跑。",
+           "8. 分工：Phase 0 到 3 的 Lab A 在 Colab，Phase 4 到 7 的 Lab A 在租用机器，每一课的 Lab B 都是 Mac 上的 Metal 孪生实验。"]'
+         data-captions-en='["The whole picture: the two tiers on the left are in the cloud and run CUDA on NVIDIA GPUs; the tier on the right is this Mac, running Metal on the Apple GPU. At the top left is the Mac as the client; at the bottom, where each lesson lab goes. Press Play to walk through it.",
+           "1. Your Mac is the client: the browser opens Colab, and the terminal reaches the rented machine with ssh. The SSH private key and every credential stay on this Mac.",
+           "2. Tier 1, the Colab notebook: %%writefile writes add.cu, and !nvcc -arch=sm_75 builds and runs it. The toolchain is preinstalled; nothing to install.",
+           "3. Behind Colab is a T4: Turing, sm_75, 16 GB. It is free, but it queues, idle sessions are reclaimed, sessions have a maximum lifetime, and files must be saved to Drive.",
+           "4. Tier 2 is a rented Linux host: you are root and it sits directly on the internet. Log in with keys only, open only port 22, pay by the hour, and stop it when done.",
+           "5. The host runs the NVIDIA nvidia/cuda 13.4.3 devel container, which holds nvcc and ncu. The profilers read GPU counters, which the host must allow, so this tier starts at Phase 4.",
+           "6. Tier 3 is this Mac: a Swift program compiles the MSL source into a kernel at run time. The Command Line Tools have no offline compiler xcrun metal, so every page compiles at run time.",
+           "7. The Apple M5 GPU: measured SIMD-group width 32, at most 1024 threads per threadgroup, and unified memory shared by CPU and GPU. It costs nothing, and every Lab B really runs here.",
+           "8. The split: Lab A of Phases 0 to 3 runs on Colab, Lab A of Phases 4 to 7 on the rented machine, and every Lab B is the Metal twin on the Mac."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="16" class="small" lang="zh-CN">云端 · NVIDIA GPU · CUDA</text><text x="30" y="16" class="small" lang="en">Cloud · NVIDIA GPU · CUDA</text>
+      <text x="615" y="16" class="small" lang="zh-CN">本机 · Apple GPU · Metal</text><text x="615" y="16" class="small" lang="en">This Mac · Apple GPU · Metal</text>
+      <line x1="600" y1="6" x2="600" y2="326" class="lane"/>
+
+      <!-- step 1: the Mac as the client -->
+      <g data-step="1"><rect class="box" x="30" y="26" width="555" height="62"/>
+        <text x="46" y="50" lang="zh-CN">你的 Mac 作客户端 · 凭据只留在这里</text><text x="46" y="50" lang="en">Your Mac as the client · credentials stay here</text>
+        <text x="46" y="74" class="mono">browser → Colab · ssh -i ~/.ssh/gpu_lab</text></g>
+      <path class="arrow" d="M165 88 L165 118"/>
+      <path class="arrow" d="M450 88 L450 118"/>
+      <text x="615" y="56" class="small" lang="zh-CN">同一台 Mac，在本机运行</text><text x="615" y="56" class="small" lang="en">The same Mac, running locally</text>
+
+      <!-- step 2: Colab notebook -->
+      <g data-step="2"><rect class="box" x="30" y="120" width="270" height="86"/>
+        <text x="44" y="143" lang="zh-CN">第一层 · Colab notebook</text><text x="44" y="143" lang="en">Tier 1 · Colab notebook</text>
+        <text x="44" y="166" class="mono">%%writefile add.cu</text>
+        <text x="44" y="188" class="mono">!nvcc -arch=sm_75</text></g>
+
+      <!-- step 3: the T4 behind Colab -->
+      <g data-step="3"><rect class="box" x="30" y="228" width="270" height="86"/><!-- cuda -->
+        <text x="44" y="251" lang="zh-CN">NVIDIA T4 · Turing</text><text x="44" y="251" lang="en">NVIDIA T4 · Turing</text>
+        <text x="44" y="274" class="mono">sm_75 · 16 GB</text>
+        <text x="44" y="296" class="small" lang="zh-CN">免费 · 排队 · 会话会结束</text><text x="44" y="296" class="small" lang="en">Free · queues · sessions end</text></g>
+      <path class="arrow" d="M165 206 L165 226"/>
+
+      <!-- step 4: the rented host -->
+      <g data-step="4"><rect class="box" x="315" y="120" width="270" height="86"/>
+        <text x="329" y="143" lang="zh-CN">第二层 · 租来的 Linux 主机</text><text x="329" y="143" lang="en">Tier 2 · a rented Linux host</text>
+        <text x="329" y="166" class="mono">root · keys only · port 22</text>
+        <text x="329" y="188" class="small" lang="zh-CN">按小时计费，用完就停</text><text x="329" y="188" class="small" lang="en">Billed by the hour; stop it when done</text></g>
+
+      <!-- step 5: the container and the profilers -->
+      <g data-step="5"><rect class="box" x="315" y="228" width="270" height="86"/><!-- cuda -->
+        <text x="329" y="251" lang="zh-CN">容器 + 剖析器</text><text x="329" y="251" lang="en">Container + profilers</text>
+        <text x="329" y="274" class="mono">nvidia/cuda:13.4.3-devel</text>
+        <text x="329" y="296" class="mono">ncu · nsys · L4 sm_89</text></g>
+      <path class="arrow" d="M450 206 L450 226"/>
+
+      <!-- step 6: Swift + MSL on the Mac -->
+      <g data-step="6"><rect class="box" x="615" y="120" width="255" height="86"/>
+        <text x="629" y="143" lang="zh-CN">第三层 · 这台 Mac</text><text x="629" y="143" lang="en">Tier 3 · this Mac</text>
+        <text x="629" y="166" class="mono">swiftc -O metal_add.swift</text>
+        <text x="629" y="188" class="small" lang="zh-CN">MSL 运行时编译 · 没有 xcrun metal</text><text x="629" y="188" class="small" lang="en">MSL compiled at run time · no xcrun metal</text></g>
+
+      <!-- step 7: the Apple GPU -->
+      <g data-step="7"><rect class="box" x="615" y="228" width="255" height="86"/><!-- metal -->
+        <text x="629" y="251" lang="zh-CN">Apple M5 GPU · Metal 4</text><text x="629" y="251" lang="en">Apple M5 GPU · Metal 4</text>
+        <text x="629" y="274" class="mono">SIMD 32 · 1024 per group</text>
+        <text x="629" y="296" class="small" lang="zh-CN">统一内存 · 免费 · 已实测</text><text x="629" y="296" class="small" lang="en">Unified memory · free · measured</text></g>
+      <path class="arrow" d="M742 206 L742 226"/>
+
+      <!-- step 8: which lab goes where -->
+      <g data-step="8"><rect class="box" x="30" y="350" width="840" height="86"/>
+        <path class="arrow" d="M165 314 L165 348"/>
+        <path class="arrow" d="M450 314 L450 348"/>
+        <path class="arrow" d="M742 314 L742 348"/>
+        <text x="44" y="376" lang="zh-CN">Phase 0–3 的 Lab A</text><text x="44" y="376" lang="en">Lab A of Phases 0–3</text>
+        <text x="44" y="400" class="small" lang="zh-CN">nvcc、计时、检查结果</text><text x="44" y="400" class="small" lang="en">nvcc, timing, result checks</text>
+        <text x="329" y="376" lang="zh-CN">Phase 4–7 的 Lab A</text><text x="329" y="376" lang="en">Lab A of Phases 4–7</text>
+        <text x="329" y="400" class="small" lang="zh-CN">ncu、nsys、compute-sanitizer</text><text x="329" y="400" class="small" lang="en">ncu, nsys, compute-sanitizer</text>
+        <text x="629" y="376" lang="zh-CN">每一课的 Lab B</text><text x="629" y="376" lang="en">Lab B of every lesson</text>
+        <text x="629" y="400" class="small" lang="zh-CN">Metal 孪生实验，真跑</text><text x="629" y="400" class="small" lang="en">The Metal twin, really run</text>
+        <text x="44" y="424" class="small" lang="zh-CN">只有第二层花钱：开机前先定预算</text><text x="44" y="424" class="small" lang="en">Only tier 2 costs money: set a budget before booting</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on lab</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 Colab 的 T4 上看清环境，跑一个向量加法</h3><h3 lang="en">Lab A · Check the environment on the Colab T4 and run a vector add</h3>
+    <div class="note" lang="zh-CN">本实验<strong>未运行</strong>，是 2026-10-31 根据 Colab 和 CUDA 文档整理的。<code>add.cu</code> 在实验机上用 clang 的 CUDA 前端对照一个桩头文件（stub header）做过语法检查，主机端和 <code>sm_75</code> 设备端都通过；它没有被 <code>nvcc</code> 编译过，也没有在 GPU 上运行过。</div><div class="note" lang="en">This lab was <strong>not run</strong>; it was assembled from the Colab and CUDA documentation on 2026-10-31. <code>add.cu</code> was syntax-checked on the lab Mac with clang’s CUDA front end against a stub header, and both the host side and the <code>sm_75</code> device side passed; it has not been compiled by <code>nvcc</code> or run on a GPU.</div>
+    <ol>
+      <li><span lang="zh-CN">新建 notebook，运行时选 T4 GPU（概念 2）。第一个单元格看 GPU 和工具链，把两段输出都记下来：</span><span lang="en">Create a notebook and choose the T4 GPU runtime (concept 2). In the first cell, check the GPU and the toolchain, and keep both outputs:</span><pre data-lang="sh" data-file="Colab cell 1">!nvidia-smi
+!nvcc --version</pre></li>
+      <li><span lang="zh-CN">第二个单元格写出源文件。它和 Lab B 的 Metal 程序做同一件事：<code>a[i] = i</code>、<code>b[i] = 2</code>，算 <code>c = a + b</code>，打印设备参数、<code>c[12345]</code> 和 GPU 时间。每个 CUDA 调用都包在 <code>CHECK</code> 里，kernel 启动之后用 <code>cudaGetLastError</code> 取启动错误：</span><span lang="en">The second cell writes the source file. It does the same thing as the Metal program of Lab B: <code>a[i] = i</code>, <code>b[i] = 2</code>, compute <code>c = a + b</code>, and print the device parameters, <code>c[12345]</code> and the GPU time. Every CUDA call is wrapped in <code>CHECK</code>, and after the kernel launch <code>cudaGetLastError</code> picks up launch errors:</span><pre data-lang="cpp" data-file="Colab cell 2 · add.cu">%%writefile add.cu
+// add.cu: 向量加法，结构和 Lab B 的 Metal 版一一对应
+#include &lt;cstdio&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); return 1; } } while (0)
+
+__global__ void add(const float* a, const float* b, float* c, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;   // 这个线程负责的下标
+    if (i &lt; n) c[i] = a[i] + b[i];                   // 最后一个 block 可能越过 n
+}
+
+int main() {
+    const int n = 1 &lt;&lt; 20;
+    const size_t bytes = n * sizeof(float);
+    cudaDeviceProp p;
+    CHECK(cudaGetDeviceProperties(&amp;p, 0));
+
+    float *ha = new float[n], *hb = new float[n], *hc = new float[n];
+    for (int i = 0; i &lt; n; ++i) { ha[i] = float(i); hb[i] = 2.0f; }
+
+    float *da, *db, *dc;
+    CHECK(cudaMalloc(&amp;da, bytes)); CHECK(cudaMalloc(&amp;db, bytes)); CHECK(cudaMalloc(&amp;dc, bytes));
+    CHECK(cudaMemcpy(da, ha, bytes, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(db, hb, bytes, cudaMemcpyHostToDevice));
+
+    cudaEvent_t t0, t1;
+    CHECK(cudaEventCreate(&amp;t0)); CHECK(cudaEventCreate(&amp;t1));
+    const int threads = 256, blocks = (n + threads - 1) / threads;
+    CHECK(cudaEventRecord(t0));
+    add&lt;&lt;&lt;blocks, threads&gt;&gt;&gt;(da, db, dc, n);
+    CHECK(cudaGetLastError());                       // 启动参数错误在这里报
+    CHECK(cudaEventRecord(t1));
+    CHECK(cudaEventSynchronize(t1));                 // 等 kernel 跑完
+    float ms = 0;
+    CHECK(cudaEventElapsedTime(&amp;ms, t0, t1));
+    CHECK(cudaMemcpy(hc, dc, bytes, cudaMemcpyDeviceToHost));
+
+    std::printf("device=%s sm_%d%d warpSize=%d maxThreadsPerBlock=%d c[12345]=%.1f gpuTime_ms=%.3f\n",
+                p.name, p.major, p.minor, p.warpSize, p.maxThreadsPerBlock, hc[12345], ms);
+    cudaEventDestroy(t0); cudaEventDestroy(t1);
+    cudaFree(da); cudaFree(db); cudaFree(dc);
+    delete[] ha; delete[] hb; delete[] hc;
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">第三个单元格编译并运行：</span><span lang="en">The third cell builds and runs it:</span><pre data-lang="sh" data-file="Colab cell 3">!nvcc -arch=sm_75 add.cu -o add &amp;&amp; ./add</pre><span lang="zh-CN">通过的标准：<code>c[12345]=12347.0</code>（12345 + 2）。按 T4 的文档参数，设备那几项应当是 <code>sm_75</code>、<code>warpSize=32</code>、<code>maxThreadsPerBlock=1024</code>；设备名以你的输出为准。GPU 时间每次不同，一次运行不算测量，Phase 0 会做规模扫描和重复。</span><span lang="en">The pass criterion: <code>c[12345]=12347.0</code> (12345 + 2). From the T4’s documented parameters the device fields should read <code>sm_75</code>, <code>warpSize=32</code> and <code>maxThreadsPerBlock=1024</code>; the device name is whatever your output shows. The GPU time differs every run, and one run is not a measurement; Phase 0 does the size sweep and the repetitions.</span></li>
+      <li><span lang="zh-CN">故意弄错一次：把 <code>threads</code> 改成 2048（超过每 block 1024 的上限），再编译运行。<code>CHECK(cudaGetLastError())</code> 应当报一个启动配置错误并以 1 退出，而不是悄悄打印一个错的 <code>c[12345]</code>。这就是每次启动后都要查错误的原因。</span><span lang="en">Break it once on purpose: change <code>threads</code> to 2048 (above the 1024 per-block limit), then build and run again. <code>CHECK(cudaGetLastError())</code> should report a launch configuration error and exit with 1, instead of quietly printing a wrong <code>c[12345]</code>. That is why every launch is followed by an error check.</span></li>
+      <li><span lang="zh-CN">把 <code>add.cu</code> 存进 Drive（概念 2 的单元格），然后在菜单里断开并删除运行时，把 GPU 还回去。</span><span lang="en">Save <code>add.cu</code> to Drive (the cell in concept 2), then disconnect and delete the runtime from the menu to hand the GPU back.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 在这台 Mac 上跑 Metal 向量加法</h3><h3 lang="en">Lab B · Run the Metal vector add on this Mac</h3>
+    <ol>
+      <li><span lang="zh-CN">确认工具链（对照概念 4 的输出）：</span><span lang="en">Confirm the toolchain (compare with the output in concept 4):</span><pre data-lang="sh">mkdir -p ~/gpu-lab &amp;&amp; cd ~/gpu-lab
+xcode-select -p
+swiftc --version
+xcrun -sdk macosx metal --version   # 预期失败：Command Line Tools 里没有它</pre></li>
+      <li><span lang="zh-CN">写出程序。MSL kernel 放在三引号字符串里，<code>makeLibrary(source:options:)</code> 在运行时编译它；<code>dispatchThreads</code> 派发 2<sup>20</sup> 个线程，每个 threadgroup 的大小取 <code>threadExecutionWidth</code>：</span><span lang="en">Write the program. The MSL kernel sits in a triple-quoted string and <code>makeLibrary(source:options:)</code> compiles it at run time; <code>dispatchThreads</code> dispatches 2<sup>20</sup> threads, with a threadgroup size of <code>threadExecutionWidth</code>:</span><pre data-lang="swift" data-file="metal_add.swift">// metal_add.swift: Metal 向量加法，kernel 在运行时从源码编译（不需要 xcrun metal）
+import Metal
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+kernel void add(device const float* a [[buffer(0)]],
+                device const float* b [[buffer(1)]],
+                device float*       c [[buffer(2)]],
+                uint i [[thread_position_in_grid]]) {
+    c[i] = a[i] + b[i];
+}
+"""
+
+guard let dev = MTLCreateSystemDefaultDevice() else { print("no device"); exit(1) }
+let lib = try dev.makeLibrary(source: src, options: nil)  // 运行时编译 MSL
+let fn  = lib.makeFunction(name: "add")!
+let pso = try dev.makeComputePipelineState(function: fn)
+
+let n = 1 &lt;&lt; 20
+// 默认是共享存储：CPU 和 GPU 读写同一块内存
+let a = dev.makeBuffer(length: n * 4)!
+let b = dev.makeBuffer(length: n * 4)!
+let c = dev.makeBuffer(length: n * 4)!
+let pa = a.contents().bindMemory(to: Float.self, capacity: n)
+let pb = b.contents().bindMemory(to: Float.self, capacity: n)
+for i in 0..&lt;n { pa[i] = Float(i); pb[i] = 2 }
+
+let q = dev.makeCommandQueue()!
+let cb = q.makeCommandBuffer()!
+let enc = cb.makeComputeCommandEncoder()!
+enc.setComputePipelineState(pso)
+enc.setBuffer(a, offset: 0, index: 0)
+enc.setBuffer(b, offset: 0, index: 1)
+enc.setBuffer(c, offset: 0, index: 2)
+let w = pso.threadExecutionWidth               // SIMD-group 宽度，对应 CUDA 的 warp
+let maxT = pso.maxTotalThreadsPerThreadgroup   // 对应 CUDA 每 block 的线程上限
+enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+enc.endEncoding()
+cb.commit()
+cb.waitUntilCompleted()
+
+let pc = c.contents().bindMemory(to: Float.self, capacity: n)
+print("device=\(dev.name) simdWidth=\(w) maxThreadsPerThreadgroup=\(maxT) "
+    + "c[12345]=\(pc[12345]) gpuTime_ms=\((cb.gpuEndTime - cb.gpuStartTime) * 1000)")</pre></li>
+      <li><span lang="zh-CN">编译并运行三次：</span><span lang="en">Build it and run it three times:</span><pre data-lang="sh">$ swiftc -O metal_add.swift -o metal_add
+$ for i in 1 2 3; do ./metal_add; done
+device=Apple M5 simdWidth=32 maxThreadsPerThreadgroup=1024 c[12345]=12347.0 gpuTime_ms=0.3859999997075647
+device=Apple M5 simdWidth=32 maxThreadsPerThreadgroup=1024 c[12345]=12347.0 gpuTime_ms=0.3241666709072888
+device=Apple M5 simdWidth=32 maxThreadsPerThreadgroup=1024 c[12345]=12347.0 gpuTime_ms=0.10974999167956412
+# 2026-10-31 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2）</pre><span lang="zh-CN">读法：SIMD-group 宽 32，和 CUDA 的 warp 一样宽；每个 threadgroup 最多 1024 个线程，和 CUDA 每 block 的上限相同；<code>c[12345]</code> 是 12347，结果对。<code>xcrun swiftc -O</code> 得到的是同一个编译器（<code>xcrun --find swiftc</code> 指向 <code>/Library/Developer/CommandLineTools/usr/bin/swiftc</code>），设备参数和 <code>c[12345]</code> 相同。</span><span lang="en">How to read it: the SIMD-group is 32 wide, the same width as a CUDA warp; a threadgroup holds at most 1024 threads, the same as CUDA’s per-block limit; <code>c[12345]</code> is 12347, so the result is right. <code>xcrun swiftc -O</code> is the same compiler (<code>xcrun --find swiftc</code> points to <code>/Library/Developer/CommandLineTools/usr/bin/swiftc</code>) and prints the same device fields and <code>c[12345]</code>.</span></li>
+      <li><span lang="zh-CN">看 GPU 时间的波动。同一天在实验机上把这个程序一共跑了 11 次（10 次 <code>swiftc</code> 编的、1 次 <code>xcrun swiftc</code> 编的），GPU 时间在 0.110 ms 到 0.519 ms 之间，差了将近 5 倍。每次运行是一个新进程，只派发一次，GPU 可能还没升到高频（推断）。按 0.110 ms 算，读两个数组、写一个数组共 12 MB（3 × 2<sup>20</sup> × 4 字节），约合 115 GB/s；按 0.519 ms 算只有约 24 GB/s。所以一次派发的时间不是测量结果：Phase 0 的 Lab B 会预热、重复、取中位数。</span><span lang="en">Look at the spread of the GPU time. Eleven runs of this program on the lab Mac that day (10 built with <code>swiftc</code>, 1 with <code>xcrun swiftc</code>) gave GPU times from 0.110 ms to 0.519 ms, almost a factor of 5. Each run is a new process with a single dispatch, and the GPU may not have clocked up yet (inference). At 0.110 ms, reading two arrays and writing one, 12 MB in all (3 × 2<sup>20</sup> × 4 bytes), comes to about 115 GB/s; at 0.519 ms, only about 24 GB/s. So the time of one dispatch is not a measurement: Lab B of Phase 0 warms up, repeats and takes the median.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>nvidia-smi</code> 和 <code>nvcc --version</code> 输出、<code>./add</code> 的输出行、改成 2048 线程后的报错；Lab B 的 <code>xcrun metal</code> 报错和三行 <code>metal_add</code> 输出。写进当天日志，并记下你的数字和本页哪里不同。Lab A 若还没有 Colab 账号，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, the <code>nvidia-smi</code> and <code>nvcc --version</code> output, the output line of <code>./add</code>, and the error after switching to 2048 threads; from Lab B, the <code>xcrun metal</code> error and the three <code>metal_add</code> output lines. Write them into that day’s log, and note where your numbers differ from this page. If you have no Colab account yet, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="gpu/lab-setup">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 为什么从 Phase 4 起要换到租用的机器？</p><p lang="en">1. Why do the labs move to a rented machine from Phase 4 on?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">T4 没有可读的性能计数器，Nsight Compute 从来不支持 Turing 这一代</span><span lang="en">The T4 has no readable performance counters, and Nsight Compute never supported the Turing generation</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN"><code>ncu</code> 读计数器要管理员权限或主机放行，只有在你有 root 的机器上才由你决定</span><span lang="en"><code>ncu</code> needs admin rights or host permission to read counters, which is your call only where you are root</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">CUDA 13 已经去掉了 <code>sm_75</code>，T4 编不了 Phase 4 要用的代码</span><span lang="en">CUDA 13 has dropped <code>sm_75</code>, so the T4 cannot build the code that Phase 4 uses</span></label>
+      <div class="why" hidden><span lang="zh-CN">T4 有计数器，Turing 也在 Nsight Compute 的支持范围里；问题在于谁有权读它们。CUDA 13 去掉的是 Turing 之前的架构，<code>sm_75</code> 仍然支持，正因为如此本专题才以它为目标。</span><span lang="en">The T4 has counters and Turing is within Nsight Compute’s support; the question is who may read them. CUDA 13 removed the architectures before Turing, and <code>sm_75</code> is still supported, which is exactly why this topic targets it.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 在这台 Mac 上 <code>xcrun -sdk macosx metal --version</code> 报 <code>unable to find utility "metal"</code>。Lab B 的 kernel 是怎么编译的？</p><p lang="en">2. On this Mac, <code>xcrun -sdk macosx metal --version</code> reports <code>unable to find utility "metal"</code>. How is the Lab B kernel compiled?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">先装 macOS 版的 CUDA Toolkit，用 <code>nvcc</code> 编译</span><span lang="en">Install the macOS CUDA Toolkit first and compile with <code>nvcc</code></span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">下载别人编好的 <code>.metallib</code> 文件再加载</span><span lang="en">Download a <code>.metallib</code> someone else built and load it</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">程序运行时用 <code>makeLibrary(source:options:)</code> 把 MSL 源码字符串编译成库</span><span lang="en">At run time the program compiles the MSL source string into a library with <code>makeLibrary(source:options:)</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">CUDA 10.2 之后就没有 macOS 版了，<code>nvcc</code> 也编不出 Metal kernel。下载来的二进制库来路不明，而且不需要：Metal 框架自己就能在运行时编译源码，这正是 Command Line Tools 下可走的路。</span><span lang="en">There has been no macOS CUDA since 10.2, and <code>nvcc</code> cannot produce a Metal kernel anyway. A downloaded binary library is of unknown origin and not needed: the Metal framework can compile source at run time itself, which is exactly the route that works with the Command Line Tools.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 租来的机器应该怎么设置登录？</p><p lang="en">3. How should logins to the rented machine be set up?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">ed25519 密钥加口令，关掉密码登录，只开 22 端口</span><span lang="en">An ed25519 key with a passphrase, password logins off, only port 22 open</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">设一个强 root 密码，这样在任何地方都能登录</span><span lang="en">A strong root password, so you can log in from anywhere</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">把私钥放进 Colab notebook，两层共用一把钥匙</span><span lang="en">Put the private key in the Colab notebook so both tiers share one key</span></label>
+      <div class="why" hidden><span lang="zh-CN">一台公网上的 root 主机几分钟内就会被扫描，密码再强也会被反复尝试；密钥登录让这种尝试没有意义。私钥一旦写进 notebook，就随 Drive 和分享链接一起流出去了，凭据只能留在 Mac 上。</span><span lang="en">A root host on the internet gets scanned within minutes, and even a strong password is tried over and over; key logins make those attempts pointless. A private key written into a notebook travels with Drive and every share link, so credentials stay on the Mac.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 一次 Phase 5 的实验做完了。下面哪一步才真正停止计费？</p><p lang="en">4. A Phase 5 lab session is finished. Which step actually stops the billing?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">在容器里输入 <code>exit</code>，再关掉终端窗口</span><span lang="en">Type <code>exit</code> in the container, then close the terminal window</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">在服务商控制台停止或销毁实例，再到账单页确认</span><span lang="en">Stop or terminate the instance in the provider console, then confirm on the billing page</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">断开 SSH，机器空闲一段时间后会自动关掉</span><span lang="en">Disconnect SSH; the machine shuts itself down after a while idle</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>exit</code> 只是退出容器，关终端只是断开连接，主机照样在跑。空闲回收是 Colab 免费层的行为，租来的机器不会替你关机。即使停了机，有的服务商仍按磁盘收费，所以还要看账单。</span><span lang="en"><code>exit</code> only leaves the container and closing the terminal only drops the connection; the host keeps running. Idle reclaiming is how the free Colab tier behaves, and a rented machine does not shut down for you. Even after a stop some providers still charge for the disk, so check the bill as well.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html">NVIDIA — CUDA Toolkit Release Notes (13.4 Update 2 when read)</a> <span class="lvl" lang="zh-CN">官方：组件版本、驱动要求、次版本兼容、去掉的架构（2026-10-31 读取）</span><span class="lvl" lang="en">Official: component versions, driver requirements, minor version compatibility, removed architectures (read 2026-10-31)</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html">NVIDIA — CUDA C++ Programming Guide</a> <span class="lvl" lang="zh-CN">官方：编程模型、kernel 启动、错误检查，本专题的主参考</span><span class="lvl" lang="en">Official: the programming model, kernel launches, error checking; the main reference of this topic</span></li>
+    <li><a href="https://developer.nvidia.com/cuda-gpus">NVIDIA — CUDA GPUs</a> <span class="lvl" lang="zh-CN">查手册：每块卡的 compute capability（T4 是 7.5，L4 是 8.9）</span><span class="lvl" lang="en">Reference: the compute capability of each card (7.5 for the T4, 8.9 for the L4)</span></li>
+    <li><a href="https://research.google.com/colaboratory/faq.html">Google — Colab FAQ</a> <span class="lvl" lang="zh-CN">官方：免费层的资源限制、虚拟机寿命</span><span class="lvl" lang="en">Official: the resource limits of the free tier, VM lifetime</span></li>
+    <li><a href="https://hub.docker.com/r/nvidia/cuda">Docker Hub — nvidia/cuda</a> · <a href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda">NGC — CUDA</a> <span class="lvl" lang="zh-CN">容器标签列表；确认 <code>13.4.3-devel-ubuntu24.04</code> 仍在</span><span class="lvl" lang="en">The container tag list; confirm <code>13.4.3-devel-ubuntu24.04</code> is still there</span></li>
+    <li><a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html">NVIDIA — Container Toolkit install guide</a> <span class="lvl" lang="zh-CN">让 <code>docker run --gpus all</code> 能用</span><span class="lvl" lang="en">What makes <code>docker run --gpus all</code> work</span></li>
+    <li><a href="https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html">NVIDIA — Nsight Compute CLI</a> · <a href="https://docs.nvidia.com/nsight-systems/UserGuide/index.html">Nsight Systems User Guide</a> · <a href="https://developer.nvidia.com/ERR_NVGPUCTRPERM">ERR_NVGPUCTRPERM</a> <span class="lvl" lang="zh-CN">官方：<code>ncu</code> 和 <code>nsys</code> 的用法、计数器权限，Phase 4 起用</span><span class="lvl" lang="en">Official: using <code>ncu</code> and <code>nsys</code>, counter permissions; from Phase 4 on</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal">Apple — Metal</a> · <a href="https://developer.apple.com/documentation/metal/mtldevice/makelibrary(source:options:)">makeLibrary(source:options:)</a> <span class="lvl" lang="zh-CN">官方：设备、命令队列、计算管线，以及运行时编译</span><span class="lvl" lang="en">Official: devices, command queues, compute pipelines, and runtime compilation</span></li>
+    <li><a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Apple — Metal Shading Language Specification</a> <span class="lvl" lang="zh-CN">规范原文：<code>kernel</code> 函数、地址空间、属性</span><span class="lvl" lang="en">The specification itself: <code>kernel</code> functions, address spaces, attributes</span></li>
+    <li><a href="https://www.runpod.io/pricing">RunPod — pricing</a> · <a href="https://cloud.google.com/compute/gpus-pricing">Google Cloud — GPU pricing</a> <span class="lvl" lang="zh-CN">开机前查当天价格</span><span class="lvl" lang="en">Check today’s price before you start a machine</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 4th ed., Morgan Kaufmann, 2022, ISBN 9780323912310. <span class="lvl">第 1 章 Introduction 对应概念 1；第 2 章 Heterogeneous data parallel computing 对应概念 2 和 Lab A；第 4 章 Compute architecture and scheduling 对应概念 4；第 6 章 Performance considerations 对应概念 3</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 4th ed., Morgan Kaufmann, 2022, ISBN 9780323912310. <span class="lvl">Chapter 1, Introduction, for concept 1; chapter 2, Heterogeneous data parallel computing, for concept 2 and Lab A; chapter 4, Compute architecture and scheduling, for concept 4; chapter 6, Performance considerations, for concept 3</span></li>
+    <li lang="zh-CN">Jason Sanders, Edward Kandrot, 《CUDA by Example: An Introduction to General-Purpose GPU Programming》, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">第 2 章 Getting Started（开发环境）和第 3 章 Introduction to CUDA C（第一个程序、查询设备、设备属性）对应概念 2 和 Lab A；第 6 章 Constant Memory and Events 讲 Lab A 用的事件计时。书比较老，API 以 CUDA 13 文档为准</span></li>
+    <li lang="en">Jason Sanders, Edward Kandrot, <em>CUDA by Example: An Introduction to General-Purpose GPU Programming</em>, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">Chapter 2, Getting Started (the development environment), and chapter 3, Introduction to CUDA C (a first program, querying devices, device properties), for concept 2 and Lab A; chapter 6, Constant Memory and Events, covers the event timing Lab A uses. The book is old; the CUDA 13 documentation is authoritative for the APIs</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../index.html"><span lang="zh-CN">← GPU 编程与 CUDA · GPU Programming with CUDA</span><span lang="en">← GPU Programming with CUDA</span></a>
+    <a href="../phase-0-foundations/index.html"><span lang="zh-CN">Phase 0 · 基础 →</span><span lang="en">Phase 0 · Foundations →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
