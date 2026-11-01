@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 0 · Foundations · Parallel Programming</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">Parallel Programming</a>
+    <span class="crumb current" aria-current="page">Phase 0 · Foundations</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 0 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 0 / 8 · about 1–2 weeks</p>
+  <h1>Foundations <span class="en" lang="zh-CN">基础：为什么要并行、加速比定律、这台机器的核心与缓存、怎样测量</span><span class="en" lang="en">Why parallel, the speedup laws, the cores and caches of this machine, how to measure</span></h1>
+  <p class="lede" lang="zh-CN">写任何一把锁、任何一个原子操作之前，先回答两个问题：多加几个核，程序最多能快多少？是什么让它快不到那么多？这一阶段用 Amdahl 定律和 Gustafson 定律给出上限，再在你面前这台 Apple M5（4 个 P 核 + 6 个 E 核，128 字节缓存行）上实测两件事：一个数组求和随线程数怎样变快、又在哪里停住；两个毫不相干的计数器怎样因为挤在同一条缓存行里而慢上七倍。</p>
+  <p class="lede" lang="en">Before writing a single lock or atomic operation, answer two questions: how much faster can a program get with more cores, and what stops it from getting there? This phase gives the upper bounds with Amdahl’s law and Gustafson’s law, then measures two things on the Apple M5 in front of you (4 P cores + 6 E cores, 128-byte cache lines): how an array sum speeds up with more threads and where it stops, and how two unrelated counters become seven times slower because they share one cache line.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">写出 Amdahl 定律和 Gustafson 定律，说清两式里的串行比例各在哪次运行上测得，并用它们算出 10 核上的加速比上限。</li>
+      <li lang="en">Write down Amdahl’s law and Gustafson’s law, say on which run the serial fraction in each is measured, and use them to compute the speedup bound on 10 cores.</li>
+      <li lang="zh-CN">区分 strong scaling（强扩展）和 weak scaling（弱扩展），知道各自对应哪条定律、用什么指标衡量。</li>
+      <li lang="en">Tell strong scaling from weak scaling, and know which law governs each and which metric measures it.</li>
+      <li lang="zh-CN">用 <code>sysctl</code> 读出本机的核心布局、各级缓存大小和缓存行长度，并说出它和典型 x86 服务器（64 字节行、SMT、NUMA）的差别。</li>
+      <li lang="en">Read this Mac’s core layout, cache sizes and cache-line length with <code>sysctl</code>, and say how it differs from a typical x86 server (64-byte lines, SMT, NUMA).</li>
+      <li lang="zh-CN">用 <code>std::jthread</code> 写一个多线程求和，按「预热 + 多次重复取中位数」测量，并用 P/E 核、串行部分和内存带宽解释测得的曲线。</li>
+      <li lang="en">Write a threaded sum with <code>std::jthread</code>, measure it with warm-up and the median of repeated runs, and explain the measured curve with P/E cores, the serial part and memory bandwidth.</li>
+      <li lang="zh-CN">复现 false sharing（伪共享），并用 128 字节对齐消除它。</li>
+      <li lang="en">Reproduce false sharing and remove it with 128-byte alignment.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN">C 和一些 C++：会写 lambda、<code>std::vector</code>，知道引用捕获 <code>[&amp;]</code> 是什么意思。</li>
+    <li lang="en">C and some C++: you can write a lambda and use <code>std::vector</code>, and you know what capture by reference <code>[&amp;]</code> means.</li>
+    <li lang="zh-CN">按 <a href="../lab-setup/index.html">实验环境</a> 准备好这台 Mac：Command Line Tools 里的 Apple clang 就够本阶段用，两个实验都不需要 OpenMP。</li>
+    <li lang="en">Prepare this Mac following <a href="../lab-setup/index.html">Lab environment</a>: Apple clang from the Command Line Tools is enough for this phase, and neither lab needs OpenMP.</li>
+    <li lang="zh-CN">做过或正在做 Kernel Engineering 的 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Phase 1 · Boot &amp; Processes</a> 更好：本页概念 4 直接引用其中的线程模型和调度器。</li>
+    <li lang="en">Better still if you have done or are doing Kernel Engineering <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Phase 1 · Boot &amp; Processes</a>: concept 4 on this page builds directly on its thread model and scheduler.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 为什么要并行，以及并行有几种</h3><h3 lang="en">1. Why parallel, and what kinds of parallel there are</h3>
+  <p lang="zh-CN">动态功耗大致与 C·V²·f 成正比（电容、电压的平方、频率）。晶体管缩小时电压也跟着降的那段时期（Dennard scaling）在 2000 年代中期结束，此后再提频率就要付出不成比例的功耗和发热，于是单核频率停在几 GHz，多出来的晶体管变成了更多的核。结果是：一个单线程程序在新机器上不会自动变快很多，想用上全部核，程序必须自己把工作分出去。</p>
+  <p lang="en">Dynamic power is roughly proportional to C·V²·f (capacitance, voltage squared, frequency). The period in which voltage fell as transistors shrank (Dennard scaling) ended in the mid-2000s; after that, raising the clock cost disproportionate power and heat, so single-core frequency stalled at a few GHz and the extra transistors became more cores. The consequence: a single-threaded program no longer gets much faster on a new machine by itself; to use all the cores, the program has to split its own work.</p>
+  <p lang="zh-CN"><strong>Concurrency（并发）与 parallelism（并行）</strong>：并发是程序结构上有多个独立推进的任务，一个核轮流跑也算；并行是这些任务真的在同一时刻跑在不同的核上。本主题关心后者，但正确性问题（Phase 2–4）在两者下都存在。</p>
+  <p lang="en"><strong>Concurrency and parallelism</strong>: concurrency means the program is structured as several independently progressing tasks, even if one core takes turns running them; parallelism means those tasks really run at the same moment on different cores. This topic is about the latter, but the correctness problems (Phases 2–4) exist under both.</p>
+  <p lang="zh-CN"><strong>Flynn 分类法</strong>（Michael Flynn，1966）按指令流和数据流的数目把计算机分成四类：SISD（单指令流单数据流，经典单核）、SIMD（一条指令同时作用于多个数据，比如每个核里的 NEON 128 位向量，Phase 6）、MISD（多指令流作用于同一数据，实际很少见）、MIMD（多个核各跑各的指令流、各读各的数据）。多核 CPU 是 MIMD，而每个核内部又有 SIMD：本主题前五个阶段讲 MIMD，Phase 6 讲核内的 SIMD。</p>
+  <p lang="en"><strong>Flynn’s taxonomy</strong> (Michael Flynn, 1966) classifies computers by the number of instruction streams and data streams: SISD (single instruction, single data: the classic single core), SIMD (one instruction acting on several data items at once, such as the 128-bit NEON vectors inside each core, Phase 6), MISD (several instruction streams on the same data, rare in practice) and MIMD (several cores, each running its own instruction stream on its own data). A multicore CPU is MIMD, and each core contains SIMD: the first five phases of this topic cover MIMD, and Phase 6 covers SIMD inside a core.</p>
+  <p lang="zh-CN">延伸阅读：McKenney《Is Parallel Programming Hard…》第 2 章「Introduction」（并行编程的三个目标：性能、生产率、通用性，以及「不并行」的替代方案）；Herlihy 等《The Art of Multiprocessor Programming》的引言章。</p>
+  <p lang="en">Further reading: McKenney, <em>Is Parallel Programming Hard…</em>, Chapter 2, “Introduction” (the three goals of parallel programming: performance, productivity, generality, and the alternatives to going parallel); the introductory chapter of Herlihy et al., <em>The Art of Multiprocessor Programming</em>.</p>
+
+  <h3 lang="zh-CN">2. Amdahl 定律与 Gustafson 定律</h3><h3 lang="en">2. Amdahl’s law and Gustafson’s law</h3>
+  <p lang="zh-CN">设 T(N) 是用 N 个核的运行时间，加速比 S(N) = T(1) / T(N)，效率 E(N) = S(N) / N。</p>
+  <p lang="en">Let T(N) be the run time on N cores; the speedup is S(N) = T(1) / T(N), and the efficiency is E(N) = S(N) / N.</p>
+  <p lang="zh-CN"><strong>Amdahl 定律</strong>（Gene Amdahl，1967）：问题规模固定。把单核运行时间分成无法并行的串行部分，占比 s，和可以完美并行的部分，占比 1 − s（0 ≤ s ≤ 1）。用 N 个核时串行部分不变，并行部分缩成 1/N：</p>
+  <p lang="en"><strong>Amdahl’s law</strong> (Gene Amdahl, 1967): the problem size is fixed. Split the single-core run time into a serial part that cannot be parallelised, with share s, and a perfectly parallel part, with share 1 − s (0 ≤ s ≤ 1). On N cores the serial part stays the same and the parallel part shrinks to 1/N:</p>
+  <pre>S(N) = 1 / ( s + (1 − s) / N )        # N → ∞ : S → 1 / s</pre>
+  <p lang="zh-CN">s = 0.1 时：N = 10 得 S ≈ 5.26，效率只有 53 %；核再多也不会超过 10。串行部分哪怕只占 10 %，也决定了上限。</p>
+  <p lang="en">With s = 0.1: N = 10 gives S ≈ 5.26, an efficiency of only 53 %; no number of cores takes it past 10. A serial part of only 10 % sets the ceiling.</p>
+  <p lang="zh-CN"><strong>Gustafson 定律</strong>（John Gustafson，1988）：换一个问法。核多了，人们通常会解更大的问题，而不是把同一个问题解得更快。设 s′ 是<em>在 N 核上运行时</em>串行部分所占的时间比例，同样这段工作若放到单核上要花 s′ + (1 − s′)·N 倍的时间，所以按比例放大后的加速比是：</p>
+  <p lang="en"><strong>Gustafson’s law</strong> (John Gustafson, 1988): ask a different question. With more cores, people usually solve a bigger problem rather than the same problem faster. Let s′ be the share of time spent in the serial part <em>on the N-core run</em>; the same work would take s′ + (1 − s′)·N times as long on one core, so the scaled speedup is:</p>
+  <pre>S(N) = s′ + (1 − s′) · N = N − s′ · (N − 1)</pre>
+  <p lang="zh-CN">s′ = 0.1、N = 10 时 S = 9.1。两条定律并不矛盾：Amdahl 的 s 是在单核运行上量的，Gustafson 的 s′ 是在 N 核运行上量的，并行部分随 N 变大时，s′ 对应的单核 s 会越来越小。</p>
+  <p lang="en">With s′ = 0.1 and N = 10, S = 9.1. The two laws do not contradict each other: Amdahl’s s is measured on the single-core run, Gustafson’s s′ on the N-core run, and as the parallel part grows with N, the single-core s that corresponds to a given s′ keeps shrinking.</p>
+  <p lang="zh-CN"><strong>Strong scaling 与 weak scaling</strong>：总问题规模固定、看时间随核数怎样下降，叫强扩展，上限由 Amdahl 给出；每个核分到的问题规模固定、总规模随核数一起涨，看时间能否保持不变，叫弱扩展，由 Gustafson 描述。下面的对照表把两者并排列出。两条定律都假设并行部分「完美」并行，而 Lab A 会显示，真实机器上还有别的东西在限制加速比：核不一样快，内存带宽有上限，创建线程也要时间。</p>
+  <p lang="en"><strong>Strong and weak scaling</strong>: keeping the total problem size fixed and watching how the time falls with more cores is strong scaling, bounded by Amdahl; keeping the problem size per core fixed, so the total grows with the core count, and checking whether the time stays flat is weak scaling, described by Gustafson. The comparison table below puts the two side by side. Both laws assume the parallel part is “perfectly” parallel, and Lab A shows that a real machine has other limits on speedup: the cores are not equally fast, memory bandwidth has a ceiling, and creating threads takes time.</p>
+  <p lang="zh-CN">延伸阅读：Herlihy 等《The Art of Multiprocessor Programming》引言章中关于 Amdahl 定律的一节；McKenney 第 2 章「Introduction」中关于性能目标的一节。</p>
+  <p lang="en">Further reading: the section on Amdahl’s law in the introductory chapter of Herlihy et al., <em>The Art of Multiprocessor Programming</em>; the section on the performance goal in McKenney, Chapter 2, “Introduction”.</p>
+
+  <h3 lang="zh-CN">3. 这台机器：核心、缓存、缓存行</h3><h3 lang="en">3. This machine: cores, caches, cache lines</h3>
+  <p lang="zh-CN">先读，再推理。下面是实验 Mac 上 <code>sysctl</code> 的原始输出（2026-10-31）：</p>
+  <p lang="en">Read first, then reason. This is the raw <code>sysctl</code> output on the lab Mac (2026-10-31):</p>
+  <pre data-lang="sh">$ sysctl machdep.cpu.brand_string hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu \
+    hw.logicalcpu hw.cachelinesize hw.perflevel0.l1dcachesize hw.perflevel1.l1dcachesize \
+    hw.perflevel0.l2cachesize hw.perflevel1.l2cachesize hw.memsize
+machdep.cpu.brand_string: Apple M5
+hw.perflevel0.physicalcpu: 4          # perflevel0 = P 核（performance）
+hw.perflevel1.physicalcpu: 6          # perflevel1 = E 核（efficiency）
+hw.logicalcpu: 10                     # 逻辑核 = 物理核：没有 SMT
+hw.cachelinesize: 128
+hw.perflevel0.l1dcachesize: 131072    # 128 KB，每个 P 核
+hw.perflevel1.l1dcachesize: 65536     # 64 KB，每个 E 核
+hw.perflevel0.l2cachesize: 16777216   # 16 MB，P 簇共享
+hw.perflevel1.l2cachesize: 6291456    # 6 MB，E 簇共享
+hw.memsize: 34359738368               # 32 GB 统一内存</pre>
+  <ul>
+    <li lang="zh-CN"><strong>两种核</strong>：4 个 P 核和 6 个 E 核执行同样的 ARM64 指令，但 E 核更慢、更省电。把工作平均切成 N 份时，最后完成的那份决定总时间，所以落在 E 核上的那份会拖慢全体（Lab A 能看到）。</li>
+    <li lang="en"><strong>Two kinds of core</strong>: the 4 P cores and the 6 E cores run the same ARM64 instructions, but the E cores are slower and use less power. When work is split into N equal pieces, the last piece to finish sets the total time, so a piece that lands on an E core holds everyone back (Lab A shows this).</li>
+    <li lang="zh-CN"><strong>缓存层级</strong>：每个核有自己的 L1D，每个簇共享一个 L2，两个簇共享同一块 DRAM。离核越远越大、越慢。一个 512 MiB 的数组远大于任何一级缓存，扫描它时数据几乎全从 DRAM 来，速度由<strong>内存带宽</strong>决定，而不是由核的算力决定。</li>
+    <li lang="en"><strong>The cache hierarchy</strong>: each core has its own L1D, each cluster shares one L2, and both clusters share the same DRAM. The further from the core, the bigger and slower. A 512 MiB array is far larger than any cache level, so a scan over it gets almost all its data from DRAM, and its speed is set by <strong>memory bandwidth</strong>, not by the cores’ compute.</li>
+    <li lang="zh-CN"><strong>缓存行</strong>：缓存与内存之间、缓存与缓存之间搬运的最小单位是一整行，本机报告 128 字节（典型 x86 是 64 字节）。多核之间靠缓存一致性协议（MESI 一族；Apple 的具体协议没有公开）保持各核看到的数据一致：一个核要写某一行，必须先让其他核里这一行的副本作废。</li>
+    <li lang="en"><strong>Cache lines</strong>: the smallest unit moved between cache and memory, and between caches, is a whole line; this Mac reports 128 bytes (typical x86 uses 64). The cores keep their views of memory consistent with a cache-coherence protocol (the MESI family; Apple’s exact protocol is not published): before a core can write a line, the copies of that line in other cores must be invalidated.</li>
+    <li lang="zh-CN"><strong>False sharing（伪共享）</strong>：两个线程各写各的变量，但两个变量恰好在同一条缓存行里。逻辑上毫无共享，硬件上这一行却在两个核之间来回搬运。办法是把它们隔开到不同的行：本机按 128 字节对齐。</li>
+    <li lang="en"><strong>False sharing</strong>: two threads each write their own variable, but the two variables happen to sit in the same cache line. Logically nothing is shared, yet in hardware the line travels back and forth between the two cores. The fix is to separate them into different lines: on this Mac, align to 128 bytes.</li>
+    <li lang="zh-CN"><strong>本机没有的东西</strong>：没有 SMT（x86 上一个物理核常跑 2 个硬件线程，共享执行单元和 L1）；没有 NUMA（多路 x86 服务器每个插槽有自己的内存，访问别的插槽的内存更慢，线程和数据放在哪个节点要一起考虑）。在这些机器上，本页的数字和曲线形状都会不同。</li>
+    <li lang="en"><strong>What this Mac does not have</strong>: no SMT (on x86 one physical core often runs 2 hardware threads that share execution units and L1); no NUMA (on multi-socket x86 servers each socket has its own memory, memory on another socket is slower, and where threads and data live has to be planned together). On those machines both the numbers and the shapes of the curves on this page will differ.</li>
+  </ul>
+  <p lang="zh-CN">缓存和内存层级在内核一侧怎样管理（页、TLB、页缓存），见 Kernel Engineering <a href="../../kernel-engineering/phase-2-memory/index.html">Phase 2 · Memory</a>。</p>
+  <p lang="en">For how the kernel side manages caches and the memory hierarchy (pages, the TLB, the page cache), see Kernel Engineering <a href="../../kernel-engineering/phase-2-memory/index.html">Phase 2 · Memory</a>.</p>
+  <p lang="zh-CN">延伸阅读：McKenney 第 3 章「Hardware and its Habits」（缓存未命中、原子操作和内存屏障各要付出什么代价）；Bos《Rust Atomics and Locks》第 7 章「Understanding the Processor」中的「Cache Coherence」和「Impact on Performance」两节。</p>
+  <p lang="en">Further reading: McKenney, Chapter 3, “Hardware and its Habits” (what cache misses, atomic operations and memory barriers each cost); Bos, <em>Rust Atomics and Locks</em>, Chapter 7, “Understanding the Processor”, the sections “Cache Coherence” and “Impact on Performance”.</p>
+
+  <h3 lang="zh-CN">4. 内核怎样对待你的线程</h3><h3 lang="en">4. What the kernel does with your threads</h3>
+  <p lang="zh-CN">在 macOS 上，<code>std::jthread</code> 底下是 <code>pthread_create</code>，再往下是一个 Mach thread：对内核来说，一个线程就是一个可调度实体，它跑在哪个核上、什么时候跑，由调度器决定，而不是由你的程序决定。Linux 上同样如此，线程就是共享 <code>mm</code> 的 <code>task_struct</code>。这部分的内核细节见 Kernel Engineering <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Phase 1 · Boot &amp; Processes</a>（线程模型、上下文切换、Edge 调度器怎样在 P 核和 E 核之间放线程）。</p>
+  <p lang="en">On macOS, <code>std::jthread</code> sits on <code>pthread_create</code>, and below that is a Mach thread: to the kernel a thread is a schedulable entity, and which core it runs on and when is decided by the scheduler, not by your program. It is the same on Linux, where a thread is a <code>task_struct</code> that shares <code>mm</code>. The kernel details are in Kernel Engineering <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Phase 1 · Boot &amp; Processes</a> (the thread model, the context switch, and how the Edge scheduler places threads on P and E cores).</p>
+  <ul>
+    <li lang="zh-CN">macOS 不提供把线程钉在某个核上的接口；你能做的是设 QoS 类（<code>pthread_set_qos_class_self_np</code>），影响调度器把线程往 P 核还是 E 核放。Lab B 的第二次运行就把两个线程设成 <code>QOS_CLASS_BACKGROUND</code>。Linux 则有 <code>sched_setaffinity</code> 可以直接绑核。</li>
+    <li lang="en">macOS offers no interface to pin a thread to a core; what you can do is set a QoS class (<code>pthread_set_qos_class_self_np</code>), which influences whether the scheduler places the thread on P or E cores. The second run of Lab B sets both threads to <code>QOS_CLASS_BACKGROUND</code>. Linux, by contrast, has <code>sched_setaffinity</code> to bind a thread to cores directly.</li>
+    <li lang="zh-CN"><code>std::jthread</code>（C++20）与 <code>std::thread</code> 的区别：析构时自动 <code>join</code>（忘了 join 不会 <code>std::terminate</code>），并自带一个 <code>std::stop_token</code> 用于请求停止。实验里「出了花括号就等所有线程结束」正是靠这一点。</li>
+    <li lang="en">How <code>std::jthread</code> (C++20) differs from <code>std::thread</code>: it joins automatically in its destructor (forgetting to join does not call <code>std::terminate</code>), and it carries a <code>std::stop_token</code> for requesting a stop. The labs rely on this to “wait for every thread at the closing brace”.</li>
+    <li lang="zh-CN">创建线程不是免费的：在实验 Mac 上，创建并 join 10 个空的 <code>std::jthread</code> 的中位数约 0.12–0.15 ms（2026-10-31，21 次取中位数）。对 Lab A 里 4 ms 级的运行来说，这就是约 3 % 的串行部分。Phase 1 会系统地测它。</li>
+    <li lang="en">Creating threads is not free: on the lab Mac, creating and joining 10 empty <code>std::jthread</code>s takes a median of about 0.12–0.15 ms (2026-10-31, median of 21 runs). For the 4 ms runs in Lab A, that is a serial part of about 3 %. Phase 1 measures it properly.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Williams《C++ Concurrency in Action》中讲线程管理的一章（启动、join、传参、转移所有权）；内核一侧见上面的 Kernel Phase 1 链接。</p>
+  <p lang="en">Further reading: the chapter on managing threads in Williams, <em>C++ Concurrency in Action</em> (launching, joining, passing arguments, transferring ownership); for the kernel side, the Kernel Phase 1 link above.</p>
+
+  <h3 lang="zh-CN">5. 测量的基本功</h3><h3 lang="en">5. Measurement basics</h3>
+  <ul>
+    <li lang="zh-CN"><strong>墙钟时间与 CPU 时间</strong>：<code>std::chrono::steady_clock</code> 量的是墙钟时间，也就是你等了多久；CPU 时间是所有线程在核上跑的时间之和。两个线程忙满时 CPU 时间约是墙钟的两倍：在 Lab B 上 <code>/usr/bin/time -p</code> 报告 <code>real 11.98</code>、<code>user 23.77</code>。加速比只看墙钟时间。</li>
+    <li lang="en"><strong>Wall time and CPU time</strong>: <code>std::chrono::steady_clock</code> measures wall time, how long you waited; CPU time is the sum of the time all threads spent on cores. With two busy threads, CPU time is about twice the wall time: on Lab B, <code>/usr/bin/time -p</code> reports <code>real 11.98</code> and <code>user 23.77</code>. Speedup uses wall time only.</li>
+    <li lang="zh-CN"><strong>预热</strong>：第一次运行要付页错误、冷缓存、频率爬升的代价。两个实验都先跑一次不计入的预热，Lab A 还在构造 <code>std::vector</code> 时就把 512 MiB 每一页都写过一遍。</li>
+    <li lang="en"><strong>Warm-up</strong>: the first run pays for page faults, cold caches and the clock ramping up. Both labs do one uncounted warm-up run first, and Lab A also writes every page of its 512 MiB when it constructs the <code>std::vector</code>.</li>
+    <li lang="zh-CN"><strong>方差与中位数</strong>：同一程序每次的时间都不同，其他进程、调度器的放置和温度都会插一脚。取多次运行的中位数而不是平均值，一两个离群值就拉不动它；同时报告最小值和最大值，看分布有多宽。Lab B 里有伪共享的版本 7 次运行在 1047–1277 ms 之间摆动，对齐后的版本只在 155.6–157.6 ms 之间：争用本身就会制造方差。</li>
+    <li lang="en"><strong>Variance and the median</strong>: the same program takes a different time on every run; other processes, the scheduler’s placement and temperature all play a part. Take the median of several runs rather than the mean, so one or two outliers cannot drag it, and report the minimum and maximum to show how wide the spread is. In Lab B the falsely shared version swings between 1047 and 1277 ms over 7 runs, while the aligned version stays between 155.6 and 157.6 ms: contention itself creates variance.</li>
+    <li lang="zh-CN"><strong>别让编译器删掉你的工作</strong>：用 <code>-O2</code> 编译，并把结果打印出来（Lab A 打印 <code>sum=</code>），否则编译器可以证明结果没人用，把整个循环删掉，你量到的就只剩空循环。</li>
+    <li lang="en"><strong>Do not let the compiler delete your work</strong>: build with <code>-O2</code> and print the result (Lab A prints <code>sum=</code>); otherwise the compiler can prove nobody uses the result and delete the whole loop, and you end up timing nothing.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Williams《C++ Concurrency in Action》中讲设计并发代码的一章（影响并发代码性能的因素：处理器数量、数据争用、cache ping-pong、伪共享）；McKenney 第 3 章「Hardware and its Habits」中各类操作代价的对比。</p>
+  <p lang="en">Further reading: the chapter on designing concurrent code in Williams, <em>C++ Concurrency in Action</em> (the factors that affect the performance of concurrent code: the number of processors, data contention, cache ping-pong, false sharing); the comparison of operation costs in McKenney, Chapter 3, “Hardware and its Habits”.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：strong scaling ↔ weak scaling</h2><h2 id="compare-en" lang="en">Comparison: strong scaling ↔ weak scaling</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th><span lang="zh-CN">Strong scaling（强扩展）</span><span lang="en">Strong scaling</span></th><th><span lang="zh-CN">Weak scaling（弱扩展）</span><span lang="en">Weak scaling</span></th></tr>
+    <tr><td><span lang="zh-CN">问的问题</span><span lang="en">Question asked</span></td><td><span lang="zh-CN">同一个问题，核多了能快多少？</span><span lang="en">The same problem: how much faster with more cores?</span></td><td><span lang="zh-CN">核多了，同样的时间里能解多大的问题？</span><span lang="en">With more cores, how big a problem fits in the same time?</span></td></tr>
+    <tr><td><span lang="zh-CN">固定的量</span><span lang="en">Held fixed</span></td><td><span lang="zh-CN">总问题规模</span><span lang="en">Total problem size</span></td><td><span lang="zh-CN">每个核的问题规模</span><span lang="en">Problem size per core</span></td></tr>
+    <tr><td><span lang="zh-CN">随 N 变化的量</span><span lang="en">Changes with N</span></td><td><span lang="zh-CN">每个核分到的工作变少</span><span lang="en">Each core gets less work</span></td><td><span lang="zh-CN">总问题规模变成 N 倍</span><span lang="en">The total problem grows N times</span></td></tr>
+    <tr><td><span lang="zh-CN">指标</span><span lang="en">Metric</span></td><td><span lang="zh-CN">S = T(1) / T(N)，效率 S / N</span><span lang="en">S = T(1) / T(N), efficiency S / N</span></td><td><span lang="zh-CN">弱扩展效率 T(1) / T(N)，其中 T(N) 处理 N 倍的工作</span><span lang="en">Weak-scaling efficiency T(1) / T(N), where T(N) handles N times the work</span></td></tr>
+    <tr><td><span lang="zh-CN">理想结果</span><span lang="en">Ideal result</span></td><td><span lang="zh-CN">时间降到 1/N</span><span lang="en">Time falls to 1/N</span></td><td><span lang="zh-CN">时间保持不变</span><span lang="en">Time stays the same</span></td></tr>
+    <tr><td><span lang="zh-CN">对应定律</span><span lang="en">Governing law</span></td><td><span lang="zh-CN">Amdahl：S ≤ 1 / s</span><span lang="en">Amdahl: S ≤ 1 / s</span></td><td><span lang="zh-CN">Gustafson：S = s′ + (1 − s′)·N</span><span lang="en">Gustafson: S = s′ + (1 − s′)·N</span></td></tr>
+    <tr><td><span lang="zh-CN">典型的拖累</span><span lang="en">Typical drag</span></td><td><span lang="zh-CN">串行部分、线程创建、每份工作太小</span><span lang="en">The serial part, thread creation, pieces of work too small</span></td><td><span lang="zh-CN">共享资源随 N 被挤满：内存带宽、锁、缓存</span><span lang="en">Shared resources filling up as N grows: memory bandwidth, locks, caches</span></td></tr>
+    <tr><td><span lang="zh-CN">在本页实验里</span><span lang="en">In this page’s labs</span></td><td><span lang="zh-CN">Lab A 原样就是强扩展：始终是同一个 512 MiB 数组</span><span lang="en">Lab A as written is strong scaling: always the same 512 MiB array</span></td><td><span lang="zh-CN">把 Lab A 改成每个线程 64 MiB、总量 N × 64 MiB，就是弱扩展（本页没有给出这组测量）</span><span lang="en">Changing Lab A to 64 MiB per thread, N × 64 MiB in total, makes it weak scaling (this page gives no measurements for it)</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 加速比与核数：串行比例 0、10 %、50 %，以及本机实测</h3><h3 lang="en">(a) Speedup against cores: serial fractions 0, 10 % and 50 %, and this Mac measured</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：横轴是核数 N（本机最多 10），纵轴是加速比 S。三条 Amdahl 曲线对应串行比例 s = 0、0.1、0.5，圆点和方块是 Lab A 在本机的两组实测，最上面的虚线是 Gustafson。竖虚线左边是 4 个 P 核，右边加入 6 个 E 核。按播放逐步看。",
+           "1. s = 0：没有串行部分，S = N，一条斜率为 1 的直线。这是上限，现实中几乎达不到。",
+           "2. s = 0.1：S = 1 / (0.1 + 0.9 / N)。N = 10 时只有 5.26，效率 53 %；N 再大也不会超过 1/s = 10。",
+           "3. s = 0.5：一半时间无法并行，曲线很快贴近 1/s = 2。N = 10 时 1.82，加核几乎没有意义。",
+           "4. 实测，一个累加器（Lab A 第一组）：到 4 线程几乎是直线（3.68），之后变缓，10 线程 5.84。形状像 s 约 0.1 的 Amdahl 曲线，但程序里并没有 10 % 的串行部分：均分的工作落到更慢的 E 核上，最慢的那份决定总时间。",
+           "5. 实测，四个累加器（Lab A 第二组）：单线程快了 3 倍，但 2 线程和 4 线程一样（约 83 GB/s），加入 E 簇后升到 131 GB/s，S 只有 2.46。这条线像 s = 0.5，限制它的却是内存带宽，不是串行代码。",
+           "6. Gustafson，s′ = 0.1：问题随 N 一起变大时，S = 0.1 + 0.9 N，N = 10 时 9.1。同样写作 0.1 的串行比例，换一种问法，结论完全不同。"]'
+         data-captions-en='["The whole picture: the x axis is the core count N (10 on this Mac), the y axis is the speedup S. The three Amdahl curves are for serial fractions s = 0, 0.1 and 0.5, the circles and squares are the two sets of Lab A measured on this Mac, and the dashed line at the top is Gustafson. Left of the vertical dashed line are the 4 P cores; to the right the 6 E cores join. Press Play to step through.",
+           "1. s = 0: no serial part, S = N, a straight line of slope 1. This is the upper bound and is almost never reached.",
+           "2. s = 0.1: S = 1 / (0.1 + 0.9 / N). At N = 10 it is only 5.26, an efficiency of 53 %; no N takes it past 1/s = 10.",
+           "3. s = 0.5: half the time cannot be parallelised, so the curve quickly flattens towards 1/s = 2. At N = 10 it is 1.82, and adding cores is nearly pointless.",
+           "4. Measured, one accumulator (first set of Lab A): almost straight up to 4 threads (3.68), flatter after that, 5.84 at 10 threads. It looks like an Amdahl curve with s near 0.1, but the program has no 10 % serial part: equal pieces of work land on the slower E cores, and the slowest piece sets the total time.",
+           "5. Measured, four accumulators (second set of Lab A): one thread is 3 times faster, but 2 threads and 4 threads are the same (about 83 GB/s), and with the E cluster added it rises to 131 GB/s, a speedup of only 2.46. This line looks like s = 0.5, yet what limits it is memory bandwidth, not serial code.",
+           "6. Gustafson, s′ = 0.1: when the problem grows with N, S = 0.1 + 0.9 N, which is 9.1 at N = 10. The same serial fraction of 0.1, asked a different question, gives a completely different conclusion."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <!-- grid and axes -->
+      <path class="lane" d="M90 306 L600 306 M90 242 L600 242 M90 178 L600 178 M90 114 L600 114 M90 50 L600 50"/>
+      <path d="M90 370 L600 370 M90 370 L90 44" style="stroke: var(--ink-3); stroke-width: 1.2; fill: none"/>
+      <text x="80" y="374" class="small" text-anchor="end">0</text>
+      <text x="80" y="310" class="small" text-anchor="end">2</text>
+      <text x="80" y="246" class="small" text-anchor="end">4</text>
+      <text x="80" y="182" class="small" text-anchor="end">6</text>
+      <text x="80" y="118" class="small" text-anchor="end">8</text>
+      <text x="80" y="54" class="small" text-anchor="end">10</text>
+      <text x="90" y="388" class="small" text-anchor="middle">1</text>
+      <text x="146.7" y="388" class="small" text-anchor="middle">2</text>
+      <text x="260" y="388" class="small" text-anchor="middle">4</text>
+      <text x="373.3" y="388" class="small" text-anchor="middle">6</text>
+      <text x="486.7" y="388" class="small" text-anchor="middle">8</text>
+      <text x="600" y="388" class="small" text-anchor="middle">10</text>
+      <text x="345" y="410" class="small" text-anchor="middle" lang="zh-CN">核数 N（本机最多 10）</text><text x="345" y="410" class="small" text-anchor="middle" lang="en">cores N (10 on this Mac)</text>
+      <text x="30" y="30" class="small" lang="zh-CN">加速比 S(N)</text><text x="30" y="30" class="small" lang="en">speedup S(N)</text>
+      <line x1="260" y1="50" x2="260" y2="370" class="lane"/>
+      <text x="252" y="68" class="small" text-anchor="end" lang="zh-CN">4 个 P 核</text><text x="252" y="68" class="small" text-anchor="end" lang="en">4 P cores</text>
+      <text x="268" y="68" class="small" lang="zh-CN">+ 6 个 E 核</text><text x="268" y="68" class="small" lang="en">+ 6 E cores</text>
+
+      <!-- step 1: s = 0 -->
+      <g data-step="1"><path d="M90 338 L600 50" style="stroke: var(--ink); stroke-width: 2; fill: none"/>
+        <text x="606" y="54" class="small">s = 0</text></g>
+      <!-- step 2: s = 0.1 -->
+      <g data-step="2"><polyline points="90,338 146.7,311.8 203.3,290 260,271.5 316.7,255.7 373.3,242 430,230 486.7,219.4 543.3,210 600,201.6" style="stroke: var(--ink); stroke-width: 2; stroke-dasharray: 7 4; fill: none"/>
+        <text x="606" y="205" class="small">s = 0.1</text>
+        <text x="680" y="112" lang="zh-CN">Amdahl · 问题规模固定</text><text x="680" y="112" lang="en">Amdahl · fixed problem size</text>
+        <text x="680" y="134" class="mono">S = 1 / (s + (1−s)/N)</text>
+        <text x="680" y="154" class="small" lang="zh-CN">s：单核运行时的串行占比</text><text x="680" y="154" class="small" lang="en">s: serial share, 1-core run</text>
+        <text x="680" y="172" class="small">N → ∞ : S → 1/s</text>
+        <text x="680" y="190" class="small">N = 10, s = 0.1 : S ≈ 5.26</text></g>
+      <!-- step 3: s = 0.5 -->
+      <g data-step="3"><polyline points="90,338 146.7,327.3 203.3,322 260,318.8 316.7,316.7 373.3,315.1 430,314 486.7,313.1 543.3,312.4 600,311.8" style="stroke: var(--ink); stroke-width: 2; stroke-dasharray: 2 4; fill: none"/>
+        <text x="606" y="322" class="small">s = 0.5</text>
+        <text x="440" y="334" class="small" lang="zh-CN">上限 1/s = 2</text><text x="440" y="334" class="small" lang="en">ceiling 1/s = 2</text></g>
+      <!-- step 4: measured, one accumulator -->
+      <g data-step="4"><!-- par --><polyline points="90,338 146.7,307.3 260,252.2 486.7,202.3 600,183.1" style="stroke: var(--ink-2); stroke-width: 1.4; fill: none"/>
+        <circle cx="90" cy="338" r="4.5" style="fill: var(--ink)"/><circle cx="146.7" cy="307.3" r="4.5" style="fill: var(--ink)"/><circle cx="260" cy="252.2" r="4.5" style="fill: var(--ink)"/><circle cx="486.7" cy="202.3" r="4.5" style="fill: var(--ink)"/><circle cx="600" cy="183.1" r="4.5" style="fill: var(--ink)"/>
+        <text x="606" y="181" class="small" lang="zh-CN">1 累加</text><text x="606" y="181" class="small" lang="en">1 acc</text>
+        <text x="468" y="190" class="small">5.24</text><text x="572" y="172" class="small">5.84</text><text x="232" y="244" class="small">3.68</text></g>
+      <!-- step 5: measured, four accumulators -->
+      <g data-step="5"><!-- par --><polyline points="90,338 146.7,320.1 260,320.4 486.7,297.7 600,291.3" style="stroke: var(--ink-2); stroke-width: 1.4; fill: none"/>
+        <rect x="85.5" y="333.5" width="9" height="9" style="fill: var(--ink)"/><rect x="142.2" y="315.6" width="9" height="9" style="fill: var(--ink)"/><rect x="255.5" y="315.9" width="9" height="9" style="fill: var(--ink)"/><rect x="482.2" y="293.2" width="9" height="9" style="fill: var(--ink)"/><rect x="595.5" y="286.8" width="9" height="9" style="fill: var(--ink)"/>
+        <text x="606" y="292" class="small" lang="zh-CN">4 累加</text><text x="606" y="292" class="small" lang="en">4 acc</text>
+        <text x="270" y="358" class="small" lang="zh-CN">2→4 线程不再变快：P 簇带宽到顶</text><text x="270" y="358" class="small" lang="en">2 to 4 threads: no gain, P cluster bandwidth full</text></g>
+      <!-- step 6: Gustafson -->
+      <g data-step="6"><path d="M90 338 L600 78.8" style="stroke: var(--ink-3); stroke-width: 2; stroke-dasharray: 10 5; fill: none"/>
+        <text x="606" y="82" class="small">Gustafson</text>
+        <text x="680" y="230" lang="zh-CN">Gustafson · 问题随 N 变大</text><text x="680" y="230" lang="en">Gustafson · work grows with N</text>
+        <text x="680" y="252" class="mono">S = s′ + (1−s′)·N</text>
+        <text x="680" y="272" class="small" lang="zh-CN">s′：N 核运行时的串行占比</text><text x="680" y="272" class="small" lang="en">s′: serial share, N-core run</text>
+        <text x="680" y="290" class="small">N = 10, s′ = 0.1 : S = 9.1</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 内存层级，以及两个核共用的一条 128 字节缓存行</h3><h3 lang="en">(b) The memory hierarchy, and one 128-byte cache line shared by two cores</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：上半部分是本机的内存层级，下半部分放大一条 128 字节的缓存行。左下是计数器 a 和 b 挤在同一行里，右下是把它们隔开 128 字节。按播放逐步看。",
+           "1. 核与 L1：4 个 P 核各有 128 KB L1D，6 个 E 核各有 64 KB L1D（sysctl 读出）。每个核只直接读写自己的 L1。",
+           "2. L2 与内存：P 簇共享 16 MB L2，E 簇共享 6 MB L2，两个簇共用 32 GB 统一内存。Lab A 实测：只用 P 簇时带宽停在约 83 GB/s，两个簇一起约 131 GB/s。",
+           "3. 一条缓存行：a 和 b 是两个 8 字节计数器，地址只差 8 字节，落在同一条 128 字节行里。两个核都读过它们，于是 P0 和 P1 的 L1 里各有这一行的一份副本。",
+           "4. P0 写 a：写之前必须独占这一行，于是 P1 里的副本作废。P1 下一次访问 b 时只能从 P0 那里重新取回整行。",
+           "5. P1 写 b：同样要独占这一行，于是整行搬到 P1，P0 的副本作废。两个线程各加 1 亿次，这一行就在两个核之间反复搬运。实测中位数 1144 ms。",
+           "6. 对齐到 128 字节：b 落在下一条行里，两个核各自独占自己的行，写入不必通知对方。同样的工作中位数 156 ms，快 7 倍多。只隔开 64 字节时，P 核上同样快，但两个线程都在 E 核上时仍慢约 3 倍，见 Lab B。"]'
+         data-captions-en='["The whole picture: the top half is the memory hierarchy of this Mac, the bottom half zooms into one 128-byte cache line. Bottom left, counters a and b share one line; bottom right, they are 128 bytes apart. Press Play to step through.",
+           "1. Cores and L1: the 4 P cores have 128 KB of L1D each, the 6 E cores 64 KB of L1D each (read with sysctl). Each core reads and writes only its own L1 directly.",
+           "2. L2 and memory: the P cluster shares a 16 MB L2, the E cluster a 6 MB L2, and both clusters share 32 GB of unified memory. Measured in Lab A: with the P cluster alone, bandwidth stops at about 83 GB/s; with both clusters, about 131 GB/s.",
+           "3. One cache line: a and b are two 8-byte counters whose addresses differ by only 8 bytes, so they sit in the same 128-byte line. Both cores have read them, so the L1 of P0 and the L1 of P1 each hold a copy of the line.",
+           "4. P0 writes a: before writing it must own the line exclusively, so the copy in P1 is invalidated. The next time P1 touches b it has to fetch the whole line back from P0.",
+           "5. P1 writes b: it too must own the line, so the whole line moves to P1 and the copy in P0 is invalidated. With each thread adding 100 million times, the line keeps travelling between the two cores. Measured median: 1144 ms.",
+           "6. Aligned to 128 bytes: b lands in the next line, each core owns its own line, and a write needs no message to the other core. The same work has a median of 156 ms, more than 7 times faster. With only 64 bytes between them it is just as fast on P cores, but still about 3 times slower when both threads run on E cores; see Lab B."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="45" y="22" class="small" lang="zh-CN">P 簇：4 个性能核</text><text x="45" y="22" class="small" lang="en">P cluster: 4 performance cores</text>
+      <text x="470" y="22" class="small" lang="zh-CN">E 簇：6 个能效核</text><text x="470" y="22" class="small" lang="en">E cluster: 6 efficiency cores</text>
+
+      <!-- step 1: cores and L1 -->
+      <g data-step="1"><!-- par -->
+        <rect class="box" x="45" y="32" width="86" height="46"/><text x="55" y="51" class="mono">P0</text><text x="55" y="69" class="small">L1D 128 KB</text>
+        <rect class="box" x="141" y="32" width="86" height="46"/><text x="151" y="51" class="mono">P1</text><text x="151" y="69" class="small">L1D 128 KB</text>
+        <rect class="box" x="237" y="32" width="86" height="46"/><text x="247" y="51" class="mono">P2</text><text x="247" y="69" class="small">L1D 128 KB</text>
+        <rect class="box" x="333" y="32" width="86" height="46"/><text x="343" y="51" class="mono">P3</text><text x="343" y="69" class="small">L1D 128 KB</text>
+        <rect class="box" x="470" y="32" width="60" height="46"/><text x="478" y="51" class="mono">E0</text><text x="478" y="69" class="small">64 KB</text>
+        <rect class="box" x="537" y="32" width="60" height="46"/><text x="545" y="51" class="mono">E1</text><text x="545" y="69" class="small">64 KB</text>
+        <rect class="box" x="604" y="32" width="60" height="46"/><text x="612" y="51" class="mono">E2</text><text x="612" y="69" class="small">64 KB</text>
+        <rect class="box" x="671" y="32" width="60" height="46"/><text x="679" y="51" class="mono">E3</text><text x="679" y="69" class="small">64 KB</text>
+        <rect class="box" x="738" y="32" width="60" height="46"/><text x="746" y="51" class="mono">E4</text><text x="746" y="69" class="small">64 KB</text>
+        <rect class="box" x="805" y="32" width="60" height="46"/><text x="813" y="51" class="mono">E5</text><text x="813" y="69" class="small">64 KB</text></g>
+
+      <!-- step 2: L2, memory, bandwidth -->
+      <g data-step="2">
+        <rect class="box" x="45" y="88" width="374" height="30"/><text x="57" y="108" lang="zh-CN">L2 16 MB · P 簇共享</text><text x="57" y="108" lang="en">L2 16 MB · shared by the P cluster</text>
+        <rect class="box" x="470" y="88" width="395" height="30"/><text x="482" y="108" lang="zh-CN">L2 6 MB · E 簇共享</text><text x="482" y="108" lang="en">L2 6 MB · shared by the E cluster</text>
+        <path class="arrow" d="M232 118 L330 156"/>
+        <path class="arrow" d="M667 118 L570 156"/>
+        <text x="45" y="146" class="small" lang="zh-CN">只用 P 簇：实测 ≈ 83 GB/s 封顶</text><text x="45" y="146" class="small" lang="en">P cluster alone: tops out ≈ 83 GB/s</text>
+        <text x="680" y="146" class="small" lang="zh-CN">两个簇一起：≈ 131 GB/s</text><text x="680" y="146" class="small" lang="en">both clusters: ≈ 131 GB/s</text>
+        <rect class="box" x="250" y="158" width="400" height="34"/><text x="450" y="180" text-anchor="middle" lang="zh-CN">统一内存 DRAM · 32 GB（与 GPU 共用）</text><text x="450" y="180" text-anchor="middle" lang="en">unified memory DRAM · 32 GB (shared with the GPU)</text></g>
+
+      <line x1="30" y1="206" x2="870" y2="206" class="lane"/>
+      <text x="40" y="228" lang="zh-CN">packed：a 和 b 在同一条 128 字节行里</text><text x="40" y="228" lang="en">packed: a and b share one 128-byte line</text>
+      <text x="480" y="228" lang="zh-CN">padded：a 和 b 相隔 128 字节</text><text x="480" y="228" lang="en">padded: a and b 128 bytes apart</text>
+
+      <!-- step 3: one line, a copy in each core -->
+      <g data-step="3">
+        <text x="40" y="264" class="small">P0 L1</text>
+        <rect class="box" x="90" y="246" width="256" height="26"/>
+        <!-- par --><rect x="90" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="106" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <text x="94" y="264" class="mono">a</text><text x="110" y="264" class="mono">b</text>
+        <text x="40" y="308" class="small">P1 L1</text>
+        <rect class="box" x="90" y="290" width="256" height="26"/>
+        <!-- par --><rect x="90" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="106" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <text x="94" y="308" class="mono">a</text><text x="110" y="308" class="mono">b</text>
+        <text x="218" y="334" class="small" text-anchor="middle" lang="zh-CN">一条行 = 128 字节，a、b 各 8 字节</text><text x="218" y="334" class="small" text-anchor="middle" lang="en">one line = 128 bytes; a and b are 8 bytes each</text></g>
+      <!-- step 4: P0 writes a -->
+      <g data-step="4">
+        <text x="356" y="308" class="small" style="fill: var(--ink-2)" lang="zh-CN">✕ 作废</text><text x="356" y="308" class="small" style="fill: var(--ink-2)" lang="en">✕ invalid</text>
+        <text x="40" y="358" class="small" lang="zh-CN">1. P0 写 a：P1 的副本作废</text><text x="40" y="358" class="small" lang="en">1. P0 writes a: the copy in P1 is invalidated</text></g>
+      <!-- step 5: P1 writes b, ping-pong -->
+      <g data-step="5">
+        <text x="356" y="264" class="small" style="fill: var(--ink-2)" lang="zh-CN">✕ 作废</text><text x="356" y="264" class="small" style="fill: var(--ink-2)" lang="en">✕ invalid</text>
+        <path class="arrow flow" d="M418 258 C 442 268, 442 292, 418 302" style="marker-start: url(#arr)"/>
+        <text x="40" y="378" class="small" lang="zh-CN">2. P1 写 b：整行搬到 P1，P0 的副本作废</text><text x="40" y="378" class="small" lang="en">2. P1 writes b: the line moves to P1, the P0 copy is invalidated</text>
+        <text x="40" y="400" class="small" lang="zh-CN">实测：1144 ms（每线程 1 亿次加法，中位数）</text><text x="40" y="400" class="small" lang="en">measured: 1144 ms (1e8 adds per thread, median)</text></g>
+      <!-- step 6: padded -->
+      <g data-step="6">
+        <text x="480" y="264" class="small">P0 L1</text>
+        <rect class="box" x="530" y="246" width="256" height="26"/>
+        <!-- par --><rect x="530" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <text x="534" y="264" class="mono">a</text><text x="794" y="264" class="small" lang="zh-CN">行 X</text><text x="794" y="264" class="small" lang="en">line X</text>
+        <text x="480" y="308" class="small">P1 L1</text>
+        <rect class="box" x="530" y="290" width="256" height="26"/>
+        <!-- par --><rect x="530" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <text x="534" y="308" class="mono">b</text><text x="794" y="308" class="small" lang="zh-CN">行 Y</text><text x="794" y="308" class="small" lang="en">line Y</text>
+        <text x="480" y="358" class="small" lang="zh-CN">a 在行 X，b 在下一条行 Y：各核独占自己的行</text><text x="480" y="358" class="small" lang="en">a in line X, b in the next line Y: each core owns its line</text>
+        <text x="480" y="378" class="small" lang="zh-CN">写入不必通知对方，没有搬运</text><text x="480" y="378" class="small" lang="en">a write needs no message to the other core</text>
+        <text x="480" y="400" class="small" lang="zh-CN">实测：156 ms（同样的工作）</text><text x="480" y="400" class="small" lang="en">measured: 156 ms (the same work)</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 多线程数组求和：1、2、4、8、10 个线程</h3><h3 lang="en">Lab A · A threaded array sum: 1, 2, 4, 8 and 10 threads</h3>
+    <ol>
+      <li><span lang="zh-CN">先读核心布局，确认你的机器和本页的一样（命令和输出见概念 3）。不一样也没关系，但下面的数字就只能当参考：</span><span lang="en">First read the core layout and check that your machine matches this page (the command and output are in concept 3). If it differs, that is fine, but treat the numbers below as a reference only:</span><pre data-lang="sh">sysctl hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu hw.cachelinesize</pre></li>
+      <li><span lang="zh-CN">把下面的程序存成 <code>sum.cpp</code>。它把 64 Mi 个 <code>double</code>（512 MiB，远大于 L2）平均切成 T 份，每份交给一个 <code>std::jthread</code>；每种线程数先预热一次，再跑 11 次取中位数。参数 <code>1</code> 用一个累加器，参数 <code>4</code> 用四个独立的累加器：</span><span lang="en">Save the program below as <code>sum.cpp</code>. It splits 64 Mi <code>double</code>s (512 MiB, far larger than L2) into T equal pieces, one per <code>std::jthread</code>; for each thread count it warms up once, then takes the median of 11 runs. Argument <code>1</code> uses one accumulator, argument <code>4</code> uses four independent accumulators:</span><pre data-lang="cpp" data-file="sum.cpp">// sum.cpp: sum a 512 MiB array with 1, 2, 4, 8, 10 threads; median of 11 runs
+// usage: ./sum 1   (one accumulator)   ./sum 4   (four accumulators)
+#include &lt;algorithm&gt;
+#include &lt;chrono&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+
+static double chunk_sum(const double* p, std::size_t n, int acc) {
+  if (acc == 1) { double s = 0; for (std::size_t i = 0; i &lt; n; ++i) s += p[i]; return s; }
+  double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+  std::size_t i = 0;
+  for (; i + 4 &lt;= n; i += 4) { s0 += p[i]; s1 += p[i + 1]; s2 += p[i + 2]; s3 += p[i + 3]; }
+  for (; i &lt; n; ++i) s0 += p[i];
+  return (s0 + s1) + (s2 + s3);
+}
+
+int main(int argc, char** argv) {
+  const int acc = argc &gt; 1 ? std::atoi(argv[1]) : 1;
+  const std::size_t N = std::size_t{1} &lt;&lt; 26;          // 64 Mi doubles = 512 MiB, far beyond L2
+  std::vector&lt;double&gt; a(N, 1.0);
+  double t1 = 0;
+  for (int T : {1, 2, 4, 8, 10}) {
+    std::vector&lt;double&gt; ms;
+    double total = 0;
+    for (int rep = 0; rep &lt; 12; ++rep) {                // rep 0 is the warm-up, not kept
+      std::vector&lt;double&gt; part(T * 16, 0.0);            // results 128 bytes apart
+      auto t0 = std::chrono::steady_clock::now();
+      {
+        std::vector&lt;std::jthread&gt; pool;
+        for (int t = 0; t &lt; T; ++t)
+          pool.emplace_back([&amp;, t] {
+            std::size_t lo = N * t / T, hi = N * (t + 1) / T;
+            part[t * 16] = chunk_sum(a.data() + lo, hi - lo, acc);
+          });
+      }                                                 // every jthread joins here
+      double dt = std::chrono::duration&lt;double, std::milli&gt;(
+                      std::chrono::steady_clock::now() - t0).count();
+      total = 0;
+      for (int t = 0; t &lt; T; ++t) total += part[t * 16];
+      if (rep &gt; 0) ms.push_back(dt);
+    }
+    std::sort(ms.begin(), ms.end());
+    double med = ms[ms.size() / 2];
+    if (T == 1) t1 = med;
+    std::printf("threads=%2d  median=%6.2f ms  speedup=%4.2f  %5.1f GB/s  sum=%.0f\n",
+                T, med, t1 / med, N * sizeof(double) / med / 1e6, total);
+  }
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行两组：</span><span lang="en">Build it and run both sets:</span><pre data-lang="sh">clang++ -std=c++20 -O2 -o sum sum.cpp
+./sum 1
+./sum 4</pre>
+        <span lang="zh-CN">预期输出：下面是实验 Mac（Apple M5，macOS 27.2，Apple clang 21）在 2026-10-31 的实测，不是计算值。你的数字会有几个百分点的出入：</span><span lang="en">Expected output: these are measurements on the lab Mac (Apple M5, macOS 27.2, Apple clang 21) on 2026-10-31, not computed values. Your numbers will differ by a few per cent:</span><pre>$ ./sum 1
+threads= 1  median= 31.20 ms  speedup=1.00   17.2 GB/s  sum=67108864
+threads= 2  median= 15.93 ms  speedup=1.96   33.7 GB/s  sum=67108864
+threads= 4  median=  8.49 ms  speedup=3.68   63.2 GB/s  sum=67108864
+threads= 8  median=  5.95 ms  speedup=5.24   90.2 GB/s  sum=67108864
+threads=10  median=  5.34 ms  speedup=5.84  100.6 GB/s  sum=67108864
+$ ./sum 4
+threads= 1  median= 10.06 ms  speedup=1.00   53.3 GB/s  sum=67108864
+threads= 2  median=  6.46 ms  speedup=1.56   83.1 GB/s  sum=67108864
+threads= 4  median=  6.49 ms  speedup=1.55   82.8 GB/s  sum=67108864
+threads= 8  median=  4.45 ms  speedup=2.26  120.6 GB/s  sum=67108864
+threads=10  median=  4.09 ms  speedup=2.46  131.1 GB/s  sum=67108864</pre></li>
+      <li><span lang="zh-CN">读懂第一组（一个累加器）。单线程只有 17 GB/s，远低于内存能给的速度：每次 <code>s += p[i]</code> 都要等上一次浮点加法完成，<code>-O2</code> 下这是一条串行的 <code>fadd</code> 依赖链（不加 <code>-ffast-math</code> 时编译器不能重排浮点加法，用 <code>clang++ -std=c++20 -O2 -S</code> 看汇编可以确认），所以瓶颈是加法延迟。到 4 线程时线程很可能都在 P 核上，几乎线性（3.68）。8 和 10 线程时多出的线程会落到 E 核上，而每份工作一样大：P 核早早做完，等着最慢的 E 核。8 线程时每份 8.4 M 个数用了 5.95 ms，约每秒 1.4 G 次加法，单线程 P 核约 2.15 G 次，最慢的那份就是 E 核那份（这是从测量推出的，macOS 不告诉你每个线程落在哪个核上）。</span><span lang="en">Read the first set (one accumulator). One thread reaches only 17 GB/s, far below what memory can deliver: every <code>s += p[i]</code> must wait for the previous floating-point add to finish, and at <code>-O2</code> this is a serial chain of dependent <code>fadd</code>s (without <code>-ffast-math</code> the compiler may not reorder floating-point additions; check the assembly with <code>clang++ -std=c++20 -O2 -S</code>), so the bottleneck is add latency. Up to 4 threads the threads most likely all sit on P cores, and the speedup is almost linear (3.68). At 8 and 10 threads the extra threads land on E cores, while every piece of work is the same size: the P cores finish early and wait for the slowest E core. At 8 threads each piece of 8.4 M numbers took 5.95 ms, about 1.4 G adds per second, against about 2.15 G for one thread on a P core, so the slowest piece is the one on an E core (this is inferred from the measurements; macOS does not tell you which core each thread ran on).</span></li>
+      <li><span lang="zh-CN">读懂第二组（四个累加器）。四条独立的加法链让单线程快了 3 倍（53 GB/s），瓶颈从加法延迟移到了内存。这时 2 线程和 4 线程一样快，都约 83 GB/s：再加 P 核也拉不来更多字节，P 簇通往内存的带宽到顶了。8、10 线程加入 E 簇后升到 131 GB/s，说明 E 簇有自己的一份带宽可用。加速比只有 2.46，但每纳秒处理的数据比第一组的 10 线程还多。这就是带宽受限：再多的核也只是在排队等内存。</span><span lang="en">Read the second set (four accumulators). Four independent add chains make one thread 3 times faster (53 GB/s), and the bottleneck moves from add latency to memory. Now 2 threads and 4 threads are equally fast, both about 83 GB/s: more P cores cannot pull in more bytes, because the P cluster’s bandwidth to memory is full. At 8 and 10 threads, with the E cluster added, it rises to 131 GB/s, which shows the E cluster has its own share of bandwidth. The speedup is only 2.46, yet it processes more data per nanosecond than the 10-thread run of the first set. This is what bandwidth-bound means: more cores just queue for memory.</span></li>
+      <li><span lang="zh-CN">把 speedup 列画成 S 对 N 的图（手画、电子表格，或者你装了 matplotlib 就用它），叠在动画 (a) 上。两组都像某条 Amdahl 曲线，但程序里的串行部分只有创建线程和最后几次加法（10 个线程约 0.12–0.15 ms，见概念 4）。用 Amdahl 拟合出一个 s，并不能告诉你瓶颈在哪里，只有测量能。</span><span lang="en">Plot the speedup column as S against N (by hand, in a spreadsheet, or with matplotlib if you have it) and lay it over diagram (a). Both sets look like some Amdahl curve, yet the only serial parts in the program are creating the threads and the final few additions (about 0.12–0.15 ms for 10 threads, see concept 4). Fitting an s with Amdahl’s law does not tell you where the bottleneck is; only measurement does.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · False sharing：同一条缓存行里的两个计数器</h3><h3 lang="en">Lab B · False sharing: two counters in one cache line</h3>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>false_sharing.cpp</code>。两个线程各自对自己的 <code>std::atomic&lt;long&gt;</code> 做 1 亿次 <code>fetch_add</code>（<code>memory_order_relaxed</code>，Phase 3 会讲），没有任何逻辑上的共享。三种布局：<code>packed</code> 两个计数器相邻（相差 8 字节）；<code>half</code> 相隔 64 字节但在同一条 128 字节对齐的行里；<code>padded</code> 各自对齐到 128 字节：</span><span lang="en">Save the program below as <code>false_sharing.cpp</code>. Two threads each do 100 million <code>fetch_add</code>s on their own <code>std::atomic&lt;long&gt;</code> (<code>memory_order_relaxed</code>, covered in Phase 3), with nothing logically shared. Three layouts: <code>packed</code> puts the counters next to each other (8 bytes apart); <code>half</code> puts them 64 bytes apart but inside one 128-byte-aligned line; <code>padded</code> aligns each to 128 bytes:</span><pre data-lang="cpp" data-file="false_sharing.cpp">// false_sharing.cpp: two threads, each adds 1e8 times to its own counter
+// usage: ./false_sharing      (default QoS)   ./false_sharing bg   (both threads at background QoS)
+#include &lt;pthread/qos.h&gt;
+#include &lt;algorithm&gt;
+#include &lt;atomic&gt;
+#include &lt;chrono&gt;
+#include &lt;cstddef&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstring&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+
+struct Packed  { std::atomic&lt;long&gt; a{0}; std::atomic&lt;long&gt; b{0}; };            // 8 bytes apart
+struct alignas(128) Half { alignas(64) std::atomic&lt;long&gt; a{0};                 // 64 apart,
+                           alignas(64) std::atomic&lt;long&gt; b{0}; };               // one 128-byte line
+struct Padded  { alignas(128) std::atomic&lt;long&gt; a{0}; alignas(128) std::atomic&lt;long&gt; b{0}; };
+
+constexpr long ITERS = 100'000'000;
+static bool bg = false;
+
+template &lt;class S&gt; double run_once() {
+  S s;
+  auto work = [&amp;](std::atomic&lt;long&gt;&amp; c) {
+    if (bg) pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+    for (long i = 0; i &lt; ITERS; ++i) c.fetch_add(1, std::memory_order_relaxed);
+  };
+  auto t0 = std::chrono::steady_clock::now();
+  { std::jthread x(work, std::ref(s.a)); std::jthread y(work, std::ref(s.b)); }
+  if (s.a.load() != ITERS || s.b.load() != ITERS) std::puts("count mismatch");
+  return std::chrono::duration&lt;double, std::milli&gt;(std::chrono::steady_clock::now() - t0).count();
+}
+
+template &lt;class S&gt; void bench(const char* name) {
+  std::vector&lt;double&gt; ms;
+  run_once&lt;S&gt;();                                       // warm-up
+  for (int r = 0; r &lt; 7; ++r) ms.push_back(run_once&lt;S&gt;());
+  std::sort(ms.begin(), ms.end());
+  std::printf("%-7s offset(b)=%3zu  median=%7.1f ms  min=%7.1f  max=%7.1f\n",
+              name, offsetof(S, b), ms[3], ms.front(), ms.back());
+}
+
+int main(int argc, char** argv) {
+  bg = argc &gt; 1 &amp;&amp; std::strcmp(argv[1], "bg") == 0;
+  bench&lt;Packed&gt;("packed");
+  bench&lt;Half&gt;("half");
+  bench&lt;Padded&gt;("padded");
+}</pre></li>
+      <li><span lang="zh-CN">编译，先用默认 QoS 跑，再让两个线程都用 background QoS 跑（调度器通常把它们放到 E 核上）：</span><span lang="en">Build it, run it at the default QoS, then run it with both threads at background QoS (the scheduler usually places them on E cores):</span><pre data-lang="sh">clang++ -std=c++20 -O2 -o false_sharing false_sharing.cpp
+./false_sharing
+./false_sharing bg</pre>
+        <span lang="zh-CN">预期输出（实验 Mac，2026-10-31 实测；默认一次运行约 12 秒）：</span><span lang="en">Expected output (measured on the lab Mac, 2026-10-31; the default run takes about 12 seconds):</span><pre>$ ./false_sharing
+packed  offset(b)=  8  median= 1144.0 ms  min= 1047.2  max= 1277.1
+half    offset(b)= 64  median=  156.0 ms  min=  155.5  max=  156.8
+padded  offset(b)=128  median=  155.8 ms  min=  155.6  max=  157.6
+$ ./false_sharing bg
+packed  offset(b)=  8  median=  851.9 ms  min=  814.8  max=  881.0
+half    offset(b)= 64  median=  610.9 ms  min=  430.6  max=  716.7
+padded  offset(b)=128  median=  211.6 ms  min=  195.7  max=  235.0</pre></li>
+      <li><span lang="zh-CN">读懂结果。默认 QoS 下（两个线程很可能在 P 核上），<code>packed</code> 比 <code>padded</code> 慢 7 倍多：这一行在两个核之间来回搬运。<code>half</code> 和 <code>padded</code> 一样快，说明在 P 核上 64 字节的间隔已经够了。background QoS 下（E 核），<code>half</code> 仍比 <code>padded</code> 慢约 3 倍，所以在 E 核上一致性的粒度是整条 128 字节行。结论：在这台 Mac 上按 <code>hw.cachelinesize</code>（128）对齐才在两种核上都安全。这里的「64 字节在 P 核上够用」是从这组测量推断的，Apple 没有公开文档说明（2026-10-31 未找到）。</span><span lang="en">Read the results. At the default QoS (both threads most likely on P cores), <code>packed</code> is more than 7 times slower than <code>padded</code>: the line travels back and forth between the two cores. <code>half</code> is as fast as <code>padded</code>, which shows that on P cores a 64-byte gap is already enough. At background QoS (E cores), <code>half</code> is still about 3 times slower than <code>padded</code>, so on E cores the coherence granularity is the whole 128-byte line. Conclusion: on this Mac, aligning to <code>hw.cachelinesize</code> (128) is the only choice that is safe on both kinds of core. The claim that “64 bytes is enough on P cores” is inferred from these measurements; Apple publishes no documentation of it (none found on 2026-10-31).</span></li>
+      <li><span lang="zh-CN">看墙钟时间和 CPU 时间的差别，再看标准库给的常量：</span><span lang="en">Look at the gap between wall time and CPU time, then at the constants the standard library provides:</span><pre data-lang="sh">/usr/bin/time -p ./false_sharing      # 实测：real 11.98，user 23.77，sys 0.01</pre>
+        <span lang="zh-CN">两个线程一直在忙，所以 user 约是 real 的两倍。C++17 的 <code>std::hardware_destructive_interference_size</code>（头文件 <code>&lt;new&gt;</code>）在这台 Mac 的 Apple clang 21 上是 256，<code>hardware_constructive_interference_size</code> 是 64（2026-10-31 编译打印）。它是编译期常量，取的是保守值，和运行时 <code>sysctl hw.cachelinesize</code> 报告的 128 不是一回事。</span><span lang="en">Both threads are busy the whole time, so user is about twice real. C++17’s <code>std::hardware_destructive_interference_size</code> (header <code>&lt;new&gt;</code>) is 256 with Apple clang 21 on this Mac, and <code>hardware_constructive_interference_size</code> is 64 (compiled and printed on 2026-10-31). It is a compile-time constant chosen conservatively, and it is not the same thing as the 128 that <code>sysctl hw.cachelinesize</code> reports at run time.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：你的机器上 Lab A 两组的五个加速比、Lab B 两次运行的三个中位数，一张 S 对 N 的图（标出 4 核处的 P/E 分界），以及你用自己的话写的解释（10 行以内）：为什么第一组在 4 线程后变缓、为什么第二组 2 和 4 线程一样快、为什么 <code>half</code> 在 E 核上变慢。</div>
+    <div class="note" lang="en">Deliverables: the five speedups of both Lab A sets on your machine, the three medians of both Lab B runs, one plot of S against N (with the P/E boundary at 4 cores marked), and your own explanation in 10 lines or fewer of why the first set flattens after 4 threads, why 2 and 4 threads are equally fast in the second set, and why <code>half</code> slows down on E cores.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="par/phase-0">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 一个程序在单核上运行时有 10 % 的时间无法并行。问题规模不变，用 10 个核，Amdahl 定律给出的加速比上限是多少？</p>
+      <p lang="en">1. A program spends 10 % of its single-core run time in code that cannot be parallelised. With the problem size unchanged and 10 cores, what speedup bound does Amdahl’s law give?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">10：每个核分到十分之一的工作</span><span lang="en">10: each core gets a tenth of the work</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">约 5.26</span><span lang="en">About 5.26</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">9.1</span><span lang="en">9.1</span></label>
+      <div class="why" hidden><span lang="zh-CN">S = 1 / (0.1 + 0.9 / 10) = 1 / 0.19 ≈ 5.26。10 是没有串行部分时的理想值；9.1 是 Gustafson 定律在 s′ = 0.1 时的结果，那里问题规模随 N 变大，而且 s′ 是在 10 核运行上量的。</span><span lang="en">S = 1 / (0.1 + 0.9 / 10) = 1 / 0.19 ≈ 5.26. 10 is the ideal value with no serial part; 9.1 is Gustafson’s law with s′ = 0.1, where the problem grows with N and s′ is measured on the 10-core run.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. Lab A 的四累加器版本里，2 线程和 4 线程都约 83 GB/s。最合理的解释是？</p>
+      <p lang="en">2. In the four-accumulator version of Lab A, 2 threads and 4 threads both reach about 83 GB/s. What is the most reasonable explanation?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">创建线程的开销吃掉了多出来的两个线程带来的收益</span><span lang="en">The cost of creating threads eats the gain from the two extra threads</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">四个线程被调度器放到了同一个核上轮流跑</span><span lang="en">The scheduler put all four threads on one core, taking turns</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">P 簇通往内存的带宽已经用满，更多的 P 核拉不来更多字节</span><span lang="en">The P cluster’s bandwidth to memory is full, so more P cores cannot pull in more bytes</span></label>
+      <div class="why" hidden><span lang="zh-CN">创建 10 个线程只要约 0.12–0.15 ms，远小于 6.5 ms 的运行时间；如果四个线程挤在一个核上，时间会比单线程还长，而实测 6.5 ms 比单线程的 10 ms 短。加入 E 簇后带宽升到 131 GB/s，正说明限制在 P 簇的内存通路上。</span><span lang="en">Creating 10 threads takes only about 0.12–0.15 ms, far less than the 6.5 ms run; if four threads shared one core, the run would take longer than one thread, but the measured 6.5 ms is shorter than the 10 ms of one thread. Adding the E cluster raises bandwidth to 131 GB/s, which shows the limit is the P cluster’s path to memory.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 两个线程各自只对自己的 <code>std::atomic&lt;long&gt;</code> 做 <code>fetch_add</code>，两个计数器地址相差 8 字节，比相隔 128 字节时慢 7 倍。慢在哪里？</p>
+      <p lang="en">3. Two threads each do <code>fetch_add</code> only on their own <code>std::atomic&lt;long&gt;</code>; with the counters 8 bytes apart, it is 7 times slower than with them 128 bytes apart. Where does the time go?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">两个计数器在同一条缓存行里，一致性按行工作，这一行在两个核之间来回搬运</span><span lang="en">Both counters sit in one cache line, coherence works per line, and the line travels back and forth between the two cores</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">原子加法指令本身就慢，与布局无关</span><span lang="en">The atomic add instruction is slow in itself, whatever the layout</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN"><code>std::atomic&lt;long&gt;</code> 内部用了一把锁，两个线程在抢它</span><span lang="en"><code>std::atomic&lt;long&gt;</code> uses a lock internally, and the two threads fight over it</span></label>
+      <div class="why" hidden><span lang="zh-CN">同样的原子加法在 <code>padded</code> 布局下只要 156 ms，所以不是指令本身慢；本机上 <code>std::atomic&lt;long&gt;::is_always_lock_free</code> 为真（编译时 <code>static_assert</code> 通过），没有锁。差别只在两个计数器是否共用一条行。</span><span lang="en">The same atomic adds take only 156 ms in the <code>padded</code> layout, so the instruction itself is not slow; on this Mac <code>std::atomic&lt;long&gt;::is_always_lock_free</code> is true (a compile-time <code>static_assert</code> passes), so there is no lock. The only difference is whether the two counters share a line.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 你把核数翻倍，同时把总问题规模也翻倍，运行时间保持不变。这说明什么？</p>
+      <p lang="en">4. You double the core count and double the total problem size at the same time, and the run time stays the same. What does this show?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">强扩展效率为 100 %</span><span lang="en">Strong-scaling efficiency is 100 %</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">理想的弱扩展</span><span lang="en">Ideal weak scaling</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">程序违反了 Amdahl 定律</span><span lang="en">The program violates Amdahl’s law</span></label>
+      <div class="why" hidden><span lang="zh-CN">每个核的工作量不变、总量随核数增长，时间不变，正是弱扩展的理想结果。强扩展要求总问题规模固定，这里不是；Amdahl 定律只约束固定规模的问题，所以也谈不上违反。</span><span lang="en">The work per core is unchanged, the total grows with the core count, and the time is unchanged: exactly the ideal result of weak scaling. Strong scaling requires a fixed total problem size, which is not the case here; Amdahl’s law constrains only fixed-size problems, so nothing violates it.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://doi.org/10.1145/1465482.1465560">Gene Amdahl, Validity of the single processor approach to achieving large scale computing capabilities (AFIPS 1967)</a> <span class="lvl" lang="zh-CN">原始论文，概念 2：Amdahl 定律的出处</span><span class="lvl" lang="en">Original paper, concept 2: the source of Amdahl’s law</span></li>
+    <li><a href="https://doi.org/10.1145/42411.42415">John Gustafson, Reevaluating Amdahl’s law (CACM 31(5), 1988)</a> <span class="lvl" lang="zh-CN">原始论文，两页，概念 2：按比例放大的加速比</span><span class="lvl" lang="en">Original paper, two pages, concept 2: scaled speedup</span></li>
+    <li><a href="https://en.cppreference.com/w/cpp/thread/jthread">cppreference: std::jthread</a> · <a href="https://en.cppreference.com/w/cpp/atomic/atomic/is_always_lock_free">std::atomic::is_always_lock_free</a> · <a href="https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size">hardware_destructive_interference_size</a> <span class="lvl" lang="zh-CN">参考，两个实验用到的标准库接口</span><span class="lvl" lang="en">Reference: the standard-library interfaces used in both labs</span></li>
+    <li><a href="https://developer.apple.com/documentation/apple-silicon/tuning-your-code-s-performance-for-apple-silicon">Apple: Tuning your code’s performance for Apple silicon</a> · <a href="https://developer.apple.com/documentation/apple-silicon/addressing-architectural-differences-in-your-macos-code">Addressing architectural differences in your macOS code</a> <span class="lvl" lang="zh-CN">官方文档，P/E 核、QoS 与 Apple Silicon 和 x86 的差别（2026-10-31 可访问）</span><span class="lvl" lang="en">Official docs: P/E cores, QoS, and how Apple silicon differs from x86 (reachable on 2026-10-31)</span></li>
+    <li><a href="https://marabos.nl/atomics/hardware.html">Mara Bos, Rust Atomics and Locks, Chapter 7: Understanding the Processor</a> <span class="lvl" lang="zh-CN">免费在线，中级：缓存一致性和伪共享的实验，用 Rust 写，但讲的是硬件</span><span class="lvl" lang="en">Free online, intermediate: cache coherence and a false-sharing experiment, written in Rust but about the hardware</span></li>
+    <li><a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.2023.06.11a.pdf">Paul E. McKenney, perfbook, release v2023.06.11a (PDF)</a> <span class="lvl" lang="zh-CN">免费，入门到进阶：第 3 章讲硬件代价，第 5 章「Counting」正是 Lab B 问题的系统解法</span><span class="lvl" lang="en">Free, beginner to advanced: Chapter 3 covers hardware costs, and Chapter 5, “Counting”, is the systematic answer to the Lab B problem</span></li>
+    <li><a href="https://people.freebsd.org/~lstewart/articles/cpumemory.pdf">Ulrich Drepper, What Every Programmer Should Know About Memory (2007)</a> <span class="lvl" lang="zh-CN">二手资料，进阶：缓存、缓存行与内存带宽的长篇讲解；以 x86 为例，数字已过时，原理仍适用</span><span class="lvl" lang="en">Secondary, advanced: a long treatment of caches, cache lines and memory bandwidth; x86-based and its numbers are dated, but the principles still apply</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Anthony Williams, 《C++ Concurrency in Action》, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">讲线程管理的一章对应概念 4（<code>std::thread</code> 的启动、join 与所有权）；讲设计并发代码的一章对应概念 5 和 Lab B（数据争用、cache ping-pong、伪共享）</span></li>
+    <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The chapter on managing threads matches concept 4 (launching, joining and owning a <code>std::thread</code>); the chapter on designing concurrent code matches concept 5 and Lab B (data contention, cache ping-pong, false sharing)</span></li>
+    <li lang="zh-CN">Maurice Herlihy, Nir Shavit, Victor Luchangco &amp; Michael Spear, 《The Art of Multiprocessor Programming》, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">引言章对应概念 1–2（并行的动机与 Amdahl 定律）；讲多处理器硬件基础的附录对应概念 3（缓存、一致性、伪共享）</span></li>
+    <li lang="en">Maurice Herlihy, Nir Shavit, Victor Luchangco &amp; Michael Spear, <em>The Art of Multiprocessor Programming</em>, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">The introductory chapter matches concepts 1–2 (why parallel, and Amdahl’s law); the appendix on multiprocessor hardware basics matches concept 3 (caches, coherence, false sharing)</span></li>
+    <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, release v2023.06.11a, 免费（CC BY-SA）. <span class="lvl">第 2 章「Introduction」对应概念 1–2；第 3 章「Hardware and its Habits」对应概念 3 和动画 (b)；第 5 章「Counting」对应 Lab B · 「免费在线」<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/">kernel.org/pub/linux/kernel/people/paulmck/perfbook</a></span></li>
+    <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, release v2023.06.11a, free (CC BY-SA). <span class="lvl">Chapter 2, “Introduction”, matches concepts 1–2; Chapter 3, “Hardware and its Habits”, matches concept 3 and diagram (b); Chapter 5, “Counting”, matches Lab B · free online: <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/">kernel.org/pub/linux/kernel/people/paulmck/perfbook</a></span></li>
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447. <span class="lvl">第 7 章「Understanding the Processor」的「Caching」部分（Cache Coherence、Impact on Performance）对应概念 3 和 Lab B · 「免费在线」<a href="https://marabos.nl/atomics/">marabos.nl/atomics</a></span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447. <span class="lvl">The “Caching” part of Chapter 7, “Understanding the Processor” (Cache Coherence, Impact on Performance), matches concept 3 and Lab B · free online: <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a></span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../lab-setup/index.html">← <span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span></a>
+    <a href="../phase-1-threads-and-the-os/index.html">Phase 1 · Threads &amp; the OS →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
