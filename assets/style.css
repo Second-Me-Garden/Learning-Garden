@@ -450,6 +450,9 @@ body.scrolled .rail-tools { display: flex; }
 .setup.done .btn { display: none; }
 @media (max-width: 600px) { .setup { grid-template-columns: 1fr; } .setup-actions { justify-items: start; } }
 .note.untranslated { margin: 6px 0 14px; border-left: 3px solid var(--ink-3); }
+.brief { border-left: 3px solid var(--ink-3); padding: 2px 0 2px 18px; margin: 8px 0 20px; }
+.brief h3 { font-size: 15px; }
+.brief p, .brief li { color: var(--ink-2); }
 
 /* ---------- Hub wordmark ---------- */
 h1.wordmark { font-family: "Fraunces", var(--display); font-weight: 600; font-variation-settings: "opsz" 72, "SOFT" 50, "WONK" 0; font-size: clamp(54px, 8vw, 96px); line-height: .98; letter-spacing: -0.012em; margin: 18px 0 14px; }

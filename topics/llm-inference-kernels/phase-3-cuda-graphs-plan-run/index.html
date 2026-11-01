@@ -23,8 +23,8 @@
 
   <p class="meta" lang="zh-CN">Phase 3 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 3 / 9 · about 1–2 weeks</p>
   <h1>CUDA Graphs and the plan()/run() Split <span class="en" lang="zh-CN">CUDA 图与 plan()/run() 拆分：为什么解码步要被捕获、图里不许做什么、按固定批大小填充，以及 FlashInfer 把 CPU 上的 plan() 和图里的 run() 分开</span><span class="en" lang="en">Why decode steps are captured, what a graph may not contain, padding to fixed batch sizes, and how FlashInfer separates plan() on the CPU from run() inside the graph</span></h1>
-  <p class="lede" lang="zh-CN">解码的每一步要跑完所有层的所有内核，而小批次下每个内核都很短，CPU 一个一个地发射它们的开销可能和内核本身一样长。CUDA 图把一整步的内核连同参数录下来，之后每步只用一次调用重放。代价是图是死的：形状、指针、控制流都在捕获时定下，图里不能同步主机、不能按数据分配内存、不能换批大小。SGLang 的回答是三件事：按一组固定批大小各捕获一张图，把真实批次填充到最近的那个尺寸；把注意力后端的准备工作拆成图外和图内两半；用 FlashInfer 的 <code>plan()</code>/<code>run()</code> 拆分，在 CPU 上算好调度，写进地址固定的缓冲区，让图里的 <code>run()</code> 去读。这台 Apple M5 上的 Metal 对照实测：一步 512 个小内核，每个内核一个命令缓冲区时每步约 7.7–7.8 ms，编码一次、每步重放的间接命令缓冲区约 1.8–1.9 ms，而它的 CPU 编码时间不随内核数增长。</p>
-  <p class="lede" lang="en">Every decode step runs every kernel of every layer, and at small batch sizes each kernel is short, so the CPU cost of launching them one at a time can be as long as the kernels themselves. A CUDA graph records a whole step’s kernels with their arguments, and each later step replays it with a single call. The price is that a graph is frozen: shapes, pointers and control flow are fixed at capture, so a graph cannot synchronize with the host, allocate memory by data, or change batch size. SGLang answers with three things: it captures one graph per size in a fixed list of batch sizes and pads the real batch up to the nearest one; it splits the attention backend’s preparation into an out-of-graph half and an in-graph half; and it uses FlashInfer’s <code>plan()</code>/<code>run()</code> split, computing the schedule on the CPU and writing it into fixed-address buffers that <code>run()</code> reads inside the graph. Measured with the Metal twin on this Apple M5: a step of 512 small kernels takes about 7.7–7.8 ms with one command buffer per kernel and about 1.8–1.9 ms as an indirect command buffer encoded once and replayed each step, whose CPU encoding time does not grow with the kernel count.</p>
+  <p class="lede" lang="zh-CN">解码的每一步要跑完所有层的所有内核，而小批次下每个内核都很短，CPU 一个一个地发射它们的开销可能和内核本身一样长。CUDA 图把一整步的内核连同参数录下来，之后每步只用一次调用重放。代价是图是死的：形状、指针、控制流都在捕获时定下，图里不能同步主机、不能按数据分配内存、不能换批大小。SGLang 的回答是三件事：按一组固定批大小各捕获一张图，把真实批次填充到最近的那个尺寸；把注意力后端的准备工作拆成图外和图内两半；用 FlashInfer 的 <code>plan()</code>/<code>run()</code> 拆分，在 CPU 上算好调度，写进地址固定的缓冲区，让图里的 <code>run()</code> 去读。这台 Apple M5 上的 Metal 对照实测：一步 512 个小内核，每个内核一个命令缓冲区时每步约 7.7–7.8 ms，编码一次、每步重放的间接命令缓冲区约 1.8–1.9 ms，而它的 CPU 编码时间不随内核数增长。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-11-01 在这台 Apple M5 上实际运行，数字原样贴出；Lab A <strong>未运行</strong>，是 2026-11-01 根据 SGLang v0.5.22 的源码整理的。</p>
+  <p class="lede" lang="en">Every decode step runs every kernel of every layer, and at small batch sizes each kernel is short, so the CPU cost of launching them one at a time can be as long as the kernels themselves. A CUDA graph records a whole step’s kernels with their arguments, and each later step replays it with a single call. The price is that a graph is frozen: shapes, pointers and control flow are fixed at capture, so a graph cannot synchronize with the host, allocate memory by data, or change batch size. SGLang answers with three things: it captures one graph per size in a fixed list of batch sizes and pads the real batch up to the nearest one; it splits the attention backend’s preparation into an out-of-graph half and an in-graph half; and it uses FlashInfer’s <code>plan()</code>/<code>run()</code> split, computing the schedule on the CPU and writing it into fixed-address buffers that <code>run()</code> reads inside the graph. Measured with the Metal twin on this Apple M5: a step of 512 small kernels takes about 7.7–7.8 ms with one command buffer per kernel and about 1.8–1.9 ms as an indirect command buffer encoded once and replayed each step, whose CPU encoding time does not grow with the kernel count. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-11-01 and its numbers are pasted as they came; Lab A is <strong>not run</strong>, assembled on 2026-11-01 from the SGLang v0.5.22 source.</p>
 
   <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
   <div class="goals">
@@ -170,19 +170,19 @@
       </defs>
       <text x="20" y="20" class="small" lang="zh-CN">启动时捕获：每个批大小一张图（从大到小）</text><text x="20" y="20" class="small" lang="en">Captured at start-up: one graph per batch size (largest first)</text>
       <g data-step="1">
-        <rect class="box cuda" x="20" y="32" width="72" height="34"/><text x="56" y="54" class="mono" text-anchor="middle">48</text>
-        <rect class="box cuda" x="106" y="32" width="72" height="34"/><text x="142" y="54" class="mono" text-anchor="middle">40</text>
-        <rect class="box cuda" x="192" y="32" width="72" height="34"/><text x="228" y="54" class="mono" text-anchor="middle">32</text>
-        <rect class="box cuda" x="278" y="32" width="72" height="34"/><text x="314" y="54" class="mono" text-anchor="middle">24</text>
-        <rect class="box cuda" x="364" y="32" width="72" height="34"/><text x="400" y="54" class="mono" text-anchor="middle">16</text>
-        <rect class="box cuda" x="450" y="32" width="72" height="34"/><text x="486" y="54" class="mono" text-anchor="middle">12</text>
-        <rect class="box cuda" x="622" y="32" width="72" height="34"/><text x="658" y="54" class="mono" text-anchor="middle">4</text>
-        <rect class="box cuda" x="708" y="32" width="72" height="34"/><text x="744" y="54" class="mono" text-anchor="middle">2</text>
-        <rect class="box cuda" x="794" y="32" width="72" height="34"/><text x="830" y="54" class="mono" text-anchor="middle">1</text>
+        <rect class="box" x="20" y="32" width="72" height="34"/><text x="56" y="54" class="mono" text-anchor="middle">48</text>
+        <rect class="box" x="106" y="32" width="72" height="34"/><text x="142" y="54" class="mono" text-anchor="middle">40</text>
+        <rect class="box" x="192" y="32" width="72" height="34"/><text x="228" y="54" class="mono" text-anchor="middle">32</text>
+        <rect class="box" x="278" y="32" width="72" height="34"/><text x="314" y="54" class="mono" text-anchor="middle">24</text>
+        <rect class="box" x="364" y="32" width="72" height="34"/><text x="400" y="54" class="mono" text-anchor="middle">16</text>
+        <rect class="box" x="450" y="32" width="72" height="34"/><text x="486" y="54" class="mono" text-anchor="middle">12</text>
+        <rect class="box" x="622" y="32" width="72" height="34"/><text x="658" y="54" class="mono" text-anchor="middle">4</text>
+        <rect class="box" x="708" y="32" width="72" height="34"/><text x="744" y="54" class="mono" text-anchor="middle">2</text>
+        <rect class="box" x="794" y="32" width="72" height="34"/><text x="830" y="54" class="mono" text-anchor="middle">1</text>
         <path class="arrow" d="M20 80 L866 80"/>
         <text x="20" y="98" class="small" lang="zh-CN">捕获顺序；小图复用大图的内存池</text><text x="20" y="98" class="small" lang="en">Capture order; smaller graphs reuse the larger graphs’ pool</text>
       </g>
-      <g data-step="1 3 6"><rect class="box cuda" x="536" y="32" width="72" height="34"/><text x="572" y="54" class="mono" text-anchor="middle">8</text></g>
+      <g data-step="1 3 6"><rect class="box" x="536" y="32" width="72" height="34"/><text x="572" y="54" class="mono" text-anchor="middle">8</text></g>
       <g data-step="3"><path class="arrow" d="M572 120 L572 70"/>
         <text x="590" y="104" class="mono">bisect_left(capture_bs, 5) → 8</text></g>
 
@@ -209,7 +209,7 @@
         <text x="372" y="210" class="mono">→ kv_indptr, kv_indices</text>
         <path class="arrow" d="M285 161 L356 175"/></g>
 
-      <g data-step="6"><rect class="box cuda" x="360" y="236" width="250" height="134"/>
+      <g data-step="6"><rect class="box" x="360" y="236" width="250" height="134"/>
         <text x="372" y="258" lang="zh-CN">重放尺寸 8 的图：一次调用</text><text x="372" y="258" lang="en">Replay the size-8 graph: one call</text>
         <text x="372" y="282" class="mono">layer 0: norm qkv rope attn</text>
         <text x="372" y="302" class="mono" style="white-space: pre">         o_proj mlp</text>
@@ -255,7 +255,7 @@
            "4. plan() uses copy_ to write the new indptr, indices and last_page_len into the same buffers, and the schedule into a fixed region of the workspace: the contents change, the addresses do not.",
            "5. Replay: run() of each of the 28 layers reads these buffers in turn. One plan serves every layer, so the CPU pays for it once per step.",
            "6. What breaks it: a different batch size makes the graph-mode wrapper raise ValueError, and a newly created indices tensor has an address the graph has never seen. That is why SGLang keeps one set of wrappers per captured size.",
-           "7. The SGLang detail: after the first plan at capture time it swaps begin_forward for FlashInfer fast_decode_plan, which by its docstring skips redundant copies into the graph buffers; SGLang own Triton kernel writes the indices straight into the buffer."]'>
+           "7. The SGLang detail: after the first plan at capture time it swaps begin_forward for the fast_decode_plan of FlashInfer, which by its docstring skips redundant copies into the graph buffers; a Triton kernel of SGLang itself writes the indices straight into the buffer."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -281,13 +281,13 @@
       <line x1="20" y1="140" x2="880" y2="140" class="lane"/>
       <text x="20" y="134" class="small" lang="zh-CN">GPU（显存，地址固定）</text><text x="20" y="134" class="small" lang="en">GPU (memory, fixed addresses)</text>
       <g data-step="1 4 5">
-        <rect class="box cuda" x="20" y="156" width="200" height="60"/><text x="32" y="180" class="mono">kv_indptr buf</text><text x="32" y="202" class="mono">[0, 9, 26, 30, 31]</text>
-        <rect class="box cuda" x="240" y="156" width="200" height="60"/><text x="252" y="180" class="mono">kv_indices buf</text><text x="252" y="202" class="mono">max_num_tokens × ctx</text>
-        <rect class="box cuda" x="460" y="156" width="200" height="60"/><text x="472" y="180" class="mono">last_page_len buf</text><text x="472" y="202" class="mono">[1, 1, 1, 1]</text>
-        <rect class="box cuda" x="680" y="156" width="200" height="60"/><text x="692" y="180" class="mono">workspace</text><text x="692" y="202" class="mono">plan info, fixed offset</text>
+        <rect class="box" x="20" y="156" width="200" height="60"/><text x="32" y="180" class="mono">kv_indptr buf</text><text x="32" y="202" class="mono">[0, 9, 26, 30, 31]</text>
+        <rect class="box" x="240" y="156" width="200" height="60"/><text x="252" y="180" class="mono">kv_indices buf</text><text x="252" y="202" class="mono">max_num_tokens × ctx</text>
+        <rect class="box" x="460" y="156" width="200" height="60"/><text x="472" y="180" class="mono">last_page_len buf</text><text x="472" y="202" class="mono">[1, 1, 1, 1]</text>
+        <rect class="box" x="680" y="156" width="200" height="60"/><text x="692" y="180" class="mono">workspace</text><text x="692" y="202" class="mono">plan info, fixed offset</text>
       </g>
 
-      <g data-step="2 5"><rect class="box cuda" x="20" y="240" width="860" height="118"/>
+      <g data-step="2 5"><rect class="box" x="20" y="240" width="860" height="118"/>
         <text x="32" y="262" lang="zh-CN">捕获下来的图：每一层一次 run()</text><text x="32" y="262" lang="en">The captured graph: one run() per layer</text>
         <rect class="box" x="40" y="278" width="170" height="36"/><text x="52" y="301" class="mono">layer 0 run()</text>
         <rect class="box" x="240" y="278" width="170" height="36"/><text x="252" y="301" class="mono">layer 1 run()</text>
@@ -311,7 +311,7 @@
   <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
   <div class="lab">
     <h3 lang="zh-CN">Lab A · 开关解码图各测一次，再手工捕获一个玩具解码步</h3><h3 lang="en">Lab A · Measure decode with graphs on and off, then capture a toy decode step by hand</h3>
-    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。根据 SGLang v0.5.22 的源码（<code>exec_.py</code>、<code>server_args.py</code>、<code>cuda_graph_hook.py</code>、<code>memory_hook.py</code>、<code>decode_cuda_graph_runner.py</code>、<code>benchmark/one_batch.py</code>、<code>environ.py</code>）、FlashInfer v0.7.1 的文档字符串和 PyTorch v2.14.1 的 CUDA 语义说明整理。还没有租用的 L4，所以这里不给数字，只描述应当看到的形状。环境是实验环境页里的 L4 和名为 <code>sglang-lab</code> 的 <code>lmsysorg/sglang:v0.5.23</code> 容器，主机目录 <code>~/llm-lab</code> 挂在容器的 <code>/work</code>；镜像比本页引用的 v0.5.22 新一个补丁版本，行号可能略有出入。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Assembled from the SGLang v0.5.22 source (<code>exec_.py</code>, <code>server_args.py</code>, <code>cuda_graph_hook.py</code>, <code>memory_hook.py</code>, <code>decode_cuda_graph_runner.py</code>, <code>benchmark/one_batch.py</code>, <code>environ.py</code>), the FlashInfer v0.7.1 docstrings and the PyTorch v2.14.1 CUDA semantics notes. There is no rented L4 yet, so this lab gives no numbers, only the shape you should see. The environment is the L4 from the lab environment page with the <code>lmsysorg/sglang:v0.5.23</code> container named <code>sglang-lab</code>, the host directory <code>~/llm-lab</code> mounted at <code>/work</code>; the image is one patch release newer than the v0.5.22 this page cites, so line numbers may shift slightly.</div>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。根据 SGLang v0.5.22 的源码（<code>exec_.py</code>、<code>server_args.py</code>、<code>cuda_graph_hook.py</code>、<code>memory_hook.py</code>、<code>decode_cuda_graph_runner.py</code>、<code>benchmark/one_batch.py</code>、<code>environ.py</code>）、FlashInfer v0.7.1 的文档字符串和 PyTorch v2.14.1 的 CUDA 语义说明整理。还没有租用的 L4，所以这里不给数字，只描述应当看到的形状。环境是实验环境页里的 L4 和名为 <code>sglang-lab</code> 的 <code>lmsysorg/sglang:v0.5.23</code> 容器，主机目录 <code>~/llm-lab</code> 挂在容器的 <code>/work</code>；镜像比本页引用的 v0.5.22 新一个补丁版本（它固定 FlashInfer 0.7.2、sglang-kernel 0.4.10 和 sgl-deep-gemm 0.2.3.post2，比这里引用的 v0.5.22 版本各新一步；torch 2.14.1、nvidia-cutlass-dsl 4.8.0 和 sgl-deep-ep 0.1.2.post1 不变），行号可能略有出入。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Assembled from the SGLang v0.5.22 source (<code>exec_.py</code>, <code>server_args.py</code>, <code>cuda_graph_hook.py</code>, <code>memory_hook.py</code>, <code>decode_cuda_graph_runner.py</code>, <code>benchmark/one_batch.py</code>, <code>environ.py</code>), the FlashInfer v0.7.1 docstrings and the PyTorch v2.14.1 CUDA semantics notes. There is no rented L4 yet, so this lab gives no numbers, only the shape you should see. The environment is the L4 from the lab environment page with the <code>lmsysorg/sglang:v0.5.23</code> container named <code>sglang-lab</code>, the host directory <code>~/llm-lab</code> mounted at <code>/work</code>; the image is one patch release newer than the v0.5.22 this page cites (it pins FlashInfer 0.7.2, sglang-kernel 0.4.10 and sgl-deep-gemm 0.2.3.post2, one step past the v0.5.22 pins quoted here; torch 2.14.1, nvidia-cutlass-dsl 4.8.0 and sgl-deep-ep 0.1.2.post1 are unchanged), so line numbers may shift slightly.</div>
     <ol>
       <li><span lang="zh-CN">开和关解码图，各用 <code>one_batch</code> 测一次。<code>one_batch</code> 每个批大小打印逐步的 <code>Decode i.</code> 行和一行 <code>Decode.  median latency</code>（<code>one_batch.py</code> 第 870、878 行）。第二次只关解码图，不用已弃用、会连预填充图一起关掉的 <code>--disable-cuda-graph</code>：</span><span lang="en">Measure with <code>one_batch</code> once with decode graphs on and once with them off. For each batch size, <code>one_batch</code> prints per-step <code>Decode i.</code> lines and one <code>Decode.  median latency</code> line (lines 870 and 878 of <code>one_batch.py</code>). The second run turns off only the decode graph, not the deprecated <code>--disable-cuda-graph</code>, which would turn off the prefill graph too:</span><pre data-lang="sh" data-file="in the container">
 # 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01

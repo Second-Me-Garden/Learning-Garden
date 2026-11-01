@@ -25,17 +25,19 @@
   <p class="lede" lang="en">Goal: read, profile and write the GPU kernels under an LLM inference engine, taking SGLang as the engine: see how each runtime design choice (RadixAttention, continuous batching, CUDA graphs, MoE, quantization, speculative decoding, structured output) places a requirement on a kernel, meet that requirement in code, and measure the end-to-end effect. "Kernel" here means a GPU compute kernel, not the OS kernel of the Kernel Engineering topic; the two topics link to each other.</p>
 
   <div class="note" lang="zh-CN">
-    读者画像：做过 GPU Programming with CUDA（warp、内存层次、占用率、流与图、剖析）和 Parallel Programming。每个 phase 大约 1–2 周（每天 1–2 小时）。SGLang 本身需要一块 Ada 级以上的 NVIDIA GPU，部分内核只在 Hopper 上有，所以云端实验按层级标注费用；每一页的 Metal 对照实验在这台 Mac 上运行。先看「实验环境」。
+    读者画像：做过 GPU Programming with CUDA（warp、内存层次、占用率、流与图、剖析）和 Parallel Programming。每个 phase 大约 1–2 周（每天 1–2 小时）。SGLang 本身需要一块 Ampere 或更新的 NVIDIA GPU（本专题用 Ada 的 L4），部分内核只在 Hopper 上有，所以云端实验按层级标注费用；每一页的 Metal 对照实验在这台 Mac 上运行。先看「实验环境」。
   </div>
   <div class="note" lang="en">
-    Reader: has done GPU Programming with CUDA (warps, the memory hierarchy, occupancy, streams and graphs, profiling) and Parallel Programming. Each phase is about 1–2 weeks at 1–2 hours a day. SGLang itself needs an NVIDIA GPU of at least Ada class and some of its kernels exist only on Hopper, so the cloud labs are marked by tier and cost; every page's Metal twin runs on this Mac. Start with the lab environment page.
+    Reader: has done GPU Programming with CUDA (warps, the memory hierarchy, occupancy, streams and graphs, profiling) and Parallel Programming. Each phase is about 1–2 weeks at 1–2 hours a day. SGLang itself needs an NVIDIA GPU of Ampere or newer (this topic uses an Ada-class L4) and some of its kernels exist only on Hopper, so the cloud labs are marked by tier and cost; every page's Metal twin runs on this Mac. Start with the lab environment page.
   </div>
 
   <h2 lang="zh-CN">简报</h2><h2 lang="en">The brief</h2>
-  <p class="small" lang="zh-CN">下面是创始人 2026-10-31 的专题简报。英文为原文，逐字保留；中文为译文。九个阶段各对应简报的一节。</p>
-  <p class="small" lang="en">The Founder's topic brief of 2026-10-31, reproduced verbatim. The Chinese is a translation. The nine phases follow the sections of the brief.</p>
+  <p class="small" lang="zh-CN">九个阶段各对应简报的一节。</p>
+  <p class="small" lang="en">The nine phases follow the sections of the brief.</p>
 
   <section class="brief">
+    <p class="small" lang="zh-CN">创始人简报 · 2026-10-31 · 英文为原文，逐字保留；中文为译文</p>
+    <p class="small" lang="en">Founder's brief · 2026-10-31 · reproduced verbatim; the Chinese is a translation</p>
     <p lang="zh-CN">内核工程是 SGLang 立足的最底层。SGLang 的大想法，比如 RadixAttention、连续批处理和推测解码，都是调度与内存管理层面的想法。它们只有在下面的 GPU 内核能配合这些想法所造出的数据布局和执行模式时才会有回报。写这些内核的人就是内核工程师。</p>
     <p lang="en">Kernel engineering is the bottom layer SGLang stands on. SGLang’s big ideas, like RadixAttention, continuous batching and speculative decoding, are scheduling and memory-management ideas. They only pay off if the GPU kernels underneath can work with the data layouts and execution patterns those ideas create. Kernel engineers write those kernels.</p>
 
@@ -45,7 +47,7 @@
       <li lang="en">Frontend / program layer: gen, select, fork. These are LLM programs that naturally share prefixes.</li>
       <li lang="zh-CN">运行时（SRT）调度器：连续批处理、radix 树 KV 缓存、分块预填充、重叠调度器、预填充/解码分离，以及推测解码（EAGLE）。</li>
       <li lang="en">Runtime (SRT) scheduler: continuous batching, the radix-tree KV cache, chunked prefill, the overlap scheduler, prefill/decode disaggregation, and speculative decoding (EAGLE).</li>
-      <li lang="zh-CN">模型执行器：每次前向都拆成注意力、GEMM、MoE、RMSNorm、RoPE、激活、采样和 all-reduce 这些算子。</li>
+      <li lang="zh-CN">模型执行器：每次前向都拆成注意力、GEMM、MoE、RMSNorm、RoPE、激活、采样和 all-reduce 等算子。</li>
       <li lang="en">Model executor: each forward pass breaks down into ops such as attention, GEMMs, MoE, RMSNorm, RoPE, activations, sampling and all-reduce.</li>
       <li lang="zh-CN">内核层：sgl-kernel（SGLang 自己的 CUDA/C++ 算子）、FlashInfer、FlashAttention-3、FlashMLA、Triton 内核、DeepGEMM、CUTLASS、DeepEP，以及自定义 all-reduce。在 AMD 上对应的是 aiter/HIP。</li>
       <li lang="en">Kernel layer: sgl-kernel (SGLang’s own CUDA/C++ ops), FlashInfer, FlashAttention-3, FlashMLA, Triton kernels, DeepGEMM, CUTLASS, DeepEP, and custom all-reduce. On AMD the equivalent is aiter/HIP.</li>
@@ -87,7 +89,7 @@
       <li lang="en">The AttentionBackend interface: init_forward_metadata, forward_extend, forward_decode, plus the CUDA-graph hooks. Adding a backend means implementing this interface around your kernel.</li>
       <li lang="zh-CN">上游库：FlashInfer、DeepGEMM、FlashMLA、CUTLASS。SGLang 常常先从这些库采用内核。</li>
       <li lang="en">Upstream libraries: FlashInfer, DeepGEMM, FlashMLA, CUTLASS. SGLang often adopts kernels from these first.</li>
-      <li lang="zh-CN">工具：bench_one_batch、torch profiler，以及用 Nsight Systems/Compute 找出哪个内核占主导。常用语言是 CUDA、CuTe/CuTe-DSL、Triton 和 TileLang。</li>
+      <li lang="zh-CN">工具：bench_one_batch、torch profiler 和 Nsight Systems/Compute，用来找出哪个内核占主导。常用语言是 CUDA、CuTe/CuTe-DSL、Triton 和 TileLang。</li>
       <li lang="en">Tooling: bench_one_batch, the torch profiler and Nsight Systems/Compute for finding which kernel dominates. Common languages are CUDA, CuTe/CuTe-DSL, Triton and TileLang.</li>
     </ul>
 
@@ -172,7 +174,7 @@
   <section class="setup" data-setup="llm" lang="zh-CN">
     <div class="setup-text">
       <h2>实验环境</h2>
-      <p>三部分：租一台 L4 跑 SGLang 本身（CUDA 13 的官方镜像，一个放得下的小模型，torch profiler 与 Nsight）；只有 Hopper 才有的内核（FA3、FlashMLA、DeepGEMM、DeepEP）另租 H100，按费用标注；Metal 对照实验在这台 Mac 上用 Swift 运行时编译内核。账户、密钥、容器和账单规则沿用 GPU 专题的环境页。</p>
+      <p>三部分：租一台 L4 跑 SGLang 本身（CUDA 13 的官方镜像，一个放得下的小模型，torch profiler 与 Nsight）；需要 Hopper 的 FA3 和 DeepGEMM 另租 H100，按费用标注；FlashMLA（SGLang 自带的 sgl-project/FlashMLA@3620b63，sm_90a）和 DeepEP（SGLang 安装的 sgl-deep-ep 0.1.2.post1 分支，要求 Hopper，且要多块 GPU 经 NVLink/RDMA 互连）只讲解，不在任何层级上运行；Metal 对照实验在这台 Mac 上用 Swift 运行时编译内核。账户、密钥、容器和账单规则沿用 GPU 专题的环境页。</p>
       <p class="setup-ready">实验环境已建好。<a href="lab-setup/index.html">查看说明</a></p>
     </div>
     <div class="setup-actions">
@@ -183,7 +185,7 @@
   <section class="setup" data-setup="llm" lang="en">
     <div class="setup-text">
       <h2>Lab environment</h2>
-      <p>Three parts: a rented L4 running SGLang itself (the official CUDA 13 image, a small model that fits, the torch profiler and Nsight); a rented H100 only for the Hopper-only kernels (FA3, FlashMLA, DeepGEMM, DeepEP), marked by cost; the Metal twins on this Mac, compiling kernels at runtime from Swift. Accounts, keys, the container and the bill rules carry over from the GPU topic's lab page.</p>
+      <p>Three parts: a rented L4 running SGLang itself (the official CUDA 13 image, a small model that fits, the torch profiler and Nsight); a rented H100 for FA3 and DeepGEMM, which need Hopper, marked by cost; FlashMLA (the sgl-project/FlashMLA@3620b63 build that SGLang bundles, sm_90a) and DeepEP (the sgl-deep-ep 0.1.2.post1 fork that SGLang installs, which needs Hopper and several GPUs over NVLink or RDMA) are described and run on no tier; the Metal twins on this Mac, compiling kernels at runtime from Swift. Accounts, keys, the container and the bill rules carry over from the GPU topic's lab page.</p>
       <p class="setup-ready">Lab environment is ready. <a href="lab-setup/index.html">Open the guide</a></p>
     </div>
     <div class="setup-actions">
