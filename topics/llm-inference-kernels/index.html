@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LLM Inference Kernels (SGLang) · Learning Garden</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script src="../../assets/theme.js"></script>
+<script src="../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../index.html"><span class="mark" aria-hidden="true"><img src="../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <span class="crumb current" aria-current="page">LLM Inference Kernels (SGLang)</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <h1>LLM Inference Kernels (SGLang)</h1>
+  <p class="lede" lang="zh-CN">目标：读懂、剖析并写出 LLM 推理引擎脚下的 GPU 内核，以 SGLang 为引擎：看清运行时的每一个设计选择（RadixAttention、连续批处理、CUDA 图、MoE、量化、推测解码、结构化输出）如何给内核提出一条要求，用代码满足这条要求，再测量端到端的效果。这里的「内核」是 GPU 计算内核，不是 Kernel Engineering 专题里的操作系统内核；两个专题互相链接。</p>
+  <p class="lede" lang="en">Goal: read, profile and write the GPU kernels under an LLM inference engine, taking SGLang as the engine: see how each runtime design choice (RadixAttention, continuous batching, CUDA graphs, MoE, quantization, speculative decoding, structured output) places a requirement on a kernel, meet that requirement in code, and measure the end-to-end effect. "Kernel" here means a GPU compute kernel, not the OS kernel of the Kernel Engineering topic; the two topics link to each other.</p>
+
+  <div class="note" lang="zh-CN">
+    读者画像：做过 GPU Programming with CUDA（warp、内存层次、占用率、流与图、剖析）和 Parallel Programming。每个 phase 大约 1–2 周（每天 1–2 小时）。SGLang 本身需要一块 Ada 级以上的 NVIDIA GPU，部分内核只在 Hopper 上有，所以云端实验按层级标注费用；每一页的 Metal 对照实验在这台 Mac 上运行。先看「实验环境」。
+  </div>
+  <div class="note" lang="en">
+    Reader: has done GPU Programming with CUDA (warps, the memory hierarchy, occupancy, streams and graphs, profiling) and Parallel Programming. Each phase is about 1–2 weeks at 1–2 hours a day. SGLang itself needs an NVIDIA GPU of at least Ada class and some of its kernels exist only on Hopper, so the cloud labs are marked by tier and cost; every page's Metal twin runs on this Mac. Start with the lab environment page.
+  </div>
+
+  <h2 lang="zh-CN">简报</h2><h2 lang="en">The brief</h2>
+  <p class="small" lang="zh-CN">下面是创始人 2026-10-31 的专题简报。英文为原文，逐字保留；中文为译文。九个阶段各对应简报的一节。</p>
+  <p class="small" lang="en">The Founder's topic brief of 2026-10-31, reproduced verbatim. The Chinese is a translation. The nine phases follow the sections of the brief.</p>
+
+  <section class="brief">
+    <p lang="zh-CN">内核工程是 SGLang 立足的最底层。SGLang 的大想法，比如 RadixAttention、连续批处理和推测解码，都是调度与内存管理层面的想法。它们只有在下面的 GPU 内核能配合这些想法所造出的数据布局和执行模式时才会有回报。写这些内核的人就是内核工程师。</p>
+    <p lang="en">Kernel engineering is the bottom layer SGLang stands on. SGLang’s big ideas, like RadixAttention, continuous batching and speculative decoding, are scheduling and memory-management ideas. They only pay off if the GPU kernels underneath can work with the data layouts and execution patterns those ideas create. Kernel engineers write those kernels.</p>
+
+    <h3 lang="zh-CN">自顶向下的栈</h3><h3 lang="en">The stack, top to bottom</h3>
+    <ul>
+      <li lang="zh-CN">前端 / 程序层：gen、select、fork。这些是天然共享前缀的 LLM 程序。</li>
+      <li lang="en">Frontend / program layer: gen, select, fork. These are LLM programs that naturally share prefixes.</li>
+      <li lang="zh-CN">运行时（SRT）调度器：连续批处理、radix 树 KV 缓存、分块预填充、重叠调度器、预填充/解码分离，以及推测解码（EAGLE）。</li>
+      <li lang="en">Runtime (SRT) scheduler: continuous batching, the radix-tree KV cache, chunked prefill, the overlap scheduler, prefill/decode disaggregation, and speculative decoding (EAGLE).</li>
+      <li lang="zh-CN">模型执行器：每次前向都拆成注意力、GEMM、MoE、RMSNorm、RoPE、激活、采样和 all-reduce 这些算子。</li>
+      <li lang="en">Model executor: each forward pass breaks down into ops such as attention, GEMMs, MoE, RMSNorm, RoPE, activations, sampling and all-reduce.</li>
+      <li lang="zh-CN">内核层：sgl-kernel（SGLang 自己的 CUDA/C++ 算子）、FlashInfer、FlashAttention-3、FlashMLA、Triton 内核、DeepGEMM、CUTLASS、DeepEP，以及自定义 all-reduce。在 AMD 上对应的是 aiter/HIP。</li>
+      <li lang="en">Kernel layer: sgl-kernel (SGLang’s own CUDA/C++ ops), FlashInfer, FlashAttention-3, FlashMLA, Triton kernels, DeepGEMM, CUTLASS, DeepEP, and custom all-reduce. On AMD the equivalent is aiter/HIP.</li>
+    </ul>
+    <p lang="zh-CN">第 2–3 层的每一个设计选择，都会给第 4 层提出一条要求。</p>
+    <p lang="en">Each design choice in layers 2–3 places a requirement on layer 4.</p>
+
+    <h3 lang="zh-CN">层与层相接的地方</h3><h3 lang="en">Where the layers meet</h3>
+    <p lang="zh-CN">RadixAttention 意味着内核不能假设 KV 缓存是连续的。缓存按 token 粒度管理，页是分散的，并且在请求之间共享。所以注意力内核要接受索引数组（CSR 风格的 indptr/indices），从任意槽位收集 KV。前缀共享还使得级联（cascade）或共享前缀注意力成为可能：公共前缀对许多请求只算一次。FlashInfer 的分页（paged）和不规则（ragged）API 很大程度上就是为此而存在的。</p>
+    <p lang="en">RadixAttention means the kernels can’t assume a contiguous KV cache. The cache is token-granular, and pages are scattered and shared across requests. So attention kernels take index arrays (CSR-style indptr/indices) and gather KV from arbitrary slots. Prefix sharing also enables cascade or shared-prefix attention, where the common prefix is computed once for many requests. FlashInfer’s paged and ragged APIs exist largely for this.</p>
+    <p lang="zh-CN">预填充和解码是两个不同的问题。预填充受算力限制，目标是用 FA3 风格的内核把 tensor core 用满。解码受内存带宽限制：每个请求只有一个查询 token，所以速度取决于你能多快把 KV 流过去。这就是解码用 split-KV（flash-decoding）的原因，也是 DeepSeek 风格模型的 MLA 内核被专门化的原因。SGLang 允许为每个阶段选不同的注意力后端。</p>
+    <p lang="en">Prefill and decode are different problems. Prefill is compute-bound, so the goal is tensor-core utilization with FA3-style kernels. Decode is memory-bandwidth-bound: there is one query token per request, so speed comes down to how fast you can stream KV. That is why decode uses split-KV (flash-decoding) and why the MLA kernels for DeepSeek-style models are specialized. SGLang lets you pick a different attention backend for each phase.</p>
+    <p lang="zh-CN">CUDA 图约束着内核的写法。解码步被捕获成 CUDA 图以去掉启动开销。一个可被图捕获的内核不能做主机同步或动态分配，形状必须是静态的或补齐过的。这就是 FlashInfer 把每次调用拆成 CPU 侧的 plan() 和图安全的 run() 两步的原因。</p>
+    <p lang="en">CUDA graphs constrain how kernels are written. Decode steps are captured as CUDA graphs to remove launch overhead. A graph-capturable kernel can’t do host syncs or dynamic allocation, and its shapes must be static or padded. This is why FlashInfer splits each call into a CPU-side plan() step and a graph-safe run() step.</p>
+    <p lang="zh-CN">MoE 在很大程度上是一个内核问题。这项工作拆成几个内核：</p>
+    <p lang="en">MoE is largely a kernel problem. The work splits into several kernels:</p>
+    <ul>
+      <li lang="zh-CN">路由与 top-k。</li>
+      <li lang="en">Routing and top-k.</li>
+      <li lang="zh-CN">moe_align_block_size，按专家对 token 排序并补齐。它在 sgl-kernel 里。</li>
+      <li lang="en">moe_align_block_size, which sorts and pads tokens per expert. It lives in sgl-kernel.</li>
+      <li lang="zh-CN">融合或分组的 GEMM，用 Triton fused_moe，或者用 DeepGEMM 处理 FP8 块量化权重。</li>
+      <li lang="en">Fused or grouped GEMMs, using Triton fused_moe or DeepGEMM for FP8 block-quantized weights.</li>
+      <li lang="zh-CN">用专家并行时，通过 DeepEP 做 all-to-all 的分发与合并。</li>
+      <li lang="en">With expert parallelism, all-to-all dispatch and combine through DeepEP.</li>
+    </ul>
+    <p lang="zh-CN">融合减少内存流量。常见的融合有：残差相加加 RMSNorm、SiLU-and-mul、RoPE 加写入 KV 缓存、all-reduce 加归一化，以及采样。FlashInfer 做 top-k/top-p 采样时不做完整排序。</p>
+    <p lang="en">Fusion cuts memory traffic. Common fusions include residual-add plus RMSNorm, SiLU-and-mul, RoPE plus writing to the KV cache, all-reduce plus norm, and sampling. FlashInfer does top-k/top-p sampling without a full sort.</p>
+    <p lang="zh-CN">量化依赖内核。FP8、Blackwell 上的 NVFP4/MXFP4，以及 int4 的 AWQ/GPTQ，各自都需要专用的 GEMM 内核，通常用 CUTLASS 或 CuTe 构建。没有这些内核，量化只省内存，不省时间。</p>
+    <p lang="en">Quantization depends on kernels. FP8, NVFP4/MXFP4 on Blackwell, and int4 AWQ/GPTQ each need dedicated GEMM kernels, usually built with CUTLASS or CuTe. Without those kernels, quantizing saves memory but not time.</p>
+    <p lang="zh-CN">其他运行时特性也需要自己的内核。推测解码需要树状注意力掩码和验证内核。结构化输出（xgrammar）每一步都要给 logits 套一个 token 位掩码，这又是热路径上的一个小内核。</p>
+    <p lang="en">Other runtime features need their own kernels too. Speculative decoding needs tree-attention masks and verification kernels. Structured output (xgrammar) applies a token bitmask to the logits each step, which is another small kernel on the hot path.</p>
+
+    <h3 lang="zh-CN">内核工程师从哪里接入</h3><h3 lang="en">Where a kernel engineer plugs in</h3>
+    <ul>
+      <li lang="zh-CN">SGLang 仓库里的 sgl-kernel/：通过 torch 算子暴露的自定义 CUDA/C++ 算子。</li>
+      <li lang="en">sgl-kernel/ in the SGLang repo: custom CUDA/C++ ops exposed through torch ops.</li>
+      <li lang="zh-CN">AttentionBackend 接口：init_forward_metadata、forward_extend、forward_decode，加上 CUDA 图的钩子。增加一个后端，就是围绕你的内核实现这个接口。</li>
+      <li lang="en">The AttentionBackend interface: init_forward_metadata, forward_extend, forward_decode, plus the CUDA-graph hooks. Adding a backend means implementing this interface around your kernel.</li>
+      <li lang="zh-CN">上游库：FlashInfer、DeepGEMM、FlashMLA、CUTLASS。SGLang 常常先从这些库采用内核。</li>
+      <li lang="en">Upstream libraries: FlashInfer, DeepGEMM, FlashMLA, CUTLASS. SGLang often adopts kernels from these first.</li>
+      <li lang="zh-CN">工具：bench_one_batch、torch profiler，以及用 Nsight Systems/Compute 找出哪个内核占主导。常用语言是 CUDA、CuTe/CuTe-DSL、Triton 和 TileLang。</li>
+      <li lang="en">Tooling: bench_one_batch, the torch profiler and Nsight Systems/Compute for finding which kernel dominates. Common languages are CUDA, CuTe/CuTe-DSL, Triton and TileLang.</li>
+    </ul>
+
+    <h3 lang="zh-CN">一条好的入门路径</h3><h3 lang="en">A good way in</h3>
+    <ul>
+      <li lang="zh-CN">把 SGLang 的注意力后端代码和 FlashInfer 的分页注意力 API 对照着读，看清数据布局的契约。</li>
+      <li lang="en">Read SGLang’s attention backend code alongside FlashInfer’s paged-attention API to see the data-layout contract.</li>
+      <li lang="zh-CN">在一个 MoE 模型上剖析一个解码步，看哪些内核占主导。</li>
+      <li lang="en">Profile a decode step on a MoE model to see which kernels dominate.</li>
+      <li lang="zh-CN">试着在 sgl-kernel 里写或优化一个小的融合算子，比如一个归一化或一个激活。</li>
+      <li lang="en">Try writing or optimizing one small fused op in sgl-kernel, such as a norm or an activation.</li>
+    </ul>
+    <p lang="zh-CN">这条路径走完整个闭环：运行时的一个设计选择定下一种布局或一条约束，一个内核必须满足它，然后你测量端到端的吞吐量。</p>
+    <p lang="en">That path covers the whole loop: a runtime design choice sets a layout or constraint, a kernel has to meet it, and you measure the end-to-end throughput.</p>
+  </section>
+
+  <div class="note" lang="zh-CN">
+    <strong>简报之后的变化（2026-10-31 按 SGLang v0.5.22 的源码核对）：</strong>简报里的 <code>sgl-kernel/</code> 目录已经搬家。现在内核库在 <code>python/sglang/kernels/</code>：<code>aot/csrc/</code> 是预先编译的 CUDA/C++ 算子（例如 <code>aot/csrc/moe/moe_align_kernel.cu</code>），<code>jit/csrc/</code> 是即时编译的算子，<code>ops/</code> 是 Python 封装；PyPI 包名是 <code>sglang-kernel</code>（旧的 <code>sgl-kernel</code> 包停在 2026-01 的 0.3.21）。AttentionBackend 接口的 CUDA 图钩子现在叫 <code>init_cuda_graph_state</code>、<code>init_forward_metadata_out_graph</code> 和 <code>init_forward_metadata_in_graph</code>。各课页面按 v0.5.22 给出当前路径；简报原文不改。
+  </div>
+  <div class="note" lang="en">
+    <strong>What moved since the brief (checked against the SGLang v0.5.22 source on 2026-10-31):</strong> the brief's <code>sgl-kernel/</code> directory has moved. The kernel library now lives at <code>python/sglang/kernels/</code>: <code>aot/csrc/</code> holds the ahead-of-time CUDA/C++ ops (for example <code>aot/csrc/moe/moe_align_kernel.cu</code>), <code>jit/csrc/</code> the JIT-built ops, <code>ops/</code> the Python wrappers; the PyPI package is <code>sglang-kernel</code> (the old <code>sgl-kernel</code> package stopped at 0.3.21 in January 2026). The AttentionBackend interface's CUDA-graph hooks are now <code>init_cuda_graph_state</code>, <code>init_forward_metadata_out_graph</code> and <code>init_forward_metadata_in_graph</code>. The lesson pages give the current paths at v0.5.22; the brief itself is left as written.
+  </div>
+
+  <h2 lang="zh-CN">路线图</h2><h2 lang="en">Roadmap</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 300" data-interval="1400"
+         data-captions='["全图：九个阶段，左侧看清栈与布局，中间逐个内核家族，右侧是运行时特性与接入点。点「播放」逐步点亮。",
+           "Phase 0 自顶向下的栈：四层、每一步解码里的算子、为什么解码受带宽限制、每个运行时想法落在哪个内核上。",
+           "Phase 1 注意力与 KV 缓存布局：RadixAttention、分散共享的页、indptr/indices 契约、级联注意力。",
+           "Phase 2 预填充与解码：FlashAttention 的分块与在线 softmax、FA3、split-KV 解码、MLA、按阶段选后端。",
+           "Phase 3 CUDA 图与 plan()/run() 拆分：捕获解码步、可捕获内核的禁区、补齐到静态批、FlashInfer 的两步。",
+           "Phase 4 MoE 内核：路由与 top-k、moe_align_block_size、分组 GEMM 与 DeepGEMM、DeepEP。",
+           "Phase 5 融合：残差加 RMSNorm、SiLU-and-mul、RoPE 加写缓存、all-reduce 加归一化、不排序的采样。",
+           "Phase 6 量化内核：FP8 块缩放、NVFP4/MXFP4、int4 权重内核；CUTLASS 与 CuTe DSL。",
+           "Phase 7 推测解码与结构化输出内核：草稿树、树状掩码与验证、xgrammar 的 logits 位掩码。",
+           "Phase 8 接入点与作品项目：sgl-kernel 算子、AttentionBackend、上游库、剖析工具；作品项目走完整个闭环。"]'
+         data-captions-en='["The whole picture: nine phases, the stack and its layouts on the left, one kernel family after another in the middle, the runtime features and the plug-in points on the right. Press Play to light them up one by one.",
+           "Phase 0 The stack, top to bottom: the four layers, the ops of one decode step, why decode is bandwidth-bound, where each runtime idea lands on a kernel.",
+           "Phase 1 Attention and KV-cache layouts: RadixAttention, scattered shared pages, the indptr/indices contract, cascade attention.",
+           "Phase 2 Prefill and decode: FlashAttention tiling and online softmax, FA3, split-KV decode, MLA, a backend per phase.",
+           "Phase 3 CUDA graphs and the plan()/run() split: capturing a decode step, what a capturable kernel may not do, padding to static batches, FlashInfer in two steps.",
+           "Phase 4 MoE kernels: routing and top-k, moe_align_block_size, grouped GEMMs and DeepGEMM, DeepEP.",
+           "Phase 5 Fusions: residual plus RMSNorm, SiLU-and-mul, RoPE plus the cache write, all-reduce plus norm, sampling without a full sort.",
+           "Phase 6 Quantization kernels: FP8 block scaling, NVFP4/MXFP4, int4 weight-only kernels; CUTLASS and the CuTe DSL.",
+           "Phase 7 Speculative decoding and structured-output kernels: the draft tree, tree masks and verification, the xgrammar logits bitmask.",
+           "Phase 8 Plugging in and the capstone: a sgl-kernel op, an AttentionBackend, the upstream libraries, the profilers; the capstone closes the loop."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="28" class="small" lang="zh-CN">栈与布局</text><text x="20" y="28" class="small" lang="en">The stack and layouts</text>
+      <text x="320" y="28" class="small" lang="zh-CN">内核家族</text><text x="320" y="28" class="small" lang="en">The kernel families</text>
+      <text x="600" y="28" class="small" lang="zh-CN">特性与接入</text><text x="600" y="28" class="small" lang="en">Features and the way in</text>
+      <line x1="300" y1="15" x2="300" y2="250" class="lane"/>
+      <line x1="580" y1="15" x2="580" y2="250" class="lane"/>
+
+      <g data-step="1"><rect class="box" x="20" y="50" width="120" height="60"/><text x="30" y="74">Phase 0</text><text x="30" y="94" class="small">The stack</text></g>
+      <g data-step="2"><rect class="box" x="160" y="50" width="120" height="60"/><text x="170" y="74">Phase 1</text><text x="170" y="94" class="small">KV layouts</text></g>
+      <path data-step="2" class="arrow" d="M140 80 L160 80"/>
+      <path data-step="3" class="arrow" d="M220 110 L220 140 L80 140 L80 160"/>
+      <g data-step="3"><rect class="box" x="20" y="160" width="120" height="60"/><text x="30" y="184">Phase 2</text><text x="30" y="204" class="small">Prefill · Decode</text></g>
+
+      <path data-step="4" class="arrow" d="M140 190 L370 190 L370 110"/>
+      <g data-step="4"><rect class="box" x="310" y="50" width="120" height="60"/><text x="320" y="74">Phase 3</text><text x="320" y="94" class="small">CUDA graphs</text></g>
+      <g data-step="5"><rect class="box" x="450" y="50" width="120" height="60"/><text x="460" y="74">Phase 4</text><text x="460" y="94" class="small">MoE</text></g>
+      <path data-step="5" class="arrow" d="M430 80 L450 80"/>
+      <path data-step="6" class="arrow" d="M510 110 L510 140 L370 140 L370 160"/>
+      <g data-step="6"><rect class="box" x="310" y="160" width="120" height="60"/><text x="320" y="184">Phase 5</text><text x="320" y="204" class="small">Fusions</text></g>
+      <g data-step="7"><rect class="box" x="450" y="160" width="120" height="60"/><text x="460" y="184">Phase 6</text><text x="460" y="204" class="small">Quantization</text></g>
+      <path data-step="7" class="arrow" d="M430 190 L450 190"/>
+
+      <path data-step="8" class="arrow" d="M570 190 L665 190 L665 110"/>
+      <g data-step="8"><rect class="box" x="600" y="50" width="130" height="60"/><text x="610" y="74">Phase 7</text><text x="610" y="94" class="small">Speculative · Grammar</text></g>
+      <g data-step="9"><rect class="box" x="750" y="50" width="130" height="60"/><text x="760" y="74">Phase 8</text><text x="760" y="94" class="small">Plugging in</text></g>
+      <path data-step="9" class="arrow" d="M730 80 L750 80"/>
+
+      <text x="20" y="270" class="small" lang="zh-CN">每个阶段：目标 → 核心概念 → 对照表 → 动画 → 实验 A（<tspan style="fill: var(--cuda, currentColor)">SGLang / CUDA</tspan>，云端）与实验 B（<tspan style="fill: var(--metal, currentColor)">Metal</tspan>，本机运行）→ 自测 → 资料 → 参考书目</text><text x="20" y="270" class="small" lang="en">Each phase: goals → core concepts → comparison → diagrams → Lab A (<tspan style="fill: var(--cuda, currentColor)">SGLang / CUDA</tspan>, in the cloud) and Lab B (<tspan style="fill: var(--metal, currentColor)">Metal</tspan>, run on this Mac) → quiz → resources → bibliography</text>
+    </svg>
+  </div>
+
+  <section class="setup" data-setup="llm" lang="zh-CN">
+    <div class="setup-text">
+      <h2>实验环境</h2>
+      <p>三部分：租一台 L4 跑 SGLang 本身（CUDA 13 的官方镜像，一个放得下的小模型，torch profiler 与 Nsight）；只有 Hopper 才有的内核（FA3、FlashMLA、DeepGEMM、DeepEP）另租 H100，按费用标注；Metal 对照实验在这台 Mac 上用 Swift 运行时编译内核。账户、密钥、容器和账单规则沿用 GPU 专题的环境页。</p>
+      <p class="setup-ready">实验环境已建好。<a href="lab-setup/index.html">查看说明</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">设置实验环境</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="llm"> 我已建好</label>
+    </div>
+  </section>
+  <section class="setup" data-setup="llm" lang="en">
+    <div class="setup-text">
+      <h2>Lab environment</h2>
+      <p>Three parts: a rented L4 running SGLang itself (the official CUDA 13 image, a small model that fits, the torch profiler and Nsight); a rented H100 only for the Hopper-only kernels (FA3, FlashMLA, DeepGEMM, DeepEP), marked by cost; the Metal twins on this Mac, compiling kernels at runtime from Swift. Accounts, keys, the container and the bill rules carry over from the GPU topic's lab page.</p>
+      <p class="setup-ready">Lab environment is ready. <a href="lab-setup/index.html">Open the guide</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">Set up the lab</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="llm"> Done</label>
+    </div>
+  </section>
+
+  <h2 lang="zh-CN">阶段</h2><h2 lang="en">Phases</h2>
+  <ol class="phases">
+    <li data-phase="llm/phase-0"><span class="n">0</span><span><span class="t"><a href="phase-0-the-stack/index.html">The Stack, Top to Bottom</a></span><br><span class="d" lang="zh-CN">四层、一步解码里的算子、为什么解码受带宽限制、每个运行时想法落在哪个内核上</span><span class="d" lang="en">The four layers, the ops of one decode step, why decode is bandwidth-bound, where each runtime idea lands on a kernel</span></span><span class="st"></span></li>
+    <li data-phase="llm/phase-1"><span class="n">1</span><span><span class="t"><a href="phase-1-attention-and-kv-layouts/index.html">Attention &amp; KV-Cache Layouts</a></span><br><span class="d" lang="zh-CN">RadixAttention、分散共享的页、indptr/indices 契约、级联注意力</span><span class="d" lang="en">RadixAttention, scattered shared pages, the indptr/indices contract, cascade attention</span></span><span class="st"></span></li>
+    <li data-phase="llm/phase-2"><span class="n">2</span><span><span class="t"><a href="phase-2-prefill-and-decode/index.html">Prefill &amp; Decode</a></span><br><span class="d" lang="zh-CN">FlashAttention 分块与在线 softmax、FA3、split-KV 解码、MLA、按阶段选后端</span><span class="d" lang="en">FlashAttention tiling and online softmax, FA3, split-KV decode, MLA, a backend per phase</span></span><span class="st"></span></li>
+    <li data-phase="llm/phase-3"><span class="n">3</span><span><span class="t"><a href="phase-3-cuda-graphs-plan-run/index.html">CUDA Graphs &amp; the plan()/run() Split</a></span><br><span class="d" lang="zh-CN">捕获解码步、可捕获内核的禁区、补齐到静态批、FlashInfer 的两步</span><span class="d" lang="en">Capturing a decode step, what a capturable kernel may not do, padding to static batches, FlashInfer in two steps</span></span><span class="st"></span></li>
+    <li data-phase="llm/phase-4"><span class="n">4</span><span><span class="t"><a href="phase-4-moe-kernels/index.html">MoE Kernels</a></span><br><span class="d" lang="zh-CN">路由与 top-k、moe_align_block_size、分组 GEMM 与 DeepGEMM、DeepEP</span><span class="d" lang="en">Routing and top-k, moe_align_block_size, grouped GEMMs and DeepGEMM, DeepEP</span></span><span class="st"></span></li>
+    <li data-phase="llm/phase-5"><span class="n">5</span><span><span class="t"><a href="phase-5-fusions/index.html">Fusions</a></span><br><span class="d" lang="zh-CN">残差加 RMSNorm、SiLU-and-mul、RoPE 加写缓存、all-reduce 加归一化、不排序的采样</span><span class="d" lang="en">Residual plus RMSNorm, SiLU-and-mul, RoPE plus the cache write, all-reduce plus norm, sampling without a full sort</span></span><span class="st"></span></li>
+    <li data-phase="llm/phase-6"><span class="n">6</span><span><span class="t"><a href="phase-6-quantization-kernels/index.html">Quantization Kernels</a></span><br><span class="d" lang="zh-CN">FP8 块缩放、NVFP4/MXFP4、int4 权重内核；CUTLASS 与 CuTe DSL</span><span class="d" lang="en">FP8 block scaling, NVFP4/MXFP4, int4 weight-only kernels; CUTLASS and the CuTe DSL</span></span><span class="st"></span></li>
+    <li data-phase="llm/phase-7"><span class="n">7</span><span><span class="t"><a href="phase-7-speculative-and-structured-output/index.html">Speculative Decoding &amp; Structured-Output Kernels</a></span><br><span class="d" lang="zh-CN">草稿树、树状掩码与验证、xgrammar 的 logits 位掩码</span><span class="d" lang="en">The draft tree, tree masks and verification, the xgrammar logits bitmask</span></span><span class="st"></span></li>
+    <li data-phase="llm/phase-8"><span class="n">8</span><span><span class="t"><a href="phase-8-plugging-in/index.html">Plugging In &amp; the Capstone</a></span><br><span class="d" lang="zh-CN">sgl-kernel 算子、AttentionBackend、上游库、剖析工具；作品项目走完整个闭环</span><span class="d" lang="en">A sgl-kernel op, an AttentionBackend, the upstream libraries, the profilers; the capstone closes the loop</span></span><span class="st"></span></li>
+  </ol>
+
+  <section class="related" data-related="llm-inference-kernels" data-root="../../"></section>
+</div>
+<script src="../../assets/diagram.js"></script>
+<script src="../../assets/progress.js"></script>
+<script src="../../assets/topics.js"></script>
+<script src="../../assets/related.js"></script>
+</body>
+</html>
