@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 5 · Streams, Graphs and Concurrency · GPU Programming with CUDA</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">GPU Programming with CUDA</a>
+    <span class="crumb current" aria-current="page">Phase 5 · Streams, Graphs and Concurrency</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 5 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 5 / 8 · about 1–2 weeks</p>
+  <h1>Streams, Graphs and Concurrency <span class="en" lang="zh-CN">流、图与并发：让拷贝和计算重叠，让一串小 kernel 只付一次启动开销</span><span class="en" lang="en">Overlapping copies with compute, and paying the launch cost of a chain of small kernels only once</span></h1>
+  <p class="lede" lang="zh-CN">前面几课一次只看一个 kernel。真实的程序是一条流水线：把数据拷到 GPU，算，再拷回来，下一批又接着来；或者每一步要连续启动几十个很短的 kernel。这一课讲 GPU 怎样同时做几件事：<strong>流</strong>（stream）和<strong>事件</strong>（event）表达「哪些工作有先后、哪些可以并行」，页锁定内存让拷贝和计算真正重叠，<strong>CUDA graph</strong> 把一串启动录下来、只准备一次、反复重放。最后概要地看多 GPU（peer access 和 NCCL）和 MPS。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-10-31 在这台 Apple M5 上实际运行了三次，数字原样贴出；Lab A 的 CUDA 代码<strong>未运行</strong>，是 2026-10-31 根据 CUDA 文档整理的。</p>
+  <p class="lede" lang="en">The lessons so far looked at one kernel at a time. A real program is a pipeline: copy data to the GPU, compute, copy it back, and the next batch follows; or every step launches dozens of very short kernels in a row. This lesson is about how a GPU does several things at once: <strong>streams</strong> and <strong>events</strong> say which work is ordered and which may run in parallel, page-locked memory lets copies truly overlap compute, and a <strong>CUDA graph</strong> records a chain of launches, prepares it once and replays it many times. Last, an outline of multi-GPU work (peer access and NCCL) and of MPS. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run three times on this Apple M5 on 2026-10-31 and its numbers are pasted as they came; the CUDA code of Lab A is <strong>not run</strong>, assembled from the CUDA documentation on 2026-10-31.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说清流内有序、流间无序的含义，用 <code>cudaEventRecord</code> 加 <code>cudaStreamWaitEvent</code> 在两个流之间加一条依赖，而不阻塞主机。</li>
+      <li lang="en">Say what in order within a stream and unordered across streams means, and add a dependence between two streams with <code>cudaEventRecord</code> plus <code>cudaStreamWaitEvent</code> without blocking the host.</li>
+      <li lang="zh-CN">把一次「拷入、计算、拷出」切成几块放到几个流上，算出理想的加速比，并解释为什么主机缓冲区必须是页锁定的。</li>
+      <li lang="en">Split a copy-in, compute, copy-out job into chunks on several streams, work out the ideal speed-up, and explain why the host buffers must be page-locked.</li>
+      <li lang="zh-CN">用流捕获建一个 CUDA graph，说出定义、实例化、执行三个阶段各做什么，以及它省掉的是哪一部分时间。</li>
+      <li lang="en">Build a CUDA graph by stream capture, say what each of the three stages (definition, instantiation, execution) does, and which part of the time it saves.</li>
+      <li lang="zh-CN">概要地说出 peer access、NCCL 和 MPS 各解决什么问题。</li>
+      <li lang="en">Say in outline what problem peer access, NCCL and MPS each solve.</li>
+      <li lang="zh-CN">在 Metal 里用两个命令队列和 <code>MTLSharedEvent</code> 做出重叠和强制先后，并用命令缓冲区自己的 GPU 时间戳量出来。</li>
+      <li lang="en">In Metal, produce overlap and forced ordering with two command queues and an <code>MTLSharedEvent</code>, and measure both with the command buffers’ own GPU timestamps.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0 · 基础</a>：主机和设备的分工、<code>cudaMemcpy</code>、用事件计时。</li>
+    <li lang="en"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>: how host and device split the work, <code>cudaMemcpy</code>, timing with events.</li>
+    <li lang="zh-CN"><a href="../phase-1-memory-hierarchy/index.html">Phase 1 · 内存层次</a>：页锁定（pinned）主机内存和统一内存第一次出现的地方。</li>
+    <li lang="en"><a href="../phase-1-memory-hierarchy/index.html">Phase 1 · The Memory Hierarchy</a>: where pinned host memory and unified memory first appeared.</li>
+    <li lang="zh-CN"><a href="../phase-4-profiling-and-optimization/index.html">Phase 4 · 性能剖析与优化</a>：Nsight Systems 的时间线，本课的重叠要在那条时间线上看。</li>
+    <li lang="en"><a href="../phase-4-profiling-and-optimization/index.html">Phase 4 · Profiling and Optimization</a>: the Nsight Systems timeline, which is where this lesson’s overlap shows.</li>
+    <li lang="zh-CN">Kernel Engineering 专题的 <a href="../../kernel-engineering/phase-2-memory/index.html">Phase 2 · 内存</a>（分页和页面换出）与 <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5 · 设备驱动</a>（DMA）：概念 2 解释页锁定时要用到它们。</li>
+    <li lang="en"><a href="../../kernel-engineering/phase-2-memory/index.html">Phase 2 · Memory</a> (paging and page-out) and <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5 · Device Drivers</a> (DMA) of the Kernel Engineering topic: concept 2 leans on them to explain page locking.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 流与事件</h3><h3 lang="en">1. Streams and events</h3>
+  <p lang="zh-CN">CUDA Programming Guide 2.5 节（13.4 版，2026-10-31 读取）把<strong>流</strong>定义为一个按顺序执行的任务队列：同一个流里的拷贝和 kernel 一个接一个完成，不同流里的工作之间没有顺序，可以并发。kernel 启动和 <code>cudaMemcpyAsync</code> 对主机都是异步的：调用把任务放进队列就返回，主机线程接着往下走。</p><p lang="en">Section 2.5 of the CUDA Programming Guide (version 13.4, read 2026-10-31) defines a <strong>stream</strong> as a queue of tasks executed in order: copies and kernels in one stream complete one after another, while work in different streams has no order between it and may run concurrently. Kernel launches and <code>cudaMemcpyAsync</code> are asynchronous to the host: the call puts the task in the queue and returns, and the host thread carries on.</p>
+  <ul>
+    <li lang="zh-CN"><strong>建流。</strong><code>cudaStreamCreate(&amp;s)</code> 建的是<strong>阻塞流</strong>；<code>cudaStreamCreateWithFlags(&amp;s, cudaStreamNonBlocking)</code> 建的是非阻塞流。kernel 用第四个启动参数选流：<code>k&lt;&lt;&lt;grid, block, 0, s&gt;&gt;&gt;(…)</code>。</li>
+    <li lang="en"><strong>Creating streams.</strong> <code>cudaStreamCreate(&amp;s)</code> creates a <strong>blocking stream</strong>; <code>cudaStreamCreateWithFlags(&amp;s, cudaStreamNonBlocking)</code> creates a non-blocking one. A kernel picks its stream with the fourth launch parameter: <code>k&lt;&lt;&lt;grid, block, 0, s&gt;&gt;&gt;(…)</code>.</li>
+    <li lang="zh-CN"><strong>默认流。</strong>不指定流的工作进入旧式默认流（legacy default stream，也叫 NULL 流或 0 号流）。指南 2.5.6 写明：它和所有阻塞流互相同步，和非阻塞流不同步。编译选项 <code>--default-stream per-thread</code> 让每个主机线程有自己的默认流，不再有这种全局同步。所以一个忘了指定流的 <code>cudaMemcpy</code> 会悄悄地把所有阻塞流串起来。</li>
+    <li lang="en"><strong>The default stream.</strong> Work with no stream goes to the legacy default stream, also called the NULL stream or stream 0. Section 2.5.6 of the guide states that it synchronizes with every blocking stream and not with non-blocking ones. The compiler option <code>--default-stream per-thread</code> gives each host thread its own default stream without that global synchronization. So one <code>cudaMemcpy</code> that forgot its stream quietly serializes every blocking stream.</li>
+    <li lang="zh-CN"><strong>事件。</strong><code>cudaEventRecord(e, s)</code> 在流 s 里放一个标记，前面的工作完成时它才算发生。<code>cudaStreamWaitEvent(s2, e)</code> 让流 s2 之后的工作等这个标记，等待发生在 GPU 一侧，主机不阻塞；这就是两个流之间的一条依赖边。<code>cudaEventSynchronize(e)</code> 才让主机等。<code>cudaEventElapsedTime(&amp;ms, a, b)</code> 给出两个事件之间的毫秒数；只用来表达依赖的事件可以用 <code>cudaEventDisableTiming</code> 建，省掉计时。</li>
+    <li lang="en"><strong>Events.</strong> <code>cudaEventRecord(e, s)</code> puts a marker into stream s that counts as having happened once the work before it is done. <code>cudaStreamWaitEvent(s2, e)</code> makes later work in stream s2 wait for that marker; the waiting happens on the GPU side and the host does not block, so this is a dependence edge between two streams. Only <code>cudaEventSynchronize(e)</code> makes the host wait. <code>cudaEventElapsedTime(&amp;ms, a, b)</code> gives the milliseconds between two events; an event used only for a dependence can be created with <code>cudaEventDisableTiming</code> to skip the timing.</li>
+  </ul>
+  <p lang="zh-CN">Metal 一侧（SDK 头文件 <code>MTLCommandQueue.h</code>、<code>MTLCommandBuffer.h</code>、<code>MTLEvent.h</code>，2026-10-31 读取）：命令队列（<code>MTLCommandQueue</code>）在头文件里写作「一个串行的命令缓冲区队列」；命令缓冲区里放一个或多个编码器（计算、blit），对应 CUDA 一个流里的一段工作。跨队列的依赖用 <code>MTLSharedEvent</code>：<code>encodeSignalEvent(_:value:)</code> 在一个命令缓冲区里发出一个值，<code>encodeWaitForEvent(_:value:)</code> 让另一个命令缓冲区等这个值，两者都只能在没有打开的编码器时调用。它对应 <code>cudaEventRecord</code> 加 <code>cudaStreamWaitEvent</code>，只是事件带一个单调递增的 64 位计数，而不是「发生过一次」。计时用命令缓冲区的 <code>gpuStartTime</code> 和 <code>gpuEndTime</code>。</p><p lang="en">On the Metal side (the SDK headers <code>MTLCommandQueue.h</code>, <code>MTLCommandBuffer.h</code> and <code>MTLEvent.h</code>, read 2026-10-31), a command queue (<code>MTLCommandQueue</code>) is described in its header as a serial queue of command buffers; a command buffer holds one or more encoders (compute, blit), the counterpart of a run of work in one CUDA stream. A dependence across queues uses an <code>MTLSharedEvent</code>: <code>encodeSignalEvent(_:value:)</code> signals a value from one command buffer and <code>encodeWaitForEvent(_:value:)</code> makes another command buffer wait for it; both may be called only when no encoder is open. It plays the part of <code>cudaEventRecord</code> plus <code>cudaStreamWaitEvent</code>, except that the event carries a 64-bit counter that only goes up rather than a single happened-once state. Timing uses the command buffer’s <code>gpuStartTime</code> and <code>gpuEndTime</code>.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 22 章 Programming a heterogeneous computing cluster（流与计算、通信的重叠；按章名对应）；《CUDA by Example》第 10 章 Streams 的 10.3 到 10.5 节。</p><p lang="en">Further reading: chapter 22 of PMPP, Programming a heterogeneous computing cluster (streams and overlapping computation with communication; matched by chapter title); sections 10.3 to 10.5 of chapter 10, Streams, of <em>CUDA by Example</em>.</p>
+
+  <h3 lang="zh-CN">2. 拷贝和计算的重叠，以及为什么要页锁定内存</h3><h3 lang="en">2. Overlapping copies with kernels, and why pinned memory is required</h3>
+  <p lang="zh-CN">一块独立的 GPU 有专门的<strong>拷贝引擎</strong>，通过 PCIe 做 DMA，和 SM 上的 kernel 是两套硬件。它们能同时忙，前提是工作分在不同的流里，而且互不依赖。设备属性 <code>asyncEngineCount</code>（运行时 API 的说明是 Number of asynchronous engines）告诉你有几个：有 2 个时，拷入和拷出也能同时进行；<code>concurrentKernels</code> 说明不同流的 kernel 能否同时跑。Lab A 会打印这两个值。</p><p lang="en">A discrete GPU has dedicated <strong>copy engines</strong> that do DMA over PCIe, separate hardware from the kernels on the SMs. They can be busy at the same time, provided the work sits in different streams and does not depend on itself. The device property <code>asyncEngineCount</code> (described in the runtime API as Number of asynchronous engines) tells how many there are: with 2, a copy in and a copy out can also run at once; <code>concurrentKernels</code> says whether kernels from different streams can run together. Lab A prints both.</p>
+  <p lang="zh-CN"><strong>切块流水。</strong>把 n 个元素切成 c 块，第 k 块的拷入、kernel、拷出都放进流 k。设整份数据的拷入、计算、拷出各要时间 T，串行一共 3T；切块以后每段只要 T / c，三段像流水线一样错开，总时间约为 (c + 2) · T / c。c = 4 时是 1.5T，正好是串行的一半；c 越大越接近 T，但每块越小，固定开销占比越大。这个公式假设两个方向的拷贝能同时进行（两个拷贝引擎）、三段时间相等；实际的瓶颈是三段里最慢的那一段。图解 (a) 画的就是 c = 4 的情形。</p><p lang="en"><strong>Chunked pipelining.</strong> Split n elements into c chunks and put chunk k’s copy in, kernel and copy out into stream k. If the copy in, the compute and the copy out of the whole data each take time T, serial work takes 3T; in chunks each stage takes only T / c, the three stages stagger like a pipeline, and the total is about (c + 2) · T / c. At c = 4 that is 1.5T, exactly half of serial; a larger c approaches T, but the smaller each chunk, the more the fixed overhead weighs. The formula assumes the two copy directions run at once (two copy engines) and the three stages take equal time; in practice the bottleneck is the slowest of the three. Diagram (a) draws the case c = 4.</p>
+  <p lang="zh-CN"><strong>为什么必须页锁定。</strong>指南 2.5.2.3 的原话是：要让涉及 CPU 内存的拷贝异步进行，主机缓冲区必须是 pinned 且 page-locked 的；用普通内存时 <code>cudaMemcpyAsync()</code> 仍然正确，但会退回同步行为，不和其他工作重叠。原因在 DMA（推断，按 Kernel Engineering 专题的分页和 DMA 两课推出，指南没有展开）：拷贝引擎按物理地址读写内存，而普通的 <code>malloc</code> 内存是可分页的，操作系统随时可以把一页换出或挪走，DMA 进行到一半时物理页不能变。所以驱动对可分页内存只能先把数据拷进自己的一块页锁定暂存区，再从那里 DMA，这一步要 CPU 参与，没法和别的工作并行。<code>cudaMallocHost</code> 直接给你页锁定的内存；运行时 API 的说明还提醒：它的带宽比可分页内存高得多，但分配太多会减少系统可用于分页的内存、拖慢整个系统，所以只该用来做和 GPU 交换数据的暂存区。</p><p lang="en"><strong>Why pinned memory is required.</strong> Section 2.5.2.3 of the guide says that for memory copies involving CPU memory to be carried out asynchronously, the host buffers must be pinned and page-locked; with ordinary memory <code>cudaMemcpyAsync()</code> still works correctly but reverts to synchronous behaviour and does not overlap other work. The reason lies in DMA (inference, drawn from the paging and DMA lessons of the Kernel Engineering topic; the guide does not spell it out): the copy engine reads and writes memory by physical address, while ordinary <code>malloc</code> memory is pageable, so the operating system may page it out or move it at any moment, and the physical page must not change in the middle of a DMA. For pageable memory the driver therefore has to copy the data into a page-locked staging area of its own first and DMA from there, a step that needs the CPU and cannot run alongside other work. <code>cudaMallocHost</code> gives you page-locked memory directly; the runtime API notes that it has much higher bandwidth than pageable memory, but that allocating too much of it reduces the memory the system has for paging and slows the whole system, so it is best kept for staging areas that exchange data with the GPU.</p>
+  <div class="note" lang="zh-CN">Apple 的统一内存没有这个问题，也没有这份收益。CPU 和 GPU 读写同一块物理内存（<code>MTLStorageModeShared</code>），不需要 PCIe 拷贝，也就没有可以藏起来的拷贝时间。Lab B 量到：在 M5 上，一次 256 MB 的 blit 拷贝和一个小 kernel 放在两个队列上，并没有重叠，总跨度反而比两者单独时间之和略长。可能的原因是 blit 在这里用的是同一组 GPU 核心和同一条内存通路，而不是独立的 DMA 引擎（推断，Apple 没有公开 blit 的实现）。</div><div class="note" lang="en">Apple’s unified memory has neither this problem nor this gain. CPU and GPU read and write the same physical memory (<code>MTLStorageModeShared</code>), so there is no PCIe copy and no copy time to hide. Lab B measured that on the M5 a 256 MB blit copy and a small kernel on two queues did not overlap; their combined span was slightly longer than the sum of their separate times. A likely reason is that the blit here uses the same GPU cores and the same memory path rather than a separate DMA engine (inference; Apple does not document how blits are implemented).</div>
+  <p lang="zh-CN">延伸阅读：《CUDA by Example》10.2 节 Page-Locked Host Memory 和 10.7 节 Using Multiple CUDA Streams Effectively（为什么按「广度优先」交错排队）；PMPP 第 22 章（按章名对应）。</p><p lang="en">Further reading: section 10.2, Page-Locked Host Memory, and section 10.7, Using Multiple CUDA Streams Effectively (why work is queued breadth first, interleaved across streams), of <em>CUDA by Example</em>; chapter 22 of PMPP (matched by chapter title).</p>
+
+  <h3 lang="zh-CN">3. CUDA graph：捕获、实例化、重放</h3><h3 lang="en">3. CUDA graphs: capture, instantiate, replay</h3>
+  <p lang="zh-CN">指南 4.2 节先讲了 graph 要解决的问题：每把一个 kernel 放进流，主机上的驱动都要做一串准备工作才能让它在 GPU 上跑，这是每个 kernel 都要付的开销；kernel 本身很短时，这笔开销会占端到端时间的很大一部分。把一个要跑很多次的工作流做成 graph，这些开销就只在实例化时为整个图付一次，之后每次启动整个图的开销都很小。（这里的驱动工作就是 Kernel Engineering Phase 5 讲的 MMIO 和命令提交。）</p><p lang="en">Section 4.2 of the guide starts with the problem graphs solve: each time a kernel goes into a stream, the driver on the host performs a sequence of operations to set it up and launch it on the GPU, an overhead paid for every kernel; for a kernel with a short execution time this overhead can be a large fraction of the end-to-end time. Make a workflow that runs many times into a graph, and those costs are paid once for the whole graph at instantiation, after which each launch of the graph costs very little. (The driver work here is the MMIO and command submission of Kernel Engineering Phase 5.)</p>
+  <ol>
+    <li lang="zh-CN"><strong>定义。</strong>最方便的办法是<strong>流捕获</strong>：<code>cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal)</code> 和 <code>cudaStreamEndCapture(s, &amp;graph)</code> 之间放进流 s 的工作不会执行，而是被记录成一张图（<code>cudaGraph_t</code>）的节点，流里的先后成为边。现成的代码和库调用只要接受一个流参数，就能原样被捕获。也可以用 <code>cudaGraphAddNode</code> 一个节点一个节点地建。</li>
+    <li lang="en"><strong>Definition.</strong> The easiest way is <strong>stream capture</strong>: work put into stream s between <code>cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal)</code> and <code>cudaStreamEndCapture(s, &amp;graph)</code> is not executed but recorded as the nodes of a graph (<code>cudaGraph_t</code>), and the order within the stream becomes its edges. Existing code and library calls are captured as they are, as long as they take a stream argument. A graph can also be built node by node with <code>cudaGraphAddNode</code>.</li>
+    <li lang="zh-CN"><strong>实例化。</strong><code>cudaGraphInstantiate(&amp;exec, graph, 0)</code> 给图拍一个快照、校验它，并完成大部分准备工作，得到可执行的 <code>cudaGraphExec_t</code>。这一步本身不便宜，只该做一次。</li>
+    <li lang="en"><strong>Instantiation.</strong> <code>cudaGraphInstantiate(&amp;exec, graph, 0)</code> takes a snapshot of the graph, validates it and does most of the setup, giving an executable <code>cudaGraphExec_t</code>. This step is not cheap in itself and should happen once.</li>
+    <li lang="zh-CN"><strong>执行。</strong><code>cudaGraphLaunch(exec, s)</code> 把整张图作为一个单位放进流 s，想重放多少次就调用多少次。</li>
+    <li lang="en"><strong>Execution.</strong> <code>cudaGraphLaunch(exec, s)</code> puts the whole graph into stream s as one unit; call it as many times as you want replays.</li>
+  </ol>
+  <p lang="zh-CN">几条规则，都来自指南 4.2.2.1.2：捕获期间同步或查询正在被捕获的流是非法的，对包含它的设备或上下文做 <code>cudaDeviceSynchronize</code> 之类的调用也一样，因为被捕获的工作并没有真的排队；旧式默认流不能被捕获，所以 Lab A 用非阻塞流；跨流的依赖照样能捕获，只要用 <code>cudaEventRecord</code> 和 <code>cudaStreamWaitEvent</code> 表达，被等的事件在同一次捕获里记录，两个流就被捕获进同一张图，这正是把一个多流流水线整个录下来的办法。<code>cudaStreamIsCapturing</code> 可以查询一个流是否在捕获中。</p><p lang="en">A few rules, all from section 4.2.2.1.2 of the guide: during capture it is invalid to synchronize or query the stream being captured, or a device or context that contains it (with <code>cudaDeviceSynchronize</code> and the like), because the captured work is not actually queued; the legacy default stream cannot be captured, which is why Lab A uses a non-blocking stream; cross-stream dependencies are captured too, as long as they are expressed with <code>cudaEventRecord</code> and <code>cudaStreamWaitEvent</code> and the awaited event was recorded in the same capture, in which case both streams are captured into one graph, which is exactly how a whole multi-stream pipeline is recorded. <code>cudaStreamIsCapturing</code> tells whether a stream is being captured.</p>
+  <p lang="zh-CN"><strong>图里冻结了什么。</strong>实例化以后，每个 kernel 的启动配置和参数（包括指针）都固定了，重放用的是同样的值。数据可以变（指针指向的内容），形状和指针不能随便变。要改参数，可以用 <code>cudaGraphExecUpdate</code> 拿一张拓扑完全相同的新图去更新，或者单独更新某个节点，都比重新实例化便宜；拓扑变了就只能重新捕获和实例化（指南 4.2.3）。graph 从 CUDA 10 开始提供，T4 上可用。</p><p lang="en"><strong>What the graph freezes.</strong> After instantiation, each kernel’s launch configuration and arguments, pointers included, are fixed, and every replay uses the same values. The data may change (what the pointers point to); the shapes and the pointers may not change freely. To change arguments, <code>cudaGraphExecUpdate</code> updates from a new graph of identical topology, or individual nodes can be updated, both cheaper than instantiating again; a change of topology needs a new capture and instantiation (section 4.2.3 of the guide). Graphs have been available since CUDA 10 and work on the T4.</p>
+  <p lang="zh-CN"><strong>谁最受益。</strong>graph 省的是主机和驱动一侧的启动开销，不让任何一个 kernel 本身跑得更快。它在「很多很短的 kernel、每一步结构都一样」时收益最大。大语言模型推理的解码阶段正是这样：每生成一个 token 都要把整个模型走一遍，几十上百个 kernel，每个都很小，结构每一步都一样。计划中的 LLM Inference Kernels 专题就建立在这一点上，在解码路径上用 CUDA graph（推断：推理引擎通常为若干固定的批大小各捕获一张图，因为图里的形状是冻结的；本页没有核对具体项目的写法）。Metal 里最接近的东西是<strong>间接命令缓冲区</strong>（<code>MTLIndirectCommandBuffer</code>，计算命令类型 <code>MTLIndirectCommandTypeConcurrentDispatch</code>，用 <code>executeCommandsInBuffer(_:withRange:)</code> 执行）：命令编码一次、反复执行，只是它不是从现有代码捕获出来的，对应关系是近似的。</p><p lang="en"><strong>Who gains most.</strong> A graph saves launch overhead on the host and driver side; it makes no single kernel run faster. It pays most with many very short kernels whose structure is the same every step. The decode phase of large-language-model inference is exactly that: every generated token walks the whole model, tens or hundreds of kernels, each small, with the same structure every step. The planned LLM Inference Kernels topic builds on this, using CUDA graphs on the decode path (inference: inference engines commonly capture one graph for each of several fixed batch sizes, because a graph’s shapes are frozen; this page has not checked any particular project’s code). The closest thing in Metal is an <strong>indirect command buffer</strong> (<code>MTLIndirectCommandBuffer</code>, with the compute command type <code>MTLIndirectCommandTypeConcurrentDispatch</code>, executed with <code>executeCommandsInBuffer(_:withRange:)</code>): commands are encoded once and executed many times, though they are not captured from existing code, so the match is approximate.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 CUDA graph（它出现在 CUDA 10，晚于两本老书；PMPP 第 5 版的目录里也没有以它为题的一章）。这一概念以 CUDA Programming Guide 4.2 节 CUDA Graphs 和运行时 API 的 Graph Management 页为准（见资料）。</p><p lang="en">Further reading: no book in the bibliography covers CUDA graphs (they arrived in CUDA 10, after the two older books, and the 5th-edition table of contents of PMPP has no chapter titled after them). This concept rests on section 4.2, CUDA Graphs, of the CUDA Programming Guide and the Graph Management page of the runtime API (see Resources).</p>
+
+  <h3 lang="zh-CN">4. 多 GPU：peer access 与 NCCL（概要）</h3><h3 lang="en">4. Multiple GPUs: peer access and NCCL, in outline</h3>
+  <p lang="zh-CN">一台机器上有几块 GPU 时，每块有自己的显存。指南 3.4 节讲了两件基本的事：</p><p lang="en">When one machine has several GPUs, each has its own memory. Section 3.4 of the guide covers two basic things:</p>
+  <ul>
+    <li lang="zh-CN"><strong>Peer access。</strong><code>cudaDeviceCanAccessPeer(&amp;ok, dev, peer)</code> 先问两块卡之间能不能直接访问；能的话在 <code>dev</code> 上调用 <code>cudaDeviceEnablePeerAccess(peer, 0)</code>，之后 <code>dev</code> 上的 kernel 可以直接解引用另一块卡的指针。两块卡在统一虚拟地址空间里，同一个指针值在两边都有效。大块搬运用 <code>cudaMemcpyPeerAsync(dst, dstDev, src, srcDev, bytes, s)</code>。指南写明：没有 NVSwitch 的系统上，每块卡全系统最多 8 条 peer 连接。</li>
+    <li lang="en"><strong>Peer access.</strong> <code>cudaDeviceCanAccessPeer(&amp;ok, dev, peer)</code> first asks whether two cards can reach each other directly; if so, calling <code>cudaDeviceEnablePeerAccess(peer, 0)</code> on <code>dev</code> lets kernels on <code>dev</code> dereference pointers into the other card. The two cards share the unified virtual address space, so one pointer value is valid on both. Bulk transfers use <code>cudaMemcpyPeerAsync(dst, dstDev, src, srcDev, bytes, s)</code>. The guide states that on systems without NVSwitch each device supports at most eight peer connections system-wide.</li>
+    <li lang="zh-CN"><strong>NCCL。</strong>多卡训练和推理要的通常不是点对点拷贝，而是<strong>集合通信</strong>：all-reduce（每块卡的数组按元素相加，结果留在每块卡上）、all-gather、reduce-scatter、broadcast。NCCL 是 NVIDIA 的集合通信库，按机器的拓扑（NVLink、PCIe、网络）选路。它的调用形如 <code>ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)</code>（NCCL 2.32.3 文档，2026-10-31 读取）：最后一个参数是一个 CUDA 流，集合操作和 kernel 一样排进流里，所以本课的流、事件和重叠规则全都适用，通信可以和计算重叠。</li>
+    <li lang="en"><strong>NCCL.</strong> Multi-GPU training and inference usually need not point-to-point copies but <strong>collectives</strong>: all-reduce (the arrays on all cards summed element by element, the result left on every card), all-gather, reduce-scatter, broadcast. NCCL is NVIDIA’s collective communication library, which routes by the machine’s topology (NVLink, PCIe, network). Its calls look like <code>ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)</code> (NCCL 2.32.3 documentation, read 2026-10-31): the last argument is a CUDA stream, and a collective is queued into the stream like a kernel, so this lesson’s rules for streams, events and overlap all apply and communication can overlap computation.</li>
+  </ul>
+  <p lang="zh-CN">Colab 只给一块 T4，所以本课的实验不涉及多卡；要做就得租一台多卡机器，那是创始人的开销决定。延伸阅读：PMPP 第 19 章 Multi-GPU API（第 5 版新增；按章名对应）；《CUDA by Example》第 11 章 CUDA C on Multiple GPUs（11.3 Using Multiple GPUs，书早于 peer access 和 NCCL）。</p><p lang="en">Colab gives a single T4, so this lesson’s labs do not touch multiple GPUs; that needs a rented multi-GPU machine, which is the Founder’s spending decision. Further reading: chapter 19 of PMPP, Multi-GPU API (new in the 5th edition; matched by chapter title); chapter 11 of <em>CUDA by Example</em>, CUDA C on Multiple GPUs (section 11.3, Using Multiple GPUs; the book predates peer access and NCCL).</p>
+
+  <h3 lang="zh-CN">5. MPS：多个进程共用一块 GPU</h3><h3 lang="en">5. MPS: several processes sharing one GPU</h3>
+  <p lang="zh-CN">流只在一个 CUDA 上下文（大致是一个进程）里并发。MPS 文档（2026-10-31 读取）写明：同一个上下文的工作队列由并发调度器调度，可以同时跑；不同上下文的工作由分时调度器调度，不能同时跑，每个进程轮流拿到整块 GPU 的一个时间片。几个各自只用一小部分 GPU 的进程（比如 MPI 的多个 rank）因此会让 GPU 大半空着。<strong>MPS</strong>（Multi-Process Service）用一个控制守护进程 <code>nvidia-cuda-mps-control</code> 和一个服务进程 <code>nvidia-cuda-mps-server</code> 让多个进程的工作像来自同一个上下文那样并发执行；从 Volta 起，客户端进程直接向硬件提交工作，服务进程只协调剩下的共享资源。环境变量 <code>CUDA_MPS_ACTIVE_THREAD_PERCENTAGE</code> 可以限制每个客户端能用的线程比例。它在 Linux 服务器上用，Colab 上没有，Metal 也没有对应物。延伸阅读：参考书目里没有一本书讲 MPS；这一段以 NVIDIA 的 Multi-Process Service 文档为准（见资料）。</p><p lang="en">Streams run concurrently only within one CUDA context, roughly one process. The MPS documentation (read 2026-10-31) states that work queues of one context are scheduled by a concurrent scheduler and can run at the same time, while work from different contexts is scheduled by a time-sliced scheduler and cannot: each process gets a time slice of the whole GPU in turn. Several processes that each use a small part of the GPU (the ranks of an MPI job, say) therefore leave most of it idle. <strong>MPS</strong>, the Multi-Process Service, uses a control daemon, <code>nvidia-cuda-mps-control</code>, and a server process, <code>nvidia-cuda-mps-server</code>, to let work from several processes run concurrently as if it came from one context; since Volta, client processes submit work to the hardware directly and the server mediates only the remaining shared resources. The environment variable <code>CUDA_MPS_ACTIVE_THREAD_PERCENTAGE</code> limits the share of threads each client may use. It is used on Linux servers; Colab does not offer it and Metal has no counterpart. Further reading: no book in the bibliography covers MPS; this paragraph rests on NVIDIA’s Multi-Process Service documentation (see Resources).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">CUDA</span><span lang="en">CUDA</span></th><th><span lang="zh-CN">Metal</span><span lang="en">Metal</span></th><th><span lang="zh-CN">对应得多紧</span><span lang="en">How close the match is</span></th></tr>
+    <tr><td><span lang="zh-CN">流（<code>cudaStream_t</code>）</span><span lang="en">Stream (<code>cudaStream_t</code>)</span></td><td><span lang="zh-CN">命令队列（<code>MTLCommandQueue</code>）加其中的命令缓冲区</span><span lang="en">Command queue (<code>MTLCommandQueue</code>) and the command buffers in it</span></td><td><span lang="zh-CN">接近。Lab B 量到：同一队列里互不相关的命令缓冲区在 M5 上也会重叠，写同一个缓冲区时才串行</span><span lang="en">Close. Lab B measured that unrelated command buffers in one queue also overlap on the M5, and run in series only when they write the same buffer</span></td></tr>
+    <tr><td><span lang="zh-CN">事件依赖：<code>cudaEventRecord</code> 加 <code>cudaStreamWaitEvent</code></span><span lang="en">Event dependence: <code>cudaEventRecord</code> plus <code>cudaStreamWaitEvent</code></span></td><td><span lang="zh-CN"><code>MTLSharedEvent</code> 的 <code>encodeSignalEvent</code> 和 <code>encodeWaitForEvent</code></span><span lang="en"><code>encodeSignalEvent</code> and <code>encodeWaitForEvent</code> on an <code>MTLSharedEvent</code></span></td><td><span lang="zh-CN">接近；Metal 的事件是单调递增的 64 位值，也能在主机上等（<code>waitUntilSignaledValue</code>）</span><span lang="en">Close; a Metal event is a 64-bit value that only goes up, and the host can wait on it too (<code>waitUntilSignaledValue</code>)</span></td></tr>
+    <tr><td><span lang="zh-CN">事件计时：<code>cudaEventElapsedTime</code></span><span lang="en">Event timing: <code>cudaEventElapsedTime</code></span></td><td><span lang="zh-CN">命令缓冲区的 <code>gpuStartTime</code>、<code>gpuEndTime</code></span><span lang="en">The command buffer’s <code>gpuStartTime</code> and <code>gpuEndTime</code></span></td><td><span lang="zh-CN">粒度不同：Metal 按整个命令缓冲区计时</span><span lang="en">Different granularity: Metal times a whole command buffer</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>cudaMemcpyAsync</code> 走拷贝引擎</span><span lang="en"><code>cudaMemcpyAsync</code> on a copy engine</span></td><td><span lang="zh-CN">blit 编码器（<code>MTLBlitCommandEncoder</code>）</span><span lang="en">Blit encoder (<code>MTLBlitCommandEncoder</code>)</span></td><td><span lang="zh-CN">松：统一内存下 CPU 和 GPU 之间本来不用拷贝，Lab B 里 blit 也没有和 kernel 重叠</span><span lang="en">Loose: with unified memory CPU and GPU need no copy in the first place, and in Lab B the blit did not overlap the kernel</span></td></tr>
+    <tr><td><span lang="zh-CN">页锁定主机内存（<code>cudaMallocHost</code>）</span><span lang="en">Pinned host memory (<code>cudaMallocHost</code>)</span></td><td><span lang="zh-CN"><code>MTLStorageModeShared</code> 缓冲区</span><span lang="en"><code>MTLStorageModeShared</code> buffers</span></td><td><span lang="zh-CN">问题本身不存在：没有 PCIe DMA，也就没有页锁定的要求</span><span lang="en">The problem does not arise: no PCIe DMA, so no need for page locking</span></td></tr>
+    <tr><td><span lang="zh-CN">CUDA graph（<code>cudaGraphExec_t</code>）</span><span lang="en">CUDA graph (<code>cudaGraphExec_t</code>)</span></td><td><span lang="zh-CN">间接命令缓冲区（<code>MTLIndirectCommandBuffer</code>）</span><span lang="en">Indirect command buffer (<code>MTLIndirectCommandBuffer</code>)</span></td><td><span lang="zh-CN">近似：都是编码一次、执行多次，但 ICB 不是从现有代码捕获的，也不带图的依赖结构</span><span lang="en">Approximate: both encode once and execute many times, but an ICB is not captured from existing code and carries no graph of dependences</span></td></tr>
+    <tr><td><span lang="zh-CN">不同流的 kernel 并发（<code>concurrentKernels</code>）</span><span lang="en">Kernels from different streams in parallel (<code>concurrentKernels</code>)</span></td><td><span lang="zh-CN">多个队列，或 <code>MTLDispatchTypeConcurrent</code> 的计算编码器</span><span lang="en">Several queues, or a compute encoder with <code>MTLDispatchTypeConcurrent</code></span></td><td><span lang="zh-CN">接近；两边都只在单个 kernel 填不满 GPU 时有收益</span><span lang="en">Close; on both sides it pays only when one kernel does not fill the GPU</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 四个流上的时间线：拷贝和 kernel 重叠</h3><h3 lang="en">(a) A timeline on four streams: copies overlapping kernels</h3>
+<div class="diagram">
+  <svg data-diagram viewBox="0 0 900 470" data-interval="2800"
+       data-captions='["全图：同一份 64 MB 的工作，先在一个流里串行做，再切成 4 块放到 4 个流上。横轴是时间，每一小格是整份工作一个阶段的四分之一。H2D 是拷入，D2H 是拷出。", "1. 一个流：拷入全部数据，算，再拷回全部结果。三段一个接一个，拷贝的时候 SM 空着，算的时候拷贝引擎空着，一共 12 格。", "2. 流 0 只管第 0 块：拷入四分之一，算四分之一，拷回四分之一。它自己内部仍然是按顺序的。", "3. 流 1 的拷入和流 0 的 kernel 同时进行：拷贝引擎和 SM 是两套硬件，两块工作又在不同的流里，没有先后约束。", "4. 流 2 和流 3 接上以后，中间几格里拷入、计算、拷出三件事同时在做。拷入和拷出要同时进行，需要两个拷贝引擎，也就是 asyncEngineCount 至少为 2。", "5. 账：四个流在第 6 格结束，一个流要 12 格。一般地，c 块的总时间约为 (c + 2) 除以 c 个阶段，c = 4 时正好是一半。实际的瓶颈是三段里最慢的那段。", "6. 前提：主机缓冲区必须用 cudaMallocHost 分配。用 malloc 的可分页内存时，cudaMemcpyAsync 结果仍然正确，但退回同步行为，时间线又变回第 1 行的样子。"]'
+       data-captions-en='["The whole picture: the same 64 MB of work, first done in series in one stream, then split into 4 chunks on 4 streams. The horizontal axis is time, and each small cell is a quarter of one stage of the whole job. H2D is the copy in, D2H the copy out.", "1. One stream: copy all the data in, compute, copy all the results back. The three stages follow one another; the SMs idle while copying and the copy engines idle while computing, 12 cells in all.", "2. Stream 0 handles only chunk 0: copy a quarter in, compute a quarter, copy a quarter back. Within itself it is still in order.", "3. The copy in of stream 1 runs during the kernel of stream 0: the copy engine and the SMs are separate hardware, and the two chunks sit in different streams with no order between them.", "4. Once streams 2 and 3 join, the middle cells have the copy in, the compute and the copy out all running at once. Copying in and out at the same time needs two copy engines, that is an asyncEngineCount of at least 2.", "5. The count: four streams finish at cell 6, one stream needs 12. In general c chunks take about (c + 2) divided by c stages, which at c = 4 is exactly half. The real bottleneck is the slowest of the three stages.", "6. The precondition: the host buffers must come from cudaMallocHost. With pageable malloc memory, cudaMemcpyAsync still gives correct results but reverts to synchronous behaviour, and the timeline turns back into row 1."]'>
+    <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/></marker></defs>
+    <text x="160" y="22" class="small" lang="zh-CN">时间（每格 = 一个阶段的四分之一）</text><text x="160" y="22" class="small" lang="en">Time (one cell = a quarter of one stage)</text>
+    <line x1="160" y1="30" x2="160" y2="312" class="lane"/>
+    <line x1="220" y1="30" x2="220" y2="312" class="lane"/>
+    <line x1="280" y1="30" x2="280" y2="312" class="lane"/>
+    <line x1="340" y1="30" x2="340" y2="312" class="lane"/>
+    <line x1="400" y1="30" x2="400" y2="312" class="lane"/>
+    <line x1="460" y1="30" x2="460" y2="312" class="lane"/>
+    <line x1="520" y1="30" x2="520" y2="312" class="lane"/>
+    <line x1="580" y1="30" x2="580" y2="312" class="lane"/>
+    <line x1="640" y1="30" x2="640" y2="312" class="lane"/>
+    <line x1="700" y1="30" x2="700" y2="312" class="lane"/>
+    <line x1="760" y1="30" x2="760" y2="312" class="lane"/>
+    <line x1="820" y1="30" x2="820" y2="312" class="lane"/>
+    <line x1="880" y1="30" x2="880" y2="312" class="lane"/>
+    <g data-step="1"><text x="20" y="72" lang="zh-CN">一个流</text><text x="20" y="72" lang="en">One stream</text><rect class="box" x="160" y="50" width="240" height="34"/><text x="172" y="72" class="mono">H2D · 64 MB</text><rect class="box" x="400" y="50" width="240" height="34"/><text x="412" y="72" class="mono">kernel · 64 MB</text><rect class="box" x="640" y="50" width="240" height="34"/><text x="652" y="72" class="mono">D2H · 64 MB</text></g>
+    <line x1="20" y1="104" x2="880" y2="104" class="lane"/>
+    <g data-step="2"><text x="20" y="142" lang="zh-CN">流 0</text><text x="20" y="142" lang="en">Stream 0</text><rect class="box" x="160" y="120" width="60" height="34"/><text x="167" y="142" class="mono">H2D</text><rect class="box" x="220" y="120" width="60" height="34"/><text x="227" y="142" class="mono">kernel</text><rect class="box" x="280" y="120" width="60" height="34"/><text x="287" y="142" class="mono">D2H</text></g>
+    <g data-step="3"><text x="20" y="192" lang="zh-CN">流 1</text><text x="20" y="192" lang="en">Stream 1</text><rect class="box" x="220" y="170" width="60" height="34"/><text x="227" y="192" class="mono">H2D</text><rect class="box" x="280" y="170" width="60" height="34"/><text x="287" y="192" class="mono">kernel</text><rect class="box" x="340" y="170" width="60" height="34"/><text x="347" y="192" class="mono">D2H</text></g>
+    <g data-step="4"><text x="20" y="242" lang="zh-CN">流 2</text><text x="20" y="242" lang="en">Stream 2</text><rect class="box" x="280" y="220" width="60" height="34"/><text x="287" y="242" class="mono">H2D</text><rect class="box" x="340" y="220" width="60" height="34"/><text x="347" y="242" class="mono">kernel</text><rect class="box" x="400" y="220" width="60" height="34"/><text x="407" y="242" class="mono">D2H</text></g>
+    <g data-step="4"><text x="20" y="292" lang="zh-CN">流 3</text><text x="20" y="292" lang="en">Stream 3</text><rect class="box" x="340" y="270" width="60" height="34"/><text x="347" y="292" class="mono">H2D</text><rect class="box" x="400" y="270" width="60" height="34"/><text x="407" y="292" class="mono">kernel</text><rect class="box" x="460" y="270" width="60" height="34"/><text x="467" y="292" class="mono">D2H</text></g>
+    <g data-step="5"><path class="arrow" d="M520 316 L520 302"/><text x="470" y="330" class="small" lang="zh-CN">4 个流：6 格</text><text x="470" y="330" class="small" lang="en">4 streams: 6 cells</text><path class="arrow" d="M880 316 L880 92"/><text x="790" y="330" class="small" lang="zh-CN">1 个流：12 格</text><text x="790" y="330" class="small" lang="en">1 stream: 12 cells</text></g>
+    <g data-step="5"><rect class="box" x="30" y="350" width="410" height="104"/><text x="44" y="374" lang="zh-CN">c 块的总时间 ≈ (c + 2) / c 个阶段</text><text x="44" y="374" lang="en">c chunks take about (c + 2) / c stages</text><text x="44" y="396" class="small" lang="zh-CN">c = 4：1.5 个阶段，串行要 3 个</text><text x="44" y="396" class="small" lang="en">c = 4: 1.5 stages, against 3 in series</text><text x="44" y="416" class="small" lang="zh-CN">假设三段等长，两个方向的拷贝能同时进行</text><text x="44" y="416" class="small" lang="en">Assumes equal stages and both copy directions at once</text><text x="44" y="436" class="small" lang="zh-CN">块太小时，每块的固定开销会吃掉收益</text><text x="44" y="436" class="small" lang="en">With chunks too small, fixed costs eat the gain</text></g>
+    <g data-step="6"><rect class="box" x="460" y="350" width="410" height="104"/><text x="474" y="374" lang="zh-CN">前提：页锁定的主机内存</text><text x="474" y="374" lang="en">Precondition: page-locked host memory</text><text x="474" y="396" class="small mono">cudaMallocHost(&amp;h, bytes)</text><text x="474" y="416" class="small" lang="zh-CN">✗ malloc 的内存：结果对，但拷贝变回同步</text><text x="474" y="416" class="small" lang="en">✗ malloc memory: correct, but copies turn synchronous</text><text x="474" y="436" class="small" lang="zh-CN">时间线退回第 1 行</text><text x="474" y="436" class="small" lang="en">and the timeline falls back to row 1</text></g>
+  </svg>
+</div>
+  <h3 lang="zh-CN">(b) CUDA graph：捕获一次，实例化一次，重放很多次</h3><h3 lang="en">(b) A CUDA graph: capture once, instantiate once, replay many times</h3>
+<div class="diagram">
+  <svg data-diagram viewBox="0 0 900 500" data-interval="2800"
+       data-captions='["全图：一步里有 5 个很短的 kernel。上面是逐个启动，中间是把这 5 次启动捕获成一张图并实例化，下面是每一步只重放这张图。CPU 一行是主机上的启动工作，GPU 一行是 kernel 真正在跑的时间。", "1. 逐个启动：每个 kernel 都要主机上的驱动做一串准备工作才能提交。kernel 本身很短，GPU 跑完一个就得等下一个提交过来，时间线上全是空隙。", "2. 捕获：cudaStreamBeginCapture 和 cudaStreamEndCapture 之间放进流 s 的 5 次启动并不执行，而是被记成一张图的 5 个节点，流里的先后成为节点之间的边。", "3. 实例化：cudaGraphInstantiate 给图拍快照、校验，并把大部分准备工作一次做完，得到可执行的 cudaGraphExec_t。这一步不便宜，但只做一次。", "4. 重放：每一步只调用一次 cudaGraphLaunch，5 个 kernel 在 GPU 上一个紧接一个地跑，中间没有等待提交的空隙。CPU 很快就空出来，可以准备下一步。", "5. 图里冻结了启动配置和参数，包括指针。数据可以变，形状和指针不能随便变；要改参数用 cudaGraphExecUpdate，拓扑变了就重新捕获。大语言模型的解码正是每一步结构都相同的一长串小 kernel。"]'
+       data-captions-en='["The whole picture: one step has 5 very short kernels. The top shows them launched one by one, the middle captures those 5 launches into a graph and instantiates it, and the bottom replays only the graph each step. The CPU row is launch work on the host; the GPU row is when kernels actually run.", "1. One-by-one launches: every kernel needs the driver on the host to do a sequence of setup work before it is submitted. The kernels are short, so the GPU finishes one and waits for the next to be submitted, and the timeline is full of gaps.", "2. Capture: the 5 launches put into stream s between cudaStreamBeginCapture and cudaStreamEndCapture are not executed but recorded as 5 nodes of a graph, and their order in the stream becomes the edges between nodes.", "3. Instantiate: cudaGraphInstantiate takes a snapshot of the graph, validates it and does most of the setup in one go, giving an executable cudaGraphExec_t. This step is not cheap, but it happens once.", "4. Replay: each step calls cudaGraphLaunch once, and the 5 kernels run back to back on the GPU with no gaps waiting for submission. The CPU is soon free to prepare the next step.", "5. The graph freezes the launch configuration and the arguments, pointers included. The data may change; the shapes and pointers may not change freely. To change arguments use cudaGraphExecUpdate; a new topology needs a new capture. Decode in a large language model is exactly a long chain of small kernels with the same structure every step."]'>
+    <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/></marker></defs>
+    <g data-step="1"><text x="20" y="22" lang="zh-CN">逐个启动</text><text x="20" y="22" lang="en">One by one</text><text x="20" y="56" class="small">CPU</text><text x="20" y="98" class="small">GPU</text><rect class="box" x="80" y="36" width="110" height="28"/><text x="90" y="55" class="mono">launch k1</text><rect class="box" x="192" y="78" width="34" height="28"/><text x="197" y="97" class="mono">k1</text><rect class="box" x="230" y="36" width="110" height="28"/><text x="240" y="55" class="mono">launch k2</text><rect class="box" x="342" y="78" width="34" height="28"/><text x="347" y="97" class="mono">k2</text><rect class="box" x="380" y="36" width="110" height="28"/><text x="390" y="55" class="mono">launch k3</text><rect class="box" x="492" y="78" width="34" height="28"/><text x="497" y="97" class="mono">k3</text><rect class="box" x="530" y="36" width="110" height="28"/><text x="540" y="55" class="mono">launch k4</text><rect class="box" x="642" y="78" width="34" height="28"/><text x="647" y="97" class="mono">k4</text><rect class="box" x="680" y="36" width="110" height="28"/><text x="690" y="55" class="mono">launch k5</text><rect class="box" x="792" y="78" width="34" height="28"/><text x="797" y="97" class="mono">k5</text><text x="80" y="126" class="small" lang="zh-CN">✗ kernel 之间的空隙：GPU 在等下一次提交</text><text x="80" y="126" class="small" lang="en">✗ Gaps between kernels: the GPU waits for the next submission</text></g>
+    <line x1="20" y1="142" x2="880" y2="142" class="lane"/>
+    <text x="20" y="166" lang="zh-CN">捕获与实例化</text><text x="20" y="166" lang="en">Capture and instantiate</text>
+    <g data-step="2"><rect class="box" x="20" y="178" width="300" height="92"/><text x="32" y="202" class="mono">cudaStreamBeginCapture(s, …)</text><text x="32" y="226" class="mono">k1&lt;&lt;&lt;g, b, 0, s&gt;&gt;&gt;(…) … k5</text><text x="32" y="250" class="mono">cudaStreamEndCapture(s, &amp;g)</text><path class="arrow" d="M322 224 L368 224"/><circle class="box" cx="390" cy="224" r="18"/><text x="381" y="229" class="mono">k1</text><path class="arrow" d="M408 224 L423 224"/><circle class="box" cx="442" cy="224" r="18"/><text x="433" y="229" class="mono">k2</text><path class="arrow" d="M460 224 L475 224"/><circle class="box" cx="494" cy="224" r="18"/><text x="485" y="229" class="mono">k3</text><path class="arrow" d="M512 224 L527 224"/><circle class="box" cx="546" cy="224" r="18"/><text x="537" y="229" class="mono">k4</text><path class="arrow" d="M564 224 L579 224"/><circle class="box" cx="598" cy="224" r="18"/><text x="589" y="229" class="mono">k5</text><text x="372" y="262" class="small" lang="zh-CN">cudaGraph_t：5 个节点，4 条边</text><text x="372" y="262" class="small" lang="en">cudaGraph_t: 5 nodes, 4 edges</text></g>
+    <g data-step="3"><path class="arrow" d="M618 224 L668 224"/><text x="672" y="182" class="small mono">cudaGraphInstantiate</text><rect class="box" x="672" y="190" width="208" height="68"/><text x="686" y="216" class="mono">cudaGraphExec_t</text><text x="686" y="240" class="small" lang="zh-CN">校验和准备只做一次</text><text x="686" y="240" class="small" lang="en">Validated and set up once</text></g>
+    <line x1="20" y1="288" x2="880" y2="288" class="lane"/>
+    <g data-step="4"><text x="20" y="312" lang="zh-CN">每一步重放</text><text x="20" y="312" lang="en">Replay each step</text><text x="20" y="346" class="small">CPU</text><text x="20" y="388" class="small">GPU</text><rect class="box" x="80" y="326" width="150" height="28"/><text x="90" y="345" class="mono">cudaGraphLaunch</text><text x="246" y="345" class="small" lang="zh-CN">CPU 空出来准备下一步</text><text x="246" y="345" class="small" lang="en">CPU free for the next step</text><rect class="box" x="240" y="368" width="34" height="28"/><text x="245" y="387" class="mono">k1</text><rect class="box" x="278" y="368" width="34" height="28"/><text x="283" y="387" class="mono">k2</text><rect class="box" x="316" y="368" width="34" height="28"/><text x="321" y="387" class="mono">k3</text><rect class="box" x="354" y="368" width="34" height="28"/><text x="359" y="387" class="mono">k4</text><rect class="box" x="392" y="368" width="34" height="28"/><text x="397" y="387" class="mono">k5</text><text x="440" y="387" class="small" lang="zh-CN">5 个 kernel 紧接着跑，没有提交空隙</text><text x="440" y="387" class="small" lang="en">5 kernels back to back, no submission gaps</text></g>
+    <g data-step="5"><rect class="box" x="20" y="414" width="860" height="74"/><text x="34" y="438" lang="zh-CN">冻结的：启动配置和参数，包括指针；可变的：指针指向的数据</text><text x="34" y="438" lang="en">Frozen: launch configuration and arguments, pointers included; free: the data they point to</text><text x="34" y="460" class="small" lang="zh-CN">改参数用 cudaGraphExecUpdate；拓扑变了就重新捕获</text><text x="34" y="460" class="small" lang="en">Change arguments with cudaGraphExecUpdate; a new topology needs a new capture</text><text x="34" y="478" class="small" lang="zh-CN">LLM 解码：每个 token 一长串小 kernel，每一步结构相同</text><text x="34" y="478" class="small" lang="en">LLM decode: a long chain of small kernels per token, the same every step</text></g>
+  </svg>
+</div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 Colab 的 T4 上：四个流的流水线，再把一步捕获成 graph</h3><h3 lang="en">Lab A · On the Colab T4: a four-stream pipeline, then one step captured as a graph</h3>
+    <div class="note" lang="zh-CN">本实验<strong>未运行</strong>，是 2026-10-31 根据 CUDA 文档整理的。<code>streams.cu</code> 和 <code>graph.cu</code> 在实验机上用 clang 的 CUDA 前端对照一个桩头文件做过语法检查，主机端和 <code>sm_75</code> 设备端都通过；桩头文件里流、事件和 graph 函数的签名照 CUDA 13.4 运行时 API 参考手册。它们没有被 <code>nvcc</code> 编译过，也没有在 GPU 上运行过，所以下面只描述预期的现象，不给数字。</div><div class="note" lang="en">This lab was <strong>not run</strong>; it was assembled from the CUDA documentation on 2026-10-31. <code>streams.cu</code> and <code>graph.cu</code> were syntax-checked on the lab Mac with clang’s CUDA front end against a stub header, and both the host side and the <code>sm_75</code> device side passed; the stub’s stream, event and graph signatures follow the CUDA 13.4 Runtime API reference. They have not been compiled by <code>nvcc</code> or run on a GPU, so what follows describes expected behaviour and gives no numbers.</div>
+    <ol>
+      <li><span lang="zh-CN">新建 notebook，运行时选 T4 GPU（见实验环境页）。第一个单元格记下 GPU 和工具链：</span><span lang="en">Create a notebook with the T4 GPU runtime (see the lab environment page). In the first cell, record the GPU and the toolchain:</span><pre data-lang="sh" data-file="Colab cell 1"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvidia-smi
+!nvcc --version</pre></li>
+      <li><span lang="zh-CN">第二个单元格写出流水线。同一个 kernel 在四种配置下处理 64 MB：可分页或页锁定的主机内存，一个流或四个流。每种配置预热 1 次、再测 5 次取中位数，计时事件记在旧式默认流上，它会等所有阻塞流的工作完成。最后逐位比较各配置的输出：</span><span lang="en">The second cell writes the pipeline. The same kernel processes 64 MB in four configurations: pageable or pinned host memory, one stream or four. Each configuration warms up once and is then timed 5 times for the median; the timing events are recorded on the legacy default stream, which waits for the work of every blocking stream. Last, the outputs of the configurations are compared bit for bit:</span><pre data-lang="cpp" data-file="Colab cell 2 · streams.cu">%%writefile streams.cu
+// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// streams.cu: 把 64 MB 的「拷入、计算、拷出」切成 4 块放到 4 个流上，和单流、可分页内存比较
+#include &lt;algorithm&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;cstring&gt;
+#include &lt;vector&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); std::exit(1); } } while (0)
+#define N (1 &lt;&lt; 24)          // 2^24 个 float，64 MB
+#define ITERS 64             // 每个元素的乘加次数：调到 kernel 时间和单向拷贝时间差不多
+
+__global__ void work(const float* in, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i &lt; n) { float x = in[i]; for (int k = 0; k &lt; ITERS; ++k) x = x * 0.999f + 0.001f; out[i] = x; }
+}
+
+// 一次完整的拷入、计算、拷出，切成 nstreams 块，第 k 块全部放在流 s[k] 上；返回 5 次的中位数毫秒
+float pipeline(const float* h_in, float* h_out, float* d_in, float* d_out, int nstreams, cudaStream_t* s) {
+    cudaEvent_t t0, t1;
+    CHECK(cudaEventCreate(&amp;t0)); CHECK(cudaEventCreate(&amp;t1));
+    int chunk = N / nstreams; size_t bytes = size_t(chunk) * sizeof(float);
+    std::vector&lt;float&gt; ms;
+    for (int r = 0; r &lt; 6; ++r) {                                 // 第 0 次是预热
+        CHECK(cudaEventRecord(t0, 0));                            // 记在旧式默认流上：它和所有阻塞流互相同步
+        for (int k = 0; k &lt; nstreams; ++k) {
+            int off = k * chunk;
+            CHECK(cudaMemcpyAsync(d_in + off, h_in + off, bytes, cudaMemcpyHostToDevice, s[k]));
+            work&lt;&lt;&lt;(chunk + 255) / 256, 256, 0, s[k]&gt;&gt;&gt;(d_in + off, d_out + off, chunk);
+            CHECK(cudaGetLastError());
+            CHECK(cudaMemcpyAsync(h_out + off, d_out + off, bytes, cudaMemcpyDeviceToHost, s[k]));
+        }
+        CHECK(cudaEventRecord(t1, 0));                            // 等前面所有流的工作都完成
+        CHECK(cudaEventSynchronize(t1));
+        float m = 0; CHECK(cudaEventElapsedTime(&amp;m, t0, t1));
+        if (r &gt; 0) ms.push_back(m);
+    }
+    CHECK(cudaEventDestroy(t0)); CHECK(cudaEventDestroy(t1));
+    std::sort(ms.begin(), ms.end());
+    return ms[ms.size() / 2];
+}
+
+int main() {
+    cudaDeviceProp p; CHECK(cudaGetDeviceProperties(&amp;p, 0));
+    std::printf("%s  asyncEngineCount=%d  concurrentKernels=%d\n", p.name, p.asyncEngineCount, p.concurrentKernels);
+    size_t bytes = size_t(N) * sizeof(float);
+    float *pin_in, *pin_out, *d_in, *d_out;
+    CHECK(cudaMallocHost(&amp;pin_in, bytes)); CHECK(cudaMallocHost(&amp;pin_out, bytes));   // 页锁定（pinned）主机内存
+    float* pg_in = (float*)std::malloc(bytes); float* pg_out = (float*)std::malloc(bytes);   // 普通的可分页内存
+    CHECK(cudaMalloc(&amp;d_in, bytes)); CHECK(cudaMalloc(&amp;d_out, bytes));
+    for (int i = 0; i &lt; N; ++i) pin_in[i] = pg_in[i] = float(i % 1000);
+    cudaStream_t s[4];
+    for (int k = 0; k &lt; 4; ++k) CHECK(cudaStreamCreate(&amp;s[k]));
+
+    std::printf("pageable, 1 stream   %8.3f ms\n", pipeline(pg_in, pg_out, d_in, d_out, 1, s));
+    std::printf("pageable, 4 streams  %8.3f ms\n", pipeline(pg_in, pg_out, d_in, d_out, 4, s));
+    std::printf("pinned,   1 stream   %8.3f ms\n", pipeline(pin_in, pin_out, d_in, d_out, 1, s));
+    std::vector&lt;float&gt; one(pin_out, pin_out + N);                 // 留下单流的结果，和四流的逐位比较
+    std::printf("pinned,   4 streams  %8.3f ms\n", pipeline(pin_in, pin_out, d_in, d_out, 4, s));
+    std::printf("4-stream result %s the 1-stream result; pageable result %s\n",
+                std::memcmp(one.data(), pin_out, bytes) == 0 ? "matches" : "DIFFERS FROM",
+                std::memcmp(one.data(), pg_out, bytes) == 0 ? "matches" : "DIFFERS");
+
+    for (int k = 0; k &lt; 4; ++k) CHECK(cudaStreamDestroy(s[k]));
+    CHECK(cudaFree(d_in)); CHECK(cudaFree(d_out)); CHECK(cudaFreeHost(pin_in)); CHECK(cudaFreeHost(pin_out));
+    std::free(pg_in); std::free(pg_out);
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行：</span><span lang="en">Build and run it:</span><pre data-lang="sh" data-file="Colab cell 3"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvcc -arch=sm_75 -O3 -std=c++17 streams.cu -o streams &amp;&amp; ./streams</pre><span lang="zh-CN">预期：最后一行两处都是 <code>matches</code>。<code>pinned, 4 streams</code> 最快；<code>pinned, 1 stream</code> 比两行 pageable 快，因为页锁定内存的拷贝带宽更高；<code>pageable, 4 streams</code> 和 <code>pageable, 1 stream</code> 差不多，因为可分页内存上的 <code>cudaMemcpyAsync</code> 退回同步行为（概念 2）。四流比单流快多少取决于 <code>asyncEngineCount</code> 和三段时间是否接近，最多约一半（图解 (a)）；如果 kernel 远比拷贝短或长，调 <code>ITERS</code> 再试。</span><span lang="en">Expected: both places on the last line say <code>matches</code>. <code>pinned, 4 streams</code> is fastest; <code>pinned, 1 stream</code> beats both pageable lines, because copies from pinned memory have higher bandwidth; <code>pageable, 4 streams</code> is about the same as <code>pageable, 1 stream</code>, because <code>cudaMemcpyAsync</code> on pageable memory reverts to synchronous behaviour (concept 2). How much four streams gain over one depends on <code>asyncEngineCount</code> and on how close the three stages are, at most about half (diagram (a)); if the kernel is far shorter or longer than a copy, adjust <code>ITERS</code> and try again.</span></li>
+      <li><span lang="zh-CN">第四个单元格写出 graph 的对比。每一步 20 个很短的 kernel，跑 1000 步：先逐个启动，再把一步捕获成 graph、实例化一次、每步重放一次。最后检查每个元素被加了几次：</span><span lang="en">The fourth cell writes the graph comparison. Each step is 20 very short kernels, run for 1000 steps: first launched one by one, then one step is captured into a graph, instantiated once and replayed once per step. Last, it checks how many times each element was incremented:</span><pre data-lang="cpp" data-file="Colab cell 4 · graph.cu">%%writefile graph.cu
+// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// graph.cu: 每一步 20 个很短的 kernel，跑 1000 步；逐个启动与捕获成 CUDA graph 后重放比较
+#include &lt;algorithm&gt;
+#include &lt;chrono&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;vector&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); std::exit(1); } } while (0)
+#define N 4096        // 很小的数组：每个 kernel 只有 16 个 block，运行时间远小于启动开销
+#define K 20          // 每一步的 kernel 数，类似一次解码步里的一串小算子
+#define STEPS 1000
+#define REPS 5
+
+__global__ void add1(float* x) { int i = blockIdx.x * blockDim.x + threadIdx.x; if (i &lt; N) x[i] += 1.0f; }
+
+void step(float* x, cudaStream_t s) {
+    for (int k = 0; k &lt; K; ++k) add1&lt;&lt;&lt;N / 256, 256, 0, s&gt;&gt;&gt;(x);
+}
+
+// 在流 s 上计时 STEPS 步，REPS 次取中位数
+template &lt;class F&gt; float time_steps(F f, cudaStream_t s) {
+    cudaEvent_t t0, t1;
+    CHECK(cudaEventCreate(&amp;t0)); CHECK(cudaEventCreate(&amp;t1));
+    std::vector&lt;float&gt; ms;
+    for (int r = 0; r &lt; REPS; ++r) {
+        CHECK(cudaEventRecord(t0, s));
+        for (int i = 0; i &lt; STEPS; ++i) f();
+        CHECK(cudaEventRecord(t1, s));
+        CHECK(cudaEventSynchronize(t1));
+        float m = 0; CHECK(cudaEventElapsedTime(&amp;m, t0, t1));
+        ms.push_back(m);
+    }
+    CHECK(cudaEventDestroy(t0)); CHECK(cudaEventDestroy(t1));
+    std::sort(ms.begin(), ms.end());
+    return ms[ms.size() / 2];
+}
+
+int main() {
+    float* x; CHECK(cudaMalloc(&amp;x, N * sizeof(float))); CHECK(cudaMemset(x, 0, N * sizeof(float)));
+    cudaStream_t s; CHECK(cudaStreamCreateWithFlags(&amp;s, cudaStreamNonBlocking));   // 捕获不能在旧式默认流上做
+
+    step(x, s); CHECK(cudaGetLastError()); CHECK(cudaStreamSynchronize(s));        // 预热：加载模块
+    float plain = time_steps([&amp;] { step(x, s); }, s);
+    CHECK(cudaGetLastError());
+
+    // 捕获：这些启动只被记录成图里的节点，不执行
+    auto h0 = std::chrono::steady_clock::now();
+    cudaGraph_t g; cudaGraphExec_t ge;
+    CHECK(cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal));
+    step(x, s);
+    CHECK(cudaStreamEndCapture(s, &amp;g));
+    CHECK(cudaGraphInstantiate(&amp;ge, g, 0));                       // 实例化：校验并一次做完大部分准备工作
+    double setup = std::chrono::duration&lt;double, std::milli&gt;(std::chrono::steady_clock::now() - h0).count();
+
+    CHECK(cudaGraphLaunch(ge, s)); CHECK(cudaStreamSynchronize(s));   // 预热：第一次重放
+    float graph = time_steps([&amp;] { CHECK(cudaGraphLaunch(ge, s)); }, s);
+
+    std::vector&lt;float&gt; h(N);
+    CHECK(cudaMemcpy(h.data(), x, N * sizeof(float), cudaMemcpyDeviceToHost));
+    float want = float(K + REPS * STEPS * K + K + REPS * STEPS * K);   // 每个元素被加 1 的总次数，小于 2^24，浮点精确
+    int bad = 0; for (int i = 0; i &lt; N; ++i) bad += h[i] != want;
+    std::printf("plain launches  %8.3f ms per %d steps  %6.2f us per kernel\n", plain, STEPS, plain * 1000 / (STEPS * K));
+    std::printf("graph replay    %8.3f ms per %d steps  %6.2f us per kernel\n", graph, STEPS, graph * 1000 / (STEPS * K));
+    std::printf("capture + instantiate %.3f ms (host clock, once)   mismatches %d\n", setup, bad);
+
+    CHECK(cudaGraphExecDestroy(ge)); CHECK(cudaGraphDestroy(g));
+    CHECK(cudaStreamDestroy(s)); CHECK(cudaFree(x));
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行：</span><span lang="en">Build and run it:</span><pre data-lang="sh" data-file="Colab cell 5"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvcc -arch=sm_75 -O3 -std=c++17 graph.cu -o graph &amp;&amp; ./graph</pre><span lang="zh-CN">预期：<code>mismatches 0</code>；<code>graph replay</code> 一行每个 kernel 的微秒数比 <code>plain launches</code> 小，因为每次启动的驱动准备工作在实例化时已经做完（概念 3）。<code>capture + instantiate</code> 只付一次，用它除以两行每步时间之差，就是这张图要重放多少步才划算。差距有多大以你的输出为准，本页不预设数字。</span><span lang="en">Expected: <code>mismatches 0</code>; the microseconds per kernel on the <code>graph replay</code> line are lower than on <code>plain launches</code>, because the driver setup of each launch was done at instantiation (concept 3). <code>capture + instantiate</code> is paid once; divide it by the difference in time per step between the two lines to get how many steps the graph must replay to pay off. How large the gap is, your output decides; this page assumes no number.</span></li>
+      <li><span lang="zh-CN">有租用机器时（Phase 4 的那一层），在上面用 Nsight Systems 看时间线，确认四个流的拷贝和 kernel 真的叠在一起，而 pageable 两行没有：</span><span lang="en">If you have the rented machine (the tier of Phase 4), look at the timeline in Nsight Systems there, and confirm that the copies and kernels of the four streams really stack up while the two pageable rows do not:</span><pre data-lang="sh" data-file="on the rented machine"># 未运行 · not run; assembled from the Nsight Systems documentation on 2026-10-31
+nvcc -arch=sm_75 -O3 -std=c++17 streams.cu -o streams
+nsys profile -o streams ./streams</pre></li>
+      <li><span lang="zh-CN">自己改一处：把 <code>pipeline</code> 的四流版本整个捕获成一张图。在一个非阻塞的源流上开始捕获，用 <code>cudaEventRecord</code> 和 <code>cudaStreamWaitEvent</code> 让另外三个流加入，最后让它们汇回源流再结束捕获（指南 4.2.2.1.2.1）。注意捕获期间不能调用 <code>cudaEventSynchronize</code>。这一步的代码由你自己写，本页没有它的运行结果。</span><span lang="en">Make one change yourself: capture the whole four-stream version of <code>pipeline</code> into one graph. Begin capture on a non-blocking origin stream, bring the other three streams in with <code>cudaEventRecord</code> and <code>cudaStreamWaitEvent</code>, and join them back to the origin stream before ending capture (section 4.2.2.1.2.1 of the guide). Note that <code>cudaEventSynchronize</code> may not be called during capture. You write this code yourself; this page has no run results for it.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 在这台 Mac 上：两个命令队列、MTLSharedEvent 和批量提交</h3><h3 lang="en">Lab B · On this Mac: two command queues, MTLSharedEvent and batched submission</h3>
+    <ol>
+      <li><span lang="zh-CN">写出程序。kernel 在运行时从源码编译。<code>spin</code> 是一个几乎不读内存的计算 kernel，有两种规模：1024 个线程（4 个 threadgroup，远填不满 GPU）和 2<sup>20</sup> 个线程（填满）。每种规模比较五种安排：A 单独跑；A 和 B 两个命令缓冲区放进同一个队列；同一个队列但 B 写 A 的输出缓冲区；A 和 B 分别在两个队列；两个队列但 B 用 <code>MTLSharedEvent</code> 等 A。然后把一次 256 MB 的 blit 拷贝和一个小 kernel 放在一起，最后比较「1000 次很小的派发，每次一个命令缓冲区并等待完成」和「1000 次派发编进一个命令缓冲区」。每个配置预热 2 次再测 11 次取中位数。<code>sum</code> 是各命令缓冲区 <code>gpuEndTime − gpuStartTime</code> 之和，<code>span</code> 是从最早的开始到最晚的结束；<code>span</code> 明显小于 <code>sum</code> 说明它们在时间上重叠了：</span><span lang="en">Write the program. The kernels compile from source at run time. <code>spin</code> is a compute kernel that reads almost no memory, at two sizes: 1024 threads (4 threadgroups, far from filling the GPU) and 2<sup>20</sup> threads (filling it). At each size it compares five arrangements: A alone; command buffers A and B in the same queue; the same queue with B writing A’s output buffer; A and B on two queues; two queues with B waiting for A through an <code>MTLSharedEvent</code>. Then it puts a 256 MB blit copy together with a small kernel, and last compares 1000 tiny dispatches, each in its own command buffer waited on to completion, with 1000 dispatches encoded into one command buffer. Each configuration warms up twice and is then measured 11 times for the median. <code>sum</code> is the sum of each command buffer’s <code>gpuEndTime − gpuStartTime</code>, and <code>span</code> runs from the earliest start to the latest end; a <code>span</code> clearly below <code>sum</code> means they overlapped in time:</span><pre data-lang="swift" data-file="metal_overlap.swift">// metal_overlap.swift: 两个命令队列上的重叠、MTLSharedEvent 强制的先后、一个缓冲区里批量提交；kernel 在运行时从源码编译
+import Metal
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+// 计算密集的小 kernel：每个线程做 iters 次乘加，写回一个数，几乎不读内存
+kernel void spin(device float* out [[buffer(0)]], constant uint&amp; iters [[buffer(1)]],
+                 uint i [[thread_position_in_grid]]) {
+    float x = float(i);
+    for (uint k = 0; k &lt; iters; ++k) x = fma(x, 1.000001f, 0.5f);
+    out[i] = x;
+}
+// 几乎什么都不做的 kernel，用来量每次提交的固定开销
+kernel void tiny(device uint* out [[buffer(0)]], uint i [[thread_position_in_grid]]) { out[i] += 1; }
+"""
+
+guard let dev = MTLCreateSystemDefaultDevice() else { print("no device"); exit(1) }
+let lib = try dev.makeLibrary(source: src, options: nil)
+let spin = try dev.makeComputePipelineState(function: lib.makeFunction(name: "spin")!)
+let tiny = try dev.makeComputePipelineState(function: lib.makeFunction(name: "tiny")!)
+let q1 = dev.makeCommandQueue()!, q2 = dev.makeCommandQueue()!
+let outA = dev.makeBuffer(length: 1 &lt;&lt; 24)!, outB = dev.makeBuffer(length: 1 &lt;&lt; 24)!
+let copySrc = dev.makeBuffer(length: 256 &lt;&lt; 20, options: .storageModePrivate)!
+let copyDst = dev.makeBuffer(length: 256 &lt;&lt; 20, options: .storageModePrivate)!
+var iters: UInt32 = 200_000
+print("device=\(dev.name) simdWidth=\(spin.threadExecutionWidth) maxThreadsPerThreadgroup=\(spin.maxTotalThreadsPerThreadgroup)")
+
+// 往命令缓冲区里编码一次 spin，threads 个线程，每个 threadgroup 256 个
+func encodeSpin(_ cb: MTLCommandBuffer, _ out: MTLBuffer, threads: Int) {
+    let e = cb.makeComputeCommandEncoder()!
+    e.setComputePipelineState(spin); e.setBuffer(out, offset: 0, index: 0)
+    e.setBytes(&amp;iters, length: 4, index: 1)
+    e.dispatchThreads(MTLSize(width: threads, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    e.endEncoding()
+}
+func encodeCopy(_ cb: MTLCommandBuffer) {
+    let b = cb.makeBlitCommandEncoder()!
+    b.copy(from: copySrc, sourceOffset: 0, to: copyDst, destinationOffset: 0, size: 256 &lt;&lt; 20)
+    b.endEncoding()
+}
+func ms(_ s: Double) -&gt; Double { s * 1000 }
+func check(_ cbs: [MTLCommandBuffer]) { for cb in cbs { if let err = cb.error { print("command buffer error: \(err)"); exit(1) } } }
+func median(_ v: [Double]) -&gt; Double { let s = v.sorted(); return s[s.count / 2] }
+
+let reps = 11
+// 一次实验：build 编码并提交若干命令缓冲区；返回 (各自 GPU 时间之和, 从最早开始到最晚结束的跨度)，都取 11 次中位数
+func run(_ name: String, _ build: () -&gt; [MTLCommandBuffer]) {
+    var sums: [Double] = [], spans: [Double] = []
+    for r in 0..&lt;(reps + 2) {                                   // 前 2 次是预热
+        let cbs = build()
+        for cb in cbs { cb.waitUntilCompleted() }
+        check(cbs)
+        if r &lt; 2 { continue }
+        sums.append(ms(cbs.map { $0.gpuEndTime - $0.gpuStartTime }.reduce(0, +)))
+        spans.append(ms(cbs.map { $0.gpuEndTime }.max()! - cbs.map { $0.gpuStartTime }.min()!))
+    }
+    let s = median(sums), p = median(spans)
+    print(String(format: "  %-34@ sum %8.3f ms  span %8.3f ms  span/sum %.2f", name as NSString, s, p, p / s))
+}
+
+for (label, threads) in [("small: 1024 threads each", 1024), ("large: 1M threads each", 1 &lt;&lt; 20)] {
+    print(label)
+    run("A alone (q1)") { let a = q1.makeCommandBuffer()!; encodeSpin(a, outA, threads: threads); a.commit(); return [a] }
+    run("A then B, same queue q1") {
+        let a = q1.makeCommandBuffer()!, b = q1.makeCommandBuffer()!
+        encodeSpin(a, outA, threads: threads); encodeSpin(b, outB, threads: threads); a.commit(); b.commit(); return [a, b]
+    }
+    run("A then B, same queue, same buffer") {             // B 写 A 的输出：自动冒险跟踪让 B 等 A
+        let a = q1.makeCommandBuffer()!, b = q1.makeCommandBuffer()!
+        encodeSpin(a, outA, threads: threads); encodeSpin(b, outA, threads: threads); a.commit(); b.commit(); return [a, b]
+    }
+    run("A on q1, B on q2") {
+        let a = q1.makeCommandBuffer()!, b = q2.makeCommandBuffer()!
+        encodeSpin(a, outA, threads: threads); encodeSpin(b, outB, threads: threads); a.commit(); b.commit(); return [a, b]
+    }
+    run("A on q1, B on q2 waits on event") {
+        let ev = dev.makeSharedEvent()!                         // 每次一个新事件，初值 0
+        let a = q1.makeCommandBuffer()!, b = q2.makeCommandBuffer()!
+        encodeSpin(a, outA, threads: threads); a.encodeSignalEvent(ev, value: 1)
+        b.encodeWaitForEvent(ev, value: 1); encodeSpin(b, outB, threads: threads)
+        b.commit(); a.commit(); return [a, b]                   // 故意先提交 b：它也要等 a 发出信号
+    }
+}
+print("copy 256 MB (blit) and compute")
+run("copy alone (q1)") { let c = q1.makeCommandBuffer()!; encodeCopy(c); c.commit(); return [c] }
+run("copy on q1, small A on q2") {
+    let c = q1.makeCommandBuffer()!, a = q2.makeCommandBuffer()!
+    encodeCopy(c); encodeSpin(a, outA, threads: 1024); c.commit(); a.commit(); return [c, a]
+}
+run("copy then small A, same queue q1") {
+    let c = q1.makeCommandBuffer()!, a = q1.makeCommandBuffer()!
+    encodeCopy(c); encodeSpin(a, outA, threads: 1024); c.commit(); a.commit(); return [c, a]
+}
+
+// 提交开销：1000 次 tiny，每次一个命令缓冲区并等它完成，对比全部编进一个命令缓冲区
+print("1000 tiny dispatches (host wall time)")
+let tbuf = dev.makeBuffer(length: 4096)!
+func tinyCB(_ count: Int) -&gt; MTLCommandBuffer {
+    let cb = q1.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+    e.setComputePipelineState(tiny); e.setBuffer(tbuf, offset: 0, index: 0)
+    for _ in 0..&lt;count { e.dispatchThreads(MTLSize(width: 1024, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)) }
+    e.endEncoding(); return cb
+}
+var each: [Double] = [], batched: [Double] = []
+for r in 0..&lt;(reps + 2) {
+    var t0 = CFAbsoluteTimeGetCurrent()
+    for _ in 0..&lt;1000 { let cb = tinyCB(1); cb.commit(); cb.waitUntilCompleted() }
+    let e1 = CFAbsoluteTimeGetCurrent() - t0
+    t0 = CFAbsoluteTimeGetCurrent()
+    let cb = tinyCB(1000); cb.commit(); cb.waitUntilCompleted(); check([cb])
+    let e2 = CFAbsoluteTimeGetCurrent() - t0
+    if r &gt;= 2 { each.append(ms(e1)); batched.append(ms(e2)) }
+}
+let p = tbuf.contents().bindMemory(to: UInt32.self, capacity: 1)
+print(String(format: "  one command buffer per dispatch   %8.3f ms  (%.1f us each)", median(each), median(each)))
+print(String(format: "  1000 dispatches in one buffer     %8.3f ms  (%.1f us each)", median(batched), median(batched)))
+print("  tiny counter check: out[0]=\(p[0]) expected=\(13 * 2000)")</pre></li>
+      <li><span lang="zh-CN">编译并运行三次。下面是第三次的完整输出：</span><span lang="en">Build it and run it three times. Below is the full output of the third run:</span><pre data-lang="sh">$ swiftc -O metal_overlap.swift -o metal_overlap
+$ ./metal_overlap
+device=Apple M5 simdWidth=32 maxThreadsPerThreadgroup=1024
+small: 1024 threads each
+  A alone (q1) sum    2.594 ms  span    2.594 ms  span/sum 1.00
+  A then B, same queue q1 sum    5.434 ms  span    2.722 ms  span/sum 0.50
+  A then B, same queue, same buffer sum    5.187 ms  span    5.188 ms  span/sum 1.00
+  A on q1, B on q2 sum    5.434 ms  span    2.722 ms  span/sum 0.50
+  A on q1, B on q2 waits on event sum    5.187 ms  span    5.379 ms  span/sum 1.04
+large: 1M threads each
+  A alone (q1) sum  542.972 ms  span  542.972 ms  span/sum 1.00
+  A then B, same queue q1 sum 1708.488 ms  span 1086.966 ms  span/sum 0.64
+  A then B, same queue, same buffer sum 1086.949 ms  span 1086.950 ms  span/sum 1.00
+  A on q1, B on q2 sum 1657.085 ms  span 1086.374 ms  span/sum 0.66
+  A on q1, B on q2 waits on event sum 1086.193 ms  span 1086.730 ms  span/sum 1.00
+copy 256 MB (blit) and compute
+  copy alone (q1) sum    4.707 ms  span    4.707 ms  span/sum 1.00
+  copy on q1, small A on q2 sum   11.861 ms  span    7.596 ms  span/sum 0.64
+  copy then small A, same queue q1 sum   12.036 ms  span    7.705 ms  span/sum 0.64
+1000 tiny dispatches (host wall time)
+  one command buffer per dispatch    178.078 ms  (178.1 us each)
+  1000 dispatches in one buffer        0.784 ms  (0.8 us each)
+  tiny counter check: out[0]=26000 expected=26000
+# 2026-10-31 22:15 PDT 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2），三次运行中的第三次</pre></li>
+      <li><span lang="zh-CN">读小 kernel：A 单独 2.594 ms；A 和 B 在两个队列上，跨度 2.722 ms，几乎和单独一个一样，<code>span/sum</code> 是 0.50，两个 kernel 完全重叠。1024 个线程只用到 M5 的一小部分核心，剩下的正好给了 B。意外的是同一个队列也得到 2.722 ms：头文件说队列是串行的，但两个互不相关的命令缓冲区在 GPU 上仍然重叠了。</span><span lang="en">Read the small kernels: A alone takes 2.594 ms; A and B on two queues span 2.722 ms, almost the same as one alone, with <code>span/sum</code> at 0.50, so the two kernels overlap completely. 1024 threads use only a small part of the M5’s cores, and the rest went to B. The surprise is that one queue also gives 2.722 ms: the header calls the queue serial, yet two unrelated command buffers still overlapped on the GPU.</span></li>
+      <li><span lang="zh-CN">读强制的先后：同一个队列、B 写 A 的输出缓冲区时，跨度变成 5.188 ms，正好是两倍，两者变成一前一后。所以让同一队列里的工作串行的是对同一资源的依赖，而不是队列本身（推断：Metal 默认对资源做冒险跟踪，头文件里有 <code>MTLHazardTrackingMode</code>，但本页只从测量推出这个解释）。用 <code>MTLSharedEvent</code> 让另一个队列上的 B 等 A，跨度是 5.379 ms，也是串行，而且比同队列的依赖多约 0.19 ms，可能是跨队列的信号和唤醒延迟（推断）。程序故意先提交 B，它仍然等到了 A 的信号。</span><span lang="en">Read the forced ordering: in one queue with B writing A’s output buffer, the span becomes 5.188 ms, exactly double, and the two run one after the other. So what serializes work within one queue is a dependence on the same resource, not the queue itself (inference: Metal tracks resource hazards by default, and the header has <code>MTLHazardTrackingMode</code>, but this page infers the explanation only from the measurements). With an <code>MTLSharedEvent</code> making B on the other queue wait for A, the span is 5.379 ms, also serial and about 0.19 ms longer than the same-queue dependence, perhaps the cross-queue signal and wake-up latency (inference). The program submits B first on purpose, and B still waited for A’s signal.</span></li>
+      <li><span lang="zh-CN">读大 kernel：A 单独 542.972 ms，两个队列上的跨度 1086.374 ms，正好两倍，并发没有带来任何收益。<code>sum</code> 比跨度还大，是因为两个命令缓冲区的时间窗口重叠，每个都被对方拖长了：GPU 已经被一个 kernel 填满，第二个只能分走同一批核心。这和 CUDA 一样：并发只在单个 kernel 填不满 GPU 时有用。</span><span lang="en">Read the large kernels: A alone takes 542.972 ms, and the span on two queues is 1086.374 ms, exactly double, so concurrency gained nothing. <code>sum</code> exceeds the span because the two command buffers’ windows overlap and each is stretched by the other: one kernel already fills the GPU, and the second can only share the same cores. That matches CUDA: concurrency helps only when one kernel does not fill the GPU.</span></li>
+      <li><span lang="zh-CN">读拷贝：256 MB 的 blit 单独 4.2 到 4.7 ms（三次运行），读加写约 114 到 128 GB/s，已接近这台机器的内存带宽。和小 kernel 放在两个队列上，跨度是 7.596 ms，比两者单独时间之和（约 7.3 ms）还长，没有重叠。这和 CUDA 的拷贝引擎不同，原因见概念 2 的提示（推断）。</span><span lang="en">Read the copy: the 256 MB blit alone takes 4.2 to 4.7 ms across the three runs, about 114 to 128 GB/s counting read and write, close to this machine’s memory bandwidth. Put on two queues with the small kernel, the span is 7.596 ms, longer than the sum of their separate times (about 7.3 ms), so there is no overlap. That differs from CUDA’s copy engines; concept 2’s note gives the likely reason (inference).</span></li>
+      <li><span lang="zh-CN">读提交开销：1000 次派发各用一个命令缓冲区并等它完成，每次约 178 µs；编进一个命令缓冲区后每次约 0.8 µs。计数检查 <code>out[0]=26000</code> 和预期一致。这是 Lab A 里 graph 那一组的 Metal 对照，但不完全对等：这里每次都等完成，量的是一次提交加一次完成通知的往返，比 CUDA 逐个启动（不等完成）付的多。结论的方向一样：小工作要批量编码、一次提交。</span><span lang="en">Read the submission overhead: 1000 dispatches, each in its own command buffer waited on to completion, cost about 178 µs each; encoded into one command buffer they cost about 0.8 µs each. The counter check <code>out[0]=26000</code> matches the expectation. This is the Metal counterpart of the graph part of Lab A, but not an exact one: each submission here waits for completion, so it measures the round trip of a submission plus a completion notice, more than a CUDA one-by-one launch (which does not wait) pays. The direction of the conclusion is the same: encode small work in batches and submit it once.</span></li>
+      <li><span lang="zh-CN">读三次运行之间的差别：小 kernel 和大 kernel 两组在三次运行里几乎不动，比如两个队列上的小 kernel 跨度三次都是 2.722 ms；拷贝那一组和逐个提交那一组动得多一些（拷贝单独 4.202、4.265、4.707 ms，逐个提交每次 188、185、178 µs）。结论不依赖这些波动。</span><span lang="en">Read the differences between the three runs: the small-kernel and large-kernel groups barely move, the small-kernel span on two queues being 2.722 ms in all three runs, for example; the copy group and the one-by-one submission group move more (the copy alone at 4.202, 4.265 and 4.707 ms, one-by-one submissions at 188, 185 and 178 µs each). The conclusions do not depend on these swings.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>nvidia-smi</code> 输出、<code>./streams</code> 和 <code>./graph</code> 的完整输出，有租用机器时再加 Nsight Systems 时间线的截图；Lab B 的三次 <code>metal_overlap</code> 输出。写进当天日志，回答三个问题：T4 的 <code>asyncEngineCount</code> 是几，四流比单流快了多少，和 (c + 2) / c 的预测比起来如何；graph 每个 kernel 省了几微秒，要重放多少步才抵得上实例化；M5 上为什么同一个队列的两个小 kernel 也能重叠。还没有 Colab 账号时，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, the <code>nvidia-smi</code> output and the full output of <code>./streams</code> and <code>./graph</code>, plus a screenshot of the Nsight Systems timeline if you have the rented machine; from Lab B, the output of the three <code>metal_overlap</code> runs. Write them into that day’s log and answer three questions: what the T4’s <code>asyncEngineCount</code> is, and how much faster four streams were than one compared with the (c + 2) / c prediction; how many microseconds the graph saved per kernel, and how many steps it must replay to cover its instantiation; and why two small kernels in the same queue could overlap on the M5. If you have no Colab account yet, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="gpu/phase-5">
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">1. 主机缓冲区用 <code>malloc</code> 分配，把拷入、计算、拷出分到四个流上，每个拷贝都用 <code>cudaMemcpyAsync</code>。会怎样？</p><p lang="en">1. The host buffers come from <code>malloc</code>, and the copy in, compute and copy out are split over four streams, each copy using <code>cudaMemcpyAsync</code>. What happens?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">调用返回错误，因为异步拷贝要求页锁定内存</span><span lang="en">The calls return an error, because asynchronous copies require pinned memory</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">拷贝和 kernel 照样重叠，只是拷贝带宽低一些</span><span lang="en">Copies and kernels still overlap, only at lower copy bandwidth</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">结果正确，但拷贝退回同步行为，几乎不和别的工作重叠</span><span lang="en">The results are correct, but the copies revert to synchronous behaviour and barely overlap other work</span></label>
+      <div class="why" hidden><span lang="zh-CN">指南写明，主机内存不是页锁定的时候 <code>cudaMemcpyAsync()</code> 仍能正确工作，只是退回同步行为，不和其他工作重叠，所以它不报错。驱动要先把可分页的数据拷进自己的暂存区，这一步要 CPU 参与，重叠也就没了；问题不只是带宽低。</span><span lang="en">The guide states that with host memory that is not page-locked <code>cudaMemcpyAsync()</code> still works correctly but reverts to synchronous behaviour and does not overlap other work, so there is no error. The driver must first copy the pageable data into its own staging area, a step that needs the CPU, and the overlap goes with it; the problem is more than lower bandwidth.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">2. 把一步里的 20 个短 kernel 捕获成一张 CUDA graph 再重放，省掉的主要是什么？</p><p lang="en">2. Capturing the 20 short kernels of one step into a CUDA graph and replaying it saves mainly what?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">每次启动时主机上驱动的准备工作：它在实例化时为整张图一次做完</span><span lang="en">The driver’s setup work on the host at every launch: it is done once for the whole graph at instantiation</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">kernel 本身的执行时间：graph 会把 20 个 kernel 融合成一个</span><span lang="en">The kernels’ own execution time: the graph fuses the 20 kernels into one</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">实例化的时间：<code>cudaGraphInstantiate</code> 几乎不花时间，所以每步都可以重新实例化</span><span lang="en">Instantiation time: <code>cudaGraphInstantiate</code> costs almost nothing, so it can be redone every step</span></label>
+      <div class="why" hidden><span lang="zh-CN">指南 4.2 说明 graph 把每个 kernel 都要付的启动开销挪到实例化时一次付清。graph 不改 kernel 本身，20 个节点仍是 20 个 kernel，每个跑得一样快。实例化恰恰是贵的那一步，只该做一次；每步都重新实例化就把省下来的又花掉了。</span><span lang="en">Section 4.2 of the guide explains that a graph moves the launch overhead every kernel pays into a single payment at instantiation. A graph does not change the kernels: 20 nodes are still 20 kernels, each as fast as before. Instantiation is precisely the expensive step and should happen once; redoing it every step spends the savings again.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 流 s2 里的 kernel 要等流 s1 里的 kernel 写完结果，但主机线程不能停下来等。怎么写？</p><p lang="en">3. A kernel in stream s2 must wait until a kernel in stream s1 has written its results, but the host thread must not stop and wait. How do you write it?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">在两个 kernel 之间调用 <code>cudaStreamSynchronize(s1)</code></span><span lang="en">Call <code>cudaStreamSynchronize(s1)</code> between the two kernels</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">在 s1 里 <code>cudaEventRecord(e, s1)</code>，再 <code>cudaStreamWaitEvent(s2, e)</code>，然后在 s2 里启动 kernel</span><span lang="en"><code>cudaEventRecord(e, s1)</code> in s1, then <code>cudaStreamWaitEvent(s2, e)</code>, then launch the kernel in s2</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">什么都不用做：不同流的工作按提交顺序执行</span><span lang="en">Nothing: work in different streams runs in the order it was submitted</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>cudaStreamWaitEvent</code> 在 GPU 一侧等，主机不阻塞，这正是一条流间依赖。<code>cudaStreamSynchronize</code> 也能保证先后，但它让主机等到 s1 跑完，违反了题目的要求。不同流之间没有顺序，这正是流存在的意义，所以不加依赖的话两个 kernel 可能同时跑。</span><span lang="en"><code>cudaStreamWaitEvent</code> waits on the GPU side without blocking the host, which is exactly a dependence between streams. <code>cudaStreamSynchronize</code> also guarantees the order, but it makes the host wait until s1 finishes, which the question rules out. Different streams have no order between them, which is the point of streams, so without a dependence the two kernels may run at the same time.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">4. Lab B 里，两个各有 2<sup>20</sup> 个线程的 kernel 放在两个命令队列上，跨度正好是单独一个的两倍。为什么？</p><p lang="en">4. In Lab B, two kernels of 2<sup>20</sup> threads each on two command queues span exactly twice the time of one alone. Why?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">Metal 的不同命令队列总是一个接一个执行</span><span lang="en">Different Metal command queues always run one after the other</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">两个 kernel 写同一个缓冲区，冒险跟踪让它们串行</span><span lang="en">The two kernels write the same buffer, and hazard tracking serializes them</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">一个 kernel 已经填满了 GPU，第二个只能分走同一批核心，并发没有多出来的资源可用</span><span lang="en">One kernel already fills the GPU, so the second can only share the same cores, and concurrency has no spare resources to use</span></label>
+      <div class="why" hidden><span lang="zh-CN">同一个程序里 1024 线程的小 kernel 在两个队列上完全重叠了，跨度和单独一个差不多，所以不同队列并不总是串行。这一组里 A 和 B 写的是两个不同的缓冲区（<code>outA</code> 和 <code>outB</code>），没有冒险可跟踪。两个大 kernel 各自的时间窗口确实重叠，<code>sum</code> 大于跨度，但它们在争同一批核心，总时间不会少。</span><span lang="en">In the same program the 1024-thread small kernels overlapped completely on two queues, spanning about the time of one alone, so different queues are not always serial. In this group A and B write two different buffers (<code>outA</code> and <code>outB</code>), so there is no hazard to track. The windows of the two large kernels do overlap, which is why <code>sum</code> exceeds the span, but they compete for the same cores and the total time does not shrink.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html">NVIDIA — CUDA Programming Guide, 2.5 Asynchronous Execution</a> <span class="lvl" lang="zh-CN">官方：流的创建和启动（2.5.2）、页锁定内存的要求（2.5.2.3 的提示）、事件（2.5.3）、阻塞流、非阻塞流与默认流（2.5.6）；13.4 版，2026-10-31 读取</span><span class="lvl" lang="en">Official: creating and launching into streams (2.5.2), the pinned-memory requirement (the note in 2.5.2.3), events (2.5.3), blocking and non-blocking streams and the default stream (2.5.6); version 13.4, read 2026-10-31</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html">NVIDIA — CUDA Programming Guide, 4.2 CUDA Graphs</a> <span class="lvl" lang="zh-CN">官方：graph 要解决的启动开销、定义、实例化、执行三个阶段，流捕获和它的禁止操作，跨流依赖，更新已实例化的图（4.2.3）</span><span class="lvl" lang="en">Official: the launch overhead graphs address, the three stages of definition, instantiation and execution, stream capture and its prohibited operations, cross-stream dependencies, updating instantiated graphs (4.2.3)</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__STREAM.html">NVIDIA — CUDA Runtime API, Stream Management</a> · <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__GRAPH.html">Graph Management</a> <span class="lvl" lang="zh-CN">官方参考（13.4 版）：<code>cudaStreamBeginCapture</code>、<code>cudaStreamEndCapture</code>、<code>cudaStreamWaitEvent</code>、<code>cudaGraphInstantiate</code>、<code>cudaGraphLaunch</code> 的签名，Lab A 的桩头文件照此写成</span><span class="lvl" lang="en">Official reference (version 13.4): the signatures of <code>cudaStreamBeginCapture</code>, <code>cudaStreamEndCapture</code>, <code>cudaStreamWaitEvent</code>, <code>cudaGraphInstantiate</code> and <code>cudaGraphLaunch</code>, which Lab A’s stub header follows</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/multi-gpu-systems.html">NVIDIA — CUDA Programming Guide, 3.4 Programming Systems with Multiple GPUs</a> · <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/api/colls.html">NCCL — Collective Communication Functions</a> <span class="lvl" lang="zh-CN">官方：peer access 和 peer 拷贝（3.4.2）；NCCL 2.32.3 的集合操作签名，包括 <code>ncclAllReduce</code></span><span class="lvl" lang="en">Official: peer access and peer copies (3.4.2); the collective signatures of NCCL 2.32.3, <code>ncclAllReduce</code> among them</span></li>
+    <li><a href="https://docs.nvidia.com/deploy/mps/index.html">NVIDIA — Multi-Process Service</a> <span class="lvl" lang="zh-CN">官方：MPS 的组成、分时调度与并发调度、Volta 以后的架构、线程比例的限制</span><span class="lvl" lang="en">Official: what MPS consists of, time-sliced versus concurrent scheduling, the architecture since Volta, limits on the thread share</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal/mtlsharedevent">Apple — MTLSharedEvent</a> · <a href="https://developer.apple.com/documentation/metal/mtlcommandbuffer">MTLCommandBuffer</a> · <a href="https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer">MTLIndirectCommandBuffer</a> <span class="lvl" lang="zh-CN">官方：本页的 Metal 名字是从实验机 SDK 的头文件 <code>MTLEvent.h</code>、<code>MTLCommandBuffer.h</code>、<code>MTLIndirectCommandBuffer.h</code> 核对的，网页是同一套 API 的文档</span><span class="lvl" lang="en">Official: this page checked its Metal names against the headers <code>MTLEvent.h</code>, <code>MTLCommandBuffer.h</code> and <code>MTLIndirectCommandBuffer.h</code> in the lab Mac’s SDK; the web pages document the same API</span></li>
+    <li><a href="https://developer.nvidia.com/blog/how-overlap-data-transfers-cuda-cc/">Mark Harris — How to Overlap Data Transfers in CUDA C/C++</a> · <a href="https://developer.nvidia.com/blog/cuda-graphs/">Getting Started with CUDA Graphs</a> <span class="lvl" lang="zh-CN">入门到中级：NVIDIA 技术博客上讲切块流水和 graph 的两篇文章；写得早于 CUDA 13，以上面的官方文档为准</span><span class="lvl" lang="en">Introductory to intermediate: two NVIDIA Technical Blog posts on chunked pipelining and graphs; written before CUDA 13, so the official documents above are authoritative</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 22 章 Programming a heterogeneous computing cluster 对应概念 1、概念 2 和图解 (a)；第 19 章 Multi-GPU API（第 5 版新增）对应概念 4。章号来自 Elsevier 页面上的第 5 版目录（2026-10-31 读取），章内小节按章名对应</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 22, Programming a heterogeneous computing cluster, for concepts 1 and 2 and diagram (a); chapter 19, Multi-GPU API (new in the 5th edition), for concept 4. Chapter numbers come from the 5th-edition table of contents on Elsevier’s page (read 2026-10-31); sections within chapters are matched by chapter title</span></li>
+    <li lang="zh-CN">Jason Sanders, Edward Kandrot, 《CUDA by Example: An Introduction to General-Purpose GPU Programming》, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">第 10 章 Streams（10.2 Page-Locked Host Memory、10.3 到 10.5 单流与多流、10.7 Using Multiple CUDA Streams Effectively）对应概念 1、概念 2 和 Lab A 的流水线；第 11 章 CUDA C on Multiple GPUs 对应概念 4。目录来自 InformIT 的页面（2026-10-31 读取）。书早于 CUDA graph、peer access 和 NCCL</span></li>
+    <li lang="en">Jason Sanders, Edward Kandrot, <em>CUDA by Example: An Introduction to General-Purpose GPU Programming</em>, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">Chapter 10, Streams (10.2, Page-Locked Host Memory; 10.3 to 10.5, single and multiple streams; 10.7, Using Multiple CUDA Streams Effectively), for concepts 1 and 2 and the pipeline of Lab A; chapter 11, CUDA C on Multiple GPUs, for concept 4. The table of contents comes from InformIT’s page (read 2026-10-31). The book predates CUDA graphs, peer access and NCCL</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-4-profiling-and-optimization/index.html"><span lang="zh-CN">← Phase 4 · 性能剖析与优化</span><span lang="en">← Phase 4 · Profiling and Optimization</span></a>
+    <a href="../phase-6-memory-management/index.html"><span lang="zh-CN">Phase 6 · 内存管理与宿主集成 →</span><span lang="en">Phase 6 · Memory Management and Host Integration →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
