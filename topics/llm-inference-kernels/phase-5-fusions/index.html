@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 5 · Fusions · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page">Phase 5 · Fusions</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 5 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 5 / 9 · about 1–2 weeks</p>
+  <h1>Fusions <span class="en" lang="zh-CN">融合：为什么把几个小算子并成一个内核能省下显存流量，残差加法 + RMSNorm、SiLU-and-mul、RoPE + 写 KV 缓存、all-reduce + 归一化和采样这五种融合各省多少字节，以及它们在 SGLang v0.5.22 里各在哪里</span><span class="en" lang="en">Why merging several small operators into one kernel saves memory traffic, how many bytes each of five fusions saves (residual add + RMSNorm, SiLU-and-mul, RoPE + KV-cache write, all-reduce + norm, and sampling), and where each lives in SGLang v0.5.22</span></h1>
+  <p class="lede" lang="zh-CN">归一化、激活、位置编码这些逐元素算子几乎不做算术，时间全花在搬数据上：每个不融合的算子都要把激活从显存读一遍、再写一遍。把相邻的算子并进一个内核，中间结果留在寄存器里，读写就少了。以本专题的 Qwen3-0.6B 为例（hidden size 1024、intermediate size 3072、BF16），残差加法后接 RMSNorm，两个内核每 token 读写 10 KiB，融合成一个只要 8 KiB；SiLU-and-mul 从 30 KiB 降到 18 KiB。SGLang 在 CUDA 上默认就走这些融合内核，采样则交给 FlashInfer 不排序的拒绝采样内核。这台 Apple M5 上的 Metal 对照实测：16384 个 token 时，融合版的耗时之比正好等于字节之比（1.25–1.26 倍和 1.65–1.66 倍）；只有 16 个 token 时比值升到约 1.5–2.3 倍，因为这时省下的主要是一次派发，而不是字节。</p>
+  <p class="lede" lang="en">Elementwise operators such as normalization, activation and positional encoding do almost no arithmetic; their time goes into moving data, and every unfused operator reads the activation from memory once and writes it once. Merge neighbouring operators into one kernel and the intermediate results stay in registers, so there are fewer reads and writes. For this topic’s Qwen3-0.6B (hidden size 1024, intermediate size 3072, BF16), a residual add followed by RMSNorm reads and writes 10 KiB per token as two kernels and 8 KiB as one fused kernel; SiLU-and-mul drops from 30 KiB to 18 KiB. SGLang takes these fused kernels by default on CUDA, and hands sampling to FlashInfer’s rejection-sampling kernel, which never sorts. Measured with the Metal twin on this Apple M5: at 16384 tokens the fused versions are faster by exactly their byte ratio (1.25–1.26 and 1.65–1.66 times); at 16 tokens the ratio rises to about 1.5–2.3 times, because what is saved there is mostly one dispatch rather than bytes.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">给定 hidden size 和数据类型，逐个内核数出一个融合省下的每 token 读写字节数，并说明它什么时候换成了时间、什么时候没有。</li>
+      <li lang="en">Given a hidden size and a data type, count kernel by kernel the bytes per token a fusion saves, and say when that turns into time and when it does not.</li>
+      <li lang="zh-CN">从 <code>Qwen3DecoderLayer</code> 一路追到 <code>fused_add_rmsnorm</code> 和 <code>silu_and_mul</code> 的内核，说出 v0.5.22 在哪个文件里做了选择。</li>
+      <li lang="en">Trace from <code>Qwen3DecoderLayer</code> down to the <code>fused_add_rmsnorm</code> and <code>silu_and_mul</code> kernels, naming the file in which v0.5.22 makes each choice.</li>
+      <li lang="zh-CN">说出 RoPE + 写 KV 缓存和 all-reduce + 残差 + RMSNorm 两种融合各在什么条件下才启用，以及为什么单卡 L4 上的 Qwen3-0.6B 两种都用不上。</li>
+      <li lang="en">State the conditions under which the RoPE + KV-cache write and the all-reduce + residual + RMSNorm fusions switch on, and why Qwen3-0.6B on a single L4 uses neither.</li>
+      <li lang="zh-CN">用两个阈值（low 和 high）一轮一轮地演示 FlashInfer 的 top-k/top-p 采样，说明它为什么不需要排序，每轮读几遍概率行。</li>
+      <li lang="en">Walk FlashInfer’s top-k/top-p sampling round by round with its two bounds (low and high), and explain why it needs no sort and how many times each round reads the probability row.</li>
+      <li lang="zh-CN">用 <code>SGLANG_FORCE_FUSED_OP_BACKEND=torch</code> 把整个模型切回不融合的 PyTorch 实现，在剖析器里比较两边的内核清单。</li>
+      <li lang="en">Switch the whole model back to its unfused PyTorch implementations with <code>SGLANG_FORCE_FUSED_OP_BACKEND=torch</code>, and compare the two kernel lists in the profiler.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-the-stack/index.html">Phase 0</a>：一个解码步按顺序跑哪些算子，以及为什么解码受带宽限制。本页把其中的逐元素算子拿出来单独算账。</li>
+    <li lang="en"><a href="../phase-0-the-stack/index.html">Phase 0</a>: which operators a decode step runs in order, and why decode is bandwidth-bound. This page takes the elementwise operators among them and does their accounting.</li>
+    <li lang="zh-CN"><a href="../phase-3-cuda-graphs-plan-run/index.html">Phase 3</a>：每个小内核都有发射开销，CUDA 图能省掉 CPU 那一份，但省不掉 GPU 上内核之间的那一份。融合把内核数本身减少了。</li>
+    <li lang="en"><a href="../phase-3-cuda-graphs-plan-run/index.html">Phase 3</a>: every small kernel has a launch cost; CUDA graphs remove the CPU share of it but not the share spent on the GPU between kernels. Fusion reduces the number of kernels itself.</li>
+    <li lang="zh-CN">GPU 专题的 <a href="../../gpu-cuda/phase-1-memory-hierarchy/index.html">Phase 1 · 内存层次</a>（寄存器、共享内存和显存的带宽差）和 <a href="../../gpu-cuda/phase-3-parallel-patterns/index.html">Phase 3 · 并行模式</a>（归约和前缀和），RMSNorm 和采样内核用的就是这两种模式。</li>
+    <li lang="en">From the GPU topic, <a href="../../gpu-cuda/phase-1-memory-hierarchy/index.html">Phase 1 · Memory Hierarchy</a> (the bandwidth gap between registers, shared memory and device memory) and <a href="../../gpu-cuda/phase-3-parallel-patterns/index.html">Phase 3 · Parallel Patterns</a> (reduction and prefix sum), the two patterns the RMSNorm and sampling kernels are built on.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+  <p lang="zh-CN">下文 SGLang 的源码路径和行号都在 <code>v0.5.22</code> 标签下，FlashInfer 的在 <code>v0.7.1</code> 标签下（SGLang 钉的版本），都是 2026-11-01 从 raw.githubusercontent.com 取回后读的；FlashInfer 的采样博客（2025-03-10）和 Qwen3-0.6B 在 Hugging Face 上的 <code>config.json</code> 也是同一天读的。字节数一律按 Qwen3-0.6B 算：hidden size <code>h</code> = 1024，intermediate size <code>I</code> = 3072，16 个 Q 头、8 个 KV 头、head_dim 128，词表 151936，28 层，BF16 每个元素 2 字节。只数激活的读写；RMSNorm 的权重每 token 只有 2 KiB，而且整批共用、多半在缓存里，不计入。</p><p lang="en">Every SGLang source path and line number below is at the <code>v0.5.22</code> tag, and FlashInfer’s at <code>v0.7.1</code> (the version SGLang pins); all were fetched from raw.githubusercontent.com and read on 2026-11-01, as were FlashInfer’s sampling blog post (2025-03-10) and the <code>config.json</code> of Qwen3-0.6B on Hugging Face. Byte counts all use Qwen3-0.6B: hidden size <code>h</code> = 1024, intermediate size <code>I</code> = 3072, 16 Q heads, 8 KV heads, head_dim 128, a vocabulary of 151936, 28 layers, and 2 bytes per BF16 element. Only activation reads and writes are counted; the RMSNorm weight is just 2 KiB, shared by the whole batch and most likely cached, so it is left out.</p>
+
+  <h3 lang="zh-CN">1. 为什么融合能省显存流量</h3><h3 lang="en">1. Why fusion cuts memory traffic</h3>
+  <p lang="zh-CN">一个逐元素算子对每个元素只做几次加乘，算术强度（每字节的运算数）远低于显卡的屋脊点，所以它的时间几乎等于「读入的字节 + 写出的字节」除以显存带宽。两个这样的算子一前一后，第一个把结果写回显存，第二个再原样读回来；这一写一读纯粹是搬运。融合的意思就是把它们写进同一个内核：中间结果留在寄存器（或共享内存）里，不再经过显存，同时少发射一个内核。</p><p lang="en">An elementwise operator does a handful of adds and multiplies per element, so its arithmetic intensity (operations per byte) sits far below the GPU’s ridge point, and its time is almost exactly the bytes it reads plus the bytes it writes, divided by memory bandwidth. Put two such operators back to back and the first writes its result to memory only for the second to read it straight back; that write and that read are pure transport. Fusion means writing both into one kernel: the intermediate result stays in registers (or shared memory) and never touches device memory, and one kernel launch disappears with it.</p>
+  <p lang="zh-CN">以残差加法 + RMSNorm 为例，数一个 token 的字节（一行激活是 1024 × 2 = 2 KiB）：</p><p lang="en">Take residual add + RMSNorm and count the bytes of one token (one row of activations is 1024 × 2 = 2 KiB):</p>
+  <ul>
+    <li lang="zh-CN"><strong>逐个 PyTorch 算子</strong>（<code>RMSNorm.forward_native</code>，<code>layernorm.py</code> 第 821–870 行）：两次转 FP32、相加、转回 BF16 存残差、平方、求均值、乘 rsqrt、乘权重、转回 BF16，每一步都读写一整行，FP32 的行是 4 KiB。加起来约 64 KiB（推断：按「每个算子是一个单独的内核，读一次输入、写一次输出」逐行数出，没有算子融合）。</li>
+    <li lang="en"><strong>Operator by operator in PyTorch</strong> (<code>RMSNorm.forward_native</code>, lines 821–870 of <code>layernorm.py</code>): two casts to FP32, the add, a cast back to BF16 to store the residual, the square, the mean, the multiply by rsqrt, the multiply by the weight, and a cast back to BF16, each reading and writing a whole row, where an FP32 row is 4 KiB. That comes to about 64 KiB (inference: counted line by line assuming each operator is its own kernel that reads its inputs once and writes its output once, with no operator fusion).</li>
+    <li lang="zh-CN"><strong>两个内核</strong>：一个加法内核读 <code>x</code> 和 <code>r</code>、写 <code>r′</code>（6 KiB），一个 RMSNorm 内核把 <code>r′</code> 读回来、写 <code>y</code>（4 KiB），共 10 KiB。</li>
+    <li lang="en"><strong>Two kernels</strong>: an add kernel reads <code>x</code> and <code>r</code> and writes <code>r′</code> (6 KiB), and an RMSNorm kernel reads <code>r′</code> back and writes <code>y</code> (4 KiB), 10 KiB in all.</li>
+    <li lang="zh-CN"><strong>一个融合内核</strong>：读 <code>x</code> 和 <code>r</code>，写 <code>r′</code>（下一层还要用残差）和 <code>y</code>，共 8 KiB。省掉的是把 <code>r′</code> 读回来的那 2 KiB 和一次发射。</li>
+    <li lang="en"><strong>One fused kernel</strong>: reads <code>x</code> and <code>r</code>, writes <code>r′</code> (the next layer still needs the residual) and <code>y</code>, 8 KiB in all. What is saved is the 2 KiB of reading <code>r′</code> back, plus one launch.</li>
+  </ul>
+  <p lang="zh-CN">这些字节什么时候变成时间，取决于 token 数。Qwen3-0.6B 每层有两个残差 + RMSNorm、一个 SiLU-and-mul，28 层再加最后一个归一化，相对于「两个内核」的写法，每个 token 每步约省 57 × 2 KiB + 28 × 12 KiB ≈ 450 KiB。批大小为 1 的解码一步要读一遍约 0.6B 个 BF16 参数，约 1.2 GB（模型卡写的是 0.6B 参数，词嵌入和输出头共用），450 KiB 只占其中约 0.04%，这时融合的收益主要是少发射内核；预填充 4096 个 token 时，450 KiB × 4096 ≈ 1.8 GB，已经和权重相当，字节就成了主角（推断，按上面的字节数相乘）。Lab B 在 Metal 上把这两种情形都量出来了。</p><p lang="en">When those bytes turn into time depends on the token count. Each Qwen3-0.6B layer has two residual + RMSNorm sites and one SiLU-and-mul; over 28 layers plus the final norm, against the two-kernel style, each token saves about 57 × 2 KiB + 28 × 12 KiB ≈ 450 KiB per step. A decode step at batch size 1 reads about 0.6B BF16 parameters once, about 1.2 GB (the model card gives 0.6B parameters, with the embedding shared as the output head), so 450 KiB is about 0.04% of it, and the benefit of fusion there is mostly fewer kernel launches; for a 4096-token prefill, 450 KiB × 4096 ≈ 1.8 GB, comparable to the weights, and the bytes take over (inference, multiplying the byte counts above). Lab B measures both regimes in Metal.</p>
+  <p lang="zh-CN">SGLang 把每个可融合的算子写成一个 <code>BaseFusedOp</code>（<code>python/sglang/kernels/fused_op.py</code>）：同一个算子有一个必备的纯 PyTorch 参考实现 <code>forward_native</code>，再加按平台的 <code>forward_cuda</code> 等和按来源的 <code>forward_jit</code>、<code>forward_aot</code>、<code>forward_flashinfer</code> 等实现，在第一次调用时选定并缓存（第 23–50 行）。环境变量 <code>SGLANG_FORCE_FUSED_OP_BACKEND</code> 能把整个进程里的这类算子强制切到某一个来源（第 26–30、222–234 行）；它的取值是 <code>KernelBackend</code> 枚举的值，参考实现那一项是 <code>torch</code>（<code>kernels/spec.py</code> 第 40 行），<code>srt/environ.py</code> 第 1355–1357 行的注释也写的是 <code>"torch"</code>。<code>fused_op.py</code> 文档字符串里举的例子 <code>native</code> 不是枚举里的值（2026-11-01 在 <code>spec.py</code> 里核对，枚举只有 <code>torch</code>、<code>torch_compile</code>、<code>triton</code>、<code>jit</code>、<code>aot</code> 等）。Lab A 用 <code>torch</code> 做不融合的对照。</p><p lang="en">SGLang writes every fusable operator as a <code>BaseFusedOp</code> (<code>python/sglang/kernels/fused_op.py</code>): one operator with a required pure-PyTorch reference, <code>forward_native</code>, plus per-platform paths such as <code>forward_cuda</code> and per-provenance ones such as <code>forward_jit</code>, <code>forward_aot</code> and <code>forward_flashinfer</code>, one of which is chosen on the first call and cached (lines 23–50). The environment variable <code>SGLANG_FORCE_FUSED_OP_BACKEND</code> forces every such operator in the process onto one provenance (lines 26–30 and 222–234); its value is a value of the <code>KernelBackend</code> enum, where the reference is <code>torch</code> (line 40 of <code>kernels/spec.py</code>), which is also what the comment at lines 1355–1357 of <code>srt/environ.py</code> says. The example <code>native</code> in the <code>fused_op.py</code> docstring is not an enum value (checked in <code>spec.py</code> on 2026-11-01: the enum has <code>torch</code>, <code>torch_compile</code>, <code>triton</code>, <code>jit</code>, <code>aot</code> and so on). Lab A uses <code>torch</code> as the unfused baseline.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 5 章 Memory architecture and data locality（为什么减少对全局内存的访问是第一位的优化）和第 6 章 Performance considerations；Hennessy &amp; Patterson 第 4 章的 Roofline 一节（算术强度和屋脊点）。</p><p lang="en">Further reading: chapter 5, Memory architecture and data locality, of PMPP 5th ed. (why cutting global-memory accesses comes first) and chapter 6, Performance considerations; the Roofline section of chapter 4 of Hennessy &amp; Patterson (arithmetic intensity and the ridge point).</p>
+
+  <h3 lang="zh-CN">2. 残差加法 + RMSNorm</h3><h3 lang="en">2. Residual add + RMSNorm</h3>
+  <p lang="zh-CN">预归一化的 Transformer 每层有两处「上一段的输出加回残差，再对和做 RMSNorm」：注意力之前和 MLP 之前。融合内核的合同写在 <code>sgl_kernel</code> 的 Python 包装里（<code>python/sglang/kernels/aot/python/sgl_kernel/elementwise.py</code> 第 125–162 行），两步都是原地的：</p><p lang="en">A pre-norm Transformer has two places per layer where the previous block’s output is added back into the residual and the sum goes through RMSNorm: before attention and before the MLP. The fused kernel’s contract is in the Python wrapper of <code>sgl_kernel</code> (lines 125–162 of <code>python/sglang/kernels/aot/python/sgl_kernel/elementwise.py</code>), and both steps are in place:</p>
+<pre data-lang="py" data-file="sgl_kernel/elementwise.py, lines 134–138 (v0.5.22)">Step 1:
+``residual[i] += input[i]``
+
+Step 2:
+``input[i] = (residual[i] / RMS(residual)) * weight[i]``</pre>
+  <p lang="zh-CN">一个 token 的一行（1024 个元素）正好交给一个线程块：每个线程读几个 <code>x</code> 和 <code>r</code>，在寄存器里相加并写回残差，同时累加平方和；块内归约出整行的平方和，得到 1/RMS；每个线程再用自己寄存器里的值乘上它和权重，写出 <code>y</code>。行内的归约就是 PMPP 讲的归约模式，所以「先加再归一化」能留在一个内核里。Lab B 的 Metal 内核就是这样写的。</p><p lang="en">One token’s row (1024 elements) maps onto one thread block: each thread reads a few elements of <code>x</code> and <code>r</code>, adds them in registers and writes the residual back while accumulating a sum of squares; a block-wide reduction gives the row’s sum of squares and so 1/RMS; then each thread multiplies the values still in its registers by that and by the weight and writes <code>y</code>. The in-row reduction is the reduction pattern from PMPP, which is why the add and the norm can live in one kernel. Lab B’s Metal kernel is written exactly this way.</p>
+  <p lang="zh-CN">在 v0.5.22 里从模型一路往下追（Qwen3 稠密模型）：</p><p lang="en">Following it down from the model in v0.5.22 (the dense Qwen3 model):</p>
+  <ol>
+    <li lang="zh-CN"><code>models/qwen3.py</code> 第 369–380 行：<code>Qwen3DecoderLayer</code> 建两个 <code>RMSNorm</code>，交给 <code>layer_boundary</code> 的两个阶段（注意力和 FFN）。<code>forward</code>（第 392–434 行）不再自己调归一化，而是调 <code>attn_boundary.prepare</code> 和 <code>ffn_boundary.prepare</code>。</li>
+    <li lang="en">Lines 369–380 of <code>models/qwen3.py</code>: <code>Qwen3DecoderLayer</code> builds two <code>RMSNorm</code> modules and hands them to the two <code>layer_boundary</code> stages (attention and FFN). Its <code>forward</code> (lines 392–434) no longer calls the norm itself; it calls <code>attn_boundary.prepare</code> and <code>ffn_boundary.prepare</code>.</li>
+    <li lang="zh-CN"><code>layers/layer_boundary/residual/add_norm.py</code>：普通残差的读出策略在加法是普通加法时调 <code>norm(hidden_states, residual)</code>（第 411 行，FFN 那一侧；注意力那一侧在第 361–363 行，多一个量化格式参数）。文档字符串说「上一段输出的普通加法在同一个内核里完成」（第 368–369 行）。同一文件里的 <code>UnfusedNormReadout</code>（第 415–435 行）给自己先做加法的模型用，注释写明「没有融合内核接它」。</li>
+    <li lang="en"><code>layers/layer_boundary/residual/add_norm.py</code>: when the update is a plain add, the plain residual’s readout calls <code>norm(hidden_states, residual)</code> (line 411 on the FFN side; the attention side is lines 361–363, with one more argument for a quantization format). Its docstring says a plain add of the previous output runs in the same kernel (lines 368–369). <code>UnfusedNormReadout</code> in the same file (lines 415–435) is for models that add their residual themselves, and its docstring says no fused kernel takes it.</li>
+    <li lang="zh-CN"><code>layers/layernorm.py</code>：<code>RMSNorm.forward_cuda</code>（第 511 行）在有残差时调 <code>fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)</code>（第 621 行），没有残差时调 <code>rmsnorm</code>（第 624 行）；两者都从 <code>sgl_kernel</code> 导入（第 102–107 行）。第 615–618 行的 TODO 说明了一个限制：多出来的 <code>post_residual_addition</code> 只能先加进残差，再交给融合内核，加法顺序因此和不融合时不同。</li>
+    <li lang="en"><code>layers/layernorm.py</code>: <code>RMSNorm.forward_cuda</code> (line 511) calls <code>fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)</code> when there is a residual (line 621) and <code>rmsnorm</code> when there is not (line 624), both imported from <code>sgl_kernel</code> (lines 102–107). A TODO at lines 615–618 records one limit: an extra <code>post_residual_addition</code> can only be added into the residual before the fused kernel runs, so the order of additions differs from the unfused one.</li>
+    <li lang="zh-CN"><code>sgl_kernel/elementwise.py</code> 第 155–162 行：装了 FlashInfer 且数据类型受支持时，转给 <code>flashinfer.norm.fused_add_rmsnorm</code>；否则调自己的 C++ 算子 <code>torch.ops.sgl_kernel.fused_add_rmsnorm</code>，它在 <code>kernels/aot/csrc/elementwise/fused_add_rms_norm_kernel.cu</code> 里，内部调用的也是 FlashInfer 头文件里的 <code>norm::FusedAddRMSNorm</code>。FlashInfer v0.7.1 的 Python 入口（<code>flashinfer/norm/__init__.py</code> 第 89–101 行）默认用 CuTe DSL 写的内核，只有设了 <code>FLASHINFER_USE_CUDA_NORM</code> 或者 CuTe DSL 不支持这块卡的架构时，才用 <code>include/flashinfer/norm.cuh</code> 第 414 行的 CUDA 内核 <code>FusedAddRMSNormKernel</code>。L4（sm_89）上走哪一个，这里没有核对（Lab A 第 1 步的剖析表会显示）。</li>
+    <li lang="en">Lines 155–162 of <code>sgl_kernel/elementwise.py</code>: when FlashInfer is installed and the data type is supported, the call goes to <code>flashinfer.norm.fused_add_rmsnorm</code>; otherwise to its own C++ op <code>torch.ops.sgl_kernel.fused_add_rmsnorm</code>, in <code>kernels/aot/csrc/elementwise/fused_add_rms_norm_kernel.cu</code>, which also calls <code>norm::FusedAddRMSNorm</code> from a FlashInfer header. FlashInfer v0.7.1’s Python entry point (lines 89–101 of <code>flashinfer/norm/__init__.py</code>) uses kernels written in the CuTe DSL by default, and the CUDA kernel <code>FusedAddRMSNormKernel</code> (line 414 of <code>include/flashinfer/norm.cuh</code>) only when <code>FLASHINFER_USE_CUDA_NORM</code> is set or the CuTe DSL cannot target the GPU’s architecture. Which of the two runs on the L4 (sm_89) was not checked here; the profiler table in step 1 of Lab A shows it.</li>
+  </ol>
+  <p lang="zh-CN">还有两条旁路。一是 SGLang 自己的 JIT 版本 <code>kernels/ops/layernorm/norm.py</code> 的 <code>fused_add_rmsnorm</code>（第 148 行，源码 <code>kernels/jit/csrc/elementwise/fused_add_rmsnorm.cuh</code>），只在 <code>cast_x_before_out_mul=True</code>（与 Hugging Face 数值一致的写法）时用，hidden size 要是 16 的倍数且不超过 8192（第 69–70 行）。二是把下一层 FP8 线性层的输入量化也并进归一化：<code>fuse_input_quant</code>（第 505–509 行）登记了下游的投影层后，<code>forward_cuda</code> 改走 FlashInfer 的 <code>rmsnorm_quant</code> 系列（第 547–560 行），连归一化的 BF16 输出都不写，直接写 FP8。</p><p lang="en">There are two side roads. One is SGLang’s own JIT version, <code>fused_add_rmsnorm</code> in <code>kernels/ops/layernorm/norm.py</code> (line 148, source <code>kernels/jit/csrc/elementwise/fused_add_rmsnorm.cuh</code>), used only with <code>cast_x_before_out_mul=True</code> (the style that matches Hugging Face numerics), for hidden sizes that are multiples of 16 up to 8192 (lines 69–70). The other folds the input quantization of the next FP8 linear layer into the norm as well: once <code>fuse_input_quant</code> (lines 505–509) has registered the downstream projection, <code>forward_cuda</code> switches to FlashInfer’s <code>rmsnorm_quant</code> family (lines 547–560), which does not even write the BF16 output of the norm and writes FP8 directly.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 10 章 Reduction（行内平方和的块内归约）；Raschka《Build a Large Language Model (From Scratch)》第 4 章的 4.2 节（用 layer normalization 归一化激活）和 4.4 节（shortcut 连接，也就是残差）。该书用的是 GPT-2 的 LayerNorm，不是 RMSNorm，但两者的内存访问形状相同。</p><p lang="en">Further reading: chapter 10, Reduction, of PMPP 5th ed. (the block-wide reduction of a row’s sum of squares); sections 4.2 (normalizing activations with layer normalization) and 4.4 (shortcut connections, that is, the residual) of chapter 4 of Raschka’s <em>Build a Large Language Model (From Scratch)</em>. The book uses GPT-2’s LayerNorm rather than RMSNorm, but the two have the same memory-access shape.</p>
+
+  <h3 lang="zh-CN">3. SiLU-and-mul</h3><h3 lang="en">3. SiLU-and-mul</h3>
+  <p lang="zh-CN">Qwen3 的 MLP 是 SwiGLU：<code>gate_up_proj</code> 一次矩阵乘同时算出 gate 和 up，输出形状 <code>[T, 2I]</code>，前一半是 gate、后一半是 up；激活是 <code>silu(gate) * up</code>，再交给 <code>down_proj</code>（<code>models/qwen2.py</code> 第 73–121 行，Qwen3 直接复用这个 <code>Qwen2MLP</code>，见 <code>qwen3.py</code> 第 37 行）。不融合的写法就是 <code>SiluAndMul.forward_native</code>（<code>layers/activation.py</code> 第 141–143 行）：<code>F.silu(x[..., :d]) * x[..., d:]</code>，两个内核。按 <code>I</code> = 3072 数一个 token：<code>silu</code> 读 gate、写中间结果（各 6 KiB），乘法再读中间结果和 up、写输出（18 KiB），共 30 KiB；融合内核读 gate 和 up、写输出，共 18 KiB，省 12 KiB。每层一次，这是一个解码步里单项最大的逐元素节省。</p><p lang="en">Qwen3’s MLP is SwiGLU: one matmul, <code>gate_up_proj</code>, produces gate and up together as a <code>[T, 2I]</code> output, gate in the first half and up in the second; the activation is <code>silu(gate) * up</code>, which feeds <code>down_proj</code> (lines 73–121 of <code>models/qwen2.py</code>; Qwen3 reuses this <code>Qwen2MLP</code> directly, line 37 of <code>qwen3.py</code>). The unfused form is <code>SiluAndMul.forward_native</code> (lines 141–143 of <code>layers/activation.py</code>): <code>F.silu(x[..., :d]) * x[..., d:]</code>, two kernels. With <code>I</code> = 3072, per token: <code>silu</code> reads gate and writes an intermediate (6 KiB each), and the multiply reads the intermediate and up and writes the output (18 KiB), 30 KiB in all; the fused kernel reads gate and up and writes the output, 18 KiB, saving 12 KiB. It happens once per layer, the largest single elementwise saving of a decode step.</p>
+  <p lang="zh-CN"><code>SiluAndMul.forward_cuda</code>（第 145–150 行）分配输出后调 <code>silu_and_mul(x, out)</code>。这个函数在同一文件第 59–99 行按形状二选一：输出宽度是向量宽度（SM100 及以上 32 字节，否则 16 字节）的整数倍时，用 SGLang 的 JIT 内核 <code>kernels/ops/activation/activation.py</code>（源码 <code>kernels/jit/csrc/elementwise/activation.cuh</code>，内核函数 <code>act_and_mul_kernel</code>，第 74 行）；否则退回 <code>sgl_kernel</code> 的提前编译版本（<code>kernels/aot/csrc/elementwise/activation.cu</code> 第 85 行，内部是 FlashInfer 的 <code>act_and_mul_kernel</code>）。注释举的例子是 DeepSeek-V2-Lite 在 8 卡张量并行下每卡 1368，不是 8 的倍数。Qwen3-0.6B 的 3072 走 JIT 版本。</p><p lang="en"><code>SiluAndMul.forward_cuda</code> (lines 145–150) allocates the output and calls <code>silu_and_mul(x, out)</code>. That function, at lines 59–99 of the same file, picks one of two by shape: when the output width is a multiple of the vector width (32 bytes on SM100 and later, 16 bytes otherwise), SGLang’s JIT kernel in <code>kernels/ops/activation/activation.py</code> (source <code>kernels/jit/csrc/elementwise/activation.cuh</code>, kernel function <code>act_and_mul_kernel</code> at line 74); otherwise it falls back to the ahead-of-time build in <code>sgl_kernel</code> (line 85 of <code>kernels/aot/csrc/elementwise/activation.cu</code>, which wraps FlashInfer’s <code>act_and_mul_kernel</code>). The comment’s example is DeepSeek-V2-Lite at 8-way tensor parallelism, 1368 per rank, not a multiple of 8. Qwen3-0.6B’s 3072 takes the JIT version.</p>
+  <p lang="zh-CN">更进一步是把激活并进矩阵乘本身，让 <code>[T, 2I]</code> 根本不落到显存。<code>Qwen2MLP.forward</code> 先问 <code>self.dual_gemm.can_run</code>（第 114–118 行）：<code>layers/dual_gemm.py</code> 的 <code>DualGemm</code> 用一个 CuTe DSL 内核同时做 gate/up 矩阵乘和 SwiGLU，但 <code>kernels/ops/gemm/cutedsl_dual_gemm.py</code> 第 1602–1622 行要求 SM100（Blackwell）、hidden size 和 intermediate size 都是 128 的倍数、token 数在 1 到 16 之间（第 51 行 <code>MAX_DUAL_GEMM_DECODE_TOKENS = 16</code>）。L4 和 H100 都用不上。</p><p lang="en">One step further is to fold the activation into the matmul itself, so that <code>[T, 2I]</code> never reaches memory. <code>Qwen2MLP.forward</code> first asks <code>self.dual_gemm.can_run</code> (lines 114–118): <code>DualGemm</code> in <code>layers/dual_gemm.py</code> does the gate/up matmul and SwiGLU in one CuTe DSL kernel, but lines 1602–1622 of <code>kernels/ops/gemm/cutedsl_dual_gemm.py</code> require SM100 (Blackwell), hidden and intermediate sizes that are multiples of 128, and between 1 and 16 tokens (<code>MAX_DUAL_GEMM_DECODE_TOKENS = 16</code>, line 51). Neither the L4 nor the H100 can use it.</p>
+  <p lang="zh-CN">延伸阅读：Raschka 第 4 章 4.3 节（带 GELU 激活的前馈网络）。书里是 GPT-2 的 GELU，没有讲 SwiGLU 的门控；门控形式以上面引用的源码为准。</p><p lang="en">Further reading: section 4.3 of chapter 4 of Raschka (a feed-forward network with GELU activations). The book has GPT-2’s GELU and does not cover SwiGLU’s gating; for the gated form, rely on the source cited above.</p>
+
+  <h3 lang="zh-CN">4. RoPE + 写 KV 缓存</h3><h3 lang="en">4. RoPE + KV-cache write</h3>
+  <p lang="zh-CN">注意力之前，q 和 k 要按位置旋转（RoPE），然后旋转后的 k 和原样的 v 写进分页 KV 缓存里这个 token 的槽位。不融合时这是两个内核：RoPE 原地改 q 和 k，注意力后端再调 <code>token_to_kv_pool.set_kv_buffer</code> 把 k、v 拷进缓存（FlashInfer 后端的解码路径在 <code>layers/attention/flashinfer_backend.py</code> 第 1494–1504 行）。按 Qwen3-0.6B 一层一个 token 数：q 是 16 × 128 个元素（4 KiB），k、v 各 8 × 128（各 2 KiB）。RoPE 读写 q 和 k 共 12 KiB，写缓存读 k、v 再写两份共 8 KiB，合计 20 KiB；融合内核读 q、k、v，写回 q、k，再写 k、v 两份缓存，合计 18 KiB。省掉的是把旋转后的 k 再读一遍的 2 KiB 和一次发射（推断，按 <code>apply_rope_inplace_with_kvcache</code> 文档字符串说的读写对象数出：q 和 k 原地旋转，旋转后的 k 也存进 <code>k_cache</code>，原样的 v 存进 <code>v_cache</code>）。</p><p lang="en">Before attention, q and k are rotated by position (RoPE), and then the rotated k and the unchanged v are written into this token’s slot of the paged KV cache. Unfused, these are two kernels: RoPE modifies q and k in place, and the attention backend then calls <code>token_to_kv_pool.set_kv_buffer</code> to copy k and v into the cache (the decode path of the FlashInfer backend, lines 1494–1504 of <code>layers/attention/flashinfer_backend.py</code>). Per token per layer for Qwen3-0.6B: q is 16 × 128 elements (4 KiB), and k and v are 8 × 128 each (2 KiB each). RoPE reads and writes q and k, 12 KiB; the cache write reads k and v and writes two copies, 8 KiB; 20 KiB in all. The fused kernel reads q, k and v, writes q and k back, and writes the two cache copies, 18 KiB in all. What is saved is reading the rotated k a second time, 2 KiB, plus one launch (inference, counted from what the <code>apply_rope_inplace_with_kvcache</code> docstring says it reads and writes: q and k rotated in place, the rotated k also stored in <code>k_cache</code>, the original v stored in <code>v_cache</code>).</p>
+  <p lang="zh-CN">代码路径：<code>layers/rotary_embedding/base.py</code> 的 <code>forward_cuda</code>（第 390–412 行）把可选的 <code>fused_set_kv_buffer_arg</code> 原样传给 <code>kernels/ops/attention/rope.py</code> 的 <code>apply_rope_with_cos_sin_cache_inplace</code>（第 183–225 行）；参数不为空时它调 <code>apply_rope_inplace_with_kvcache</code>（第 145–180 行），后者用 JIT 模块 <code>FusedRopeKernel::run_fused</code>（第 30–44 行，源码 <code>kernels/jit/csrc/elementwise/rope.cuh</code>）。谁会传这个参数，由 <code>models/utils.py</code> 的 <code>enable_fused_set_kv_buffer</code> 决定（第 286–303 行）：CUDA 上要求 KV 池是 BF16、不是 SWA 池、没有上下文并行。传它的模型有 <code>qwen3_moe.py</code>（第 736–749 行）和 <code>gpt_oss.py</code>（第 478–499 行），这时注意力那一侧会收到 <code>save_kv_cache=False</code>，不再写第二遍。稠密的 <code>qwen3.py</code> 第 183 行只调 <code>self.rotary_emb(positions, q, k)</code>，不传，所以 Qwen3-0.6B 在 v0.5.22 上不用这个融合（2026-11-01 在 <code>qwen3.py</code>、<code>qwen2.py</code>、<code>llama.py</code> 里检索 <code>fused_set_kv_buffer</code>，都没有）。</p><p lang="en">The code path: <code>forward_cuda</code> in <code>layers/rotary_embedding/base.py</code> (lines 390–412) passes the optional <code>fused_set_kv_buffer_arg</code> straight to <code>apply_rope_with_cos_sin_cache_inplace</code> in <code>kernels/ops/attention/rope.py</code> (lines 183–225); when it is present, that calls <code>apply_rope_inplace_with_kvcache</code> (lines 145–180), which uses the JIT module <code>FusedRopeKernel::run_fused</code> (lines 30–44, source <code>kernels/jit/csrc/elementwise/rope.cuh</code>). Who passes the argument is decided by <code>enable_fused_set_kv_buffer</code> in <code>models/utils.py</code> (lines 286–303): on CUDA it needs a BF16 KV pool, no SWA pool and no context parallelism. Models that pass it include <code>qwen3_moe.py</code> (lines 736–749) and <code>gpt_oss.py</code> (lines 478–499), and their attention call then gets <code>save_kv_cache=False</code>, so nothing is written twice. The dense <code>qwen3.py</code> only calls <code>self.rotary_emb(positions, q, k)</code> at line 183 and passes nothing, so Qwen3-0.6B does not use this fusion at v0.5.22 (searching <code>qwen3.py</code>, <code>qwen2.py</code> and <code>llama.py</code> for <code>fused_set_kv_buffer</code> on 2026-11-01 finds nothing).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 RoPE 内核（Raschka 的 GPT-2 用的是学到的位置嵌入）。这一概念以 <code>rope.py</code> 的文档字符串和 <code>models/utils.py</code> 为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers RoPE kernels (Raschka’s GPT-2 uses learned position embeddings). This concept rests on the docstrings of <code>rope.py</code> and on <code>models/utils.py</code>; see Resources.</p>
+
+  <h3 lang="zh-CN">5. all-reduce + 残差 + RMSNorm</h3><h3 lang="en">5. All-reduce + residual + RMSNorm</h3>
+  <p lang="zh-CN">张量并行时，<code>o_proj</code> 和 <code>down_proj</code> 是按行切的线性层，每张卡只算出部分和，必须先 all-reduce 才能加回残差。紧跟其后的正是下一个残差 + RMSNorm，于是可以把 all-reduce 的收尾、残差加法和归一化放进同一个通信内核：归约出来的和不必先写回显存、再被归一化内核读回。按一行 2 KiB 数，省下的是这一写一读的 4 KiB 本地显存流量和一次发射（推断：实际节省还取决于 all-reduce 算法本身怎么搬数据）。</p><p lang="en">With tensor parallelism, <code>o_proj</code> and <code>down_proj</code> are row-split linear layers: each GPU computes only a partial sum, which must be all-reduced before it can be added to the residual. The very next thing is a residual + RMSNorm, so the tail of the all-reduce, the residual add and the norm can share one communication kernel: the reduced sum never has to be written to memory and read back by a norm kernel. At 2 KiB a row, what is saved is that write and that read, 4 KiB of local memory traffic, plus one launch (inference: the real saving also depends on how the all-reduce algorithm itself moves data).</p>
+  <p lang="zh-CN">v0.5.22 的主路径是 FlashInfer 的 <code>allreduce_fusion</code>，模式 <code>AllReduceFusionPattern.kARResidualRMSNorm</code>（<code>layers/flashinfer_comm_fusion.py</code> 第 805–895 行，模式在第 880 行）。它返回 <code>(norm_out, residual_out)</code>；只有一张卡时直接返回空，让调用方走普通路径（第 844–846 行）。调用方 <code>layers/layer_boundary/fusions/allreduce.py</code> 的 <code>fused_attn_input</code>（第 70–113 行）先检查 <code>flashinfer_ar_fusion_applies</code>（<code>residual/add_norm.py</code> 第 144–160 行）：要 SM90 或 SM100、装了 FlashInfer、没开 DP attention、设了 <code>--flashinfer-allreduce-fusion-backend</code>、这一批有 1 到 2048 个 token（第 141 行 <code>FUSE_ALLREDUCE_MAX_BATCH_SIZE = 2048</code>）。这个开关在 <code>arg_groups/fields/exec_.py</code> 第 708–727 行，可选 <code>auto</code>、<code>trtllm</code>、<code>mnnvl</code>、<code>cutedsl</code>，帮助文字写明需要 SM90 或 SM10X；旧的 <code>--enable-flashinfer-allreduce-fusion</code> 已弃用（<code>server_args.py</code> 第 425–428 行）。内核拒绝某一批时，<code>layernorm.py</code> 第 251–260 行的退路是先单独 all-reduce，再调普通的融合加法 + 归一化。SGLang 自己的 <code>kernels/ops/communication/</code> 下另有针对具体模型的版本，例如 <code>all_reduce_fusion.py</code> 把 MoE 的 finalize 也并了进去、<code>all_reduce_residual.py</code> 是 Kimi K3 的多节点 NVLink 版本。</p><p lang="en">In v0.5.22 the main path is FlashInfer’s <code>allreduce_fusion</code> with the pattern <code>AllReduceFusionPattern.kARResidualRMSNorm</code> (lines 805–895 of <code>layers/flashinfer_comm_fusion.py</code>, the pattern at line 880). It returns <code>(norm_out, residual_out)</code>; with a single GPU it returns nothing at once and leaves the caller on the ordinary path (lines 844–846). The caller, <code>fused_attn_input</code> in <code>layers/layer_boundary/fusions/allreduce.py</code> (lines 70–113), first checks <code>flashinfer_ar_fusion_applies</code> (lines 144–160 of <code>residual/add_norm.py</code>): SM90 or SM100, FlashInfer installed, no DP attention, <code>--flashinfer-allreduce-fusion-backend</code> set, and between 1 and 2048 tokens in the batch (<code>FUSE_ALLREDUCE_MAX_BATCH_SIZE = 2048</code>, line 141). The switch is at lines 708–727 of <code>arg_groups/fields/exec_.py</code>, with the values <code>auto</code>, <code>trtllm</code>, <code>mnnvl</code> and <code>cutedsl</code>, and its help text says it requires SM90 or SM10X; the old <code>--enable-flashinfer-allreduce-fusion</code> is deprecated (lines 425–428 of <code>server_args.py</code>). When the kernel declines a batch, the fallback at lines 251–260 of <code>layernorm.py</code> all-reduces on its own first and then calls the ordinary fused add + norm. SGLang’s own <code>kernels/ops/communication/</code> holds model-specific versions as well: <code>all_reduce_fusion.py</code> also folds in the MoE finalize, and <code>all_reduce_residual.py</code> is a multi-node NVLink version for Kimi K3.</p>
+  <p lang="zh-CN">单卡的 L4 上这个融合不会出现：只有一张卡，也不是 SM90 或 SM100。本页不给它的实验，只在 Lab A 第 2 步的剖析表里确认它不在。</p><p lang="en">On a single L4 this fusion never appears: there is one GPU, and it is neither SM90 nor SM100. This page gives it no lab beyond confirming, in the profiler table of step 2 of Lab A, that it is absent.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版新增的第 19 章 Multi-GPU API（多卡之间的通信接口；只按章名对应，章内是否讲 all-reduce 没有核对）。</p><p lang="en">Further reading: chapter 19, Multi-GPU API, new in PMPP 5th ed. (communication interfaces between GPUs; matched by chapter title only, without checking whether the chapter covers all-reduce).</p>
+
+  <h3 lang="zh-CN">6. 采样：不排序的 top-k / top-p</h3><h3 lang="en">6. Sampling: top-k / top-p without a full sort</h3>
+  <p lang="zh-CN">每步最后，每个请求从一整行概率里选一个 token。教科书写法是先把这一行按概率从大到小排序，再做前缀和、按 top-k 和 top-p 截断、归一化、抽样。SGLang 的 <code>pytorch</code> 后端就这样做（<code>layers/sampler.py</code> 第 779 行起，排序在第 813–815 行）。词表 151936 时，一行 FP32 概率是 593.5 KiB，排序要把它读进来、写出排好的值和 int64 的下标（每个元素 12 字节，约 1.74 MiB），后面的前缀和和两次截断又各读写一遍（推断，按这几行代码的张量数出，不含排序算法内部的多趟）。</p><p lang="en">At the end of every step, each request picks one token from a whole row of probabilities. The textbook way sorts the row from largest to smallest, takes a prefix sum, truncates by top-k and top-p, renormalizes and draws. SGLang’s <code>pytorch</code> backend does exactly this (from line 779 of <code>layers/sampler.py</code>, the sort at lines 813–815). With a vocabulary of 151936, one row of FP32 probabilities is 593.5 KiB; the sort reads it and writes the sorted values plus int64 indices (12 bytes per element, about 1.74 MiB), and the prefix sum and the two truncations each read and write it again (inference, counted from the tensors in those lines, not including the internal passes of the sort algorithm).</p>
+  <p lang="zh-CN">默认的 <code>flashinfer</code> 后端（装了 FlashInfer 时，<code>arg_groups/overrides.py</code> 第 975–983 行）不排序。<code>sampler.py</code> 先原地做 softmax（第 288–291 行），再调 <code>top_k_top_p_sampling_from_probs(probs, top_ks, top_ps, filter_apply_order="joint")</code>（第 429–434 行）。FlashInfer v0.7.1 的文档字符串说它「实现了不显式排序的 GPU 拒绝采样」，「多轮拒绝采样在同一个 CUDA 内核里完成」（<code>flashinfer/sampling.py</code> 第 1780–1786 行）；<code>joint</code> 表示每一轮同时检查 top-k 和 top-p（第 1810–1813 行）。内核是 <code>include/flashinfer/sampling.cuh</code> 的 <code>TopKTopPSamplingFromProbKernel</code>（第 1210–1338 行），一个线程块负责一个请求，每一轮：</p><p lang="en">The default <code>flashinfer</code> backend (when FlashInfer is installed, lines 975–983 of <code>arg_groups/overrides.py</code>) does not sort. <code>sampler.py</code> does the softmax in place first (lines 288–291), then calls <code>top_k_top_p_sampling_from_probs(probs, top_ks, top_ps, filter_apply_order="joint")</code> (lines 429–434). The FlashInfer v0.7.1 docstring says it implements GPU-based rejection sampling without explicit sorting, with the multiple rounds of rejection sampling in a single CUDA kernel (lines 1780–1786 of <code>flashinfer/sampling.py</code>); <code>joint</code> means each round checks top-k and top-p at the same time (lines 1810–1813). The kernel is <code>TopKTopPSamplingFromProbKernel</code> in <code>include/flashinfer/sampling.cuh</code> (lines 1210–1338), one thread block per request, and each round does this:</p>
+  <ol>
+    <li lang="zh-CN"><strong>抽一个候选</strong>：取 <code>u = uniform × q</code>，<code>q</code> 是还在候选范围里的概率总和；按词表原来的顺序，只累加概率大于 <code>low</code> 的 token，累加和超过 <code>u</code> 的那个就是候选（逆变换采样，块内前缀和，超过就提前停）。</li>
+    <li lang="en"><strong>Draw a candidate</strong>: take <code>u = uniform × q</code>, where <code>q</code> is the mass still in range; walk the vocabulary in its original order adding only probabilities above <code>low</code>, and the token at which the running sum passes <code>u</code> is the candidate (inverse transform sampling, with block prefix sums and an early stop).</li>
+    <li lang="zh-CN"><strong>检验</strong>：<code>pivot_0</code> 是候选的概率，<code>pivot_1 = (pivot_0 + high) / 2</code>。再读一遍整行，数出概率大于两个 pivot 的 token 个数和概率和。大于 <code>pivot_0</code> 的个数小于 k 且和小于 p，就接受候选、结束（第 1318–1321 行）。</li>
+    <li lang="en"><strong>Test</strong>: <code>pivot_0</code> is the candidate’s probability and <code>pivot_1 = (pivot_0 + high) / 2</code>. One more read of the whole row counts the tokens above each pivot and sums their probabilities. If fewer than k tokens lie above <code>pivot_0</code> and their mass is below p, the candidate is accepted and the kernel stops (lines 1318–1321).</li>
+    <li lang="zh-CN"><strong>收窄</strong>：否则，若 <code>pivot_1</code> 满足条件，范围变成 <code>(pivot_0, pivot_1]</code>；若不满足，<code>low</code> 提到 <code>pivot_1</code>（第 1322–1331 行）。两种情况范围都至少减半。</li>
+    <li lang="en"><strong>Narrow</strong>: otherwise, if <code>pivot_1</code> passes the test, the range becomes <code>(pivot_0, pivot_1]</code>; if not, <code>low</code> rises to <code>pivot_1</code> (lines 1322–1331). Either way the range at least halves.</li>
+  </ol>
+  <p lang="zh-CN">FlashInfer 的博客 <em>Sorting-Free GPU Kernels for LLM Sampling</em>（2025-03-10）把这叫 Dual Pivot Rejection Sampling，说它从 v0.2.3 开始使用，轮数最坏是 O(log(1/ε))，并证明了输出分布正好等于「先截断、再在剩下的 token 里按概率抽」；它也说实际需要的轮数通常很少。所以每轮最多读两遍这一行，没有排序、没有中间张量。博客里的单卡 H100 评测说采样时间减少了一半以上，这是博客自己的数字，本页没有复现。v0.7.1 的默认 <code>top_k_first</code> 另有一条快路径：先用基数 top-k 选出 k 个，再在这 k 个上做 top-p（第 1547–1605 行）；SGLang 传的是 <code>joint</code>，不走它。</p><p lang="en">FlashInfer’s blog post <em>Sorting-Free GPU Kernels for LLM Sampling</em> (2025-03-10) calls this Dual Pivot Rejection Sampling, says it has been used since v0.2.3 with a worst case of O(log(1/ε)) rounds, and proves that the output distribution is exactly that of truncating first and then sampling among the remaining tokens by probability; it also says the number of rounds needed is usually small. So each round reads the row at most twice, with no sort and no intermediate tensors. The post’s evaluation on one H100 reports sampling time cut by more than half; that is the post’s own figure and was not reproduced here. The default <code>top_k_first</code> order of v0.7.1 has a separate fast path, which selects k entries with a radix top-k first and then runs top-p over those k (lines 1547–1605); SGLang passes <code>joint</code> and does not take it.</p>
+  <p lang="zh-CN">延伸阅读：Raschka 第 5 章 5.3 节（控制随机性的解码策略：5.3.1 温度缩放、5.3.2 top-k 采样）讲的是要算什么；PMPP 第 5 版第 11 章 Prefix sum (scan) 讲逆变换采样里的块内前缀和，第 13 章 Sorting 讲被省掉的排序要花多少。</p><p lang="en">Further reading: section 5.3 of chapter 5 of Raschka (decoding strategies to control randomness: 5.3.1 temperature scaling and 5.3.2 top-k sampling) covers what is being computed; chapter 11 of PMPP 5th ed., Prefix sum (scan), covers the block prefix sums of inverse transform sampling, and chapter 13, Sorting, what the avoided sort would cost.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：融合 ↔ 每 token 省下的字节 ↔ 在哪里</h2><h2 id="compare-en" lang="en">Comparison: fusion ↔ bytes saved per token ↔ where it lives</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">融合</span><span lang="en">Fusion</span></th><th><span lang="zh-CN">每 token 的读写（Qwen3-0.6B，BF16）：不融合 → 融合，省下</span><span lang="en">Bytes per token (Qwen3-0.6B, BF16): unfused → fused, saved</span></th><th><span lang="zh-CN">在 v0.5.22 的哪里</span><span lang="en">Where it lives at v0.5.22</span></th><th><span lang="zh-CN">什么时候启用</span><span lang="en">When it is on</span></th></tr>
+    <tr><td><span lang="zh-CN">残差加法 + RMSNorm</span><span lang="en">Residual add + RMSNorm</span></td><td><span lang="zh-CN">两个内核 10 KiB → 8 KiB，每处省 2 KiB；对逐个 PyTorch 算子的约 64 KiB 省约 56 KiB（推断）。每层两处</span><span lang="en">Two kernels 10 KiB → 8 KiB, 2 KiB saved per site; against about 64 KiB operator by operator in PyTorch, about 56 KiB (inference). Two sites per layer</span></td><td><span lang="zh-CN"><code>layers/layernorm.py</code> 的 <code>RMSNorm.forward_cuda</code> → <code>sgl_kernel</code> 的 <code>fused_add_rmsnorm</code> → FlashInfer 的 norm；JIT 版本在 <code>kernels/ops/layernorm/norm.py</code></span><span lang="en"><code>RMSNorm.forward_cuda</code> in <code>layers/layernorm.py</code> → <code>fused_add_rmsnorm</code> in <code>sgl_kernel</code> → FlashInfer’s norm; the JIT version in <code>kernels/ops/layernorm/norm.py</code></span></td><td><span lang="zh-CN">CUDA 上默认</span><span lang="en">Default on CUDA</span></td></tr>
+    <tr><td><span lang="zh-CN">SiLU-and-mul</span><span lang="en">SiLU-and-mul</span></td><td><span lang="zh-CN">30 KiB → 18 KiB，每层省 12 KiB</span><span lang="en">30 KiB → 18 KiB, 12 KiB saved per layer</span></td><td><span lang="zh-CN"><code>layers/activation.py</code> 的 <code>SiluAndMul.forward_cuda</code> → <code>kernels/ops/activation/activation.py</code>（JIT）或 <code>sgl_kernel</code> 的 <code>silu_and_mul</code>；矩阵乘里的版本在 <code>layers/dual_gemm.py</code></span><span lang="en"><code>SiluAndMul.forward_cuda</code> in <code>layers/activation.py</code> → <code>kernels/ops/activation/activation.py</code> (JIT) or <code>silu_and_mul</code> in <code>sgl_kernel</code>; the in-matmul version in <code>layers/dual_gemm.py</code></span></td><td><span lang="zh-CN">CUDA 上默认；并进矩阵乘只在 SM100、1–16 个 token</span><span lang="en">Default on CUDA; folding into the matmul only on SM100 with 1–16 tokens</span></td></tr>
+    <tr><td><span lang="zh-CN">RoPE + 写 KV 缓存</span><span lang="en">RoPE + KV-cache write</span></td><td><span lang="zh-CN">20 KiB → 18 KiB，每层省 2 KiB（推断，见概念 4）</span><span lang="en">20 KiB → 18 KiB, 2 KiB saved per layer (inference, see concept 4)</span></td><td><span lang="zh-CN"><code>layers/rotary_embedding/base.py</code> → <code>kernels/ops/attention/rope.py</code> 的 <code>apply_rope_inplace_with_kvcache</code>（JIT <code>rope.cuh</code>）</span><span lang="en"><code>layers/rotary_embedding/base.py</code> → <code>apply_rope_inplace_with_kvcache</code> in <code>kernels/ops/attention/rope.py</code> (JIT <code>rope.cuh</code>)</span></td><td><span lang="zh-CN">模型传了参数（例如 Qwen3-MoE、GPT-OSS）且 KV 池是 BF16；稠密 Qwen3 不传</span><span lang="en">When the model passes the argument (Qwen3-MoE and GPT-OSS, for example) and the KV pool is BF16; dense Qwen3 does not</span></td></tr>
+    <tr><td><span lang="zh-CN">all-reduce + 残差 + RMSNorm</span><span lang="en">All-reduce + residual + RMSNorm</span></td><td><span lang="zh-CN">本地显存约省 4 KiB 每处，外加一次发射（推断）</span><span lang="en">About 4 KiB of local memory traffic saved per site, plus one launch (inference)</span></td><td><span lang="zh-CN"><code>layers/flashinfer_comm_fusion.py</code> → FlashInfer 的 <code>allreduce_fusion</code>（<code>kARResidualRMSNorm</code>）；判断在 <code>layer_boundary/residual/add_norm.py</code></span><span lang="en"><code>layers/flashinfer_comm_fusion.py</code> → FlashInfer’s <code>allreduce_fusion</code> (<code>kARResidualRMSNorm</code>); the test in <code>layer_boundary/residual/add_norm.py</code></span></td><td><span lang="zh-CN">张量并行多于一张卡、SM90 或 SM100、1–2048 个 token、设了 <code>--flashinfer-allreduce-fusion-backend</code></span><span lang="en">Tensor parallelism over more than one GPU, SM90 or SM100, 1–2048 tokens, and <code>--flashinfer-allreduce-fusion-backend</code> set</span></td></tr>
+    <tr><td><span lang="zh-CN">采样（top-k / top-p）</span><span lang="en">Sampling (top-k / top-p)</span></td><td><span lang="zh-CN">按请求算，一行 FP32 概率 593.5 KiB。排序写法：排好的值和下标约 1.74 MiB，另有几遍整行读写（推断）；FlashInfer：每轮最多读两遍整行，轮数取决于分布</span><span lang="en">Per request, one row of FP32 probabilities is 593.5 KiB. Sorting: about 1.74 MiB of sorted values and indices plus several whole-row passes (inference); FlashInfer: at most two reads of the row per round, with a round count that depends on the distribution</span></td><td><span lang="zh-CN"><code>layers/sampler.py</code> → FlashInfer 的 <code>top_k_top_p_sampling_from_probs</code>（<code>joint</code>）→ <code>TopKTopPSamplingFromProbKernel</code></span><span lang="en"><code>layers/sampler.py</code> → FlashInfer’s <code>top_k_top_p_sampling_from_probs</code> (<code>joint</code>) → <code>TopKTopPSamplingFromProbKernel</code></span></td><td><span lang="zh-CN"><code>--sampling-backend flashinfer</code>，装了 FlashInfer 时的默认值；确定性推理会改成 <code>pytorch</code></span><span lang="en"><code>--sampling-backend flashinfer</code>, the default when FlashInfer is installed; deterministic inference switches to <code>pytorch</code></span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 残差 + RMSNorm：两个内核对一个融合内核，每 token 的字节</h3><h3 lang="en">(a) Residual + RMSNorm: two kernels against one fused kernel, bytes per token</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="2800"
+         data-captions='["全图：上半是不融合的两个内核，下半是一个融合内核。每个方框是一个 token 的一行激活，Qwen3-0.6B 的 hidden size 1024、BF16，一行 2 KiB。按播放逐步看。",
+           "1. 内核 1 是加法：从显存读 x（上一段的输出）和 r（残差），写出 r′ = x + r。读 4 KiB，写 2 KiB。",
+           "2. 内核 2 是 RMSNorm：把刚写出的 r′ 原样读回来，算出平方和与 1/RMS，写出 y。读 2 KiB，写 2 KiB。合计 10 KiB，两次发射；r′ 的那次读回纯粹是搬运。",
+           "3. 融合内核：一个线程块负责一行。每个线程读几个 x 和 r，在寄存器里相加，同时累加平方和；块内归约得到 1/RMS。",
+           "4. 线程用还在寄存器里的和乘上 1/RMS 和权重，写出 y；r′ 也写出去，因为下一层还要用残差。读 4 KiB，写 4 KiB，合计 8 KiB，一次发射。",
+           "5. 每处省 2 KiB 和一次发射。Qwen3-0.6B 每步约 57 处。批小时省下的主要是发射，token 多时字节成为主角：Lab B 在 16384 个 token 时量到的时间比正好是 10 比 8。"]'
+         data-captions-en='["The whole picture: two unfused kernels at the top, one fused kernel at the bottom. Each box is one token row of activations; Qwen3-0.6B has hidden size 1024 in BF16, so a row is 2 KiB. Press Play to walk through it.",
+           "1. Kernel 1 is the add: it reads x (the previous block output) and r (the residual) from memory and writes r′ = x + r. 4 KiB read, 2 KiB written.",
+           "2. Kernel 2 is RMSNorm: it reads the r′ just written straight back, computes the sum of squares and 1/RMS, and writes y. 2 KiB read, 2 KiB written. 10 KiB and two launches in all; reading r′ back is pure transport.",
+           "3. The fused kernel: one thread block per row. Each thread reads a few elements of x and r, adds them in registers and accumulates the sum of squares; a block reduction gives 1/RMS.",
+           "4. The threads multiply the sums still in their registers by 1/RMS and the weight and write y; r′ is written too, because the next layer needs the residual. 4 KiB read, 4 KiB written, 8 KiB and one launch in all.",
+           "5. Each site saves 2 KiB and one launch, and Qwen3-0.6B has about 57 sites per step. At small batches the saving is mostly the launch; with many tokens the bytes take over: at 16384 tokens Lab B measured a time ratio of exactly 10 to 8."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="22" class="small" lang="zh-CN">不融合：两个内核（每 token 10 KiB）</text><text x="20" y="22" class="small" lang="en">Unfused: two kernels (10 KiB per token)</text>
+      <g data-step="1">
+        <rect class="box" x="20" y="40" width="110" height="34"/><text x="32" y="62" class="mono">x · 2 KiB</text>
+        <rect class="box" x="20" y="90" width="110" height="34"/><text x="32" y="112" class="mono">r · 2 KiB</text>
+        <path class="arrow" d="M130 57 L166 72"/><path class="arrow" d="M130 107 L166 92"/>
+        <rect class="box cuda" x="170" y="52" width="180" height="56"/>
+        <text x="182" y="74" lang="zh-CN">内核 1 · add</text><text x="182" y="74" lang="en">Kernel 1 · add</text>
+        <text x="182" y="96" class="small" lang="zh-CN">读 4 KiB · 写 2 KiB</text><text x="182" y="96" class="small" lang="en">R 4 KiB · W 2 KiB</text>
+        <path class="arrow" d="M350 80 L386 80"/>
+        <rect class="box" x="390" y="63" width="110" height="34"/><text x="402" y="85" class="mono">r′ · 2 KiB</text>
+      </g>
+      <g data-step="2">
+        <path class="arrow flow" d="M500 80 L536 80"/>
+        <rect class="box cuda" x="540" y="52" width="180" height="56"/>
+        <text x="552" y="74" lang="zh-CN">内核 2 · rmsnorm</text><text x="552" y="74" lang="en">Kernel 2 · rmsnorm</text>
+        <text x="552" y="96" class="small" lang="zh-CN">读 2 KiB · 写 2 KiB</text><text x="552" y="96" class="small" lang="en">R 2 KiB · W 2 KiB</text>
+        <path class="arrow" d="M720 80 L756 80"/>
+        <rect class="box" x="760" y="63" width="120" height="34"/><text x="772" y="85" class="mono">y · 2 KiB</text>
+        <text x="390" y="132" class="small" lang="zh-CN">r′ 写回显存，又被原样读回：多出 2 KiB</text><text x="390" y="132" class="small" lang="en">r′ goes to memory and straight back: 2 KiB extra</text>
+        <text x="20" y="164" lang="zh-CN">合计：读 6 KiB + 写 4 KiB = 10 KiB，两次发射</text><text x="20" y="164" lang="en">Total: 6 KiB read + 4 KiB written = 10 KiB, two launches</text>
+      </g>
+
+      <line x1="20" y1="186" x2="880" y2="186" class="lane"/>
+      <text x="20" y="210" class="small" lang="zh-CN">融合：一个内核（每 token 8 KiB）</text><text x="20" y="210" class="small" lang="en">Fused: one kernel (8 KiB per token)</text>
+      <g data-step="3">
+        <rect class="box" x="20" y="228" width="110" height="34"/><text x="32" y="250" class="mono">x · 2 KiB</text>
+        <rect class="box" x="20" y="278" width="110" height="34"/><text x="32" y="300" class="mono">r · 2 KiB</text>
+        <path class="arrow" d="M130 245 L166 254"/><path class="arrow" d="M130 295 L166 290"/>
+        <rect class="box cuda" x="170" y="222" width="440" height="122"/>
+        <text x="182" y="246" lang="zh-CN">fused_add_rmsnorm（一个线程块一行）</text><text x="182" y="246" lang="en">fused_add_rmsnorm (one thread block per row)</text>
+        <text x="182" y="270" class="mono" lang="zh-CN">1. s = x + r        寄存器里</text><text x="182" y="270" class="mono" lang="en">1. s = x + r        in registers</text>
+        <text x="182" y="292" class="mono" lang="zh-CN">2. 块内归约 Σ s² → 1/RMS</text><text x="182" y="292" class="mono" lang="en">2. block reduce Σ s² → 1/RMS</text>
+      </g>
+      <g data-step="4">
+        <text x="182" y="314" class="mono">3. y = s · (1/RMS) · w</text>
+        <text x="182" y="334" class="small" lang="zh-CN">读 4 KiB · 写 4 KiB</text><text x="182" y="334" class="small" lang="en">R 4 KiB · W 4 KiB</text>
+        <path class="arrow" d="M610 253 L646 253"/><path class="arrow" d="M610 307 L646 307"/>
+        <rect class="box" x="650" y="236" width="110" height="34"/><text x="662" y="258" class="mono">r′ · 2 KiB</text>
+        <rect class="box" x="650" y="290" width="110" height="34"/><text x="662" y="312" class="mono">y · 2 KiB</text>
+        <text x="770" y="258" class="small" lang="zh-CN">下一层的残差</text><text x="770" y="258" class="small" lang="en">next residual</text>
+        <text x="770" y="312" class="small" lang="zh-CN">进投影层</text><text x="770" y="312" class="small" lang="en">into the projection</text>
+        <text x="20" y="372" lang="zh-CN">合计：读 4 KiB + 写 4 KiB = 8 KiB，一次发射；r′ 不再读回</text><text x="20" y="372" lang="en">Total: 4 KiB read + 4 KiB written = 8 KiB, one launch; r′ is never read back</text>
+      </g>
+      <g data-step="5">
+        <rect class="box" x="20" y="390" width="860" height="66"/>
+        <text x="32" y="414" lang="zh-CN">每处省 2 KiB 和一次发射；Qwen3-0.6B 每步约 57 处，约 114 KiB 每 token</text><text x="32" y="414" lang="en">2 KiB and one launch saved per site; about 57 sites per step in Qwen3-0.6B, about 114 KiB per token</text>
+        <text x="32" y="440" class="small" lang="zh-CN">Lab B（Apple M5）：16384 个 token 时时间比 1.25–1.26，正好是字节比 10 : 8；16 个 token 时约 1.5–2.2，省下的主要是一次派发</text><text x="32" y="440" class="small" lang="en">Lab B (Apple M5): at 16384 tokens the time ratio is 1.25–1.26, exactly the byte ratio 10 : 8; at 16 tokens about 1.5–2.2, mostly one dispatch saved</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 不排序的 top-k / top-p 采样：一轮一轮收窄概率范围</h3><h3 lang="en">(b) Top-k / top-p sampling without a sort: narrowing the probability range round by round</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="3000"
+         data-captions='["全图：一个请求的一行概率，按词表顺序画出，从不排序；这里只画 10 个 token，真实的词表有 151936 个。top_k = 4，top_p = 0.6，允许的集合是最大的 3 个：t1、t5、t3（和 0.67，第一次不小于 0.6）。一个线程块负责这一行。按播放逐步看。",
+           "1. 第 1 轮：low = 0，high = 1。抽 u = 0.52，按词表顺序累加概率：0.05、0.35、0.37、0.49、0.57，在 t4 处超过 u，候选是 t4（0.08）。块内前缀和一旦超过 u 就停。",
+           "2. 检验：pivot_0 = 0.08，比它大的有 4 个（t1、t3、t5、t7），不小于 top_k，拒绝。pivot_1 = (0.08 + 1) / 2 = 0.54，比它大的一个都没有，满足条件。范围收窄为 (0.08, 0.54]。",
+           "3. 第 2 轮：只累加大于 0.08 的 token，q = 0.77。u = 0.70 落在 t7（0.10）。比 0.10 大的有 3 个，但和是 0.67，不小于 top_p，拒绝；pivot_1 = 0.32 满足，范围变成 (0.10, 0.32]。",
+           "4. 第 3 轮：大于 0.10 的是 t1、t3、t5，q = 0.67。u = 0.50 落在 t5（0.25）。比 0.25 大的只有 t1：1 个，和 0.30，两个条件都满足，接受 t5，内核结束。",
+           "5. 代价：每轮最多读两遍整行（一遍抽候选，一遍数 pivot 之上的个数和概率和），范围每轮至少减半，所有轮次在同一个内核里。pytorch 后端则先把 151936 个概率整行排序。"]'
+         data-captions-en='["The whole picture: one request row of probabilities, drawn in vocabulary order and never sorted; only 10 tokens are drawn here, against 151936 in the real vocabulary. With top_k = 4 and top_p = 0.6 the allowed set is the 3 largest: t1, t5 and t3 (mass 0.67, the first to reach 0.6). One thread block handles the row. Press Play to walk through it.",
+           "1. Round 1: low = 0 and high = 1. Draw u = 0.52 and add up probabilities in vocabulary order: 0.05, 0.35, 0.37, 0.49, 0.57, passing u at t4, so the candidate is t4 (0.08). The block prefix sum stops as soon as it passes u.",
+           "2. Test: pivot_0 = 0.08, and 4 tokens lie above it (t1, t3, t5, t7), not fewer than top_k, so reject. pivot_1 = (0.08 + 1) / 2 = 0.54 has nothing above it and passes. The range narrows to (0.08, 0.54].",
+           "3. Round 2: only tokens above 0.08 are added now, q = 0.77. u = 0.70 lands on t7 (0.10). Three tokens lie above 0.10, but their mass is 0.67, not below top_p, so reject; pivot_1 = 0.32 passes, and the range becomes (0.10, 0.32].",
+           "4. Round 3: above 0.10 lie t1, t3 and t5, q = 0.67. u = 0.50 lands on t5 (0.25). Only t1 lies above 0.25: 1 token with mass 0.30, both tests pass, t5 is accepted and the kernel ends.",
+           "5. The cost: each round reads the row at most twice (once to draw, once to count the tokens and mass above the pivots), the range at least halves every round, and all rounds run in one kernel. The pytorch backend instead sorts all 151936 probabilities first."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="22" class="small" lang="zh-CN">一个请求的概率行（词表顺序，不排序）；top_k = 4，top_p = 0.6</text><text x="20" y="22" class="small" lang="en">One request row (vocabulary order, never sorted); top_k = 4, top_p = 0.6</text>
+      <line x1="145" y1="330" x2="625" y2="330" style="stroke: var(--ink-3)"/>
+      <rect class="box" x="150" y="305" width="34" height="25"/><rect class="box" x="198" y="180" width="34" height="150"/>
+      <rect class="box" x="246" y="320" width="34" height="10"/><rect class="box" x="294" y="270" width="34" height="60"/>
+      <rect class="box" x="342" y="290" width="34" height="40"/><rect class="box" x="390" y="205" width="34" height="125"/>
+      <rect class="box" x="438" y="315" width="34" height="15"/><rect class="box" x="486" y="280" width="34" height="50"/>
+      <rect class="box" x="534" y="325" width="34" height="5"/><rect class="box" x="582" y="310" width="34" height="20"/>
+      <text x="167" y="348" class="mono" text-anchor="middle">t0</text><text x="215" y="348" class="mono" text-anchor="middle">t1</text>
+      <text x="263" y="348" class="mono" text-anchor="middle">t2</text><text x="311" y="348" class="mono" text-anchor="middle">t3</text>
+      <text x="359" y="348" class="mono" text-anchor="middle">t4</text><text x="407" y="348" class="mono" text-anchor="middle">t5</text>
+      <text x="455" y="348" class="mono" text-anchor="middle">t6</text><text x="503" y="348" class="mono" text-anchor="middle">t7</text>
+      <text x="551" y="348" class="mono" text-anchor="middle">t8</text><text x="599" y="348" class="mono" text-anchor="middle">t9</text>
+      <text x="167" y="366" class="small" text-anchor="middle">.05</text><text x="215" y="366" class="small" text-anchor="middle">.30</text>
+      <text x="263" y="366" class="small" text-anchor="middle">.02</text><text x="311" y="366" class="small" text-anchor="middle">.12</text>
+      <text x="359" y="366" class="small" text-anchor="middle">.08</text><text x="407" y="366" class="small" text-anchor="middle">.25</text>
+      <text x="455" y="366" class="small" text-anchor="middle">.03</text><text x="503" y="366" class="small" text-anchor="middle">.10</text>
+      <text x="551" y="366" class="small" text-anchor="middle">.01</text><text x="599" y="366" class="small" text-anchor="middle">.04</text>
+
+      <rect class="box" x="650" y="36" width="230" height="318"/>
+      <g data-step="1"><rect class="box" x="342" y="290" width="34" height="40"/>
+        <text x="662" y="60" lang="zh-CN">第 1 轮：u = 0.52</text><text x="662" y="60" lang="en">Round 1: u = 0.52</text>
+        <text x="662" y="80" class="mono">→ t4 (0.08)</text></g>
+      <g data-step="2">
+        <line x1="145" y1="290" x2="625" y2="290" class="lane"/><line x1="145" y1="60" x2="625" y2="60" class="lane"/>
+        <text x="20" y="294" class="mono">low  0.08</text><text x="20" y="64" class="mono">high 0.54</text>
+        <text x="662" y="104" lang="zh-CN">比 0.08 大：4 个</text><text x="662" y="104" lang="en">Above 0.08: 4 tokens</text>
+        <text x="662" y="124" style="fill: var(--ink-2)" lang="zh-CN">× 拒绝，范围 (0.08, 0.54]</text><text x="662" y="124" style="fill: var(--ink-2)" lang="en">× reject, range (0.08, 0.54]</text></g>
+      <g data-step="3"><rect class="box" x="486" y="280" width="34" height="50"/>
+        <line x1="145" y1="280" x2="625" y2="280" class="lane"/><line x1="145" y1="170" x2="625" y2="170" class="lane"/>
+        <text x="20" y="276" class="mono">low  0.10</text><text x="20" y="174" class="mono">high 0.32</text>
+        <text x="662" y="160" lang="zh-CN">第 2 轮：q = 0.77</text><text x="662" y="160" lang="en">Round 2: q = 0.77</text>
+        <text x="662" y="180" class="mono">u = 0.70 → t7 (0.10)</text>
+        <text x="662" y="200" lang="zh-CN">3 个，和 0.67 ≥ 0.6</text><text x="662" y="200" lang="en">3 tokens, mass 0.67 ≥ 0.6</text>
+        <text x="662" y="220" style="fill: var(--ink-2)" lang="zh-CN">× 拒绝，范围 (0.10, 0.32]</text><text x="662" y="220" style="fill: var(--ink-2)" lang="en">× reject, range (0.10, 0.32]</text></g>
+      <g data-step="4"><rect class="box" x="390" y="205" width="34" height="125"/>
+        <line x1="145" y1="205" x2="625" y2="205" class="lane"/>
+        <text x="20" y="209" class="mono">pivot 0.25</text>
+        <text x="662" y="256" lang="zh-CN">第 3 轮：q = 0.67</text><text x="662" y="256" lang="en">Round 3: q = 0.67</text>
+        <text x="662" y="276" class="mono">u = 0.50 → t5 (0.25)</text>
+        <text x="662" y="296" lang="zh-CN">1 个，和 0.30</text><text x="662" y="296" lang="en">1 token, mass 0.30</text>
+        <text x="662" y="320" lang="zh-CN">✓ 接受 t5</text><text x="662" y="320" lang="en">✓ accept t5</text></g>
+      <g data-step="5">
+        <rect class="box" x="20" y="390" width="860" height="66"/>
+        <text x="32" y="414" lang="zh-CN">每轮最多读两遍整行（抽候选、数 pivot 之上），范围每轮至少减半，全在一个内核里</text><text x="32" y="414" lang="en">At most two reads of the row per round (draw, then count above the pivots); the range halves; one kernel</text>
+        <text x="32" y="440" class="small" lang="zh-CN">对照：pytorch 后端先把 151936 个概率整行排序（sampler.py 第 813–815 行）</text><text x="32" y="440" class="small" lang="en">Compare: the pytorch backend first sorts all 151936 probabilities (sampler.py, lines 813–815)</text>
+      </g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 L4 上给融合和不融合的算子计时，再在剖析器里读出两边的内核</h3><h3 lang="en">Lab A · Time the fused and unfused operators on the L4, then read both kernel lists in the profiler</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。根据 SGLang v0.5.22 的源码（<code>layers/layernorm.py</code>、<code>layers/activation.py</code>、<code>layers/sampler.py</code>、<code>kernels/fused_op.py</code>、<code>kernels/spec.py</code>、<code>srt/environ.py</code>、<code>benchmark/one_batch.py</code>、<code>sgl_kernel/elementwise.py</code>）、FlashInfer v0.7.1 的 <code>flashinfer/sampling.py</code> 文档字符串和 PyTorch v2.14.1 的 <code>torch/autograd/profiler_util.py</code> 整理。还没有租用的 L4，所以这里不给数字，只描述应当看到的形状。环境是实验环境页里的 L4 和名为 <code>sglang-lab</code> 的 <code>lmsysorg/sglang:v0.5.23</code> 容器，主机目录 <code>~/llm-lab</code> 挂在容器的 <code>/work</code>；镜像比本页引用的 v0.5.22 新一个补丁版本，行号可能略有出入。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Assembled from the SGLang v0.5.22 source (<code>layers/layernorm.py</code>, <code>layers/activation.py</code>, <code>layers/sampler.py</code>, <code>kernels/fused_op.py</code>, <code>kernels/spec.py</code>, <code>srt/environ.py</code>, <code>benchmark/one_batch.py</code>, <code>sgl_kernel/elementwise.py</code>), the docstrings of <code>flashinfer/sampling.py</code> at FlashInfer v0.7.1, and <code>torch/autograd/profiler_util.py</code> at PyTorch v2.14.1. There is no rented L4 yet, so this lab gives no numbers, only the shape you should see. The environment is the L4 from the lab environment page with the <code>lmsysorg/sglang:v0.5.23</code> container named <code>sglang-lab</code>, the host directory <code>~/llm-lab</code> mounted at <code>/work</code>; the image is one patch release newer than the v0.5.22 this page cites, so line numbers may shift slightly.</div>
+    <ol>
+      <li><span lang="zh-CN">先只看算子。把下面的脚本存成主机上的 <code>~/llm-lab/fusion_ops.py</code>（容器里的 <code>/work/fusion_ops.py</code>）。它在 1、64、4096 个 token 下比较残差 + RMSNorm 的三种写法（逐个 PyTorch 算子、两个内核、<code>sgl_kernel</code> 的融合内核）和 SiLU-and-mul 的两种写法，再在 64 个请求、整个词表上比较排序采样和 FlashInfer 的 <code>joint</code> 采样，最后把一次 4096 token 的运行交给 torch profiler：</span><span lang="en">Look at the operators alone first. Save the script below as <code>~/llm-lab/fusion_ops.py</code> on the host (<code>/work/fusion_ops.py</code> in the container). At 1, 64 and 4096 tokens it compares three forms of residual + RMSNorm (operator by operator in PyTorch, two kernels, and the fused kernel of <code>sgl_kernel</code>) and two forms of SiLU-and-mul, then compares sorting-based sampling with FlashInfer’s <code>joint</code> sampling for 64 requests over the whole vocabulary, and finally hands one 4096-token run to the torch profiler:</span><pre data-lang="py" data-file="fusion_ops.py"># fusion_ops.py: fused against unfused norm, activation and sampling ops on the L4, timed and profiled
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+import torch
+import torch.nn.functional as F
+from torch.profiler import ProfilerActivity, profile
+from sgl_kernel import fused_add_rmsnorm, rmsnorm
+from sglang.kernels.ops.activation.activation import silu_and_mul        # the JIT op SGLang picks for I = 3072
+from flashinfer.sampling import top_k_top_p_sampling_from_probs
+
+torch.manual_seed(0)
+dev, dt = "cuda", torch.bfloat16
+H, I, V, EPS = 1024, 3072, 151936, 1e-6                              # Qwen3-0.6B
+w = torch.ones(H, device=dev, dtype=dt)
+
+def torch_add_rmsnorm(x, r):                    # RMSNorm.forward_native (layernorm.py lines 821-870), op by op
+    s = x.to(torch.float32) + r.to(torch.float32)
+    r_new = s.to(dt)
+    s = s * torch.rsqrt(s.pow(2).mean(dim=-1, keepdim=True) + EPS)
+    return (s * w).to(dt), r_new
+
+def two_kernels(x, r):                          # an add, then a norm kernel that reads the sum back
+    r_new = x + r
+    return rmsnorm(r_new, w, EPS), r_new
+
+def fused(x, r):                                # in place: r += x, then x = rmsnorm(r) * w
+    fused_add_rmsnorm(x, r, w, EPS)
+    return x, r
+
+def median_us(fn, n=51):
+    for _ in range(5):
+        fn()
+    ts = []
+    for _ in range(n):
+        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        a.record(); fn(); b.record(); torch.cuda.synchronize()
+        ts.append(a.elapsed_time(b) * 1000)
+    return sorted(ts)[n // 2]
+
+for T in [1, 64, 4096]:
+    x, r = torch.randn(T, H, device=dev, dtype=dt), torch.randn(T, H, device=dev, dtype=dt)
+    ref, _ = torch_add_rmsnorm(x, r)
+    x2, r2 = x.clone(), r.clone()               # the fused op works in place, so it gets its own copies
+    fused(x2, r2)
+    print(f"T={T:5d} max|fused - torch| = {(x2 - ref).abs().max().item():.2e}")
+    for name, fn, bpt in [("torch op by op", lambda: torch_add_rmsnorm(x, r), None),
+                          ("add + rmsnorm", lambda: two_kernels(x, r), 10 * H),
+                          ("fused_add_rmsnorm", lambda: fused(x2, r2), 8 * H)]:
+        t = median_us(fn)
+        print(f"  {name:20s} {t:9.1f} us" + (f"  {bpt * T / t / 1e3:7.1f} GB/s" if bpt else ""))
+    gu = torch.randn(T, 2 * I, device=dev, dtype=dt)
+    for name, fn in [("silu then mul", lambda: F.silu(gu[:, :I]) * gu[:, I:]),
+                     ("silu_and_mul", lambda: silu_and_mul(gu))]:
+        print(f"  {name:20s} {median_us(fn):9.1f} us")
+
+B = 64                                          # sampling: 64 requests over the whole vocabulary
+probs = torch.softmax(torch.randn(B, V, device=dev) * 3, dim=-1)
+
+def sort_sample():                              # the sorting path of the pytorch backend (sampler.py lines 813-821)
+    ps, idx = probs.sort(dim=-1, descending=True)
+    cum = ps.cumsum(dim=-1)
+    ps[torch.arange(V, device=dev).view(1, -1) &gt;= 50] = 0.0
+    ps[(cum - ps) &gt; 0.9] = 0.0
+    return idx.gather(1, torch.multinomial(ps / ps.sum(-1, keepdim=True), 1))
+
+def fi_sample():                                # what SGLang calls (sampler.py lines 429-434)
+    return top_k_top_p_sampling_from_probs(probs, 50, 0.9, filter_apply_order="joint")
+
+for name, fn in [("sort + cumsum + mask", sort_sample), ("flashinfer joint", fi_sample)]:
+    print(f"sampling B={B} {name:22s} {median_us(fn):9.1f} us")
+
+x, r = torch.randn(4096, H, device=dev, dtype=dt), torch.randn(4096, H, device=dev, dtype=dt)
+x2, r2 = x.clone(), r.clone()
+with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+    torch_add_rmsnorm(x, r); two_kernels(x, r); fused(x2, r2); sort_sample(); fi_sample()
+    torch.cuda.synchronize()
+print(prof.key_averages().table(sort_by="self_device_time_total", row_limit=20))
+prof.export_chrome_trace("/work/profiles/fusion_ops.json")</pre><pre data-lang="sh" data-file="in the container">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+mkdir -p /work/profiles
+python3 /work/fusion_ops.py 2&gt;&amp;1 | tee /work/fusion_ops.txt</pre><span lang="zh-CN">应当看到：<code>max|fused - torch|</code> 在 BF16 舍入的量级；「逐个 PyTorch 算子」最慢；4096 个 token 时「两个内核」和「融合」的时间比接近字节比 10 : 8，SiLU 接近 30 : 18，而 1 个 token 时比值更大，因为这时每个内核都短到只剩发射和调度（推断，依据是概念 1 和 Lab B 的结果）；FlashInfer 采样比排序那条路快。剖析表里，「逐个 PyTorch 算子」那一段应当出现好几个逐元素内核和一个归约内核，「融合」只有一个归一化内核；它的名字取决于 FlashInfer 走 CuTe DSL 还是 CUDA 内核（概念 2），所以按个数看，不按名字看。</span><span lang="en">You should see: <code>max|fused - torch|</code> at the level of BF16 rounding; operator by operator in PyTorch the slowest; at 4096 tokens a time ratio between two kernels and fused near the byte ratio of 10 : 8, and near 30 : 18 for SiLU, with larger ratios at 1 token, where each kernel is so short that only launch and scheduling remain (inference, from concept 1 and the Lab B results); FlashInfer sampling faster than the sorting path. In the profiler table, the operator-by-operator part should show several elementwise kernels and a reduction kernel, and the fused part a single norm kernel, whose name depends on whether FlashInfer takes its CuTe DSL or its CUDA kernel (concept 2), so count kernels rather than matching names.</span></li>
+      <li><span lang="zh-CN">再看整个模型。<code>SGLANG_FORCE_FUSED_OP_BACKEND=torch</code> 把进程里所有 <code>BaseFusedOp</code> 切到 <code>forward_native</code>，不只是归一化，SiLU-and-mul 和 RoPE 也一起退回 PyTorch 写法；没有 <code>forward_native</code> 的算子会打一次警告后照常分派（<code>fused_op.py</code> 第 641–653 行）。用 <code>one_batch</code> 各跑一次，比较解码的中位延迟：</span><span lang="en">Now the whole model. <code>SGLANG_FORCE_FUSED_OP_BACKEND=torch</code> switches every <code>BaseFusedOp</code> in the process to <code>forward_native</code>, not only the norm: SiLU-and-mul and RoPE fall back to their PyTorch forms too, and an op without the forced path warns once and dispatches as usual (lines 641–653 of <code>fused_op.py</code>). Run <code>one_batch</code> once each way and compare the median decode latency:</span><pre data-lang="sh" data-file="in the container, server stopped">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+M=Qwen/Qwen3-0.6B
+python3 -m sglang.benchmark.one_batch --model-path $M --batch-size 1 64 --input-len 256 --output-len 32 \
+  2&gt;&amp;1 | tee /work/fused.txt
+SGLANG_FORCE_FUSED_OP_BACKEND=torch python3 -m sglang.benchmark.one_batch --model-path $M \
+  --batch-size 1 64 --input-len 256 --output-len 32 2&gt;&amp;1 | tee /work/torch.txt
+grep -H "Decode.  median" /work/fused.txt /work/torch.txt</pre><span lang="zh-CN">应当看到：两个批大小下，<code>torch</code> 那一次的解码中位延迟都更长。CUDA 图仍然开着，CPU 的发射开销已经被它省掉了，剩下的差别来自 GPU 上多出来的内核和它们多读写的字节（推断）。</span><span lang="en">You should see: a longer median decode latency for the <code>torch</code> run at both batch sizes. CUDA graphs are still on, so the CPU launch cost is already gone; what remains is the extra kernels on the GPU and the extra bytes they move (inference).</span></li>
+      <li><span lang="zh-CN">数内核。关掉解码图，让每个内核在 trace 里各自出现，两种设置各剖析一个解码步（<code>--profile-prefix</code> 决定文件名，目录是实验环境页设好的 <code>SGLANG_TORCH_PROFILER_DIR</code>，<code>one_batch.py</code> 第 660–668 行），再按名字统计内核：</span><span lang="en">Count the kernels. Turn off the decode graph so each kernel appears on its own in the trace, profile one decode step in each setting (<code>--profile-prefix</code> sets the file name, in the <code>SGLANG_TORCH_PROFILER_DIR</code> set on the lab environment page, lines 660–668 of <code>one_batch.py</code>), and tally kernels by name:</span><pre data-lang="sh" data-file="in the container, server stopped">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+export SGLANG_TORCH_PROFILER_DIR=/work/profiles
+A="--model-path Qwen/Qwen3-0.6B --batch-size 1 --input-len 256 --output-len 32 --cuda-graph-backend-decode disabled"
+python3 -m sglang.benchmark.one_batch $A --profile --profile-stage decode --profile-prefix fused
+SGLANG_FORCE_FUSED_OP_BACKEND=torch python3 -m sglang.benchmark.one_batch $A --profile --profile-stage decode --profile-prefix torch
+python3 - &lt;&lt;'PY'
+import collections, glob, gzip, json
+for f in sorted(glob.glob("/work/profiles/*_decode.trace.json.gz")):
+    ev = json.load(gzip.open(f))["traceEvents"]
+    k = collections.Counter(e["name"] for e in ev if e.get("cat") == "kernel")
+    print(f, sum(k.values()), "kernels")
+    for name, n in k.most_common(8):
+        print(f"  {n:5d}  {name[:100]}")
+PY</pre><span lang="zh-CN">应当看到：<code>torch</code> 那份 trace 的内核总数明显更多，增加的主要是逐元素内核和归约内核；<code>fused</code> 那份里归一化和激活大致每层各一到两个内核。两份里都不应出现 all-reduce 内核，因为只有一张卡（推断：trace 里内核事件的 <code>cat</code> 字段按 PyTorch profiler 的 Chrome trace 格式写成 <code>kernel</code>，这里没有在真实 trace 上核对过）。在 <a href="https://ui.perfetto.dev/">ui.perfetto.dev</a> 里打开两个文件，看一层里归一化之前和之后的那一段时间线。</span><span lang="en">You should see: clearly more kernels in the <code>torch</code> trace, the increase being mostly elementwise and reduction kernels, with roughly one or two kernels per layer for the norms and the activation in the <code>fused</code> trace. Neither trace should contain an all-reduce kernel, since there is only one GPU (inference: the <code>cat</code> field of kernel events is assumed to read <code>kernel</code> in the PyTorch profiler’s Chrome trace format, which was not checked against a real trace). Open both files in <a href="https://ui.perfetto.dev/">ui.perfetto.dev</a> and look at the stretch of one layer’s timeline around a norm.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 对照：融合和不融合的残差 + RMSNorm 与 SiLU-and-mul，三种大小</h3><h3 lang="en">Lab B · The Metal twin: fused and unfused residual + RMSNorm and SiLU-and-mul at three sizes</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01（01:26 PDT）。下面的输出都来自这台 Mac 上的实际运行（macOS 27.2，Swift 6.4.2），着色器在运行时编译，不用 <code>xcrun metal</code>。数据类型用 FP16 代替 BF16，每个元素同样是 2 字节，字节数和 Lab A 一致。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01 (01:26 PDT). The outputs below come from actual runs on this Mac (macOS 27.2, Swift 6.4.2), with the shaders compiled at run time rather than by <code>xcrun metal</code>. FP16 stands in for BF16; both are 2 bytes per element, so the byte counts match Lab A.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>fusion.swift</code>。形状取 Qwen3-0.6B 的 <code>H</code> = 1024、<code>I</code> = 3072，token 数取 16、1024、16384。残差 + RMSNorm 的不融合写法是一个加法内核加一个 RMSNorm 内核，融合写法是一个线程块一行、256 个线程、平方和用 <code>simd_sum</code> 加线程组内存归约；SiLU-and-mul 的不融合写法是 <code>silu</code> 和 <code>mul</code> 两个内核。为了能反复执行，融合版也写到另一块输出缓冲区，不原地改残差。每种写法在一个命令缓冲区里重复若干次，用 GPU 时间戳除以次数，预热 3 个命令缓冲区后取 31 个的中位数；最后和 CPU 参考结果、以及两种写法互相比较：</span><span lang="en">Save the program below as <code>fusion.swift</code>. The shapes are Qwen3-0.6B’s <code>H</code> = 1024 and <code>I</code> = 3072, at 16, 1024 and 16384 tokens. Unfused residual + RMSNorm is an add kernel plus an RMSNorm kernel; fused is one threadgroup per row with 256 threads, reducing the sum of squares with <code>simd_sum</code> and threadgroup memory; unfused SiLU-and-mul is two kernels, <code>silu</code> and <code>mul</code>. So that it can be repeated, the fused version also writes to a separate output buffer instead of updating the residual in place. Each form is repeated several times in one command buffer, its GPU timestamps divided by the repeat count, and the median taken over 31 command buffers after 3 warm-up ones; at the end the results are checked against a CPU reference and against each other:</span><pre data-lang="swift" data-file="fusion.swift">// fusion.swift: fused against unfused residual + RMSNorm and SiLU-and-mul, FP16, on the Mac GPU
+import Metal
+import Foundation
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+constant uint TG = 256;                      // threads per row; H / TG elements per thread
+
+// Reduce one float across the threadgroup (8 SIMD groups of 32).
+inline float tg_sum(float v, threadgroup float* part, uint tid) {
+    v = simd_sum(v);
+    if (tid % 32 == 0) part[tid / 32] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float s = 0;
+    for (uint i = 0; i &lt; TG / 32; i++) s += part[i];
+    return s;
+}
+
+// Unfused, kernel 1 of 2: r_out = x + r. Reads 2 rows, writes 1.
+kernel void add(device const half4* x [[buffer(0)]], device const half4* r [[buffer(1)]],
+                device half4* r_out [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    r_out[i] = half4(float4(x[i]) + float4(r[i]));
+}
+
+// Unfused, kernel 2 of 2: y = r_out / rms(r_out) * w. One threadgroup per token; reads 1 row, writes 1.
+kernel void rmsnorm(device const half4* r_out [[buffer(0)]], device const half4* w [[buffer(1)]],
+                    device half4* y [[buffer(2)]], constant uint&amp; H [[buffer(3)]],
+                    uint t [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {
+    threadgroup float part[TG / 32];
+    uint n4 = H / 4, base = t * n4;
+    float4 v[4]; float ss = 0;               // H &lt;= 4096: at most 4 half4 per thread
+    for (uint k = 0, j = tid; j &lt; n4; k++, j += TG) { v[k] = float4(r_out[base + j]); ss += dot(v[k], v[k]); }
+    float inv = rsqrt(tg_sum(ss, part, tid) / float(H) + 1e-6f);
+    for (uint k = 0, j = tid; j &lt; n4; k++, j += TG) y[base + j] = half4(v[k] * inv * float4(w[j]));
+}
+
+// Fused: the add and the norm in one pass. Reads x and r, writes r_out and y; r_out is never read back.
+kernel void fused_add_rmsnorm(device const half4* x [[buffer(0)]], device const half4* r [[buffer(1)]],
+                              device half4* r_out [[buffer(2)]], device const half4* w [[buffer(3)]],
+                              device half4* y [[buffer(4)]], constant uint&amp; H [[buffer(5)]],
+                              uint t [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {
+    threadgroup float part[TG / 32];
+    uint n4 = H / 4, base = t * n4;
+    float4 v[4]; float ss = 0;
+    for (uint k = 0, j = tid; j &lt; n4; k++, j += TG) {
+        half4 s = half4(float4(x[base + j]) + float4(r[base + j]));
+        r_out[base + j] = s; v[k] = float4(s); ss += dot(v[k], v[k]);
+    }
+    float inv = rsqrt(tg_sum(ss, part, tid) / float(H) + 1e-6f);
+    for (uint k = 0, j = tid; j &lt; n4; k++, j += TG) y[base + j] = half4(v[k] * inv * float4(w[j]));
+}
+
+// gate_up is [T, 2I]: gate in the first half of each row, up in the second (SGLang's layout).
+kernel void silu(device const half4* gu [[buffer(0)]], device half4* s [[buffer(1)]],
+                 constant uint&amp; I [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    uint n4 = I / 4, t = i / n4, c = i % n4;
+    float4 g = float4(gu[t * 2 * n4 + c]);
+    s[i] = half4(g / (1.0f + exp(-g)));
+}
+kernel void mul(device const half4* s [[buffer(0)]], device const half4* gu [[buffer(1)]],
+                device half4* y [[buffer(2)]], constant uint&amp; I [[buffer(3)]], uint i [[thread_position_in_grid]]) {
+    uint n4 = I / 4, t = i / n4, c = i % n4;
+    y[i] = half4(float4(s[i]) * float4(gu[t * 2 * n4 + n4 + c]));
+}
+kernel void silu_and_mul(device const half4* gu [[buffer(0)]], device half4* y [[buffer(1)]],
+                         constant uint&amp; I [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    uint n4 = I / 4, t = i / n4, c = i % n4;
+    float4 g = float4(gu[t * 2 * n4 + c]), u = float4(gu[t * 2 * n4 + n4 + c]);
+    y[i] = half4(g / (1.0f + exp(-g)) * u);
+}
+"""
+
+let dev = MTLCreateSystemDefaultDevice()!
+let lib = try dev.makeLibrary(source: src, options: nil)
+func pso(_ n: String) -&gt; MTLComputePipelineState { try! dev.makeComputePipelineState(function: lib.makeFunction(name: n)!) }
+let pAdd = pso("add"), pNorm = pso("rmsnorm"), pFused = pso("fused_add_rmsnorm")
+let pSilu = pso("silu"), pMul = pso("mul"), pSwiglu = pso("silu_and_mul")
+let queue = dev.makeCommandQueue()!
+let H = 1024, I = 3072                      // Qwen3-0.6B: hidden_size 1024, intermediate_size 3072
+let N = 31, warm = 3                         // median of N command buffers after warm-up
+
+func buf(_ count: Int, _ f: (Int) -&gt; Float) -&gt; MTLBuffer {
+    let b = dev.makeBuffer(length: count * 2, options: .storageModeShared)!
+    let p = b.contents().bindMemory(to: Float16.self, capacity: count)
+    for i in 0..&lt;count { p[i] = Float16(f(i)) }
+    return b
+}
+func h(_ b: MTLBuffer, _ i: Int) -&gt; Float { Float(b.contents().bindMemory(to: Float16.self, capacity: i + 1)[i]) }
+var rng = SystemRandomNumberGenerator()
+func rnd() -&gt; Float { Float.random(in: -1...1, using: &amp;rng) }
+
+// Time `reps` repetitions of `encode` inside one command buffer; return the median GPU time per repetition.
+func time(reps: Int, _ encode: (MTLComputeCommandEncoder) -&gt; Void) -&gt; Double {
+    var ts: [Double] = []
+    for k in 0..&lt;(warm + N) {
+        let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+        for _ in 0..&lt;reps { encode(enc) }
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if k &gt;= warm { ts.append((cb.gpuEndTime - cb.gpuStartTime) / Double(reps)) }
+    }
+    return ts.sorted()[N / 2]
+}
+func line(_ name: String, _ kernels: Int, _ bytesPerTok: Int, _ T: Int, _ t: Double) {
+    print("  " + name.padding(toLength: 30, withPad: " ", startingAt: 0)
+          + String(format: "%2d %10d %12.1f %10.1f", kernels, bytesPerTok, t * 1e6, Double(bytesPerTok * T) / t / 1e9))
+}
+
+let stamp = DateFormatter(); stamp.dateFormat = "yyyy-MM-dd HH:mm zzz"
+print("device=\(dev.name) FP16, H=\(H) I=\(I), median of \(N) command buffers, \(stamp.string(from: Date()))")
+for T in [16, 1024, 16384] {
+    let reps = max(5, min(400, (1 &lt;&lt; 27) / (T * H * 2)))
+    var Hu = UInt32(H), Iu = UInt32(I)
+    // Residual + RMSNorm
+    let x = buf(T * H) { _ in rnd() }, r = buf(T * H) { _ in rnd() }, w = buf(H) { _ in 1 + 0.1 * rnd() }
+    let rU = buf(T * H) { _ in 0 }, yU = buf(T * H) { _ in 0 }, rF = buf(T * H) { _ in 0 }, yF = buf(T * H) { _ in 0 }
+    let elem4 = MTLSize(width: T * H / 4, height: 1, depth: 1), rows = MTLSize(width: T, height: 1, depth: 1)
+    let tg = MTLSize(width: 256, height: 1, depth: 1)
+    let tU = time(reps: reps) { e in
+        e.setComputePipelineState(pAdd); e.setBuffer(x, offset: 0, index: 0); e.setBuffer(r, offset: 0, index: 1)
+        e.setBuffer(rU, offset: 0, index: 2); e.dispatchThreads(elem4, threadsPerThreadgroup: tg)
+        e.setComputePipelineState(pNorm); e.setBuffer(rU, offset: 0, index: 0); e.setBuffer(w, offset: 0, index: 1)
+        e.setBuffer(yU, offset: 0, index: 2); e.setBytes(&amp;Hu, length: 4, index: 3)
+        e.dispatchThreadgroups(rows, threadsPerThreadgroup: tg)
+    }
+    let tF = time(reps: reps) { e in
+        e.setComputePipelineState(pFused)
+        for (i, b) in [x, r, rF, w, yF].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+        e.setBytes(&amp;Hu, length: 4, index: 5); e.dispatchThreadgroups(rows, threadsPerThreadgroup: tg)
+    }
+    // CPU reference for token 0 and token T-1, and fused against unfused over every element
+    var refErr: Float = 0, fuDiff: Float = 0
+    for t in [0, T - 1] {
+        var s = [Float](repeating: 0, count: H), ss: Float = 0
+        for j in 0..&lt;H { s[j] = Float(Float16(h(x, t * H + j) + h(r, t * H + j))); ss += s[j] * s[j] }
+        let inv = 1 / (ss / Float(H) + 1e-6).squareRoot()
+        for j in 0..&lt;H { refErr = max(refErr, abs(h(yF, t * H + j) - s[j] * inv * h(w, j))) }
+    }
+    for i in 0..&lt;(T * H) { fuDiff = max(fuDiff, abs(h(yF, i) - h(yU, i)), abs(h(rF, i) - h(rU, i))) }
+
+    // SiLU-and-mul
+    let gu = buf(T * 2 * I) { _ in 3 * rnd() }, s = buf(T * I) { _ in 0 }
+    let mU = buf(T * I) { _ in 0 }, mF = buf(T * I) { _ in 0 }
+    let out4 = MTLSize(width: T * I / 4, height: 1, depth: 1)
+    let repsS = max(5, min(400, (1 &lt;&lt; 27) / (T * I * 2)))
+    let sU = time(reps: repsS) { e in
+        e.setComputePipelineState(pSilu); e.setBuffer(gu, offset: 0, index: 0); e.setBuffer(s, offset: 0, index: 1)
+        e.setBytes(&amp;Iu, length: 4, index: 2); e.dispatchThreads(out4, threadsPerThreadgroup: tg)
+        e.setComputePipelineState(pMul); e.setBuffer(s, offset: 0, index: 0); e.setBuffer(gu, offset: 0, index: 1)
+        e.setBuffer(mU, offset: 0, index: 2); e.setBytes(&amp;Iu, length: 4, index: 3); e.dispatchThreads(out4, threadsPerThreadgroup: tg)
+    }
+    let sF = time(reps: repsS) { e in
+        e.setComputePipelineState(pSwiglu); e.setBuffer(gu, offset: 0, index: 0); e.setBuffer(mF, offset: 0, index: 1)
+        e.setBytes(&amp;Iu, length: 4, index: 2); e.dispatchThreads(out4, threadsPerThreadgroup: tg)
+    }
+    var sDiff: Float = 0
+    for i in 0..&lt;(T * I) { sDiff = max(sDiff, abs(h(mF, i) - h(mU, i))) }
+
+    print("T=\(T) tokens                    kernels  bytes/token  median us   GB/s")
+    line("add + rmsnorm (unfused)", 2, 10 * H, T, tU)
+    line("fused_add_rmsnorm", 1, 8 * H, T, tF)
+    print(String(format: "    unfused/fused time %.2f x, bytes 1.25 x; max|fused-CPU| %.1e, max|fused-unfused| %.1e", tU / tF, refErr, fuDiff))
+    line("silu, then mul (unfused)", 2, 10 * I, T, sU)
+    line("silu_and_mul", 1, 6 * I, T, sF)
+    print(String(format: "    unfused/fused time %.2f x, bytes 1.67 x; max|fused-unfused| %.1e", sU / sF, sDiff))
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是连续三次运行里的第三次，原样贴出：</span><span lang="en">Build and run. Below is the third of three consecutive runs, pasted as it came:</span><pre data-lang="sh">$ swiftc -O fusion.swift -o fusion
+$ ./fusion
+device=Apple M5 FP16, H=1024 I=3072, median of 31 command buffers, 2026-11-01 01:26 PDT
+T=16 tokens                    kernels  bytes/token  median us   GB/s
+  add + rmsnorm (unfused)        2      10240          1.8       91.2
+  fused_add_rmsnorm              1       8192          1.2      112.5
+    unfused/fused time 1.54 x, bytes 1.25 x; max|fused-CPU| 9.6e-04, max|fused-unfused| 0.0e+00
+  silu, then mul (unfused)       2      30720          2.4      208.8
+  silu_and_mul                   1      18432          1.2      244.1
+    unfused/fused time 1.95 x, bytes 1.67 x; max|fused-unfused| 7.8e-03
+T=1024 tokens                    kernels  bytes/token  median us   GB/s
+  add + rmsnorm (unfused)        2      10240         97.8      107.2
+  fused_add_rmsnorm              1       8192         76.8      109.3
+    unfused/fused time 1.27 x, bytes 1.25 x; max|fused-CPU| 9.7e-04, max|fused-unfused| 0.0e+00
+  silu, then mul (unfused)       2      30720        201.7      156.0
+  silu_and_mul                   1      18432        135.0      139.8
+    unfused/fused time 1.49 x, bytes 1.67 x; max|fused-unfused| 7.8e-03
+T=16384 tokens                    kernels  bytes/token  median us   GB/s
+  add + rmsnorm (unfused)        2      10240       1283.8      130.7
+  fused_add_rmsnorm              1       8192       1021.6      131.4
+    unfused/fused time 1.26 x, bytes 1.25 x; max|fused-CPU| 9.3e-04, max|fused-unfused| 0.0e+00
+  silu, then mul (unfused)       2      30720       3920.8      128.4
+  silu_and_mul                   1      18432       2380.6      126.9
+    unfused/fused time 1.65 x, bytes 1.67 x; max|fused-unfused| 7.8e-03
+# 2026-11-01 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2）</pre></li>
+      <li><span lang="zh-CN">先看正确性：融合版和 CPU 参考的最大差约 1e-3，是 FP16 输出的舍入；残差 + RMSNorm 的两种写法逐位相同，因为两边都先把和舍入成 FP16 再求平方和。SiLU-and-mul 两种写法差 7.8e-3，正好是 8 到 16 之间 FP16 的一个最小单位：不融合版把 <code>silu(gate)</code> 先舍入成 FP16 再乘，融合版在 FP32 里一口气算完。</span><span lang="en">Correctness first: the fused result differs from the CPU reference by at most about 1e-3, the rounding of an FP16 output; the two forms of residual + RMSNorm agree bit for bit, because both round the sum to FP16 before squaring it. The two forms of SiLU-and-mul differ by 7.8e-3, exactly one FP16 unit in the last place between 8 and 16: the unfused form rounds <code>silu(gate)</code> to FP16 before multiplying, while the fused form computes it all in FP32.</span></li>
+      <li><span lang="zh-CN">大尺寸（16384 个 token，每块 FP16 张量 32 MiB）：三次运行里时间比是 1.25–1.26 和 1.65–1.66，就是字节比 1.25 和 1.67。四个内核的有效带宽都在 127–132 GB/s，说明两种写法都被显存带宽卡住，融合的收益正好等于它省掉的字节。</span><span lang="en">The large size (16384 tokens, 32 MiB per FP16 tensor): across the three runs the time ratios are 1.25–1.26 and 1.65–1.66, which are the byte ratios of 1.25 and 1.67. All the kernels run at 127–132 GB/s of effective bandwidth, so both forms are bound by memory bandwidth, and fusion gains exactly the bytes it removes.</span></li>
+      <li><span lang="zh-CN">小尺寸（16 个 token，每块张量 32 KiB）：时间比升到 1.54–2.15（归一化）和 1.95–2.29（SiLU），比字节比大。每个内核只要 1–4 µs，数据多半在缓存里，所以「GB/s」一列超过了大尺寸时的带宽；这时少一次派发几乎就是少一半时间。解码时批很小，就是这种情形（推断）。</span><span lang="en">The small size (16 tokens, 32 KiB per tensor): the time ratios rise to 1.54–2.15 (norm) and 1.95–2.29 (SiLU), above the byte ratios. Each kernel takes only 1–4 µs and the data most likely sits in cache, which is why the GB/s column exceeds the large-size bandwidth; here one dispatch fewer is nearly half the time. A decode step with a small batch is this case (inference).</span></li>
+      <li><span lang="zh-CN">中间尺寸（1024 个 token，每块 2 MiB）最不稳定：融合归一化三次分别是 83.9、32.4、76.8 µs，时间比 1.22–1.38 和 1.49–1.70。工作集的大小接近缓存容量，数据有时在缓存里、有时不在（推断）。报数字时把三次都报上，不要只挑一次。</span><span lang="en">The middle size (1024 tokens, 2 MiB per tensor) is the least stable: the fused norm took 83.9, 32.4 and 76.8 µs in the three runs, with time ratios of 1.22–1.38 and 1.49–1.70. The working set is close to the cache size, so the data is sometimes cached and sometimes not (inference). Report all three runs rather than picking one.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>fusion_ops.txt</code>（三个 token 数下的时间、两次采样的时间和剖析表）、<code>fused.txt</code> 和 <code>torch.txt</code> 的 <code>Decode.  median latency</code> 行、两份 trace 的内核计数；Lab B 的三次完整输出，以及你自己的一张小表：三种大小下的两个时间比和字节比。写进当天日志，并记下你的数字和本页哪里不同。还没有租用账户时，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, <code>fusion_ops.txt</code> (the timings at three token counts, the two sampling timings and the profiler table), the <code>Decode.  median latency</code> lines of <code>fused.txt</code> and <code>torch.txt</code>, and the kernel counts of the two traces; from Lab B, the three full outputs and a small table of your own: the two time ratios and the byte ratios at the three sizes. Write them into that day’s log, and note where your numbers differ from this page. Until a rental account exists, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/phase-5">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. hidden size 1024、BF16 时，残差 + RMSNorm 从两个内核（10 KiB 每 token）融合成一个（8 KiB），省下的 2 KiB 是哪一笔？</p><p lang="en">1. With hidden size 1024 in BF16, fusing residual + RMSNorm from two kernels (10 KiB per token) into one (8 KiB) saves 2 KiB. Which transfer is it?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">写出新残差 <code>r′</code>：融合内核只把残差留在寄存器里，不写回显存</span><span lang="en">Writing the new residual <code>r′</code>: the fused kernel keeps the residual in registers only and never writes it to memory</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">归一化内核把刚写出的 <code>r′</code> 再读回来的那一次</span><span lang="en">The norm kernel reading back the <code>r′</code> that was just written</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">读 RMSNorm 的权重：融合内核把它编进了常量</span><span lang="en">Reading the RMSNorm weight: the fused kernel bakes it into constants</span></label>
+      <div class="why" hidden><span lang="zh-CN">两个内核时，<code>r′</code> 被写出一次、又被归一化内核读回一次；融合后它仍要写出，因为下一层要用残差，但不再读回，省下的就是这一读。权重本来就不计入（2 KiB，整批共用、多半在缓存里），融合内核照样从显存读它。</span><span lang="en">With two kernels, <code>r′</code> is written once and read back once by the norm kernel; fused, it still has to be written, because the next layer needs the residual, but it is no longer read back, and that read is the saving. The weight was never counted (2 KiB, shared by the batch and most likely cached), and the fused kernel still reads it from memory.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">2. Lab B 里，16 个 token 时不融合和融合的时间比约为 1.5–2.3，比字节比（1.25 和 1.67）大；16384 个 token 时正好等于字节比。最好的解释是什么？</p><p lang="en">2. In Lab B, at 16 tokens the unfused-to-fused time ratio is about 1.5–2.3, above the byte ratios (1.25 and 1.67); at 16384 tokens it equals the byte ratio. What is the best explanation?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">小尺寸时每个内核的时间主要是派发和调度的固定开销，一个内核对两个内核约等于一半；大尺寸时两边都被显存带宽卡住，时间跟着字节走</span><span lang="en">At the small size each kernel’s time is mostly the fixed cost of dispatch and scheduling, so one kernel against two is about half; at the large size both are bound by memory bandwidth and time follows bytes</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">融合内核在 FP32 里计算，小尺寸时 GPU 的 FP32 单元比 FP16 单元快</span><span lang="en">The fused kernel computes in FP32, and at small sizes the GPU’s FP32 units are faster than its FP16 units</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">小尺寸时融合内核跳过了写残差，所以省的字节比 2 KiB 多</span><span lang="en">At small sizes the fused kernel skips writing the residual, so it saves more than 2 KiB</span></label>
+      <div class="why" hidden><span lang="zh-CN">两种写法用的都是 FP32 算术、FP16 存储，算术也不是瓶颈；融合内核在每个尺寸下都写残差（程序里的 <code>r_out</code>），正确性检查也逐位对上了。剩下的解释是固定开销：16 个 token 时一个内核只要 1–4 µs，少一次派发就是少一大截；16384 个 token 时有效带宽稳定在约 130 GB/s，时间比就等于字节比。</span><span lang="en">Both forms use FP32 arithmetic and FP16 storage, and arithmetic is not the bottleneck; the fused kernel writes the residual at every size (<code>r_out</code> in the program), and the correctness check matches bit for bit. What remains is fixed cost: at 16 tokens a kernel takes only 1–4 µs, so one dispatch fewer is a large share; at 16384 tokens the effective bandwidth holds at about 130 GB/s, so the time ratio equals the byte ratio.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">3. FlashInfer 的 <code>TopKTopPSamplingFromProbKernel</code>（<code>joint</code> 顺序）一轮做了什么？</p><p lang="en">3. What does one round of FlashInfer’s <code>TopKTopPSamplingFromProbKernel</code> (the <code>joint</code> order) do?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">把这一行分成若干段，每段在共享内存里排序，再归并出前 k 个</span><span lang="en">Split the row into chunks, sort each chunk in shared memory, and merge out the top k</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">每个线程维护一个大小为 k 的堆，最后把所有堆合并，再在里面按 top-p 截断</span><span lang="en">Each thread keeps a heap of size k, all heaps are merged at the end, and top-p is applied to the result</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">按词表顺序做逆变换采样得到一个候选，再数出概率比它大的 token 个数和概率和；个数小于 k 且和小于 p 就接受，否则提高下界或收窄范围，进入下一轮</span><span lang="en">Draw a candidate by inverse transform sampling in vocabulary order, then count the tokens with a higher probability and sum their probabilities; accept if the count is below k and the sum below p, otherwise raise the lower bound or narrow the range and go round again</span></label>
+      <div class="why" hidden><span lang="zh-CN">内核里没有排序也没有堆：每轮一遍带提前停止的前缀和抽候选，一遍归约数出 <code>pivot_0</code> 和 <code>pivot_1</code> 之上的个数和概率和（<code>sampling.cuh</code> 第 1239–1332 行）。分段排序再归并是排序的做法，正是它要避开的；先选 k 个再做 top-p 的是 <code>top_k_first</code> 的快路径，用的是基数 top-k，也不是堆，而且 SGLang 不走它。</span><span lang="en">There is no sort and no heap in the kernel: each round makes one prefix-sum pass with an early stop to draw a candidate and one reduction pass counting the tokens above <code>pivot_0</code> and <code>pivot_1</code> and summing their probabilities (lines 1239–1332 of <code>sampling.cuh</code>). Sorting chunks and merging is the sort it avoids; selecting k first and then applying top-p is the <code>top_k_first</code> fast path, which uses a radix top-k rather than heaps, and SGLang does not take it.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. 在一张 L4 上用 v0.5.22 跑 Qwen3-0.6B，下面哪个融合肯定不会出现在 trace 里？</p><p lang="en">4. Running Qwen3-0.6B with v0.5.22 on one L4, which of these fusions is certain not to appear in the trace?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">all-reduce + 残差 + RMSNorm</span><span lang="en">All-reduce + residual + RMSNorm</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">残差加法 + RMSNorm</span><span lang="en">Residual add + RMSNorm</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">SiLU-and-mul</span><span lang="en">SiLU-and-mul</span></label>
+      <div class="why" hidden><span lang="zh-CN">只有一张卡就没有 all-reduce，<code>flashinfer_allreduce_residual_rmsnorm</code> 在 world size 为 1 时直接返回空；L4 是 sm_89，也不满足 SM90 或 SM100 的条件。残差 + RMSNorm 和 SiLU-and-mul 在 CUDA 上是默认路径，单卡照样走融合内核。（RoPE + 写 KV 缓存同样不会出现，但原因不同：稠密 Qwen3 的模型代码不传那个参数。）</span><span lang="en">With one GPU there is no all-reduce, and <code>flashinfer_allreduce_residual_rmsnorm</code> returns nothing at once when the world size is 1; the L4 is sm_89, which fails the SM90-or-SM100 condition as well. Residual + RMSNorm and SiLU-and-mul are the default paths on CUDA and take their fused kernels on a single GPU too. (RoPE + KV-cache write will not appear either, for a different reason: the dense Qwen3 model code does not pass the argument.)</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/layernorm.py">layers/layernorm.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/python/sgl_kernel/elementwise.py">sgl_kernel/elementwise.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/csrc/elementwise/fused_add_rms_norm_kernel.cu">fused_add_rms_norm_kernel.cu</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/layernorm/norm.py">kernels/ops/layernorm/norm.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/layer_boundary/residual/add_norm.py">layer_boundary/residual/add_norm.py</a> <span class="lvl" lang="zh-CN">源码，中级（SGLang v0.5.22，2026-11-01 取回）：残差 + RMSNorm 从层到内核的整条路径，以及 all-reduce 融合的启用条件；概念 2、5 和动画 (a)</span><span class="lvl" lang="en">Source, intermediate (SGLang v0.5.22, fetched 2026-11-01): the whole path of residual + RMSNorm from the layer to the kernel, and the conditions of the all-reduce fusion; concepts 2 and 5 and diagram (a)</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/activation.py">layers/activation.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/activation/activation.py">kernels/ops/activation/activation.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/jit/csrc/elementwise/activation.cuh">jit/csrc/elementwise/activation.cuh</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/dual_gemm.py">layers/dual_gemm.py</a> <span class="lvl" lang="zh-CN">源码，中级：SiLU-and-mul 在 JIT 和提前编译两个版本之间的选择，以及只在 SM100 上可用的矩阵乘 + SwiGLU；概念 3</span><span class="lvl" lang="en">Source, intermediate: how SiLU-and-mul chooses between the JIT and ahead-of-time builds, and the matmul + SwiGLU available only on SM100; concept 3</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/rotary_embedding/base.py">rotary_embedding/base.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/attention/rope.py">kernels/ops/attention/rope.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/models/utils.py">models/utils.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/models/qwen3_moe.py">models/qwen3_moe.py</a> <span class="lvl" lang="zh-CN">源码，中级：RoPE 和融合写 KV 缓存的接口、启用条件和使用它的模型；概念 4</span><span class="lvl" lang="en">Source, intermediate: the interface of RoPE with the fused KV-cache write, its conditions and a model that uses it; concept 4</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/flashinfer_comm_fusion.py">layers/flashinfer_comm_fusion.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/layer_boundary/fusions/allreduce.py">layer_boundary/fusions/allreduce.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/exec_.py">arg_groups/fields/exec_.py</a> <span class="lvl" lang="zh-CN">源码，进阶：FlashInfer 的 all-reduce + 残差 + RMSNorm 调用、退路和命令行开关；概念 5</span><span class="lvl" lang="en">Source, advanced: the FlashInfer all-reduce + residual + RMSNorm call, its fallback and its command-line switch; concept 5</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/sampler.py">layers/sampler.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/overrides.py">arg_groups/overrides.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/fused_op.py">kernels/fused_op.py</a> <span class="lvl" lang="zh-CN">源码，入门到中级：两个采样后端和默认值，<code>BaseFusedOp</code> 的分派和 <code>SGLANG_FORCE_FUSED_OP_BACKEND</code>；概念 1、6 和 Lab A</span><span class="lvl" lang="en">Source, beginner to intermediate: the two sampling backends and the default, <code>BaseFusedOp</code> dispatch and <code>SGLANG_FORCE_FUSED_OP_BACKEND</code>; concepts 1 and 6 and Lab A</span></li>
+    <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/flashinfer/sampling.py">flashinfer/sampling.py (v0.7.1)</a> · <a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/include/flashinfer/sampling.cuh">include/flashinfer/sampling.cuh</a> · <a href="https://docs.flashinfer.ai/api/sampling.html">docs.flashinfer.ai: Sampling</a> <span class="lvl" lang="zh-CN">源码与文档，进阶：<code>top_k_top_p_sampling_from_probs</code> 的参数和 <code>joint</code> 顺序，双 pivot 拒绝采样内核本身；概念 6 和动画 (b)</span><span class="lvl" lang="en">Source and docs, advanced: the parameters of <code>top_k_top_p_sampling_from_probs</code> and the <code>joint</code> order, and the dual-pivot rejection-sampling kernel itself; concept 6 and diagram (b)</span></li>
+    <li><a href="https://flashinfer.ai/2025/03/10/sampling.html">FlashInfer blog: Sorting-Free GPU Kernels for LLM Sampling (2025-03-10)</a> <span class="lvl" lang="zh-CN">设计文章，中级：逆变换采样、拒绝采样、双 pivot 的收敛保证和正确性证明；概念 6 的主依据</span><span class="lvl" lang="en">Design article, intermediate: inverse transform sampling, rejection sampling, the convergence guarantee of dual pivots and the correctness proof; the main basis of concept 6</span></li>
+    <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/flashinfer/norm/__init__.py">flashinfer/norm/__init__.py (v0.7.1)</a> · <a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/include/flashinfer/norm.cuh">include/flashinfer/norm.cuh</a> · <a href="https://docs.flashinfer.ai/api/norm.html">docs.flashinfer.ai: Normalization</a> <span class="lvl" lang="zh-CN">源码与文档，中级：融合加法 + RMSNorm 的 CuTe DSL 和 CUDA 两种实现；概念 2</span><span class="lvl" lang="en">Source and docs, intermediate: the CuTe DSL and CUDA implementations of fused add + RMSNorm; concept 2</span></li>
+    <li><a href="https://huggingface.co/Qwen/Qwen3-0.6B">Qwen/Qwen3-0.6B</a> <span class="lvl" lang="zh-CN">模型卡和 <code>config.json</code>，入门（2026-11-01 读取）：本页所有字节数用到的形状</span><span class="lvl" lang="en">Model card and <code>config.json</code>, beginner (read 2026-11-01): the shapes behind every byte count on this page</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal/mtlcomputecommandencoder">MTLComputeCommandEncoder</a> · <a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification</a> <span class="lvl" lang="zh-CN">官方文档，入门到中级：计算编码器的派发、SIMD 组函数 <code>simd_sum</code> 和线程组内存；Lab B</span><span class="lvl" lang="en">Official docs, beginner to intermediate: dispatching from a compute encoder, the SIMD-group function <code>simd_sum</code>, and threadgroup memory; Lab B</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 5 章 Memory architecture and data locality 和第 6 章 Performance considerations 对应概念 1；第 10 章 Reduction 对应概念 2 的行内平方和；第 11 章 Prefix sum (scan) 和第 13 章 Sorting 对应概念 6；第 19 章 Multi-GPU API 对应概念 5。按第 5 版目录的章名对应</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 5, Memory architecture and data locality, and chapter 6, Performance considerations, match concept 1; chapter 10, Reduction, matches the in-row sum of squares of concept 2; chapter 11, Prefix sum (scan), and chapter 13, Sorting, match concept 6; chapter 19, Multi-GPU API, matches concept 5. Matched by chapter title in the 5th-edition table of contents</span></li>
+    <li lang="zh-CN">Sebastian Raschka, 《Build a Large Language Model (From Scratch)》, Manning, 2024, ISBN 9781633437166. <span class="lvl">第 4 章 Implementing a GPT model from scratch 的 4.2、4.3、4.4 节（layer normalization、GELU 前馈网络、shortcut 连接）对应概念 2 和 3；第 5 章 5.3 节 Decoding strategies to control randomness（温度缩放、top-k 采样）对应概念 6。节名按作者仓库 rasbt/LLMs-from-scratch 里的章节笔记本核对（2026-11-01）</span></li>
+    <li lang="en">Sebastian Raschka, <em>Build a Large Language Model (From Scratch)</em>, Manning, 2024, ISBN 9781633437166. <span class="lvl">Sections 4.2, 4.3 and 4.4 of chapter 4, Implementing a GPT model from scratch (layer normalization, a feed-forward network with GELU, shortcut connections), match concepts 2 and 3; section 5.3 of chapter 5, Decoding strategies to control randomness (temperature scaling, top-k sampling), matches concept 6. Section titles checked against the chapter notebooks in the author’s repository rasbt/LLMs-from-scratch (2026-11-01)</span></li>
+    <li lang="zh-CN">John L. Hennessy &amp; David A. Patterson, 《Computer Architecture: A Quantitative Approach》, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">第 4 章 Data-Level Parallelism in Vector, SIMD, and GPU Architectures 里的 Roofline 一节对应概念 1（逐元素算子为什么落在屋脊点左边）</span></li>
+    <li lang="en">John L. Hennessy &amp; David A. Patterson, <em>Computer Architecture: A Quantitative Approach</em>, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">The Roofline section of chapter 4, Data-Level Parallelism in Vector, SIMD, and GPU Architectures, matches concept 1 (why elementwise operators sit left of the ridge point)</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-4-moe-kernels/index.html"><span lang="zh-CN">← Phase 4 · MoE 内核</span><span lang="en">← Phase 4 · MoE Kernels</span></a>
+    <a href="../phase-6-quantization-kernels/index.html"><span lang="zh-CN">Phase 6 · 量化内核 →</span><span lang="en">Phase 6 · Quantization Kernels →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
