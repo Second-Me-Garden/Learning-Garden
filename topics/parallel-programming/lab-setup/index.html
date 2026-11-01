@@ -23,8 +23,8 @@
 
   <p class="meta" lang="zh-CN">环境准备 · 做任何实验之前</p><p class="meta" lang="en">Environment setup · before any lab</p>
   <h1><span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span> <span class="en" lang="zh-CN">Lab environment: the Mac itself, measured</span><span class="en" lang="en">The Mac itself, measured</span></h1>
-  <p class="lede" lang="zh-CN">这个专题的实验测量的是硬件本身：核心有几个、cache line 多宽、两个线程抢同一行时慢多少。所以实验机就是你面前这台 Mac，不开虚拟机。本页先把这台机器的真实参数读出来，再把编译器、线程库、OpenMP、观察工具和 sanitizer 逐个验证一遍。页面上每段「预期输出」都是 2026-10-31 在这台 Apple M5 上实际跑出来的；唯一没跑过的是 OpenMP，因为它要先安装，页面上已标明。</p>
-  <p class="lede" lang="en">The labs in this topic measure the hardware itself: how many cores there are, how wide a cache line is, how much slower two threads get when they fight over one line. So the lab machine is the Mac in front of you, with no VM. This page first reads out this machine’s real parameters, then checks the compiler, the thread libraries, OpenMP, the observation tools and the sanitizers one by one. Every "expected output" on this page was actually produced on this Apple M5 on 2026-10-31; the only thing not run is OpenMP, because it has to be installed first, and the page marks it so.</p>
+  <p class="lede" lang="zh-CN">这个专题的实验测量的是硬件本身：核心有几个、cache line 多宽、两个线程抢同一行时慢多少。所以实验机就是你面前这台 Mac，不开虚拟机。本页先把这台机器的真实参数读出来，再把编译器、线程库、OpenMP、观察工具和 sanitizer 逐个验证一遍。页面上每段「预期输出」都是 2026-10-31 在这台 Apple M5 上实际跑出来的；没跑过的有三样：OpenMP，因为它要先安装；以及要 sudo 的 <code>spindump</code> 和 <code>dtrace</code>，本页只跑了不加 sudo 的那一步，记下了它们的报错。页面上都已标明。</p>
+  <p class="lede" lang="en">The labs in this topic measure the hardware itself: how many cores there are, how wide a cache line is, how much slower two threads get when they fight over one line. So the lab machine is the Mac in front of you, with no VM. This page first reads out this machine’s real parameters, then checks the compiler, the thread libraries, OpenMP, the observation tools and the sanitizers one by one. Every "expected output" on this page was actually produced on this Apple M5 on 2026-10-31; three things were not run: OpenMP, because it has to be installed first, and <code>spindump</code> and <code>dtrace</code> with sudo; for those two the page ran only the step without sudo and records the errors it gave. The page marks all three.</p>
 
   <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
   <div class="goals">
@@ -110,8 +110,8 @@ InstalledDir: /Library/Developer/CommandLineTools/usr/bin</pre>
   <h3 lang="zh-CN">3. 怎么测时间</h3><h3 lang="en">3. How to measure time</h3>
   <p lang="zh-CN">并行程序的一次运行时间不可信：第一次要把代码和数据拉进 cache，调度器可能把线程放到 E 核，后台进程会插进来。每个实验都按同一套做法：</p><p lang="en">A single run time of a parallel program cannot be trusted: the first run has to pull code and data into the cache, the scheduler may put threads on E cores, and background processes get in the way. Every lab follows the same method:</p>
   <ul>
-    <li lang="zh-CN"><strong>单调时钟</strong>：C 用 <code>clock_gettime(CLOCK_MONOTONIC, …)</code>，C++ 用 <code>std::chrono::steady_clock</code>。不要用会被 NTP 调整的墙上时间（<code>gettimeofday</code>、<code>system_clock</code>）。</li>
-    <li lang="en"><strong>A monotonic clock</strong>: <code>clock_gettime(CLOCK_MONOTONIC, …)</code> in C, <code>std::chrono::steady_clock</code> in C++. Do not use calendar time that NTP can adjust (<code>gettimeofday</code>, <code>system_clock</code>).</li>
+    <li lang="zh-CN"><strong>单调时钟</strong>：C 用 <code>clock_gettime(CLOCK_UPTIME_RAW 或 CLOCK_MONOTONIC_RAW, …)</code>（macOS 上 <code>CLOCK_MONOTONIC</code> 只有 1 µs 分辨率，见 <a href="../phase-1-threads-and-the-os/index.html#lab">Phase 1 Lab A 第 5 步</a>），C++ 用 <code>std::chrono::steady_clock</code>。不要用会被 NTP 调整的墙上时间（<code>gettimeofday</code>、<code>system_clock</code>）。</li>
+    <li lang="en"><strong>A monotonic clock</strong>: in C, <code>clock_gettime(CLOCK_UPTIME_RAW or CLOCK_MONOTONIC_RAW, …)</code>, because macOS gives <code>CLOCK_MONOTONIC</code> only 1 µs resolution (<a href="../phase-1-threads-and-the-os/index.html#lab-en">Phase 1, Lab A step 5</a>); in C++, <code>std::chrono::steady_clock</code>. Do not use calendar time that NTP can adjust (<code>gettimeofday</code>, <code>system_clock</code>).</li>
     <li lang="zh-CN"><strong>预热、重复、取中位数</strong>：先空跑几次，再跑奇数次，报中位数，同时报最小值和最大值，让人看到波动。</li>
     <li lang="en"><strong>Warm up, repeat, take the median</strong>: run a few times untimed, then an odd number of timed runs; report the median, together with the minimum and maximum so the spread is visible.</li>
     <li lang="zh-CN"><strong>墙钟时间和 CPU 时间分开报</strong>：<code>std::clock()</code> 统计进程所有线程用掉的 CPU 时间。并行版本的墙钟时间下降而 CPU 时间不变，说明工作被分摊了；CPU 时间暴涨，说明线程在空转或抢锁。</li>
@@ -214,7 +214,7 @@ $ TSAN_OPTIONS=abort_on_error=0 ./race &gt;/dev/null 2&gt;&amp;1; echo $?
            "5. 统一内存：所有核看到同一块内存，没有 NUMA。核与核之间按 128 字节的 cache line 传数据，两个线程写同一行就是 false sharing。",
            "6. 用户态观察：sample 看每个线程的调用栈，不需要 sudo；spindump 类似但要 sudo；leaks 看堆。Instruments 要完整 Xcode，是可选项。",
            "7. 内核侧观察：dtrace 要 sudo，而且 SIP 开着时只有部分探针。硬件计数器的 perf 在 macOS 上没有，去内核专题的 Linux VM 里用。"]'
-         data-captions-en='["Overview: at the top is your process and its threads, in the middle the XNU scheduler, below it the two core clusters and the unified memory of the Apple M5. On the right are the tools that observe each layer. Press Play to walk the layers.",
+         data-captions-en='["The whole picture: at the top is your process and its threads, in the middle the XNU scheduler, below it the two core clusters and the unified memory of the Apple M5. On the right are the tools that observe each layer. Press Play to walk the layers.",
            "1. Your process: threads created by std::jthread, GCD or OpenMP all live here, and all are ordinary user-space threads. TSan and ASan are compiled into the process itself and check every memory access.",
            "2. The XNU scheduler decides when each thread runs and on which core. macOS does not let you pin threads; you can only tell it how urgent the work is with QoS.",
            "3. The P cluster: 4 performance cores sharing a 16 MB L2. sysctl calls this tier perflevel0 and names it Super. To measure the fastest case, use 4 threads or fewer.",
@@ -275,7 +275,7 @@ $ TSAN_OPTIONS=abort_on_error=0 ./race &gt;/dev/null 2&gt;&amp;1; echo $?
         <path class="arrow flow" d="M665 344 L665 368"/></g>
 
       <!-- step 6: user-space tools -->
-      <g data-step="6"><rect class="box" x="600" y="28" width="260" height="80"/>
+      <g data-step="6"><rect class="box" x="600" y="28" width="260" height="80"/><!-- par -->
         <text x="614" y="52" lang="zh-CN">用户态观察</text><text x="614" y="52" lang="en">User-space tools</text>
         <text x="614" y="74" class="mono">sample · spindump · leaks</text>
         <text x="614" y="96" class="small" lang="zh-CN">Instruments 需 Xcode，可选</text><text x="614" y="96" class="small" lang="en">Instruments needs Xcode, optional</text>
@@ -366,7 +366,7 @@ int main(void) {
     printf("threads that ran the region = %d\n", count);
     return 0;
 }</pre></li>
-      <li><span lang="zh-CN">路线 1，Homebrew <code>libomp</code> 加 Apple clang。本页写作时未在实验机上执行，结果请用冒烟测试验证：</span><span lang="en">Route 1, Homebrew <code>libomp</code> with Apple clang. Not run on the lab machine when this page was written; verify the result with the smoke test:</span><pre data-lang="sh"># 未在实验机执行 · not run on the lab Mac · verify with the smoke test
+      <li><span lang="zh-CN">路线 1，Homebrew <code>libomp</code> 加 Apple clang。Homebrew 的 <code>libomp</code> 公式自带的测试用的是 <code>-Xpreprocessor -fopenmp</code>，如果 <code>-Xclang -fopenmp</code> 失败就换成它试试。本页写作时未在实验机上执行，结果请用冒烟测试验证：</span><span lang="en">Route 1, Homebrew <code>libomp</code> with Apple clang. The Homebrew <code>libomp</code> formula’s own test uses <code>-Xpreprocessor -fopenmp</code>; if <code>-Xclang -fopenmp</code> fails, try that instead. Not run on the lab machine when this page was written; verify the result with the smoke test:</span><pre data-lang="sh"># 未在实验机执行 · not run on the lab Mac · verify with the smoke test
 brew install libomp
 clang -O2 -Xclang -fopenmp \
   -I"$(brew --prefix libomp)/include" \
@@ -492,8 +492,8 @@ ThreadSanitizer: reported 1 warnings
     <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, free (CC BY-SA); this page read release v2026.06.21a, <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">Hardware and its Habits for concept 1; Tools of the Trade for concept 2; the Performance Estimation and Tracing sections of Validation for concepts 3 and 5</span></li>
     <li lang="zh-CN">Anthony Williams, 《C++ Concurrency in Action》, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">线程管理一章对应概念 2 与 Lab A；测试与调试多线程程序一章对应概念 6 与 Lab B 的 TSan 步骤</span></li>
     <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The chapter on managing threads for concept 2 and Lab A; the chapter on testing and debugging multithreaded applications for concept 6 and the TSan step of Lab B</span></li>
-    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">第 7 章 Understanding the Processor 对应概念 1；第 8 章 Operating System Primitives 对应概念 4。本专题只读不练 Rust</span></li>
-    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">Chapter 7, Understanding the Processor, for concept 1; chapter 8, Operating System Primitives, for concept 4. This topic reads the Rust, it does not run it</span></li>
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://mara.nl/atomics/">mara.nl/atomics</a>. <span class="lvl">第 7 章 Understanding the Processor 对应概念 1；第 8 章 Operating System Primitives 对应概念 4。本专题只读不练 Rust</span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://mara.nl/atomics/">mara.nl/atomics</a>. <span class="lvl">Chapter 7, Understanding the Processor, for concept 1; chapter 8, Operating System Primitives, for concept 4. This topic reads the Rust, it does not run it</span></li>
     <li lang="zh-CN">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, 《The Art of Multiprocessor Programming》, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">讲多处理器硬件基础（cache、一致性、cache line）的部分，作为概念 1 的背景；本页之后各 Phase 用得更多</span></li>
     <li lang="en">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, <em>The Art of Multiprocessor Programming</em>, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">The material on multiprocessor hardware basics (caches, coherence, cache lines) as background for concept 1; the later phases use it much more</span></li>
   </ol>

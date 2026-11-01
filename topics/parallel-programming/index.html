@@ -34,7 +34,7 @@
   <h2 lang="zh-CN">路线图</h2><h2 lang="en">Roadmap</h2>
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 300" data-interval="1400"
-         data-captions='["八个阶段：左侧打基础，中间把程序做对，右侧把程序做快。点「播放」逐步点亮。",
+         data-captions='["全图：八个阶段，左侧打基础，中间把程序做对，右侧把程序做快。点「播放」逐步点亮。",
            "Phase 0 基础：为什么并行、Amdahl 与 Gustafson、核与缓存、伪共享、怎样测量。",
            "Phase 1 线程与操作系统：pthreads、std::thread、GCD、线程的一生、QoS 与调度。",
            "Phase 2 共享内存与同步：数据竞争、互斥锁、条件变量、自旋锁、死锁与优先级反转、TSan。",
@@ -43,7 +43,7 @@
            "Phase 5 结构化并行：OpenMP 的 parallel for、调度与规约、任务；GCD；工作窃取。",
            "Phase 6 SIMD 与数据并行：NEON intrinsics、自动向量化、AoS 与 SoA、Accelerate、roofline。",
            "Phase 7 性能测量与作品项目：基准方法、sample 与 spindump、内核虚拟机里的 perf、作品项目。"]'
-         data-captions-en='["Eight phases: foundations on the left, correctness in the middle, speed on the right. Press Play to light them up one by one.",
+         data-captions-en='["The whole picture: eight phases, foundations on the left, correctness in the middle, speed on the right. Press Play to light them up one by one.",
            "Phase 0 Foundations: why parallel, Amdahl and Gustafson, cores and caches, false sharing, how to measure.",
            "Phase 1 Threads and the OS: pthreads, std::thread, GCD, the life of a thread, QoS and scheduling.",
            "Phase 2 Shared memory and synchronization: data races, mutexes, condition variables, spinlocks, deadlock and priority inversion, TSan.",
@@ -115,10 +115,10 @@
     <li data-phase="par/phase-1"><span class="n">1</span><span><span class="t"><a href="phase-1-threads-and-the-os/index.html">Threads &amp; the OS</a></span><br><span class="d" lang="zh-CN">pthreads、std::thread、GCD、线程的一生、上下文切换、QoS 与线程池</span><span class="d" lang="en">pthreads, std::thread, GCD, the life of a thread, context switches, QoS and thread pools</span></span><span class="st"></span></li>
     <li data-phase="par/phase-2"><span class="n">2</span><span><span class="t"><a href="phase-2-synchronization/index.html">Shared Memory &amp; Synchronization</a></span><br><span class="d" lang="zh-CN">数据竞争、互斥锁、条件变量、自旋锁、死锁、优先级反转、TSan</span><span class="d" lang="en">Data races, mutexes, condition variables, spinlocks, deadlock, priority inversion, TSan</span></span><span class="st"></span></li>
     <li data-phase="par/phase-3"><span class="n">3</span><span><span class="t"><a href="phase-3-memory-model-and-atomics/index.html">Memory Models &amp; Atomics</a></span><br><span class="d" lang="zh-CN">C++20 内存模型、acquire/release、栅栏、CAS 与 ABA、ARM64 弱序</span><span class="d" lang="en">The C++20 memory model, acquire and release, fences, CAS and ABA, the weak ordering of ARM64</span></span><span class="st"></span></li>
-    <li data-phase="par/phase-4"><span class="n">4</span><span><span class="t"><a href="phase-4-lock-free-structures/index.html">Lock-free Structures</a></span><br><span class="d" lang="zh-CN">进度保证、Treiber 栈、MS 队列、hazard pointer、RCU、seqlock</span><span class="d" lang="en">Progress guarantees, the Treiber stack, the MS queue, hazard pointers, RCU, seqlocks</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-4"><span class="n">4</span><span><span class="t"><a href="phase-4-lock-free-structures/index.html">Lock-free &amp; Wait-free Structures</a></span><br><span class="d" lang="zh-CN">进度保证、Treiber 栈、MS 队列、hazard pointer、RCU、seqlock</span><span class="d" lang="en">Progress guarantees, the Treiber stack, the MS queue, hazard pointers, RCU, seqlocks</span></span><span class="st"></span></li>
     <li data-phase="par/phase-5"><span class="n">5</span><span><span class="t"><a href="phase-5-structured-parallelism/index.html">Structured Parallelism</a></span><br><span class="d" lang="zh-CN">OpenMP、GCD、fork-join、调度与规约、任务、工作窃取</span><span class="d" lang="en">OpenMP, GCD, fork-join, schedules and reductions, tasks, work stealing</span></span><span class="st"></span></li>
     <li data-phase="par/phase-6"><span class="n">6</span><span><span class="t"><a href="phase-6-simd/index.html">SIMD &amp; Data Parallelism</a></span><br><span class="d" lang="zh-CN">NEON intrinsics、自动向量化、AoS 与 SoA、Accelerate、roofline</span><span class="d" lang="en">NEON intrinsics, auto-vectorization, AoS versus SoA, Accelerate, the roofline</span></span><span class="st"></span></li>
-    <li data-phase="par/phase-7"><span class="n">7</span><span><span class="t"><a href="phase-7-measurement-and-capstone/index.html">Measurement &amp; Capstone</a></span><br><span class="d" lang="zh-CN">基准方法、sample 与 spindump、内核虚拟机里的 perf、作品项目</span><span class="d" lang="en">Benchmark method, sample and spindump, perf in the kernel VM, the capstone project</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-7"><span class="n">7</span><span><span class="t"><a href="phase-7-measurement-and-capstone/index.html">Measuring Performance &amp; the Capstone</a></span><br><span class="d" lang="zh-CN">基准方法、sample 与 spindump、内核虚拟机里的 perf、作品项目</span><span class="d" lang="en">Benchmark method, sample and spindump, perf in the kernel VM, the capstone project</span></span><span class="st"></span></li>
   </ol>
 
   <section class="related" data-related="parallel-programming" data-root="../../"></section>

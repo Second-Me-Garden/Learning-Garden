@@ -22,7 +22,7 @@
   </header>
 
   <p class="meta" lang="zh-CN">Phase 3 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 3 / 8 · about 1–2 weeks</p>
-  <h1><span lang="zh-CN">内存模型与原子</span><span lang="en">Memory Models and Atomics</span> <span class="en" lang="zh-CN">Memory Models and Atomics：happens-before、五种内存序，以及 M5 上它们变成的指令</span><span class="en" lang="en">happens-before, the five memory orders, and the instructions they become on the M5</span></h1>
+  <h1>Memory Models and Atomics <span class="en" lang="zh-CN">内存模型与原子：happens-before、五种内存序，以及 M5 上它们变成的指令</span><span class="en" lang="en">happens-before, the five memory orders, and the instructions they become on the M5</span></h1>
   <p class="lede" lang="zh-CN">Phase 2 用锁和原子操作消除了数据竞争，但没有回答一个更底层的问题：一个线程写下的值，另一个线程什么时候、以什么顺序看见？答案不是「立刻、按程序顺序」。这台 M5 是 ARM64，内存序是弱的；编译器也会重排。本阶段先在实验机上把重排抓出来：两个线程各写一个变量再读对方的，在 relaxed 下 1 亿次里有 2683 次两边都读到 0；然后讲 C++20 内存模型怎样用 happens-before 和 synchronizes-with 给出精确的保证，每种内存序在 M5 上编译成哪条指令，和 x86 的 TSO 差在哪里。页面上的计数和汇编都是 2026-10-31 在实验机上跑出来、用 Apple clang 21 生成的。</p>
   <p class="lede" lang="en">Phase 2 removed data races with locks and atomics, but left a lower-level question open: when, and in what order, does one thread see the values another thread wrote? The answer is not “at once, in program order”. This M5 is ARM64, whose memory ordering is weak, and the compiler reorders too. This phase first catches reordering in the act on the lab machine: two threads each write one variable and then read the other’s, and under relaxed order both read 0 in 2683 of 100 million trials. Then it covers how the C++20 memory model gives exact guarantees through happens-before and synchronizes-with, which instruction each memory order compiles to on the M5, and how that differs from x86 TSO. Every count and every line of assembly on this page was produced on the lab machine on 2026-10-31 with Apple clang 21.</p>
 
@@ -69,8 +69,8 @@
     <li lang="en"><strong>The caches themselves are coherent.</strong> Reordering does not mean the caches disagree: for any single address, all cores agree on the order of its writes (coherence). Reordering is about order between <em>different addresses</em>: A writes <code>x</code> and reads <code>y</code>, two addresses, and another core sees those two events in the opposite order.</li>
     <li lang="zh-CN"><strong>x86 是 TSO。</strong>x86-64 的内存序叫 Total Store Order：读不和读重排，写不和写重排，写不和更早的读重排；唯一允许的是「较晚的读越过较早的、写到不同地址的写」，也就是 store buffer 造成的那一种（Intel SDM 第 3 卷 Memory Ordering 一节；Sewell 等人的 x86-TSO 论文）。所以 SB 在 x86 上也会失败，但下面的 message passing 不会。</li>
     <li lang="en"><strong>x86 is TSO.</strong> The x86-64 memory order is called Total Store Order: reads are not reordered with reads, writes are not reordered with writes, and writes are not reordered with earlier reads; the one reordering allowed is a later read passing an earlier write to a different address, exactly the store-buffer case (the Memory Ordering section of Intel SDM volume 3; the x86-TSO paper by Sewell et al.). So SB fails on x86 too, but the message passing below does not.</li>
-    <li lang="zh-CN"><strong>ARM64 是弱序的。</strong>对不同地址的普通读写，在没有依赖、没有屏障的情况下，读读、读写、写读、写写四种重排都允许（Arm ARM 的 AArch64 内存模型一章）。Lab A 的 message passing 实验在 M5 上抓到了写写或读读重排：读者看见了旗子，却读到了旧数据，2000 万次里 10 到 58 次。ARMv8 自 2017 年的修订起是 other-multi-copy-atomic 的：一个写一旦被另一个核看见，就被所有其他核看见。</li>
-    <li lang="en"><strong>ARM64 is weakly ordered.</strong> For plain reads and writes to different addresses, with no dependency and no barrier, all four reorderings are allowed: read-read, read-write, write-read and write-write (the AArch64 memory model chapter of the Arm ARM). The message-passing experiment in Lab A catches a write-write or read-read reordering on the M5: the reader saw the flag but read stale data, 10 to 58 times in 20 million trials. Since its 2017 revision ARMv8 is other-multi-copy atomic: once one other core sees a write, all other cores see it.</li>
+    <li lang="zh-CN"><strong>ARM64 是弱序的。</strong>对不同地址的普通读写，在没有依赖、没有屏障的情况下，读读、读写、写读、写写四种重排都允许（Arm ARM 的 AArch64 内存模型一章）。Lab A 的 message passing 实验在 M5 上抓到了写写或读读重排：读者看见了旗子，却读到了旧数据，2000 万次里 10 到 58 次。ARMv8 自 2017 年前后的一次架构修订起（Pulte 等，POPL 2018）是 other-multi-copy-atomic 的：一个写一旦被另一个核看见，就被所有其他核看见。</li>
+    <li lang="en"><strong>ARM64 is weakly ordered.</strong> For plain reads and writes to different addresses, with no dependency and no barrier, all four reorderings are allowed: read-read, read-write, write-read and write-write (the AArch64 memory model chapter of the Arm ARM). The message-passing experiment in Lab A catches a write-write or read-read reordering on the M5: the reader saw the flag but read stale data, 10 to 58 times in 20 million trials. Since a revision of the architecture around 2017 (Pulte et al., POPL 2018), ARMv8 is other-multi-copy atomic: once one other core sees a write, all other cores see it.</li>
   </ul>
   <p lang="zh-CN">延伸阅读：McKenney《Is Parallel Programming Hard》附录 Why Memory Barriers? 的 Store Buffers、Store Forwarding、Invalidate Queues 三节；Bos《Rust Atomics and Locks》第 7 章 Understanding the Processor 的 Reordering 和 Memory Ordering 两节。</p>
   <p lang="en">Further reading: the sections Store Buffers, Store Forwarding and Invalidate Queues in McKenney’s appendix Why Memory Barriers? in <em>Is Parallel Programming Hard</em>; the sections Reordering and Memory Ordering of chapter 7 of Bos’s <em>Rust Atomics and Locks</em>, Understanding the Processor.</p>
@@ -90,8 +90,8 @@
   <p lang="en">Further reading: the section Compile-Time Consternation of McKenney’s chapter Advanced Synchronization: Memory Ordering, and the section Accessing Shared Variables of the chapter Tools of the Trade; the section Reordering and Optimizations of chapter 3 of Bos, Memory Ordering.</p>
 
   <h3 lang="zh-CN">3. C++20 内存模型：happens-before 与 synchronizes-with</h3><h3 lang="en">3. The C++20 memory model: happens-before and synchronizes-with</h3>
-  <p lang="zh-CN">C++11 起，标准不再说「哪条指令先执行」，而是定义几种关系，再用它们规定每次读可以读到哪些写。下面的说法照标准的 [intro.races] 和 [atomics.order] 两节（C++20；2026-10-31 对照了 eel.is 上的当前草案，下列条文与 C++20 一致，草案已经删掉了 <code>memory_order::consume</code>）：</p>
-  <p lang="en">Since C++11 the standard no longer says which instruction executes first; it defines a few relations and uses them to state which writes each read may see. What follows follows the standard’s sections [intro.races] and [atomics.order] (C++20; checked on 2026-10-31 against the current draft at eel.is, where the clauses below match C++20 and <code>memory_order::consume</code> has been removed):</p>
+  <p lang="zh-CN">C++11 起，标准不再说「哪条指令先执行」，而是定义几种关系，再用它们规定每次读可以读到哪些写。下面的说法照标准的 [intro.races] 和 [atomics.order] 两节（C++20；2026-10-31 对照了 eel.is 上的当前草案，下列条文与 C++20 一致；草案已把 <code>memory_order::consume</code> 移到附录 D 并弃用，语义与 acquire 相同（[depr.atomics.order]））：</p>
+  <p lang="en">Since C++11 the standard no longer says which instruction executes first; it defines a few relations and uses them to state which writes each read may see. What follows follows the standard’s sections [intro.races] and [atomics.order] (C++20; checked on 2026-10-31 against the current draft at eel.is, where the clauses below match C++20 and <code>memory_order::consume</code> has moved to Annex D as deprecated, with the same meaning as acquire ([depr.atomics.order])):</p>
   <ul>
     <li lang="zh-CN"><strong>sequenced-before</strong>：同一个线程里，按语言的求值顺序规则，一个求值在另一个之前。粗略地说就是程序顺序。</li>
     <li lang="en"><strong>sequenced-before</strong>: within one thread, one evaluation comes before another by the language’s evaluation-order rules. Roughly, program order.</li>
@@ -164,8 +164,8 @@
   <h3 lang="zh-CN">7. compare-exchange 与 ABA 问题</h3><h3 lang="en">7. Compare-exchange and the ABA problem</h3>
   <p lang="zh-CN"><code>compare_exchange_strong(expected, desired)</code> 原子地做一件事：如果当前值等于 <code>expected</code>，就写入 <code>desired</code> 并返回 true；否则把当前值写回 <code>expected</code> 并返回 false。几乎所有无锁算法都是一个「读旧值、算新值、CAS 提交、失败就重试」的循环。<code>compare_exchange_weak</code> 允许在值相等时也失败（spurious failure），因为在 LL/SC 机器上 <code>stlxr</code> 可能因为别的原因失败；它本来就放在重试循环里时，用 weak 可以省掉内层循环。本机有 <code>casal</code>，strong 版本就是一条指令加比较。</p>
   <p lang="en"><code>compare_exchange_strong(expected, desired)</code> does one thing atomically: if the current value equals <code>expected</code>, it writes <code>desired</code> and returns true; otherwise it writes the current value back into <code>expected</code> and returns false. Almost every lock-free algorithm is a loop of read the old value, compute the new one, commit with CAS, retry on failure. <code>compare_exchange_weak</code> may fail even when the values are equal (a spurious failure), because on an LL/SC machine <code>stlxr</code> can fail for other reasons; when the call already sits in a retry loop, weak saves an inner loop. This machine has <code>casal</code>, so the strong version is one instruction plus a compare.</p>
-  <p lang="zh-CN"><strong>ABA</strong>：CAS 只比较值，不知道值在中间变过。无锁栈的 pop 读到栈顶 A 和 A 的 next 为 B，准备 CAS(top, A → B)；这时另一个线程 pop 了 A、pop 了 B、又把 A push 回去（同一个地址被重用）。top 又是 A，CAS 成功，top 被设成已经不在栈里的 B。修法是让「值」包含版本：带计数的指针（tagged pointer，用 128 位的 CAS 或指针的空闲高位），或者保证 A 在还有人可能持有它时不被重用（hazard pointer、epoch、RCU）。这些是 Phase 4 的内容，Lab A 会在那里让 ABA 真的发生一次。</p>
-  <p lang="en"><strong>ABA</strong>: CAS compares only the value and cannot tell that it changed in between. A lock-free stack’s pop reads the top A and A’s next, B, and prepares CAS(top, A → B); meanwhile another thread pops A, pops B and pushes A back (the same address reused). top is A again, the CAS succeeds, and top is set to B, which is no longer on the stack. The fixes give the value a version: a tagged pointer (with a 128-bit CAS or the spare high bits of a pointer), or a guarantee that A is not reused while anyone might still hold it (hazard pointers, epochs, RCU). Those are Phase 4, whose Lab A makes ABA actually happen once.</p>
+  <p lang="zh-CN"><strong>ABA</strong>：CAS 只比较值，不知道值在中间变过。无锁栈的 pop 读到栈顶 A 和 A 的 next 为 B，准备 CAS(top, A → B)；这时另一个线程 pop 了 A、pop 了 B、又把 A push 回去（同一个地址被重用）。top 又是 A，CAS 成功，top 被设成已经不在栈里的 B。修法是让「值」包含版本：带计数的指针（tagged pointer，用 128 位的 CAS 或指针的空闲高位），或者保证 A 在还有人可能持有它时不被重用（hazard pointer、epoch、RCU）。这些是 Phase 4 的内容，Lab A 会在那里让 ABA 真的发生：100 次试验里 100 次损坏。</p>
+  <p lang="en"><strong>ABA</strong>: CAS compares only the value and cannot tell that it changed in between. A lock-free stack’s pop reads the top A and A’s next, B, and prepares CAS(top, A → B); meanwhile another thread pops A, pops B and pushes A back (the same address reused). top is A again, the CAS succeeds, and top is set to B, which is no longer on the stack. The fixes give the value a version: a tagged pointer (with a 128-bit CAS or the spare high bits of a pointer), or a guarantee that A is not reused while anyone might still hold it (hazard pointers, epochs, RCU). Those are Phase 4, whose Lab A makes ABA actually happen: it corrupted the stack in 100 of 100 trials.</p>
   <p lang="zh-CN">延伸阅读：Bos 第 2 章 Atomics 的 Compare-and-Exchange Operations 一节；Herlihy 等《The Art of Multiprocessor Programming》讲队列、内存管理与 ABA 问题的一章；McKenney Advanced Synchronization 一章的 Non-Blocking Synchronization 一节。</p>
   <p lang="en">Further reading: the section Compare-and-Exchange Operations of chapter 2 of Bos, Atomics; the chapter on queues, memory management and the ABA problem in Herlihy et al., <em>The Art of Multiprocessor Programming</em>; the section Non-Blocking Synchronization of McKenney’s chapter Advanced Synchronization.</p>
 
@@ -198,7 +198,7 @@
            "4. B 执行 r2 = x.load(relaxed)，同样从内存读到 x = 0。",
            "5. 两个缓冲排空，内存最终是 x = 1、y = 1，可两次读都已经拿到了 0。r1 = r2 = 0 在任何交错下都不可能，这台 M5 上 relaxed 实测 1 亿次中 2683 次。汇编里 str 在 ldr 前面，所以是硬件重排。",
            "6. 换成 seq_cst：写编成 stlr，读编成 ldar。ldar 不会越过程序顺序更早的 stlr，所以至少一个线程看见对方的 1。实测 1 亿次中 0 次；在中间放一个 seq_cst 栅栏（dmb ish）也是 0 次。"]'
-         data-captions-en='["Overview: at the top, threads A and B on two cores, each with its own store buffer; at the bottom, the coherent shared memory, with x and y starting at 0. Press Play to see how both threads read 0 under relaxed order.",
+         data-captions-en='["The whole picture: at the top, threads A and B on two cores, each with its own store buffer; at the bottom, the coherent shared memory, with x and y starting at 0. Press Play to see how both threads read 0 under relaxed order.",
            "1. Thread A runs x.store(1, relaxed), one str. The write goes into the store buffer of A and A keeps executing; B cannot see x = 1 yet.",
            "2. At the same time thread B runs y.store(1, relaxed). y = 1 goes into the own store buffer of B, and A cannot see it yet either.",
            "3. A runs r1 = y.load(relaxed), one ldr. y = 1 is still in the buffer of B, so A reads y = 0 from memory.",
@@ -214,7 +214,7 @@
       <text x="30" y="282" class="small" lang="zh-CN">cache 一致的共享内存</text><text x="30" y="282" class="small" lang="en">Coherent shared memory</text>
 
       <!-- step 1: core A and its store buffer (par token belongs on the thread box) -->
-      <g data-step="1"><rect class="box" x="30" y="24" width="290" height="96"/><!-- par -->
+      <g data-step="1"><rect class="box" x="30" y="24" width="290" height="96"/>
         <text x="44" y="48" lang="zh-CN">线程 A · 一个核</text><text x="44" y="48" lang="en">Thread A · one core</text>
         <text x="44" y="72" class="mono">x.store(1, relaxed);</text>
         <text x="44" y="94" class="mono">r1 = y.load(relaxed);</text>
@@ -224,7 +224,7 @@
         <text x="130" y="144" class="small" lang="zh-CN">1. str x</text><text x="130" y="144" class="small" lang="en">1. str x</text></g>
 
       <!-- step 2: core B and its store buffer (par token belongs on the thread box) -->
-      <g data-step="2"><rect class="box" x="580" y="24" width="290" height="96"/><!-- par -->
+      <g data-step="2"><rect class="box" x="580" y="24" width="290" height="96"/>
         <text x="594" y="48" lang="zh-CN">线程 B · 另一个核</text><text x="594" y="48" lang="en">Thread B · another core</text>
         <text x="594" y="72" class="mono">y.store(1, relaxed);</text>
         <text x="594" y="94" class="mono">r2 = x.load(relaxed);</text>
@@ -251,7 +251,7 @@
         <path class="arrow flow" d="M725 210 L640 294"/>
         <text x="226" y="246" class="small" lang="zh-CN">5. 排空</text><text x="226" y="246" class="small" lang="en">5. drain</text>
         <text x="520" y="340" class="mono">→ x = 1  y = 1</text>
-        <text x="30" y="384" style="fill: var(--ink-2)" lang="zh-CN">✗ r1 = 0 且 r2 = 0：任何交错下都不可能</text><text x="30" y="384" style="fill: var(--ink-2)" lang="en">✗ r1 = 0 and r2 = 0: impossible in any interleaving</text>
+        <text x="30" y="384" style="fill: var(--ink-2)" lang="zh-CN">✕ r1 = 0 且 r2 = 0：任何交错下都不可能</text><text x="30" y="384" style="fill: var(--ink-2)" lang="en">✕ r1 = 0 and r2 = 0: impossible in any interleaving</text>
         <text x="30" y="406" class="small" lang="zh-CN">relaxed 实测：1 亿次中 2683 次（5 次运行 51 到 1863）</text><text x="30" y="406" class="small" lang="en">relaxed, measured: 2683 in 100 million (5 runs, 51 to 1863 each)</text></g>
 
       <!-- step 6: seq_cst -->
@@ -275,7 +275,7 @@
            "3. 读者用 acquire 读旗子，本机编成 ldapr。它读到了 release 写的 1，于是这次 release 与这次 acquire 同步（synchronizes-with）。",
            "4. 由 sequenced-before 和 synchronizes-with 传递得到：写 data 先于（happens-before）读 data。所以读者一定读到 42，而且 data 是普通变量也没有数据竞争。",
            "5. 如果两边都用 relaxed，没有同步：读者可能看见 ready = 1 却读到 data = 0。汇编里写者是 str data 再 str ready，读者是 ldr ready 再 ldr data，顺序没变，所以这是 M5 的重排。实测 2000 万次中 10 到 58 次，release/acquire 下 0 次。"]'
-         data-captions-en='["Overview: on the left the writer thread writes the data and then raises a flag; on the right the reader thread waits for the flag and then reads the data. The arrows in the middle are two relations: synchronizes-with and the happens-before that follows from it. Press Play to walk through it.",
+         data-captions-en='["The whole picture: on the left the writer thread writes the data and then raises a flag; on the right the reader thread waits for the flag and then reads the data. The arrows in the middle are two relations: synchronizes-with and the happens-before that follows from it. Press Play to walk through it.",
            "1. The writer writes the ordinary variable data = 42, one str. On its own, nothing says when any other thread will see it.",
            "2. The writer writes the flag ready = 1 with release, one stlr. The promise of release: no read or write of this thread before it is moved after it.",
            "3. The reader reads the flag with acquire, an ldapr on this machine. It reads the 1 that the release wrote, so this release synchronizes with this acquire.",
@@ -287,12 +287,12 @@
         </marker>
       </defs>
       <!-- the two threads (par token belongs on these boxes) -->
-      <rect class="box" x="30" y="24" width="370" height="130"/><!-- par -->
+      <rect class="box" x="30" y="24" width="370" height="130"/>
       <text x="44" y="48" lang="zh-CN">写者线程 W</text><text x="44" y="48" lang="en">Writer thread W</text>
       <text x="44" y="76" class="mono">data = 42;</text>
       <text x="44" y="100" class="mono">ready.store(1, release);</text>
       <text x="44" y="132" class="small" lang="zh-CN">本机：str data，stlr ready</text><text x="44" y="132" class="small" lang="en">here: str data, stlr ready</text>
-      <rect class="box" x="500" y="24" width="370" height="130"/><!-- par -->
+      <rect class="box" x="500" y="24" width="370" height="130"/>
       <text x="514" y="48" lang="zh-CN">读者线程 R</text><text x="514" y="48" lang="en">Reader thread R</text>
       <text x="514" y="76" class="mono">while (!ready.load(acquire)) {}</text>
       <text x="514" y="100" class="mono">use(data);   // 42</text>
@@ -319,7 +319,7 @@
         <text x="300" y="326" class="small" lang="zh-CN">happens-before：写 data 先于读 data，所以读到 42</text><text x="300" y="326" class="small" lang="en">happens-before: the write of data precedes its read, so 42</text></g>
       <!-- step 5: the relaxed failure -->
       <g data-step="5"><rect class="box" x="30" y="336" width="840" height="74"/>
-        <text x="44" y="362" style="fill: var(--ink-2)" lang="zh-CN">✗ 两边都用 relaxed：可能看见 ready = 1 却读到 data = 0</text><text x="44" y="362" style="fill: var(--ink-2)" lang="en">✗ relaxed on both sides: may see ready = 1 and still read data = 0</text>
+        <text x="44" y="362" style="fill: var(--ink-2)" lang="zh-CN">✕ 两边都用 relaxed：可能看见 ready = 1 却读到 data = 0</text><text x="44" y="362" style="fill: var(--ink-2)" lang="en">✕ relaxed on both sides: may see ready = 1 and still read data = 0</text>
         <text x="44" y="390" class="small" lang="zh-CN">实测（M5，5 次 × 2000 万）：relaxed 10 到 58 次，release/acquire 0 次</text><text x="44" y="390" class="small" lang="en">measured (M5, 5 runs × 20 million): relaxed 10 to 58 each, release/acquire 0</text></g>
     </svg>
   </div>
@@ -755,8 +755,8 @@ ttas    T=10  ns per increment: median 115.39  min  61.22  max 127.89  total 100
           <li lang="en"><strong>Every result is correct.</strong> Each line’s total equals T × one million: <code>fetch_add</code> loses no update, and the ordinary variable under the spin lock loses none either.</li>
           <li lang="zh-CN"><strong>不争用时，内存序有一点代价。</strong>1 个线程时 relaxed 的 <code>ldadd</code> 约 1.67 ns，seq_cst 的 <code>ldaddal</code> 约 2.0 ns，两次运行一致。</li>
           <li lang="en"><strong>Uncontended, the memory order costs a little.</strong> With 1 thread, relaxed <code>ldadd</code> takes about 1.67 ns and seq_cst <code>ldaddal</code> about 2.0 ns, the same in both runs.</li>
-          <li lang="zh-CN"><strong>争用时，代价是 cache line 在核之间搬家，内存序差别淹没在噪声里。</strong>4 和 10 个线程时 relaxed 和 seq_cst 两次运行互有快慢（10 线程 relaxed 13.6–32.4 ns，seq_cst 14.1–19.2 ns）。10 个线程里有 6 个在 E 核上，数字也更散。</li>
-          <li lang="en"><strong>Under contention the cost is the cache line moving between cores, and the memory-order difference drowns in the noise.</strong> At 4 and 10 threads, relaxed and seq_cst each win one of the two runs (10 threads: relaxed 13.6–32.4 ns, seq_cst 14.1–19.2 ns). Of the 10 threads, 6 run on E cores, and the numbers scatter more.</li>
+          <li lang="zh-CN"><strong>争用时，代价是 cache line 在核之间搬家，内存序差别淹没在噪声里。</strong>4 和 10 个线程时 relaxed 和 seq_cst 两次运行互有快慢（10 线程 relaxed 13.6–32.4 ns，seq_cst 14.1–19.2 ns）。10 个线程时大概有 6 个落在 E 核上（按本机 4 个 P 核、6 个 E 核推断，没有直接观察线程的位置），数字也更散。</li>
+          <li lang="en"><strong>Under contention the cost is the cache line moving between cores, and the memory-order difference drowns in the noise.</strong> At 4 and 10 threads, relaxed and seq_cst each win one of the two runs (10 threads: relaxed 13.6–32.4 ns, seq_cst 14.1–19.2 ns). With 10 threads, probably 6 land on E cores (inferred from this Mac’s 4 P and 6 E cores; thread placement was not observed directly), and the numbers scatter more.</li>
           <li lang="zh-CN"><strong>TTAS 比 TAS 快两到四倍。</strong>TAS 的每个等待者不停地 <code>swpab</code>，每次都要把 cache line 抢成独占，持锁者解锁时还得把它抢回来。TTAS 的等待者先用普通的 <code>ldrb</code> 读，大家共享这条 line，只在锁放开后才去 <code>swpab</code>。10 个线程时 TAS 245–295 ns，TTAS 70–115 ns。</li>
           <li lang="en"><strong>TTAS is two to four times faster than TAS.</strong> In TAS every waiter keeps issuing <code>swpab</code>, each time pulling the cache line into exclusive state, and the holder must pull it back to unlock. TTAS waiters read with a plain <code>ldrb</code>, sharing the line, and only attempt <code>swpab</code> once the lock is free. At 10 threads TAS takes 245–295 ns and TTAS 70–115 ns.</li>
         </ul></li>

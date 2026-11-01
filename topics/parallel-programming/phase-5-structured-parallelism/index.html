@@ -22,7 +22,7 @@
   </header>
 
   <p class="meta" lang="zh-CN">Phase 5 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 5 / 8 · about 1–2 weeks</p>
-  <h1><span lang="zh-CN">结构化并行</span><span lang="en">Structured Parallelism</span> <span class="en" lang="zh-CN">Structured Parallelism：fork-join、OpenMP、GCD 和 work stealing</span><span class="en" lang="en">Fork-join, OpenMP, GCD and work stealing</span></h1>
+  <h1>Structured Parallelism <span class="en" lang="zh-CN">结构化并行：fork-join、OpenMP、GCD 和 work stealing</span><span class="en" lang="en">Fork-join, OpenMP, GCD and work stealing</span></h1>
   <p class="lede" lang="zh-CN">前几个阶段你自己建线程、自己分工、自己 join。这一阶段把这些交给运行时：一个 <code>parallel for</code> 或一次 <code>dispatch_apply</code> 就是一次 fork-join，循环怎么切块（schedule）、切多细（granularity）、谁闲了去偷谁的活（work stealing），都由运行时按你给的提示去做。本页用同一个矩阵乘法比较 OpenMP、GCD 和手写线程三种写法，用一棵递归的 fib 任务树看 work stealing 和 cutoff。OpenMP 在实验机上没有装（<code>libomp</code> 和 <code>llvm</code> 都不在），所以 OpenMP 程序都写成装好后就能编译的样子，标为「未运行」；GCD、C++20 手写线程和 C++17 并行算法的数字都是 2026-10-31 在实验机 Apple M5 上实测的。</p>
   <p class="lede" lang="en">In the earlier phases you created the threads, split the work and joined them yourself. This phase hands that to a runtime: one <code>parallel for</code> or one <code>dispatch_apply</code> is one fork-join, and how the loop is cut into chunks (the schedule), how fine the chunks are (granularity) and who steals whose work when idle (work stealing) are done by the runtime from the hints you give. This page compares OpenMP, GCD and hand-written threads on one matrix multiply, and uses a recursive fib task tree to look at work stealing and the cutoff. OpenMP is not installed on the lab machine (neither <code>libomp</code> nor <code>llvm</code> is present), so every OpenMP program is written exactly as it would compile once installed and is marked not run; the numbers for GCD, hand-written C++20 threads and C++17 parallel algorithms were measured on the lab Apple M5 on 2026-10-31.</p>
 
@@ -210,8 +210,8 @@ int main(int argc, char **argv) {
   </ul>
   <p lang="zh-CN">LLVM 的 libomp 就是这么做 OpenMP 任务的（<code>openmp/runtime/src/kmp_tasking.cpp</code>，2026-10-31 读的 main 分支）：每个线程一个带锁的 deque，<code>__kmp_remove_my_task</code> 从自己的尾部取，<code>__kmp_steal_task</code> 加锁后从对方的头部偷。Lab B 的 <code>ws_fib.cpp</code> 是同一个设计，每个 deque 一把 <code>std::mutex</code>，简单而且 TSan 检查干净。去掉锁的版本（Chase–Lev deque）要用到 Phase 3 的内存序和 Phase 4 那类无锁技巧，本页不展开。</p>
   <p lang="en">LLVM’s libomp runs OpenMP tasks exactly this way (<code>openmp/runtime/src/kmp_tasking.cpp</code>, the main branch read on 2026-10-31): one locked deque per thread, <code>__kmp_remove_my_task</code> takes from the thread’s own tail, and <code>__kmp_steal_task</code> takes the victim’s lock and steals from its head. Lab B’s <code>ws_fib.cpp</code> uses the same design with one <code>std::mutex</code> per deque, which is simple and comes out clean under TSan. The lock-free version (the Chase–Lev deque) needs Phase 3’s memory orders and Phase 4-style lock-free techniques, and this page does not cover it.</p>
-  <p lang="zh-CN">实测（fib(42)，10 个线程，cutoff 25）：每次运行生成 6764 个任务，只发生约 150–180 次偷，用时约 59–60 ms，串行约 360 ms。</p>
-  <p lang="en">Measured (fib(42), 10 threads, cutoff 25): each run creates 6764 tasks but only about 150–180 steals happen, taking about 59–60 ms against about 360 ms serial.</p>
+  <p lang="zh-CN">实测（fib(42)，10 个线程，cutoff 25）：每次运行生成 6764 个任务，只发生 146–179 次偷，用时约 59–60 ms，串行约 360 ms。</p>
+  <p lang="en">Measured (fib(42), 10 threads, cutoff 25): each run creates 6764 tasks but only 146–179 steals happen, taking about 59–60 ms against about 360 ms serial.</p>
   <p lang="zh-CN">延伸阅读：Herlihy 等讲调度与工作分配的一章（work-stealing deque 及其正确性）；Williams 讲高级线程管理的一章里 work stealing 线程池的部分。</p>
   <p lang="en">Further reading: the chapter on scheduling and work distribution in Herlihy et al. (work-stealing deques and their correctness); the part on work-stealing thread pools in Williams’s chapter on advanced thread management.</p>
 
@@ -256,8 +256,8 @@ int main(int argc, char **argv) {
     <li lang="zh-CN"><strong>串行部分。</strong>初始化矩阵、建线程、最后的 join 和 reduction 合并都是串行的；本页的计时只包住计算本身，真实程序里它们就是 Amdahl 公式里的 s。</li>
     <li lang="en"><strong>The serial part.</strong> Initialising the matrices, creating threads, the final join and combining the reduction are all serial; this page’s timers wrap only the computation, but in a real program those are the s in Amdahl’s formula.</li>
   </ul>
-  <p lang="zh-CN">运行时的线程仍是内核调度的普通线程（<a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">内核专题 Phase 1</a> 的「调度」），所以 Phase 1 的超订规则照样适用，而且更容易踩到：一个进程里 OpenMP 的一组线程和 GCD 的线程池互相不知道对方。在 <code>#pragma omp parallel for</code> 的每次迭代里调用一个内部用 <code>dispatch_apply</code> 的库，可运行的线程数就可能是 10 乘 10。OpenMP 线程在并行区之间还会先自旋一段时间再睡（libomp 用 <code>KMP_BLOCKTIME</code> 控制，标准的 <code>OMP_WAIT_POLICY</code> 也能影响），旁边的 GCD 线程就分不到核。规则：一个进程里只让一个运行时负责并行，或者明确给内层设成串行。</p>
-  <p lang="en">A runtime’s threads are still ordinary threads scheduled by the kernel (the scheduling concept in <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">kernel topic Phase 1</a>), so Phase 1’s oversubscription rule still applies, and it is easier to trip over: inside one process, OpenMP’s team and GCD’s pool know nothing of each other. Call a library that uses <code>dispatch_apply</code> internally from each iteration of a <code>#pragma omp parallel for</code>, and the runnable thread count may be 10 times 10. Between parallel regions OpenMP threads also spin for a while before sleeping (libomp controls this with <code>KMP_BLOCKTIME</code>, and the standard <code>OMP_WAIT_POLICY</code> affects it too), so GCD threads next to them get no core. The rule: let one runtime own the parallelism in a process, or explicitly make the inner level serial.</p>
+  <p lang="zh-CN">运行时的线程仍是内核调度的普通线程（<a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">内核专题 Phase 1</a> 的「调度」），所以 Phase 1 的超订规则照样适用，而且更容易踩到：一个进程里 OpenMP 的一组线程和 GCD 的线程池互相不知道对方。在 <code>#pragma omp parallel for</code> 的每次迭代里调用一个内部用 <code>dispatch_apply</code> 的库，可运行的线程数就可能是 10 乘 10。OpenMP 线程等活时可能先自旋再睡：libomp 用 <code>KMP_BLOCKTIME</code> 控制时长，标准的 <code>OMP_WAIT_POLICY=active</code> 要求自旋。在 Apple 芯片的 macOS 上 libomp 默认 blocktime 是 0，空闲线程直接睡；其他平台默认 200 ms（<code>openmp/runtime/src/kmp.h</code>）。一旦设了 <code>OMP_WAIT_POLICY=active</code> 或很大的 <code>KMP_BLOCKTIME</code>，旁边的 GCD 线程就分不到核。规则：一个进程里只让一个运行时负责并行，或者明确给内层设成串行。</p>
+  <p lang="en">A runtime’s threads are still ordinary threads scheduled by the kernel (the scheduling concept in <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">kernel topic Phase 1</a>), so Phase 1’s oversubscription rule still applies, and it is easier to trip over: inside one process, OpenMP’s team and GCD’s pool know nothing of each other. Call a library that uses <code>dispatch_apply</code> internally from each iteration of a <code>#pragma omp parallel for</code>, and the runnable thread count may be 10 times 10. OpenMP threads may also spin before they sleep. libomp’s <code>KMP_BLOCKTIME</code> sets how long, and the standard <code>OMP_WAIT_POLICY=active</code> asks for spinning. On macOS on Apple silicon, libomp’s default blocktime is 0, so idle threads sleep at once; elsewhere the default is 200 ms (<code>openmp/runtime/src/kmp.h</code>). If you set <code>OMP_WAIT_POLICY=active</code> or a large <code>KMP_BLOCKTIME</code>, GCD threads next to the team get no core. The rule: let one runtime own the parallelism in a process, or explicitly make the inner level serial.</p>
   <p lang="zh-CN">延伸阅读：McKenney Partitioning and Synchronization Design 一章的 Partitioning, Parallelism, and Optimization 一节；Phase 0 的 Amdahl 与 Gustafson。</p>
   <p lang="en">Further reading: the section Partitioning, Parallelism, and Optimization in McKenney’s chapter Partitioning and Synchronization Design; Amdahl and Gustafson in Phase 0.</p>
 
@@ -266,8 +266,8 @@ int main(int argc, char **argv) {
   <table class="cmp">
     <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th>OpenMP</th><th>GCD</th><th><span lang="zh-CN">手写线程（C++20）</span><span lang="en">Hand-written threads (C++20)</span></th></tr>
     <tr><td><span lang="zh-CN">并行循环</span><span lang="en">Parallel loop</span></td><td><code>#pragma omp parallel for</code></td><td><code>dispatch_apply(n, DISPATCH_APPLY_AUTO, ^(size_t i){…})</code></td><td><span lang="zh-CN">建 T 个 <code>std::jthread</code>，各自算范围或从原子计数器领</span><span lang="en">Create T <code>std::jthread</code>s that compute their range or take from an atomic counter</span></td></tr>
-    <tr><td><span lang="zh-CN">静态分块</span><span lang="en">Static split</span></td><td><code>schedule(static)</code>、<code>schedule(static,c)</code></td><td><span lang="zh-CN">没有；n 等于线程数时近似</span><span lang="en">None; n equal to the thread count comes close</span></td><td><span lang="zh-CN">每线程一段连续的行</span><span lang="en">One contiguous range of rows per thread</span></td></tr>
-    <tr><td><span lang="zh-CN">动态分块</span><span lang="en">Dynamic split</span></td><td><code>schedule(dynamic,c)</code>、<code>schedule(guided,c)</code></td><td><span lang="zh-CN">默认就是：一次领一个迭代，块大小就是你定义的一次迭代</span><span lang="en">The default: one iteration per take, and a chunk is whatever you make one iteration</span></td><td><code>next.fetch_add(chunk)</code></td></tr>
+    <tr><td><span lang="zh-CN">静态分块</span><span lang="en">Static split</span></td><td><code>schedule(static)</code> / <code>schedule(static,c)</code></td><td><span lang="zh-CN">没有；n 等于线程数时近似</span><span lang="en">None; n equal to the thread count comes close</span></td><td><span lang="zh-CN">每线程一段连续的行</span><span lang="en">One contiguous range of rows per thread</span></td></tr>
+    <tr><td><span lang="zh-CN">动态分块</span><span lang="en">Dynamic split</span></td><td><code>schedule(dynamic,c)</code> / <code>schedule(guided,c)</code></td><td><span lang="zh-CN">默认就是：一次领一个迭代，块大小就是你定义的一次迭代</span><span lang="en">The default: one iteration per take, and a chunk is whatever you make one iteration</span></td><td><code>next.fetch_add(chunk)</code></td></tr>
     <tr><td><span lang="zh-CN">运行时选调度</span><span lang="en">Choose the schedule at run time</span></td><td><span lang="zh-CN"><code>schedule(runtime)</code> 加 <code>OMP_SCHEDULE</code></span><span lang="en"><code>schedule(runtime)</code> with <code>OMP_SCHEDULE</code></span></td><td><span lang="zh-CN">把块数 n 当参数传</span><span lang="en">Pass the chunk count n as a parameter</span></td><td><span lang="zh-CN">自己写</span><span lang="en">Write it yourself</span></td></tr>
     <tr><td>reduction</td><td><code>reduction(+:x)</code></td><td><span lang="zh-CN">每块一格部分和，返回后串行相加</span><span lang="en">One partial-sum slot per chunk, added serially after the call returns</span></td><td><span lang="zh-CN">同 GCD，或 Phase 2 的每线程私有和</span><span lang="en">Same as GCD, or Phase 2’s private per-thread sum</span></td></tr>
     <tr><td><span lang="zh-CN">递归任务树</span><span lang="en">Recursive task tree</span></td><td><span lang="zh-CN"><code>task</code> 加 <code>taskwait</code>；libomp 内部用 work stealing</span><span lang="en"><code>task</code> with <code>taskwait</code>; libomp uses work stealing inside</span></td><td><span lang="zh-CN">group 能写，但在工作线程里等待会睡掉池线程</span><span lang="en">Possible with groups, but waiting on a worker thread puts a pool thread to sleep</span></td><td><span lang="zh-CN">自己写 work stealing（Lab B）</span><span lang="en">Write work stealing yourself (Lab B)</span></td></tr>
@@ -288,7 +288,7 @@ int main(int argc, char **argv) {
            "3. schedule(dynamic,1)：谁先做完谁去领下一行。贵的行自然分散到四个线程上。",
            "4. 四个线程在 28 到 40 个单位之间先后做完，循环在 40 结束，比静态短约 30 %。代价是每一行都要去共享计数器领一次活。",
            "5. 实测，下三角 1024 行、10 个线程：GCD 切 10 块 16.4 到 17.7 ms，切 100 块 11.3 到 11.6 ms；手写线程静态 15.5 到 16.3 ms，动态每次 8 行 11.5 到 11.7 ms。"]'
-         data-captions-en='["Overview: one lower-triangular loop, 16 rows on 4 threads (a sketch, not the measured 1024 rows on 10 threads). Row i costs i+1 units, and time runs left to right. The static schedule is on top, the dynamic one below. Press Play to step through.",
+         data-captions-en='["The whole picture: one lower-triangular loop, 16 rows on 4 threads (a sketch, not the measured 1024 rows on 10 threads). Row i costs i+1 units, and time runs left to right. The static schedule is on top, the dynamic one below. Press Play to step through.",
            "1. schedule(static): each thread gets one contiguous block of 4 rows, fixed on entry. T0 gets the cheapest rows 0 to 3, T3 the most expensive rows 12 to 15.",
            "2. T0, T1 and T2 finish early and can only wait for T3. The loop ends only at 58 units, and every dashed box is wasted core time.",
            "3. schedule(dynamic,1): whoever finishes first takes the next row. The expensive rows spread across all four threads by themselves.",
@@ -299,7 +299,7 @@ int main(int argc, char **argv) {
       <text x="40" y="62" class="mono">T0</text><text x="40" y="92" class="mono">T1</text><text x="40" y="122" class="mono">T2</text><text x="40" y="152" class="mono">T3</text>
 
       <!-- step 1: static blocks (par token belongs on these boxes) -->
-      <g data-step="1"><!-- par -->
+      <g data-step="1">
         <rect class="box" x="120" y="46" width="10" height="22"/>
         <rect class="box" x="130" y="46" width="20" height="22"/>
         <rect class="box" x="150" y="46" width="30" height="22"/><text x="160" y="62" class="mono">2</text>
@@ -333,7 +333,7 @@ int main(int argc, char **argv) {
       <text x="40" y="248" class="mono">T0</text><text x="40" y="278" class="mono">T1</text><text x="40" y="308" class="mono">T2</text><text x="40" y="338" class="mono">T3</text>
 
       <!-- step 3: dynamic blocks (par token belongs on these boxes) -->
-      <g data-step="3"><!-- par -->
+      <g data-step="3">
         <rect class="box" x="120" y="232" width="10" height="22"/>
         <rect class="box" x="120" y="262" width="20" height="22"/>
         <rect class="box" x="120" y="292" width="30" height="22"/><text x="130" y="308" class="mono">2</text>
@@ -375,23 +375,23 @@ int main(int argc, char **argv) {
            "4. W1 在自己这边做同样的事：fib(40) 和 fib(38) 进了它自己的 deque，它在算 fib(37)。偷一次就够它忙很久。",
            "5. W0 做完 fib(36)，从自己的尾部取最新的 fib(37)，之后再取 fib(39)。最新任务的数据还在这个核的 cache 里。",
            "6. W0 回到 fib(42) 的 taskwait：fib(41) 在 W1 手里，自己的 deque 也空了。它不睡，去偷 W1 的头部 fib(40)。",
-           "7. 实测 fib(42)，10 个线程：cutoff 25 时每次 6764 个任务，只偷了约 150 到 180 次，59 到 60 ms，串行 360 ms。cutoff 10 时 9227464 个任务，165 到 175 ms。"]'
-         data-captions-en='["Overview: two worker threads, W0 and W1, each with a deque; the left end is the head (oldest task) and the right end the tail (newest task). Below are the fib(42) measurements. Press Play to watch one steal.",
+           "7. 实测 fib(42)，10 个线程：cutoff 25 时每次 6764 个任务，只偷了 146 到 179 次，59 到 60 ms，串行 360 ms。cutoff 10 时 9227464 个任务，165 到 175 ms。"]'
+         data-captions-en='["The whole picture: two worker threads, W0 and W1, each with a deque; the left end is the head (oldest task) and the right end the tail (newest task). Below are the fib(42) measurements. Press Play to watch one steal.",
            "1. W0 starts fib(42): it pushes fib(41) as a task onto the tail of its own deque and goes on with fib(40) itself.",
            "2. W0 keeps descending, pushing n-1 onto the tail at each level and doing n-2 itself. Its deque now holds fib(41), fib(39), fib(37) from head to tail, and it is computing fib(36).",
            "3. W1 has an empty deque. It steals from the head of W0 and gets the oldest task, fib(41), which is the biggest subtree.",
            "4. W1 does the same on its side: fib(40) and fib(38) go into its own deque while it computes fib(37). One steal keeps it busy for a long time.",
            "5. W0 finishes fib(36) and takes the newest task, fib(37), from its own tail, then fib(39). The newest task has its data still in this core cache.",
            "6. W0 returns to the taskwait of fib(42): fib(41) is with W1, and its own deque is empty. It does not sleep; it steals fib(40) from the head of W1.",
-           "7. Measured, fib(42) on 10 threads: with cutoff 25 each run makes 6764 tasks but only about 150 to 180 steals, 59 to 60 ms against 360 ms serial. With cutoff 10 it makes 9227464 tasks and takes 165 to 175 ms."]'>
+           "7. Measured, fib(42) on 10 threads: with cutoff 25 each run makes 6764 tasks but only 146 to 179 steals, 59 to 60 ms against 360 ms serial. With cutoff 10 it makes 9227464 tasks and takes 165 to 175 ms."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <rect class="box" x="30" y="30" width="400" height="260"/><!-- par -->
+      <rect class="box" x="30" y="30" width="400" height="260"/>
       <text x="44" y="54" lang="zh-CN">W0 · 线程 0</text><text x="44" y="54" lang="en">W0 · thread 0</text>
-      <rect class="box" x="470" y="30" width="400" height="260"/><!-- par -->
+      <rect class="box" x="470" y="30" width="400" height="260"/>
       <text x="484" y="54" lang="zh-CN">W1 · 线程 1</text><text x="484" y="54" lang="en">W1 · thread 1</text>
       <text x="60" y="210" class="small" lang="zh-CN">← 头部 · 最老</text><text x="60" y="210" class="small" lang="en">← head · oldest</text>
       <text x="290" y="210" class="small" lang="zh-CN">尾部 · 最新 →</text><text x="290" y="210" class="small" lang="en">tail · newest →</text>
@@ -422,7 +422,7 @@ int main(int argc, char **argv) {
         <text x="44" y="262" class="small" lang="zh-CN">从自己的尾部取：最新、cache 还热</text><text x="44" y="262" class="small" lang="en">pop own tail: newest, cache still warm</text></g>
 
       <!-- step 6: waiting means working -->
-      <g data-step="6"><path class="arrow" d="M502 178 C 470 190, 450 240, 432 262"/>
+      <g data-step="6"><path class="arrow" d="M500 178 C 468 190, 446 236, 418 256"/>
         <text x="600" y="244" class="small" lang="zh-CN">W0 在 taskwait：去偷 fib(40)</text><text x="600" y="244" class="small" lang="en">W0 at taskwait: steals fib(40)</text>
         <text x="600" y="264" class="small" lang="zh-CN">等的时候也在干活</text><text x="600" y="264" class="small" lang="en">waiting is working</text></g>
 
@@ -430,7 +430,7 @@ int main(int argc, char **argv) {
       <g data-step="7"><rect class="box" x="30" y="310" width="840" height="120"/>
         <text x="44" y="336" lang="zh-CN">实测 · fib(42)，10 个线程，2026-10-31</text><text x="44" y="336" lang="en">Measured · fib(42), 10 threads, 2026-10-31</text>
         <text x="44" y="362" class="small" lang="zh-CN">串行：约 360 ms</text><text x="44" y="362" class="small" lang="en">serial: about 360 ms</text>
-        <text x="44" y="386" class="small" lang="zh-CN">cutoff 25：6764 个任务，约 150–180 次偷，59–60 ms</text><text x="44" y="386" class="small" lang="en">cutoff 25: 6764 tasks, about 150–180 steals, 59–60 ms</text>
+        <text x="44" y="386" class="small" lang="zh-CN">cutoff 25：6764 个任务，146–179 次偷，59–60 ms</text><text x="44" y="386" class="small" lang="en">cutoff 25: 6764 tasks, 146–179 steals, 59–60 ms</text>
         <text x="44" y="410" class="small" lang="zh-CN">cutoff 10：9227464 个任务，165–175 ms，开销压过了计算</text><text x="44" y="410" class="small" lang="en">cutoff 10: 9227464 tasks, 165–175 ms, overhead beats the work</text></g>
     </svg>
   </div>
@@ -872,7 +872,7 @@ OMP_NUM_THREADS=4 ./fib_omp 42 25        # 只用 4 个线程，和 P 核数相�
   <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
   <form class="quiz" data-quiz="par/phase-5">
     <div class="q" data-answer="b">
-      <p lang="zh-CN">1. 下三角矩阵乘法里第 i 行的代价和 i 成正比。用 <code>schedule(static)</code> 在 10 个线程上跑，比 <code>schedule(dynamic,8)</code> 慢约 40 %。主要原因是什么？</p><p lang="en">1. In the triangular matrix multiply, row i costs in proportion to i. With <code>schedule(static)</code> on 10 threads it is about 40 % slower than <code>schedule(dynamic,8)</code>. What is the main reason?</p>
+      <p lang="zh-CN">1. 下三角矩阵乘法里第 i 行的代价和 i 成正比。Lab A 用 <code>std::jthread</code> 手写的静态调度（每线程一段连续的行，即 <code>schedule(static)</code> 的做法）在 10 个线程上实测比动态调度（每次领 8 行，即 <code>schedule(dynamic,8)</code>）慢约 35 %（15.5 对 11.5 ms）；OpenMP 本页没有运行，预期同理。主要原因是什么？</p><p lang="en">1. In the triangular matrix multiply, row i costs in proportion to i. In Lab A the static schedule written by hand with <code>std::jthread</code> (one contiguous range of rows per thread, as <code>schedule(static)</code> does) measured about 35 % slower on 10 threads than the dynamic one (8 rows per take, as <code>schedule(dynamic,8)</code> does): 15.5 against 11.5 ms. OpenMP was not run on this page; it is expected to behave the same. What is the main reason?</p>
       <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">静态调度每一块都要去运行时领一次活，开销比动态大</span><span lang="en">The static schedule makes a trip to the runtime for every chunk, so its overhead is higher than dynamic</span></label>
       <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">连续平分让最后一个线程拿到最贵的那段行，其他线程做完后干等；这台机器上 E 核更慢，又加重了拖尾</span><span lang="en">The contiguous even split gives the last thread the most expensive rows while the others finish and wait; the slower E cores on this machine make the tail worse</span></label>
       <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">静态调度只会启动和 P 核一样多的 4 个线程</span><span lang="en">The static schedule starts only 4 threads, as many as there are P cores</span></label>
@@ -883,7 +883,7 @@ OMP_NUM_THREADS=4 ./fib_omp 42 25        # 只用 4 个线程，和 P 核数相�
       <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">头部是最老的任务，在递归里是离根最近、最大的子树，偷一次就够忙很久，所以偷的次数少；尾部留给主人，它的数据还在主人的 cache 里</span><span lang="en">The head holds the oldest task, which in a recursion is the biggest subtree near the root, so one steal keeps the thief busy for long and steals stay rare; the tail stays with the owner, whose cache still holds its data</span></label>
       <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">只有头部能在不加锁的情况下访问，尾部必须加锁</span><span lang="en">Only the head can be accessed without a lock; the tail always needs one</span></label>
       <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">头部的任务最小，偷过来最快做完，能尽快把结果还给主人</span><span lang="en">The tasks at the head are the smallest, so a stolen one finishes fastest and its result returns to the owner sooner</span></label>
-      <div class="why" hidden><span lang="zh-CN">锁和哪一端无关：本页的 <code>ws_fib.cpp</code> 和 libomp 两端都加锁，无锁的 Chase–Lev deque 也是主人那一端最便宜。头部的任务恰恰最大而不是最小：主人先放进去的是 fib(41)，后放的是越来越小的子问题。偷最大的那块，本页实测 6764 个任务只偷了约 150–180 次。</span><span lang="en">Locking has nothing to do with which end: this page’s <code>ws_fib.cpp</code> and libomp lock both ends, and in the lock-free Chase–Lev deque it is the owner’s end that is cheapest. The head holds the largest tasks, not the smallest: the owner pushed fib(41) first and ever smaller subproblems after it. Stealing the biggest piece is why this page measured only about 150–180 steals for 6764 tasks.</span></div>
+      <div class="why" hidden><span lang="zh-CN">锁和哪一端无关：本页的 <code>ws_fib.cpp</code> 和 libomp 两端都加锁，无锁的 Chase–Lev deque 也是主人那一端最便宜。头部的任务恰恰最大而不是最小：主人先放进去的是 fib(41)，后放的是越来越小的子问题。偷最大的那块，本页实测 6764 个任务只偷了 146–179 次。</span><span lang="en">Locking has nothing to do with which end: this page’s <code>ws_fib.cpp</code> and libomp lock both ends, and in the lock-free Chase–Lev deque it is the owner’s end that is cheapest. The head holds the largest tasks, not the smallest: the owner pushed fib(41) first and ever smaller subproblems after it. Stealing the biggest piece is why this page measured only 146–179 steals for 6764 tasks.</span></div>
     </div>
     <div class="q" data-answer="c">
       <p lang="zh-CN">3. 用 <code>-fexperimental-library</code> 编译的 <code>std::for_each(std::execution::par, …)</code> 按 1024 行做矩阵乘法要 34 ms，而 <code>dispatch_apply</code> 切 100 块只要 23 ms。为什么？</p><p lang="en">3. <code>std::for_each(std::execution::par, …)</code> built with <code>-fexperimental-library</code> takes 34 ms for the matrix multiply over 1024 rows, while <code>dispatch_apply</code> with 100 chunks takes only 23 ms. Why?</p>
@@ -921,8 +921,8 @@ OMP_NUM_THREADS=4 ./fib_omp 42 25        # 只用 4 个线程，和 P 核数相�
     <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The techniques for dividing work in the chapter on designing concurrent code for concepts 1 and 4; the work-stealing thread pool in the chapter on advanced thread management for concept 6; the chapter on parallel algorithms for concept 8</span></li>
     <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, 免费（CC BY-SA），本页读的是 v2026.06.21a 和 2026-10-31 的 git 树，<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">Partitioning and Synchronization Design 一章的 Design Criteria、Synchronization Granularity、Beyond Partitioning、Partitioning, Parallelism, and Optimization 四节对应概念 2、5、7、9；Counting 一章的 Statistical Counters 和 Data Ownership 一章的 Privatization 对应概念 3</span></li>
     <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, free (CC BY-SA); this page read release v2026.06.21a and the git tree as of 2026-10-31, <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">The sections Design Criteria, Synchronization Granularity, Beyond Partitioning and Partitioning, Parallelism, and Optimization of the chapter Partitioning and Synchronization Design for concepts 2, 5, 7 and 9; Statistical Counters in the chapter Counting and Privatization in the chapter Data Ownership for concept 3</span></li>
-    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">第 1 章 Basics of Rust Concurrency 的 Scoped Threads 一节对应概念 1（结构化 fork-join）。这本书不讲 OpenMP 和 work stealing；本专题只读不练 Rust</span></li>
-    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">The section Scoped Threads of chapter 1, Basics of Rust Concurrency, for concept 1 (structured fork-join). The book does not cover OpenMP or work stealing; this topic reads the Rust, it does not run it</span></li>
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://mara.nl/atomics/">mara.nl/atomics</a>. <span class="lvl">第 1 章 Basics of Rust Concurrency 的 Scoped Threads 一节对应概念 1（结构化 fork-join）。这本书不讲 OpenMP 和 work stealing；本专题只读不练 Rust</span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://mara.nl/atomics/">mara.nl/atomics</a>. <span class="lvl">The section Scoped Threads of chapter 1, Basics of Rust Concurrency, for concept 1 (structured fork-join). The book does not cover OpenMP or work stealing; this topic reads the Rust, it does not run it</span></li>
   </ol>
 
   <nav class="pn">

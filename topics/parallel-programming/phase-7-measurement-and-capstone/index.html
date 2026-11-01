@@ -22,7 +22,7 @@
   </header>
 
   <p class="meta" lang="zh-CN">Phase 7 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 7 / 8 · about 1–2 weeks</p>
-  <h1><span lang="zh-CN">性能测量与作品项目</span><span lang="en">Measuring Performance and the Capstone</span> <span class="en" lang="zh-CN">Measuring Performance：基准方法、sample、perf、roofline 和一个要交测量报告的作品</span><span class="en" lang="en">Benchmark method, sample, perf, the roofline, and a capstone with a measurement report</span></h1>
+  <h1>Measuring Performance &amp; the Capstone <span class="en" lang="zh-CN">性能测量与作品项目：基准方法、sample、perf、roofline 和一个要交测量报告的作品</span><span class="en" lang="en">Benchmark method, sample, perf, the roofline, and a capstone with a measurement report</span></h1>
   <p class="lede" lang="zh-CN">这是本专题的最后一课。前面每一课都量过时间；这一课把「怎么量才可信、量完怎么找原因、找到原因怎么判断还剩多少」本身当成内容。主线是一个完整的回合：拿 Phase 5 的 GCD 矩阵乘法，用 <code>sample</code> 找到热循环，发现它早已被自动向量化，于是用 Phase 6 的 NEON 做寄存器分块，22.4 ms 降到 14.0 ms，再用实测的内存带宽和峰值算力画出这台 M5 的 roofline，看它离屋顶还有多远。Mac 上的数字都是 2026-10-31 在实验机 Apple M5 上实测的；Linux <code>perf</code> 的步骤要在内核专题的虚拟机里做，本页写成命令和预期字段，标为「未运行」。最后是作品项目的规格和验收标准。</p>
   <p class="lede" lang="en">This is the last lesson of the topic. Every earlier lesson measured times; this one makes the method itself the subject: how to measure so the number can be trusted, how to find the cause once you have it, and how to judge how much is left. The thread through it is one complete round: take Phase 5’s GCD matrix multiply, find the hot loop with <code>sample</code>, discover that it was already auto-vectorized, apply Phase 6’s NEON as register blocking to go from 22.4 ms to 14.0 ms, then draw this M5’s roofline from measured memory bandwidth and measured peak compute and see how far below the roof it still is. Every Mac number was measured on the lab Apple M5 on 2026-10-31; the Linux <code>perf</code> steps belong in the kernel topic’s virtual machine and are written as commands with the expected fields, marked not run. The page ends with the capstone’s specification and acceptance criteria.</p>
 
@@ -47,12 +47,12 @@
 
   <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
   <ul>
-    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0 · 基础</a>：墙钟时间和 CPU 时间、预热和 N 次取中位数；实测带宽（只用 P 簇约 83 GB/s，两个簇约 131 GB/s）；false sharing 实验（挤在一行比各占 128 字节慢 7 倍多）。</li>
-    <li lang="en"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>: wall time versus CPU time, warm-up and the median of N; the measured bandwidth (about 83 GB/s on the P cluster alone, about 131 GB/s with both clusters); the false-sharing lab (sharing one line is more than 7 times slower than 128 bytes each).</li>
+    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0 · 基础</a>：墙钟时间和 CPU 时间、预热和 N 次取中位数；实测带宽（Phase 0 那次运行：只用 P 簇约 83 GB/s，两个簇约 131 GB/s；本页自己的运行测得 132 GB/s）；false sharing 实验（挤在一行比各占 128 字节慢 7 倍多）。</li>
+    <li lang="en"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>: wall time versus CPU time, warm-up and the median of N; the measured bandwidth (in Phase 0’s run, about 83 GB/s on the P cluster alone and about 131 GB/s with both clusters; this page’s own run measured 132 GB/s); the false-sharing lab (sharing one line is more than 7 times slower than 128 bytes each).</li>
     <li lang="zh-CN"><a href="../phase-5-structured-parallelism/index.html">Phase 5 · 结构化并行</a>：<code>dispatch_apply</code> 切 100 块的矩阵乘法（约 22.6 ms），本页 Lab A 的起点；还有那个计时陷阱：纯函数的调用被编译器提出了计时循环，串行基线量出 0 ms。</li>
     <li lang="en"><a href="../phase-5-structured-parallelism/index.html">Phase 5 · Structured Parallelism</a>: the matrix multiply with <code>dispatch_apply</code> in 100 chunks (about 22.6 ms), the starting point of this page’s Lab A; and the timing trap where the compiler hoisted a pure function call out of the timing loop and the serial baseline measured 0 ms.</li>
-    <li lang="zh-CN"><a href="../phase-6-simd/index.html">Phase 6 · SIMD 与数据并行</a>：NEON intrinsics、自动向量化的 remark、roofline 的概念。本页写作时 Phase 6 还没有发布，这里的 SIMD 步骤是按 Phase 6 的大纲写的，用到的只是 <code>vld1q_f64</code>、<code>vfmaq_n_f64</code> 这类基本 intrinsics。</li>
-    <li lang="en"><a href="../phase-6-simd/index.html">Phase 6 · SIMD &amp; Data Parallelism</a>: NEON intrinsics, auto-vectorization remarks, the idea of the roofline. Phase 6 was not yet published when this page was written, so the SIMD step here is written against Phase 6’s plan and uses only basic intrinsics such as <code>vld1q_f64</code> and <code>vfmaq_n_f64</code>.</li>
+    <li lang="zh-CN"><a href="../phase-6-simd/index.html">Phase 6 · SIMD 与数据并行</a>：NEON intrinsics、自动向量化的 remark、roofline 的概念。</li>
+    <li lang="en"><a href="../phase-6-simd/index.html">Phase 6 · SIMD &amp; Data Parallelism</a>: NEON intrinsics, auto-vectorization remarks, the idea of the roofline.</li>
     <li lang="zh-CN"><a href="../lab-setup/index.html">实验环境</a>：哪些工具在本机可用、哪些要 sudo；<a href="../../kernel-engineering/lab-setup/index.html">内核专题的实验环境</a>：QEMU Linux VM 和它的 TCG 与 hvf 两种加速方式。</li>
     <li lang="en"><a href="../lab-setup/index.html">Lab environment</a>: which tools work here and which need sudo; <a href="../../kernel-engineering/lab-setup/index.html">the kernel topic’s lab environment</a>: the QEMU Linux VM and its two accelerators, TCG and hvf.</li>
   </ul>
@@ -80,8 +80,8 @@
   <p lang="en">Further reading: section 11.7, Performance Estimation, of chapter 11, Validation, in McKenney’s <em>Is Parallel Programming Hard</em>, especially 11.7.1 Benchmarking, 11.7.2 Profiling and 11.7.3 Differential Profiling.</p>
 
   <h3 lang="zh-CN">2. 基准方法：预热、重复、中位数、范围、负载</h3><h3 lang="en">2. Benchmark method: warm-up, repetition, median, range, load</h3>
-  <p lang="zh-CN">本页所有 Mac 数字都按同一个规矩量：程序先跑 3 次不计时（预热），再计时 20 次，报中位数和最小到最大的范围，时钟用 <code>CLOCK_MONOTONIC_RAW</code> 或 <code>std::chrono::steady_clock</code>。下面三组实测说明每一条规矩防的是什么（Lab A 的 <code>mm.c</code>，auto 版本，2026-10-31）：</p>
-  <p lang="en">Every Mac number on this page follows one rule: run the program 3 times untimed (warm-up), then time it 20 times, and report the median with the min-to-max range, using <code>CLOCK_MONOTONIC_RAW</code> or <code>std::chrono::steady_clock</code>. The three sets of measurements below show what each part of the rule protects against (Lab A’s <code>mm.c</code>, the auto version, 2026-10-31):</p>
+  <p lang="zh-CN">本页所有 Mac 数字都按同一个规矩量：程序先跑 3 次不计时（预热），再计时 20 次，报中位数和最小到最大的范围，时钟用 <code>CLOCK_MONOTONIC_RAW</code> 或 <code>std::chrono::steady_clock</code>。例外有三处：Lab A 剖析用的 <code>matmul_prof</code> 报的是 400 次的平均值；roofline 程序里 <code>read</code> 和 <code>dot</code> 预热 1 次、计时 20 次，<code>fma64</code> 和 <code>fma32</code> 只计时 7 次。下面三组实测说明每一条规矩防的是什么（Lab A 的 <code>mm.c</code>，auto 版本，2026-10-31）：</p>
+  <p lang="en">Every Mac number on this page follows one rule: run the program 3 times untimed (warm-up), then time it 20 times, and report the median with the min-to-max range, using <code>CLOCK_MONOTONIC_RAW</code> or <code>std::chrono::steady_clock</code>. There are three exceptions: <code>matmul_prof</code>, used for profiling in Lab A, reports the mean over 400 runs; in the roofline program, <code>read</code> and <code>dot</code> take 1 warm-up and 20 timed runs, and <code>fma64</code> and <code>fma32</code> are timed only 7 times. The three sets of measurements below show what each part of the rule protects against (Lab A’s <code>mm.c</code>, the auto version, 2026-10-31):</p>
 <pre data-lang="sh"># 1. 不预热，一个进程里连续 20 次（毫秒）
 $ ./mm auto 20 0 v
 25.8 22.6 23.0 21.9 21.8 22.5 22.0 22.9 24.0 22.2 22.1 22.0 22.5 22.1 22.0 22.2 22.6 22.2 21.9 22.6
@@ -259,7 +259,7 @@ sudo dtrace -n 'sched:::on-cpu /pid == $target/ { self-&gt;t = timestamp; } sche
   <table class="cmp">
     <tr><th><span lang="zh-CN">你想知道</span><span lang="en">You want to know</span></th><th><span lang="zh-CN">在这台 Mac 上</span><span lang="en">On this Mac</span></th><th><span lang="zh-CN">在内核专题的 Linux VM 里</span><span lang="en">In the kernel topic’s Linux VM</span></th><th><span lang="zh-CN">看什么</span><span lang="en">What to look at</span></th></tr>
     <tr><td><span lang="zh-CN">这个数字可信吗</span><span lang="en">Can I trust this number</span></td><td><span lang="zh-CN">预热 3 次、计时 20 次、中位数加范围，<code>uptime</code></span><span lang="en">3 warm-ups, 20 timed runs, median with range, <code>uptime</code></span></td><td><code>perf stat -r 5</code></td><td><span lang="zh-CN">范围宽不宽；<code>( +- x% )</code></span><span lang="en">How wide the range is; <code>( +- x% )</code></span></td></tr>
-    <tr><td><span lang="zh-CN">时间花在哪个函数、哪一行</span><span lang="en">Which function and line the time goes to</span></td><td><span lang="zh-CN"><code>sample pid 3</code>（不要 sudo），<code>-g</code> 编译</span><span lang="en"><code>sample pid 3</code> (no sudo), built with <code>-g</code></span></td><td><code>perf record -g</code>、<code>perf report</code>、<code>perf annotate</code></td><td><span lang="zh-CN">Sort by top of stack；<code>文件:行</code></span><span lang="en">Sort by top of stack; <code>file:line</code></span></td></tr>
+    <tr><td><span lang="zh-CN">时间花在哪个函数、哪一行</span><span lang="en">Which function and line the time goes to</span></td><td><span lang="zh-CN"><code>sample pid 3</code>（不要 sudo），<code>-g</code> 编译</span><span lang="en"><code>sample pid 3</code> (no sudo), built with <code>-g</code></span></td><td><code>perf record -g</code> / <code>perf report</code> / <code>perf annotate</code></td><td><span lang="zh-CN">Sort by top of stack；<code>文件:行</code></span><span lang="en">Sort by top of stack; <code>file:line</code></span></td></tr>
     <tr><td><span lang="zh-CN">线程在等什么</span><span lang="en">What the threads wait for</span></td><td><span lang="zh-CN"><code>sample</code>；<code>sudo spindump</code></span><span lang="en"><code>sample</code>; <code>sudo spindump</code></span></td><td><span lang="zh-CN"><code>perf stat -e context-switches</code>；<code>perf record</code> 的 off-CPU 分析（查文档）</span><span lang="en"><code>perf stat -e context-switches</code>; off-CPU analysis with <code>perf record</code> (check the docs)</span></td><td><span lang="zh-CN"><code>__ulock_wait</code> 是在等锁或等同伴，<code>__workq_kernreturn</code> 是空闲的池线程</span><span lang="en"><code>__ulock_wait</code> is waiting on a lock or a peer, <code>__workq_kernreturn</code> is an idle pool thread</span></td></tr>
     <tr><td><span lang="zh-CN">做了哪些系统调用</span><span lang="en">Which system calls it makes</span></td><td><span lang="zh-CN"><code>sudo dtrace</code> 的 <code>syscall</code> 探针（SIP 下部分可用）</span><span lang="en"><code>sudo dtrace</code> with the <code>syscall</code> provider (partly available under SIP)</span></td><td><span lang="zh-CN"><code>strace -c</code>（Debian 里要另装）</span><span lang="en"><code>strace -c</code> (a separate install on Debian)</span></td><td><span lang="zh-CN">次数和总时间</span><span lang="en">Counts and total time</span></td></tr>
     <tr><td><span lang="zh-CN">是不是 cache miss 多</span><span lang="en">Whether it misses in cache a lot</span></td><td><span lang="zh-CN">没有直接的计数器；改数据大小看拐点；Instruments 要 Xcode</span><span lang="en">No direct counter; vary the data size and look for the knee; Instruments needs Xcode</span></td><td><code>perf stat -e cache-misses,L1-dcache-load-misses</code></td><td><span lang="zh-CN">硬件事件可能是 <code>&lt;not supported&gt;</code>（VM 的 PMU 未验证）</span><span lang="en">Hardware events may read <code>&lt;not supported&gt;</code> (the VM’s PMU is unverified)</span></td></tr>
@@ -281,7 +281,7 @@ sudo dtrace -n 'sched:::on-cpu /pid == $target/ { self-&gt;t = timestamp; } sche
            "5. 复测：同样的方法，14.0 到 15.5 ms，和原来的范围不重叠，才说变快了。",
            "6. 什么时候停：把结果放到 roofline 上。NEON 版本 153 GFLOP/s，FP64 屋顶 317，还差约 2 倍；值不值得追，看代价。",
            "7. 测量陷阱：第一次触碰内存要缺页；别的进程的负载能让中位数涨 50 % 以上；优化器会把计时的调用提走；内联会把热帧并进调用者。"]'
-         data-captions-en='["Overview: the top row is the five steps of one round of the measurement loop, and the arc below joins the last step back to the first. The small text in each step is the real content of the Lab A round. Bottom left is when to stop, bottom right the most common measurement traps. Press Play to step through.",
+         data-captions-en='["The whole picture: the top row is the five steps of one round of the measurement loop, and the arc below joins the last step back to the first. The small text in each step is the real content of the Lab A round. Bottom left is when to stop, bottom right the most common measurement traps. Press Play to step through.",
            "1. Hypothesis: one sentence a measurement could refute. Lab A hypothesis: the inner loop moves 24 bytes per 2 floating-point operations and is stuck on memory operations.",
            "2. Benchmark: 3 warm-ups, 20 timed runs, report the median and range, note uptime. The auto version takes 22.0 to 22.8 ms.",
            "3. Profile: sample for 3 seconds puts 92 % of top-of-stack samples on line 21 of rows; the disassembly shows fmla.2d, so auto-vectorization already happened.",
@@ -291,27 +291,27 @@ sudo dtrace -n 'sched:::on-cpu /pid == $target/ { self-&gt;t = timestamp; } sche
            "7. Measurement traps: the first touch of memory takes page faults; load from other processes can raise the median by more than 50 %; the optimiser can hoist the timed call; inlining folds the hot frame into its caller."]'>
       <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/></marker></defs>
 
-      <g data-step="1"><rect class="box" x="20" y="30" width="160" height="86"/><!-- par -->
+      <g data-step="1"><rect class="box" x="20" y="30" width="160" height="86"/>
         <text x="32" y="54" lang="zh-CN">1. 假设</text><text x="32" y="54" lang="en">1. Hypothesis</text>
-        <text x="32" y="78" class="small" lang="zh-CN">内循环卡在访存</text><text x="32" y="78" class="small" lang="en">inner loop is bound</text>
-        <text x="32" y="96" class="small" lang="zh-CN">24 字节换 2 flop</text><text x="32" y="96" class="small" lang="en">by loads and stores</text></g>
+        <text x="32" y="78" class="small" lang="zh-CN">内循环卡在访存</text><text x="32" y="78" class="small" lang="en">loop is memory-bound</text>
+        <text x="32" y="96" class="small" lang="zh-CN">24 字节换 2 flop</text><text x="32" y="96" class="small" lang="en">24 bytes per 2 flops</text></g>
       <path class="arrow" d="M182 73 L196 73"/>
-      <g data-step="2"><rect class="box" x="198" y="30" width="160" height="86"/><!-- par -->
+      <g data-step="2"><rect class="box" x="198" y="30" width="160" height="86"/>
         <text x="210" y="54" lang="zh-CN">2. 基准</text><text x="210" y="54" lang="en">2. Benchmark</text>
         <text x="210" y="78" class="small" lang="zh-CN">预热 3 次，计时 20 次</text><text x="210" y="78" class="small" lang="en">warm up 3, time 20</text>
         <text x="210" y="96" class="small" lang="zh-CN">22.0–22.8 ms</text><text x="210" y="96" class="small" lang="en">22.0–22.8 ms</text></g>
       <path class="arrow" d="M360 73 L374 73"/>
-      <g data-step="3"><rect class="box" x="376" y="30" width="160" height="86"/><!-- par -->
+      <g data-step="3"><rect class="box" x="376" y="30" width="160" height="86"/>
         <text x="388" y="54" lang="zh-CN">3. 剖析</text><text x="388" y="54" lang="en">3. Profile</text>
         <text x="388" y="78" class="small" lang="zh-CN">sample：92 % 在第 21 行</text><text x="388" y="78" class="small" lang="en">sample: 92 % at line 21</text>
         <text x="388" y="96" class="small" lang="zh-CN">已是 fmla.2d</text><text x="388" y="96" class="small" lang="en">already fmla.2d</text></g>
       <path class="arrow" d="M538 73 L552 73"/>
-      <g data-step="4"><rect class="box" x="554" y="30" width="160" height="86"/><!-- par -->
+      <g data-step="4"><rect class="box" x="554" y="30" width="160" height="86"/>
         <text x="566" y="54" lang="zh-CN">4. 只改一处</text><text x="566" y="54" lang="en">4. Change one thing</text>
         <text x="566" y="78" class="small" lang="zh-CN">4 × 8 寄存器分块</text><text x="566" y="78" class="small" lang="en">4 × 8 register blocking</text>
         <text x="566" y="96" class="small" lang="zh-CN">结果逐位相同</text><text x="566" y="96" class="small" lang="en">result bit-identical</text></g>
       <path class="arrow" d="M716 73 L730 73"/>
-      <g data-step="5"><rect class="box" x="732" y="30" width="150" height="86"/><!-- par -->
+      <g data-step="5"><rect class="box" x="732" y="30" width="150" height="86"/>
         <text x="744" y="54" lang="zh-CN">5. 复测</text><text x="744" y="54" lang="en">5. Re-measure</text>
         <text x="744" y="78" class="small" lang="zh-CN">14.0–15.5 ms</text><text x="744" y="78" class="small" lang="en">14.0–15.5 ms</text>
         <text x="744" y="96" class="small" lang="zh-CN">范围不重叠</text><text x="744" y="96" class="small" lang="en">ranges do not overlap</text></g>
@@ -347,7 +347,7 @@ sudo dtrace -n 'sched:::on-cpu /pid == $target/ { self-&gt;t = timestamp; } sche
            "4. 矩阵乘法，FP64，按必需流量强度约 85：在脊点右边，屋顶是 317。实测标量 52、自动向量化 95、NEON 寄存器分块 153 GFLOP/s。",
            "5. 作品项目的模糊，FP32，预测：分两遍强度 1.25，上限约 165；融合成一遍强度 2.5，上限约 330。都在 FP32 脊点左边，融合比 NEON 技巧更重要。",
            "6. 怎么读：点到屋顶的竖直距离就是还能拿到的上限。点积已经没有空间；矩阵乘法还差约 2 倍，但问题不在 DRAM，要看对 L1 的强度。"]'
-         data-captions-en='["Overview: the x axis is arithmetic intensity (floating-point operations per byte), the y axis GFLOP/s, both logarithmic. The sloped line is the measured memory bandwidth, the horizontal lines the measured peak compute. Filled points are measured, hollow points are capstone predictions. Press Play to step through.",
+         data-captions-en='["The whole picture: the x axis is arithmetic intensity (floating-point operations per byte), the y axis GFLOP/s, both logarithmic. The sloped line is the measured memory bandwidth, the horizontal lines the measured peak compute. Filled points are measured, hollow points are capstone predictions. Press Play to step through.",
            "1. Memory bandwidth 132 GB/s: 10 threads streaming through 1 GiB, median of 20 runs. A kernel of intensity I can reach at most I times 132 GFLOP/s.",
            "2. Peak compute: FP64 317 GFLOP/s and FP32 648 GFLOP/s, both measured with 16 independent FMA chains. Where the slope meets a flat line is the ridge point: 2.4 for FP64, 4.9 for FP32.",
            "3. The dot product, FP32, intensity 0.25: the roof allows 33 GFLOP/s and it measures 32.4. It sits on the slope, memory-bound; changing the computation will not make it faster.",
@@ -366,12 +366,12 @@ sudo dtrace -n 'sched:::on-cpu /pid == $target/ { self-&gt;t = timestamp; } sche
       <text x="655" y="420" class="small" style="text-anchor: middle">16</text><text x="792" y="420" class="small" style="text-anchor: middle">64</text>
       <text x="485" y="452" class="small" style="text-anchor: middle" lang="zh-CN">算术强度，flop/byte（对数）</text><text x="485" y="452" class="small" style="text-anchor: middle" lang="en">arithmetic intensity, flops per byte (log)</text>
 
-      <g data-step="1"><!-- par -->
+      <g data-step="1">
         <line x1="110" y1="397.8" x2="539.3" y2="83" style="stroke: var(--ink); stroke-width: 2.4"/>
         <text x="150" y="196" lang="zh-CN">内存带宽 132 GB/s</text><text x="150" y="196" lang="en">bandwidth 132 GB/s</text>
         <text x="150" y="214" class="small" lang="zh-CN">实测：10 线程流式读 1 GiB</text><text x="150" y="214" class="small" lang="en">measured: 10 threads read 1 GiB</text></g>
 
-      <g data-step="2"><!-- par -->
+      <g data-step="2">
         <line x1="468.9" y1="134.6" x2="860" y2="134.6" style="stroke: var(--ink); stroke-width: 2.4"/>
         <line x1="539.3" y1="83" x2="860" y2="83" style="stroke: var(--ink); stroke-width: 2.4; stroke-dasharray: 8 4"/>
         <text x="640" y="126" class="small" lang="zh-CN">FP64 峰值 317 GFLOP/s</text><text x="640" y="126" class="small" lang="en">FP64 peak 317 GFLOP/s</text>
@@ -396,16 +396,16 @@ sudo dtrace -n 'sched:::on-cpu /pid == $target/ { self-&gt;t = timestamp; } sche
 
       <g data-step="5">
         <circle cx="404.7" cy="181.7" r="7" style="fill: none; stroke: var(--ink); stroke-width: 2"/>
-        <circle cx="472.9" cy="131.7" r="7" style="fill: none; stroke: var(--ink); stroke-width: 2"/>
-        <text x="236" y="160" class="small" lang="zh-CN">模糊，两遍 · 1.25 · 约 165</text><text x="236" y="160" class="small" lang="en">blur, two passes · 1.25 · ~165</text>
-        <text x="300" y="114" class="small" lang="zh-CN">融合一遍 · 2.5 · 约 330</text><text x="300" y="114" class="small" lang="en">fused · 2.5 · ~330</text>
-        <text x="300" y="96" class="small" lang="zh-CN">空心 = 预测，未实测</text><text x="300" y="96" class="small" lang="en">hollow = predicted, not measured</text></g>
+        <circle cx="494" cy="131.7" r="7" style="fill: none; stroke: var(--ink); stroke-width: 2"/><!-- shortcut: x nudged from 472.9 (I = 2.5) so it does not touch the FP64 ridge dot -->
+        <text x="390" y="177" class="small" style="text-anchor: end" lang="zh-CN">两遍 FP32 · 1.25 · 约 165</text><text x="390" y="177" class="small" style="text-anchor: end" lang="en">two-pass FP32 · 1.25 · ~165</text>
+        <text x="466" y="121" class="small" style="text-anchor: end" lang="zh-CN">融合 FP32 · 2.5 · 约 330</text><text x="466" y="121" class="small" style="text-anchor: end" lang="en">fused FP32 · 2.5 · ~330</text></g>
 
       <g data-step="6">
         <line x1="836" y1="180" x2="836" y2="141" style="stroke: var(--ink-2); stroke-width: 2; stroke-dasharray: 4 3"/>
         <text x="842" y="166" class="small" lang="zh-CN">×2</text><text x="842" y="166" class="small" lang="en">×2</text>
         <text x="560" y="330" class="small" lang="zh-CN">点到屋顶的竖直距离</text><text x="560" y="330" class="small" lang="en">vertical distance to the roof</text>
         <text x="560" y="348" class="small" lang="zh-CN">= 还能拿到的上限</text><text x="560" y="348" class="small" lang="en">= what is left to gain</text></g>
+      <text x="560" y="376" class="small" lang="zh-CN">实心 = 实测 · 空心 = 预测</text><text x="560" y="376" class="small" lang="en">filled = measured · hollow = predicted</text>
     </svg>
   </div>
 
@@ -877,7 +877,7 @@ perf report -i neon.data --stdio --sort symbol | head -30</pre><span lang="zh-CN
     <li><span lang="zh-CN">本机手册页：<code>man sample</code>、<code>man spindump</code>、<code>man dtrace</code></span><span lang="en">Local manual pages: <code>man sample</code>, <code>man spindump</code>, <code>man dtrace</code></span> <span class="lvl" lang="zh-CN">macOS 27.2 自带：采样参数、<code>spindump -o</code>、SIP 对 dtrace 的两项限制</span><span class="lvl" lang="en">Shipped with macOS 27.2: sampling options, <code>spindump -o</code>, and SIP’s two limits on dtrace</span></li>
     <li><a href="https://www2.eecs.berkeley.edu/Pubs/TechRpts/2008/EECS-2008-134.html">Williams, Waterman, Patterson — Roofline (UC Berkeley EECS-2008-134)</a> <span class="lvl" lang="zh-CN">roofline 模型的原始技术报告；期刊版发表在 Communications of the ACM，2009（概念 7）</span><span class="lvl" lang="en">The original technical report of the roofline model; the journal version appeared in Communications of the ACM in 2009 (concept 7)</span></li>
     <li><a href="https://www.brendangregg.com/perf.html">Brendan Gregg — Linux perf Examples</a> <span class="lvl" lang="zh-CN">进阶，实战：one-liner、火焰图、off-CPU 分析</span><span class="lvl" lang="en">Intermediate, hands-on: one-liners, flame graphs, off-CPU analysis</span></li>
-    <li><a href="https://marabos.nl/atomics/hardware.html">Mara Bos — Understanding the Processor</a> <span class="lvl" lang="zh-CN">免费在线的第 7 章：cache 一致性、对性能的影响和一个实测实验（概念 6）</span><span class="lvl" lang="en">Chapter 7, free online: cache coherence, its impact on performance and a measured experiment (concept 6)</span></li>
+    <li><a href="https://mara.nl/atomics/hardware.html">Mara Bos — Understanding the Processor</a> <span class="lvl" lang="zh-CN">免费在线的第 7 章：cache 一致性、对性能的影响和一个实测实验（概念 6）</span><span class="lvl" lang="en">Chapter 7, free online: cache coherence, its impact on performance and a measured experiment (concept 6)</span></li>
     <li><a href="../lab-setup/index.html">Lab environment</a> · <a href="../../kernel-engineering/lab-setup/index.html">Kernel Engineering · Lab environment</a> · <a href="../../kernel-engineering/phase-6-debugging-and-tooling/index.html">Kernel Engineering Phase 6</a> <span class="lvl" lang="zh-CN">本站：本机工具和 sudo 要求；QEMU VM 的 TCG 与 hvf；perf 需要完整用户态</span><span class="lvl" lang="en">This site: the tools on this Mac and their sudo needs; the QEMU VM’s TCG and hvf; perf needing a full user space</span></li>
   </ul>
 
@@ -885,8 +885,8 @@ perf report -i neon.data --stdio --sort symbol | head -30</pre><span lang="zh-CN
   <ol class="books">
     <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, 免费（CC BY-SA），本页读的是 v2026.06.21a 的目录，<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">第 11 章 Validation 的 11.7 Performance Estimation（11.7.1 Benchmarking 到 11.7.6 Detecting Interference）对应概念 1 到 5；第 3 章 Hardware and its Habits 的 3.1.2 Memory References、3.1.7 Cache Misses、3.2 Overheads、3.4 Software Design Implications 对应概念 6 到 8</span></li>
     <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, free (CC BY-SA); this page read the table of contents of release v2026.06.21a, <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">Section 11.7, Performance Estimation (11.7.1 Benchmarking through 11.7.6 Detecting Interference), of chapter 11, Validation, for concepts 1 to 5; 3.1.2 Memory References, 3.1.7 Cache Misses, 3.2 Overheads and 3.4 Software Design Implications of chapter 3, Hardware and its Habits, for concepts 6 to 8</span></li>
-    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">第 7 章 Understanding the Processor 的 Caching 一节（Cache Coherence、Impact on Performance）对应概念 6；书里的实验是 Rust 写的，本专题只读不练</span></li>
-    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">The section Caching (Cache Coherence, Impact on Performance) of chapter 7, Understanding the Processor, for concept 6; the book’s experiments are in Rust, which this topic reads but does not run</span></li>
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://mara.nl/atomics/">mara.nl/atomics</a>. <span class="lvl">第 7 章 Understanding the Processor 的 Caching 一节（Cache Coherence、Impact on Performance）对应概念 6；书里的实验是 Rust 写的，本专题只读不练</span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://mara.nl/atomics/">mara.nl/atomics</a>. <span class="lvl">The section Caching (Cache Coherence, Impact on Performance) of chapter 7, Understanding the Processor, for concept 6; the book’s experiments are in Rust, which this topic reads but does not run</span></li>
     <li lang="zh-CN">Anthony Williams, 《C++ Concurrency in Action》, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">设计并发代码一章里影响并发代码性能的因素（处理器数、数据竞争与 cache ping-pong、false sharing）对应概念 6；测试与调试多线程程序（testing and debugging multithreaded applications）一章里测试性能的部分对应概念 2</span></li>
     <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The factors affecting the performance of concurrent code (the number of processors, data contention and cache ping-pong, false sharing) in the chapter on designing concurrent code, for concept 6; the part on testing performance in the chapter on testing and debugging multithreaded applications, for concept 2</span></li>
     <li lang="zh-CN">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, 《The Art of Multiprocessor Programming》, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">讲自旋锁与争用（spin locks and contention）的一章用实测说明 cache 一致性流量怎样决定性能，对应概念 6 和 8；讲硬件基础（hardware basics）的附录对应概念 7 的 cache 与内存</span></li>

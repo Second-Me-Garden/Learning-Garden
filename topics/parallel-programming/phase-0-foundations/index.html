@@ -163,14 +163,14 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
   <h3 lang="zh-CN">(a) 加速比与核数：串行比例 0、10 %、50 %，以及本机实测</h3><h3 lang="en">(a) Speedup against cores: serial fractions 0, 10 % and 50 %, and this Mac measured</h3>
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
-         data-captions='["全图：横轴是核数 N（本机最多 10），纵轴是加速比 S。三条 Amdahl 曲线对应串行比例 s = 0、0.1、0.5，圆点和方块是 Lab A 在本机的两组实测，最上面的虚线是 Gustafson。竖虚线左边是 4 个 P 核，右边加入 6 个 E 核。按播放逐步看。",
+         data-captions='["全图：横轴是核数 N（本机最多 10），纵轴是加速比 S。三条 Amdahl 曲线对应串行比例 s = 0、0.1、0.5，圆点和方块是 Lab A 在本机的两组实测，紧贴在 s = 0 直线下方的虚线是 Gustafson。竖虚线左边是 4 个 P 核，右边加入 6 个 E 核。右侧标签「1 累加」「4 累加」是累加器（accumulator）的个数。按播放逐步看。",
            "1. s = 0：没有串行部分，S = N，一条斜率为 1 的直线。这是上限，现实中几乎达不到。",
            "2. s = 0.1：S = 1 / (0.1 + 0.9 / N)。N = 10 时只有 5.26，效率 53 %；N 再大也不会超过 1/s = 10。",
            "3. s = 0.5：一半时间无法并行，曲线很快贴近 1/s = 2。N = 10 时 1.82，加核几乎没有意义。",
            "4. 实测，一个累加器（Lab A 第一组）：到 4 线程几乎是直线（3.68），之后变缓，10 线程 5.84。形状像 s 约 0.1 的 Amdahl 曲线，但程序里并没有 10 % 的串行部分：均分的工作落到更慢的 E 核上，最慢的那份决定总时间。",
            "5. 实测，四个累加器（Lab A 第二组）：单线程快了 3 倍，但 2 线程和 4 线程一样（约 83 GB/s），加入 E 簇后升到 131 GB/s，S 只有 2.46。这条线像 s = 0.5，限制它的却是内存带宽，不是串行代码。",
            "6. Gustafson，s′ = 0.1：问题随 N 一起变大时，S = 0.1 + 0.9 N，N = 10 时 9.1。同样写作 0.1 的串行比例，换一种问法，结论完全不同。"]'
-         data-captions-en='["The whole picture: the x axis is the core count N (10 on this Mac), the y axis is the speedup S. The three Amdahl curves are for serial fractions s = 0, 0.1 and 0.5, the circles and squares are the two sets of Lab A measured on this Mac, and the dashed line at the top is Gustafson. Left of the vertical dashed line are the 4 P cores; to the right the 6 E cores join. Press Play to step through.",
+         data-captions-en='["The whole picture: the x axis is the core count N (10 on this Mac), the y axis is the speedup S. The three Amdahl curves are for serial fractions s = 0, 0.1 and 0.5, the circles and squares are the two sets of Lab A measured on this Mac, and the dashed line just below the s = 0 line is Gustafson. Left of the vertical dashed line are the 4 P cores; to the right the 6 E cores join. In the labels, acc = accumulators. Press Play to step through.",
            "1. s = 0: no serial part, S = N, a straight line of slope 1. This is the upper bound and is almost never reached.",
            "2. s = 0.1: S = 1 / (0.1 + 0.9 / N). At N = 10 it is only 5.26, an efficiency of 53 %; no N takes it past 1/s = 10.",
            "3. s = 0.5: half the time cannot be parallelised, so the curve quickly flattens towards 1/s = 2. At N = 10 it is 1.82, and adding cores is nearly pointless.",
@@ -219,12 +219,12 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
         <text x="606" y="322" class="small">s = 0.5</text>
         <text x="440" y="334" class="small" lang="zh-CN">上限 1/s = 2</text><text x="440" y="334" class="small" lang="en">ceiling 1/s = 2</text></g>
       <!-- step 4: measured, one accumulator -->
-      <g data-step="4"><!-- par --><polyline points="90,338 146.7,307.3 260,252.2 486.7,202.3 600,183.1" style="stroke: var(--ink-2); stroke-width: 1.4; fill: none"/>
+      <g data-step="4"><polyline points="90,338 146.7,307.3 260,252.2 486.7,202.3 600,183.1" style="stroke: var(--ink-2); stroke-width: 1.4; fill: none"/>
         <circle cx="90" cy="338" r="4.5" style="fill: var(--ink)"/><circle cx="146.7" cy="307.3" r="4.5" style="fill: var(--ink)"/><circle cx="260" cy="252.2" r="4.5" style="fill: var(--ink)"/><circle cx="486.7" cy="202.3" r="4.5" style="fill: var(--ink)"/><circle cx="600" cy="183.1" r="4.5" style="fill: var(--ink)"/>
         <text x="606" y="181" class="small" lang="zh-CN">1 累加</text><text x="606" y="181" class="small" lang="en">1 acc</text>
         <text x="468" y="190" class="small">5.24</text><text x="572" y="172" class="small">5.84</text><text x="232" y="244" class="small">3.68</text></g>
       <!-- step 5: measured, four accumulators -->
-      <g data-step="5"><!-- par --><polyline points="90,338 146.7,320.1 260,320.4 486.7,297.7 600,291.3" style="stroke: var(--ink-2); stroke-width: 1.4; fill: none"/>
+      <g data-step="5"><polyline points="90,338 146.7,320.1 260,320.4 486.7,297.7 600,291.3" style="stroke: var(--ink-2); stroke-width: 1.4; fill: none"/>
         <rect x="85.5" y="333.5" width="9" height="9" style="fill: var(--ink)"/><rect x="142.2" y="315.6" width="9" height="9" style="fill: var(--ink)"/><rect x="255.5" y="315.9" width="9" height="9" style="fill: var(--ink)"/><rect x="482.2" y="293.2" width="9" height="9" style="fill: var(--ink)"/><rect x="595.5" y="286.8" width="9" height="9" style="fill: var(--ink)"/>
         <text x="606" y="292" class="small" lang="zh-CN">4 累加</text><text x="606" y="292" class="small" lang="en">4 acc</text>
         <text x="270" y="358" class="small" lang="zh-CN">2→4 线程不再变快：P 簇带宽到顶</text><text x="270" y="358" class="small" lang="en">2 to 4 threads: no gain, P cluster bandwidth full</text></g>
@@ -264,7 +264,7 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
       <text x="470" y="22" class="small" lang="zh-CN">E 簇：6 个能效核</text><text x="470" y="22" class="small" lang="en">E cluster: 6 efficiency cores</text>
 
       <!-- step 1: cores and L1 -->
-      <g data-step="1"><!-- par -->
+      <g data-step="1">
         <rect class="box" x="45" y="32" width="86" height="46"/><text x="55" y="51" class="mono">P0</text><text x="55" y="69" class="small">L1D 128 KB</text>
         <rect class="box" x="141" y="32" width="86" height="46"/><text x="151" y="51" class="mono">P1</text><text x="151" y="69" class="small">L1D 128 KB</text>
         <rect class="box" x="237" y="32" width="86" height="46"/><text x="247" y="51" class="mono">P2</text><text x="247" y="69" class="small">L1D 128 KB</text>
@@ -294,11 +294,11 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
       <g data-step="3">
         <text x="40" y="264" class="small">P0 L1</text>
         <rect class="box" x="90" y="246" width="256" height="26"/>
-        <!-- par --><rect x="90" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="106" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <rect x="90" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="106" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
         <text x="94" y="264" class="mono">a</text><text x="110" y="264" class="mono">b</text>
         <text x="40" y="308" class="small">P1 L1</text>
         <rect class="box" x="90" y="290" width="256" height="26"/>
-        <!-- par --><rect x="90" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="106" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <rect x="90" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="106" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
         <text x="94" y="308" class="mono">a</text><text x="110" y="308" class="mono">b</text>
         <text x="218" y="334" class="small" text-anchor="middle" lang="zh-CN">一条行 = 128 字节，a、b 各 8 字节</text><text x="218" y="334" class="small" text-anchor="middle" lang="en">one line = 128 bytes; a and b are 8 bytes each</text></g>
       <!-- step 4: P0 writes a -->
@@ -315,11 +315,11 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
       <g data-step="6">
         <text x="480" y="264" class="small">P0 L1</text>
         <rect class="box" x="530" y="246" width="256" height="26"/>
-        <!-- par --><rect x="530" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <rect x="530" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
         <text x="534" y="264" class="mono">a</text><text x="794" y="264" class="small" lang="zh-CN">行 X</text><text x="794" y="264" class="small" lang="en">line X</text>
         <text x="480" y="308" class="small">P1 L1</text>
         <rect class="box" x="530" y="290" width="256" height="26"/>
-        <!-- par --><rect x="530" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <rect x="530" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
         <text x="534" y="308" class="mono">b</text><text x="794" y="308" class="small" lang="zh-CN">行 Y</text><text x="794" y="308" class="small" lang="en">line Y</text>
         <text x="480" y="358" class="small" lang="zh-CN">a 在行 X，b 在下一条行 Y：各核独占自己的行</text><text x="480" y="358" class="small" lang="en">a in line X, b in the next line Y: each core owns its line</text>
         <text x="480" y="378" class="small" lang="zh-CN">写入不必通知对方，没有搬运</text><text x="480" y="378" class="small" lang="en">a write needs no message to the other core</text>
@@ -514,8 +514,8 @@ padded  offset(b)=128  median=  211.6 ms  min=  195.7  max=  235.0</pre></li>
     <li><a href="https://doi.org/10.1145/42411.42415">John Gustafson, Reevaluating Amdahl’s law (CACM 31(5), 1988)</a> <span class="lvl" lang="zh-CN">原始论文，两页，概念 2：按比例放大的加速比</span><span class="lvl" lang="en">Original paper, two pages, concept 2: scaled speedup</span></li>
     <li><a href="https://en.cppreference.com/w/cpp/thread/jthread">cppreference: std::jthread</a> · <a href="https://en.cppreference.com/w/cpp/atomic/atomic/is_always_lock_free">std::atomic::is_always_lock_free</a> · <a href="https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size">hardware_destructive_interference_size</a> <span class="lvl" lang="zh-CN">参考，两个实验用到的标准库接口</span><span class="lvl" lang="en">Reference: the standard-library interfaces used in both labs</span></li>
     <li><a href="https://developer.apple.com/documentation/apple-silicon/tuning-your-code-s-performance-for-apple-silicon">Apple: Tuning your code’s performance for Apple silicon</a> · <a href="https://developer.apple.com/documentation/apple-silicon/addressing-architectural-differences-in-your-macos-code">Addressing architectural differences in your macOS code</a> <span class="lvl" lang="zh-CN">官方文档，P/E 核、QoS 与 Apple Silicon 和 x86 的差别（2026-10-31 可访问）</span><span class="lvl" lang="en">Official docs: P/E cores, QoS, and how Apple silicon differs from x86 (reachable on 2026-10-31)</span></li>
-    <li><a href="https://marabos.nl/atomics/hardware.html">Mara Bos, Rust Atomics and Locks, Chapter 7: Understanding the Processor</a> <span class="lvl" lang="zh-CN">免费在线，中级：缓存一致性和伪共享的实验，用 Rust 写，但讲的是硬件</span><span class="lvl" lang="en">Free online, intermediate: cache coherence and a false-sharing experiment, written in Rust but about the hardware</span></li>
-    <li><a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.2023.06.11a.pdf">Paul E. McKenney, perfbook, release v2023.06.11a (PDF)</a> <span class="lvl" lang="zh-CN">免费，入门到进阶：第 3 章讲硬件代价，第 5 章「Counting」正是 Lab B 问题的系统解法</span><span class="lvl" lang="en">Free, beginner to advanced: Chapter 3 covers hardware costs, and Chapter 5, “Counting”, is the systematic answer to the Lab B problem</span></li>
+    <li><a href="https://mara.nl/atomics/hardware.html">Mara Bos, Rust Atomics and Locks, Chapter 7: Understanding the Processor</a> <span class="lvl" lang="zh-CN">免费在线，中级：缓存一致性和伪共享的实验，用 Rust 写，但讲的是硬件</span><span class="lvl" lang="en">Free online, intermediate: cache coherence and a false-sharing experiment, written in Rust but about the hardware</span></li>
+    <li><a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.2026.06.21a.pdf">Paul E. McKenney, perfbook, release v2026.06.21a (PDF)</a> <span class="lvl" lang="zh-CN">免费，入门到进阶：第 3 章讲硬件代价，第 5 章「Counting」正是 Lab B 问题的系统解法</span><span class="lvl" lang="en">Free, beginner to advanced: Chapter 3 covers hardware costs, and Chapter 5, “Counting”, is the systematic answer to the Lab B problem</span></li>
     <li><a href="https://people.freebsd.org/~lstewart/articles/cpumemory.pdf">Ulrich Drepper, What Every Programmer Should Know About Memory (2007)</a> <span class="lvl" lang="zh-CN">二手资料，进阶：缓存、缓存行与内存带宽的长篇讲解；以 x86 为例，数字已过时，原理仍适用</span><span class="lvl" lang="en">Secondary, advanced: a long treatment of caches, cache lines and memory bandwidth; x86-based and its numbers are dated, but the principles still apply</span></li>
   </ul>
 
@@ -525,10 +525,10 @@ padded  offset(b)=128  median=  211.6 ms  min=  195.7  max=  235.0</pre></li>
     <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The chapter on managing threads matches concept 4 (launching, joining and owning a <code>std::thread</code>); the chapter on designing concurrent code matches concept 5 and Lab B (data contention, cache ping-pong, false sharing)</span></li>
     <li lang="zh-CN">Maurice Herlihy, Nir Shavit, Victor Luchangco &amp; Michael Spear, 《The Art of Multiprocessor Programming》, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">引言章对应概念 1–2（并行的动机与 Amdahl 定律）；讲多处理器硬件基础的附录对应概念 3（缓存、一致性、伪共享）</span></li>
     <li lang="en">Maurice Herlihy, Nir Shavit, Victor Luchangco &amp; Michael Spear, <em>The Art of Multiprocessor Programming</em>, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">The introductory chapter matches concepts 1–2 (why parallel, and Amdahl’s law); the appendix on multiprocessor hardware basics matches concept 3 (caches, coherence, false sharing)</span></li>
-    <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, release v2023.06.11a, 免费（CC BY-SA）. <span class="lvl">第 2 章「Introduction」对应概念 1–2；第 3 章「Hardware and its Habits」对应概念 3 和动画 (b)；第 5 章「Counting」对应 Lab B · 「免费在线」<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/">kernel.org/pub/linux/kernel/people/paulmck/perfbook</a></span></li>
-    <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, release v2023.06.11a, free (CC BY-SA). <span class="lvl">Chapter 2, “Introduction”, matches concepts 1–2; Chapter 3, “Hardware and its Habits”, matches concept 3 and diagram (b); Chapter 5, “Counting”, matches Lab B · free online: <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/">kernel.org/pub/linux/kernel/people/paulmck/perfbook</a></span></li>
-    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447. <span class="lvl">第 7 章「Understanding the Processor」的「Caching」部分（Cache Coherence、Impact on Performance）对应概念 3 和 Lab B · 「免费在线」<a href="https://marabos.nl/atomics/">marabos.nl/atomics</a></span></li>
-    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447. <span class="lvl">The “Caching” part of Chapter 7, “Understanding the Processor” (Cache Coherence, Impact on Performance), matches concept 3 and Lab B · free online: <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a></span></li>
+    <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, release v2026.06.21a, 免费（CC BY-SA）. <span class="lvl">第 2 章「Introduction」对应概念 1–2；第 3 章「Hardware and its Habits」对应概念 3 和动画 (b)；第 5 章「Counting」对应 Lab B · 「免费在线」<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/">kernel.org/pub/linux/kernel/people/paulmck/perfbook</a></span></li>
+    <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, release v2026.06.21a, free (CC BY-SA). <span class="lvl">Chapter 2, “Introduction”, matches concepts 1–2; Chapter 3, “Hardware and its Habits”, matches concept 3 and diagram (b); Chapter 5, “Counting”, matches Lab B · free online: <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/">kernel.org/pub/linux/kernel/people/paulmck/perfbook</a></span></li>
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447. <span class="lvl">第 7 章「Understanding the Processor」的「Caching」部分（Cache Coherence、Impact on Performance）对应概念 3 和 Lab B · 「免费在线」<a href="https://mara.nl/atomics/">mara.nl/atomics</a></span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447. <span class="lvl">The “Caching” part of Chapter 7, “Understanding the Processor” (Cache Coherence, Impact on Performance), matches concept 3 and Lab B · free online: <a href="https://mara.nl/atomics/">mara.nl/atomics</a></span></li>
   </ol>
 
   <nav class="pn">

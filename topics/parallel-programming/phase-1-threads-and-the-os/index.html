@@ -22,9 +22,9 @@
   </header>
 
   <p class="meta" lang="zh-CN">Phase 1 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 1 / 8 · about 1–2 weeks</p>
-  <h1><span lang="zh-CN">线程与操作系统</span><span lang="en">Threads and the OS</span> <span class="en" lang="zh-CN">Threads and the OS：pthreads、std::jthread、GCD，以及它们下面的内核</span><span class="en" lang="en">pthreads, std::jthread, GCD, and the kernel underneath them</span></h1>
-  <p class="lede" lang="zh-CN">Phase 0 里你用线程把一个求和分给了多个核。这一阶段看线程本身：调用 <code>pthread_create</code> 时向内核要了什么，栈从哪里来，调度器怎样把它放到 P 核或 E 核上，以及创建一个线程到底要花多少时间。然后比较三种写法（pthreads、<code>std::jthread</code>、GCD），用线程池把创建成本摊掉，最后故意开 100 个线程，看超订（oversubscription）在这台 Mac 上让什么变慢了、为什么。页面上的每个数字都是 2026-10-31 在实验机 Apple M5 上实测的。</p>
-  <p class="lede" lang="en">In Phase 0 you used threads to split a sum across cores. This phase looks at the thread itself: what <code>pthread_create</code> asks the kernel for, where the stack comes from, how the scheduler puts the thread on a P core or an E core, and how long creating one actually takes. Then it compares three ways to write it (pthreads, <code>std::jthread</code>, GCD), uses a thread pool to amortise the creation cost, and finally starts 100 threads on purpose to see what oversubscription slows down on this Mac, and why. Every number on this page was measured on the lab Apple M5 on 2026-10-31.</p>
+  <h1>Threads and the OS <span class="en" lang="zh-CN">线程与操作系统：pthreads、std::jthread、GCD，以及它们下面的内核</span><span class="en" lang="en">pthreads, std::jthread, GCD, and the kernel underneath them</span></h1>
+  <p class="lede" lang="zh-CN">Phase 0 里你用线程把一个求和分给了多个核。这一阶段看线程本身：调用 <code>pthread_create</code> 时向内核要了什么，栈从哪里来，调度器怎样把它放到 P 核或 E 核上，以及创建一个线程到底要花多少时间。然后比较三种写法（pthreads、<code>std::jthread</code>、GCD），用线程池把创建成本摊掉，最后故意开 100 个线程，看超订（oversubscription）在这台 Mac 上让什么变慢了、为什么。页面上每个实测数字都是 2026-10-31 在实验机 Apple M5 上测得的；Linux 的默认值和各级基础优先级是引用的，不是实测。</p>
+  <p class="lede" lang="en">In Phase 0 you used threads to split a sum across cores. This phase looks at the thread itself: what <code>pthread_create</code> asks the kernel for, where the stack comes from, how the scheduler puts the thread on a P core or an E core, and how long creating one actually takes. Then it compares three ways to write it (pthreads, <code>std::jthread</code>, GCD), uses a thread pool to amortise the creation cost, and finally starts 100 threads on purpose to see what oversubscription slows down on this Mac, and why. Every measured number on this page comes from the lab Apple M5 on 2026-10-31; the Linux defaults and the base priorities are quoted, not measured.</p>
 
   <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
   <div class="goals">
@@ -163,8 +163,8 @@ $ ulimit -s
   <ul>
     <li lang="zh-CN"><strong>自愿和非自愿。</strong>线程自己等锁、等 I/O、等 join 而让出核，是自愿切换（voluntary）；时间片用完或被更高优先级的线程抢走，是非自愿切换（involuntary）。<code>getrusage</code> 的 <code>ru_nvcsw</code> 和 <code>ru_nivcsw</code> 分别数这两种，Lab B 用后者。</li>
     <li lang="en"><strong>Voluntary and involuntary.</strong> A thread that gives up its core to wait for a lock, for I/O or for a join makes a voluntary switch; one whose time slice runs out or that is preempted by a higher-priority thread makes an involuntary switch. <code>getrusage</code> counts them in <code>ru_nvcsw</code> and <code>ru_nivcsw</code>; Lab B uses the latter.</li>
-    <li lang="zh-CN"><strong>代价有直接和间接两份。</strong>直接的是切换本身的指令；间接的往往更大：新线程上核时 cache 和 TLB 里装的是别人的数据，要重新热起来。本页不单独测切换本身（那需要精确的乒乓测量，Phase 7 再做），只在 Lab B 看它在整体上造成的结果。</li>
-    <li lang="en"><strong>The cost comes in a direct part and an indirect part.</strong> The direct part is the switch instructions themselves; the indirect part is often larger: when the new thread comes on, the cache and the TLB hold someone else’s data and must warm up again. This page does not measure the switch alone (that needs a careful ping-pong benchmark, done in Phase 7); Lab B only looks at its overall effect.</li>
+    <li lang="zh-CN"><strong>代价有直接和间接两份。</strong>直接的是切换本身的指令；间接的往往更大：新线程上核时 cache 和 TLB 里装的是别人的数据，要重新热起来。本页不单独测切换本身（那需要精确的乒乓测量，本专题没有测），只在 Lab B 看它在整体上造成的结果。</li>
+    <li lang="en"><strong>The cost comes in a direct part and an indirect part.</strong> The direct part is the switch instructions themselves; the indirect part is often larger: when the new thread comes on, the cache and the TLB hold someone else’s data and must warm up again. This page does not measure the switch alone (that needs a careful ping-pong benchmark, not measured in this topic); Lab B only looks at its overall effect.</li>
     <li lang="zh-CN"><strong>吃 CPU 的线程优先级会往下掉。</strong>XNU 的普通线程是 timeshare 的：有效优先级从基础优先级出发，用得越多掉得越多。Lab B 里 100 个忙等的线程用 <code>ps -M</code> 看，PRI 从默认的 31 掉到了 1 到 19 之间（两次运行），就是这个衰减（内核专题 Phase 1 的「调度」）。</li>
     <li lang="en"><strong>CPU-hungry threads drop in priority.</strong> Ordinary XNU threads are timeshare: the effective priority starts at the base priority and falls the more CPU the thread uses. Look at the 100 busy-waiting threads of Lab B with <code>ps -M</code> and PRI has fallen from the default 31 to between 1 and 19 (two runs); that is the decay (the scheduling concept of kernel Phase 1).</li>
   </ul>
@@ -399,7 +399,7 @@ exit 0
            "6. eret 回到用户态，从 thread_start 跑到 _pthread_start，再调用你的函数。Lab B 的 sample 输出里，每个工作线程的栈底都是这两帧。",
            "7. 时间片用完被抢占，或者自己等锁、等 I/O 而阻塞，线程就离开核，回到运行队列或等待队列，以后再被选中。一个线程一生中会这样来回很多次。",
            "8. 函数返回：线程唤醒等着 join 它的线程，再调用 __bsdthread_terminate，请内核在销毁线程时释放它脚下的栈。主线程在 __ulock_wait 里醒来，回收 pthread_t。"]'
-         data-captions-en='["Overview: at the top is libpthread and your function in user space, in the middle the XNU kernel, at the bottom the cores and the end of the thread. Press Play to follow one thread from creation to exit.",
+         data-captions-en='["The whole picture: at the top is libpthread and your function in user space, in the middle the XNU kernel, at the bottom the cores and the end of the thread. Press Play to follow one thread from creation to exit.",
            "1. pthread_create starts in user space: one mach_vm_map maps a whole region, with the guard page at the lowest address, a 512 KB stack in the middle and the pthread_t at the top. The stack grows down, so the initial stack pointer is the address of the pthread_t.",
            "2. One system call, __bsdthread_create, enters the kernel with the function, the argument, the stack, the pthread_t and the QoS.",
            "3. The kernel builds a Mach thread in the current task and writes its first registers: pc points to thread_start, sp to the new stack, and x0 holds the pthread_t. On Linux this step is clone3, and the result is a new task_struct that shares the mm.",
@@ -477,7 +477,7 @@ exit 0
         <text x="44" y="370" class="mono">__bsdthread_terminate(freeaddr, freesize, …)</text>
         <text x="44" y="390" class="mono">main: _pthread_join → __ulock_wait → wakes</text>
         <text x="44" y="412" class="small" lang="zh-CN">内核在销毁线程时释放它的栈；主线程回收 pthread_t</text><text x="44" y="412" class="small" lang="en">the kernel frees the stack as it destroys the thread; main reclaims the pthread_t</text>
-        <path class="arrow" d="M470 128 L390 172 L390 324"/></g>
+        <path class="arrow" d="M872 110 L886 110 L886 408 L574 408"/></g>
     </svg>
   </div>
 
@@ -493,7 +493,7 @@ exit 0
            "6. 做完回去取下一个，线程不重建。本机实测每个任务约 0.25 微秒，新建一个线程约 6 微秒。",
            "7. GCD 是同样的形状，但池子是整个系统共用的，由内核的 workqueue 管理：线程阻塞时补线程，空闲久了回收。本机 kern.wq_max_threads 是 512。",
            "8. 关闭：jthread 析构时先 request_stop 再 join。带 stop token 的 wait 只在已请求停止且队列为空时返回 false，所以剩下的任务会先做完。"]'
-         data-captions-en='["Overview: top left is the thread that submits tasks, in the middle the work queue guarded by one mutex, along the bottom a fixed set of worker threads, top right GCD, bottom right the shutdown. Press Play to follow one task round the loop.",
+         data-captions-en='["The whole picture: top left is the thread that submits tasks, in the middle the work queue guarded by one mutex, along the bottom a fixed set of worker threads, top right GCD, bottom right the shutdown. Press Play to follow one task round the loop.",
            "1. The submitter locks, puts the task at the back of the queue, unlocks, then calls notify_one to wake one worker. Submitting creates no thread.",
            "2. The work queue is a deque guarded by one mutex. Every submitter and every worker contends for that one lock, and with tiny tasks it is the bottleneck.",
            "3. The workers are created once at the start, usually as many as there are cores, 10 on this Mac. While the queue is empty they sleep on a condition variable and use no CPU.",
@@ -509,13 +509,13 @@ exit 0
       </defs>
 
       <!-- step 1: submitter (par token belongs on this box) -->
-      <g data-step="1"><rect class="box" x="30" y="30" width="250" height="80"/><!-- par -->
+      <g data-step="1"><rect class="box" x="30" y="30" width="250" height="80"/>
         <text x="44" y="56" lang="zh-CN">1. 提交者 submit(job)</text><text x="44" y="56" lang="en">1. Submitter: submit(job)</text>
         <text x="44" y="82" class="mono">lock · push_back · notify_one</text>
         <path class="arrow" d="M280 70 L328 70"/></g>
 
       <!-- step 2: the queue -->
-      <g data-step="2"><rect class="box" x="330" y="30" width="330" height="80"/><!-- par -->
+      <g data-step="2"><rect class="box" x="330" y="30" width="330" height="80"/>
         <text x="344" y="54" lang="zh-CN">2. 工作队列，一把 mutex</text><text x="344" y="54" lang="en">2. Work queue, one mutex</text>
         <rect class="box" x="344" y="68" width="50" height="28"/><text x="352" y="87" class="mono">job</text>
         <rect class="box" x="400" y="68" width="50" height="28"/><text x="408" y="87" class="mono">job</text>
@@ -525,7 +525,7 @@ exit 0
 
       <!-- step 3: the workers -->
       <g data-step="3">
-        <rect class="box" x="30" y="200" width="130" height="80"/><!-- par -->
+        <rect class="box" x="30" y="200" width="130" height="80"/>
         <text x="44" y="226" class="mono">worker 0</text>
         <text x="44" y="250" class="small" lang="zh-CN">睡在 cv 上</text><text x="44" y="250" class="small" lang="en">asleep on cv</text>
         <rect class="box" x="180" y="200" width="130" height="80"/>
@@ -546,7 +546,7 @@ exit 0
         <text x="194" y="250" class="small" lang="zh-CN">醒了，拿到 job</text><text x="194" y="250" class="small" lang="en">awake, has a job</text></g>
 
       <!-- step 5: run outside the lock -->
-      <g data-step="5"><rect class="box" x="180" y="300" width="130" height="44"/><!-- par -->
+      <g data-step="5"><rect class="box" x="180" y="300" width="130" height="44"/>
         <text x="190" y="318" class="mono">job()</text>
         <text x="190" y="336" class="small" lang="zh-CN">在锁外执行</text><text x="190" y="336" class="small" lang="en">outside the lock</text>
         <path class="arrow" d="M245 280 L245 298"/></g>
@@ -556,7 +556,7 @@ exit 0
         <text x="330" y="362" class="small" lang="zh-CN">做完回去取下一个，线程不重建</text><text x="330" y="362" class="small" lang="en">back for the next job, no new thread</text></g>
 
       <!-- step 7: GCD -->
-      <g data-step="7"><rect class="box" x="690" y="30" width="180" height="80"/><!-- par -->
+      <g data-step="7"><rect class="box" x="690" y="30" width="180" height="80"/>
         <text x="704" y="54" lang="zh-CN">7. GCD：同样的形状</text><text x="704" y="54" lang="en">7. GCD: same shape</text>
         <text x="704" y="76" class="small" lang="zh-CN">池子由内核 workqueue 管</text><text x="704" y="76" class="small" lang="en">pool run by the kernel</text>
         <text x="704" y="96" class="mono">wq_max_threads 512</text></g>
@@ -806,12 +806,12 @@ spin    T=  1  wall   0.01 s  cpu   0.01 s  involuntary switches      2
 spin    T=  4  wall   0.15 s  cpu   0.57 s  involuntary switches     29
 spin    T= 10  wall   0.70 s  cpu   6.70 s  involuntary switches   1803
 spin    T=100  wall   4.70 s  cpu  45.59 s  involuntary switches  18776
-# 2026-10-31 实验机输出；第二次运行 compute T=100 为 0.45 s，spin T=100 为 5.74 s</pre>
-        <span lang="zh-CN">先看 <code>compute</code>。4 个线程 3.7 倍加速，正好落在 4 个 P 核上。到 10 个线程只再快一点，因为多出来的 6 个是 E 核，每个慢约 1.6 倍；CPU 时间从 3.30 s 涨到 4.25 s，也是同样的工作在慢核上用了更多核秒。100 个线程和 10 个一样快：超订对互不等待的计算几乎免费。再看 <code>spin</code>。从 1 到 4 个线程已经慢了 15 倍，这是锁所在的 cache line 在核之间来回传（Phase 2 会量它）。从 10 到 100 个线程又慢了 7 倍，这一份才是超订的代价：持锁的线程被换下核，其他线程空转烧掉整段时间片。</span><span lang="en">Look at <code>compute</code> first. 4 threads give a 3.7× speedup, exactly on the 4 P cores. 10 threads are only a little faster, because the extra 6 are E cores, each about 1.6 times slower; CPU time rising from 3.30 s to 4.25 s is the same effect, the same work taking more core-seconds on slower cores. 100 threads are as fast as 10: oversubscription is nearly free for computation that never waits. Now <code>spin</code>. Going from 1 to 4 threads is already 15 times slower; that is the cache line holding the lock bouncing between cores (Phase 2 measures it). Going from 10 to 100 threads is another 7 times slower, and that part is the cost of oversubscription: the lock holder is switched off its core and the others spin through whole time slices.</span></li>
+# 2026-10-31 实验机，单次运行的输出；另一次运行中 compute T=100 为 0.45 s，spin T=100 为 5.74 s</pre>
+        <span lang="zh-CN">上面是单次运行的数字，只有两行复测过。先看 <code>compute</code>。4 个线程 3.7 倍加速，正好落在 4 个 P 核上。到 10 个线程只再快一点，因为多出来的 6 个是 E 核，每个慢约 1.6 倍；CPU 时间从 3.30 s 涨到 4.25 s，也是同样的工作在慢核上用了更多核秒。100 个线程和 10 个一样快：超订对互不等待的计算几乎免费。再看 <code>spin</code>。从 1 到 4 个线程已经慢了 15 倍，这是锁所在的 cache line 在核之间来回传（Phase 2 会量它）。从 10 到 100 个线程又慢了 7 倍，这一份才是超订的代价：持锁的线程被换下核，其他线程空转烧掉整段时间片。</span><span lang="en">These are the numbers of a single run; only two lines were repeated. Look at <code>compute</code> first. 4 threads give a 3.7× speedup, exactly on the 4 P cores. 10 threads are only a little faster, because the extra 6 are E cores, each about 1.6 times slower; CPU time rising from 3.30 s to 4.25 s is the same effect, the same work taking more core-seconds on slower cores. 100 threads are as fast as 10: oversubscription is nearly free for computation that never waits. Now <code>spin</code>. Going from 1 to 4 threads is already 15 times slower; that is the cache line holding the lock bouncing between cores (Phase 2 measures it). Going from 10 to 100 threads is another 7 times slower, and that part is the cost of oversubscription: the lock holder is switched off its core and the others spin through whole time slices.</span></li>
       <li><span lang="zh-CN">程序跑着的时候用 <code>ps -M</code> 看它的 Mach 线程，不需要 sudo。数一下线程数，再按优先级分组：</span><span lang="en">While the program runs, look at its Mach threads with <code>ps -M</code>; no sudo needed. Count the threads, then group them by priority:</span><pre data-lang="sh">$ ./oversub 100 spin &amp;  PID=$!;  sleep 1.5
 $ ps -M -p $PID | head -4
 USER            PID   TT   %CPU STAT PRI     STIME     UTIME COMMAND
-haoxiangzhang 26410   ??    0.0 S    31T   0:00.00   0:00.00 ./oversub 100 spin
+you           26410   ??    0.0 S    31T   0:00.00   0:00.00 ./oversub 100 spin
               26410        11.5 R    14T   0:00.00   0:00.16
               26410        11.7 R    14T   0:00.00   0:00.15
 $ ps -M -p $PID | tail -n +2 | wc -l
@@ -912,8 +912,8 @@ less ~/par-lab/phase-1/oversub.spindump.txt</pre><span lang="zh-CN">参数依次
     <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The chapter on managing threads for concepts 1 and 3 and Lab A; the thread-pool part of the chapter on advanced thread management for concept 6</span></li>
     <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, 免费（CC BY-SA），本页读的是 v2026.06.21a 和 2026-10-31 的 git 树，<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">Tools of the Trade 一章的 POSIX Thread Creation and Destruction、Per-Thread Variables、Alternatives to POSIX Operations 三节对应概念 2 和 3；Hardware and its Habits 一章的 Overheads 一节对应概念 4 和 7</span></li>
     <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, free (CC BY-SA); this page read release v2026.06.21a and the git tree as of 2026-10-31, <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">The sections POSIX Thread Creation and Destruction, Per-Thread Variables and Alternatives to POSIX Operations of the chapter Tools of the Trade for concepts 2 and 3; the section Overheads of the chapter Hardware and its Habits for concepts 4 and 7</span></li>
-    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">第 1 章 Basics of Rust Concurrency 的 Threads in Rust 一节对应概念 1；第 4 章 Building Our Own Spin Lock 对应概念 7 和 Lab B；第 8 章 Operating System Primitives 的 Interfacing with the Kernel 与 macOS 两节对应概念 2、4、5。本专题只读不练 Rust</span></li>
-    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">The section Threads in Rust of chapter 1, Basics of Rust Concurrency, for concept 1; chapter 4, Building Our Own Spin Lock, for concept 7 and Lab B; the sections Interfacing with the Kernel and macOS of chapter 8, Operating System Primitives, for concepts 2, 4 and 5. This topic reads the Rust, it does not run it</span></li>
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://mara.nl/atomics/">mara.nl/atomics</a>. <span class="lvl">第 1 章 Basics of Rust Concurrency 的 Threads in Rust 一节对应概念 1；第 4 章 Building Our Own Spin Lock 对应概念 7 和 Lab B；第 8 章 Operating System Primitives 的 Interfacing with the Kernel 与 macOS 两节对应概念 2、4、5。本专题只读不练 Rust</span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://mara.nl/atomics/">mara.nl/atomics</a>. <span class="lvl">The section Threads in Rust of chapter 1, Basics of Rust Concurrency, for concept 1; chapter 4, Building Our Own Spin Lock, for concept 7 and Lab B; the sections Interfacing with the Kernel and macOS of chapter 8, Operating System Primitives, for concepts 2, 4 and 5. This topic reads the Rust, it does not run it</span></li>
     <li lang="zh-CN">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, 《The Art of Multiprocessor Programming》, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">讲调度与工作分配（scheduling and work distribution）的一章对应概念 6 和图解 (b)，Phase 5 的 work stealing 用得更多</span></li>
     <li lang="en">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, <em>The Art of Multiprocessor Programming</em>, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">The chapter on scheduling and work distribution for concept 6 and diagram (b); the work stealing of Phase 5 uses it much more</span></li>
   </ol>
