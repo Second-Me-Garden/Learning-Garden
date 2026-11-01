@@ -23,8 +23,8 @@
 
   <p class="meta" lang="zh-CN">Phase 0 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 0 / 8 · about 1–2 weeks</p>
   <h1>Foundations <span class="en" lang="zh-CN">基础：为什么用 GPU、SIMT 与 warp、grid/block/thread、第一个内核、错误检查与计时</span><span class="en" lang="en">Why GPUs, SIMT and warps, grid, block and thread, a first kernel, error checking and timing</span></h1>
-  <p class="lede" lang="zh-CN">CPU 用几个很强的核，把一条指令流跑得尽可能快；GPU 用成千上万个简单的线程，把一大批相同的工作一起推过去。这一阶段讲清 CUDA 的编程模型：host 与 device、kernel、grid、block、thread，以及硬件怎样把 32 个线程编成一个 warp、把 block 分给 SM。然后写第一个内核（向量加法），带上错误检查和 <code>cudaEvent</code> 计时。CUDA 实验在 Colab 的 T4 上做；同一个内核的 Metal 版本在这台 Apple M5 上实测：n = 2<sup>26</sup> 时 GPU 用 6.3 ms，约 127 GB/s；而只有一千个元素时，提交和等待的开销是 GPU 实际工作时间的 15 倍以上。</p>
-  <p class="lede" lang="en">A CPU uses a few strong cores to run one instruction stream as fast as possible; a GPU uses tens of thousands of simple threads to push a large batch of identical work through together. This phase lays out the CUDA programming model: host and device, kernel, grid, block and thread, and how the hardware packs 32 threads into a warp and hands blocks to SMs. Then you write a first kernel (vector add) with error checking and <code>cudaEvent</code> timing. The CUDA lab runs on a Colab T4; the Metal version of the same kernel is measured on this Apple M5: at n = 2<sup>26</sup> the GPU takes 6.3 ms, about 127 GB/s, while at a thousand elements the cost of submitting and waiting is more than 15 times the GPU’s actual work.</p>
+  <p class="lede" lang="zh-CN">CPU 用几个很强的核，把一条指令流跑得尽可能快；GPU 用成千上万个简单的线程，把一大批相同的工作一起推过去。这一阶段讲清 CUDA 的编程模型：host 与 device、kernel、grid、block、thread，以及硬件怎样把 32 个线程编成一个 warp、把 block 分给 SM。然后写第一个内核（向量加法），带上错误检查和 <code>cudaEvent</code> 计时。CUDA 实验在 Colab 的 T4 上做；同一个内核的 Metal 版本在这台 Apple M5 上实测：n = 2<sup>26</sup> 时 GPU 用 6.3 ms，约 127 GB/s；而只有一千个元素时，提交和等待的开销是 GPU 实际工作时间的 15 倍以上。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-10-31 在这台 Apple M5 上实际运行，数字原样贴出；Lab A 的 CUDA 代码<strong>未运行</strong>，是 2026-10-31 根据 CUDA 文档整理的。</p>
+  <p class="lede" lang="en">A CPU uses a few strong cores to run one instruction stream as fast as possible; a GPU uses tens of thousands of simple threads to push a large batch of identical work through together. This phase lays out the CUDA programming model: host and device, kernel, grid, block and thread, and how the hardware packs 32 threads into a warp and hands blocks to SMs. Then you write a first kernel (vector add) with error checking and <code>cudaEvent</code> timing. The CUDA lab runs on a Colab T4; the Metal version of the same kernel is measured on this Apple M5: at n = 2<sup>26</sup> the GPU takes 6.3 ms, about 127 GB/s, while at a thousand elements the cost of submitting and waiting is more than 15 times the GPU’s actual work. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-10-31 and its numbers are pasted as they came; the CUDA code of Lab A is <strong>not run</strong>, assembled from the CUDA documentation on 2026-10-31.</p>
 
   <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
   <div class="goals">
@@ -64,18 +64,18 @@
   <p lang="en"><strong>How latency gets hidden</strong>: a global-memory read waits hundreds of clock cycles (an approximate order of magnitude; Phase 1 covers it). A CPU reduces that wait with caches and out-of-order execution; a GPU takes another route and keeps many warps resident on each SM at once. Every thread’s registers stay in the SM’s large register file for the whole life of its block, so switching from one warp to another saves and restores nothing: each cycle the scheduler just picks a warp whose next instruction has its operands ready and issues it. While one warp waits on memory, other warps keep issuing, and the arithmetic units stay busy. Compare an operating-system thread switch, which writes registers back to memory and loads others (Kernel Engineering Phase 1); a GPU warp switch happens in hardware and costs almost nothing.</p>
   <p lang="zh-CN"><strong>需要多少线程</strong>：Little 定律说，要维持带宽 B，在途的数据量必须等于 B × 延迟 L。拿 T4 来算：NVIDIA 给出的显存带宽是 320 GB/s 以上；假设一次读的延迟约 500 ns（这是示意值，不是测量值），在途数据就得有约 160 KB，也就是同时有约四万个 <code>float</code> 正在被读。一个 CPU 核同时只能挂起少量缓存未命中，GPU 能做到，是因为它有几万个线程，每个线程手里挂着一次读。所以对 GPU 来说「够并行」意味着至少几万个线程；Lab A 里 n = 1024 时，大部分 GPU 是闲着的。</p>
   <p lang="en"><strong>How many threads it takes</strong>: Little’s law says that to sustain a bandwidth B, the data in flight must equal B × the latency L. Take the T4: NVIDIA gives its memory bandwidth as 320+ GB/s; assume a read latency of about 500 ns (an illustrative value, not a measurement), and about 160 KB must be in flight, that is, about forty thousand <code>float</code>s being read at once. A CPU core can keep only a small number of cache misses outstanding; a GPU gets there because it has tens of thousands of threads, each holding one read in flight. So for a GPU, “parallel enough” means at least tens of thousands of threads; at n = 1024 in Lab A, most of the GPU sits idle.</p>
-  <p lang="zh-CN">延伸阅读：PMPP 第 4 版的引言章（异构并行计算、面向延迟与面向吞吐的设计）和讲计算架构与调度的一章（延迟容忍）；Hennessy &amp; Patterson 第 4 章「Data-Level Parallelism in Vector, SIMD, and GPU Architectures」。</p>
-  <p lang="en">Further reading: the introductory chapter of PMPP, 4th ed. (heterogeneous parallel computing, latency-oriented and throughput-oriented design) and its chapter on compute architecture and scheduling (latency tolerance); Hennessy &amp; Patterson, Chapter 4, “Data-Level Parallelism in Vector, SIMD, and GPU Architectures”.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版的引言章（异构并行计算、面向延迟与面向吞吐的设计）和讲计算架构与调度的一章（延迟容忍）；Hennessy &amp; Patterson 第 4 章「Data-Level Parallelism in Vector, SIMD, and GPU Architectures」。</p>
+  <p lang="en">Further reading: the introductory chapter of PMPP, 5th ed. (heterogeneous parallel computing, latency-oriented and throughput-oriented design) and its chapter on compute architecture and scheduling (latency tolerance); Hennessy &amp; Patterson, Chapter 4, “Data-Level Parallelism in Vector, SIMD, and GPU Architectures”.</p>
 
   <h3 lang="zh-CN">2. SIMT 与 warp</h3><h3 lang="en">2. SIMT and the warp</h3>
   <p lang="zh-CN"><strong>SIMD</strong>（Parallel Programming <a href="../../parallel-programming/phase-6-simd/index.html">Phase 6</a>）：一条指令作用于一个固定宽度的向量寄存器，比如 NEON 的 128 位，一次 4 个 <code>float</code>。向量宽度写在代码里，由你或编译器写出向量指令，自己处理尾部和掩码。</p>
   <p lang="en"><strong>SIMD</strong> (Parallel Programming <a href="../../parallel-programming/phase-6-simd/index.html">Phase 6</a>): one instruction acts on a fixed-width vector register, such as NEON’s 128 bits, 4 <code>float</code>s at a time. The vector width is written into the code: you or the compiler write the vector instructions and handle the tail and the masks yourselves.</p>
   <p lang="zh-CN"><strong>SIMT</strong>（Single Instruction, Multiple Threads）：你只写<em>一个</em>标量线程的代码。硬件把一个 block 里编号连续的 32 个线程编成一个 warp，一条指令同时为这 32 个线程发射（CUDA C++ Programming Guide，「Warps and SIMT」一节）。每个线程有自己的寄存器，可以各自走分支；一个 warp 里的线程走了不同的路径时，warp 会把两条路径都执行一遍，每次屏蔽掉不走这条路的线程，这叫 divergence（分支发散，Phase 2）。从 Volta 开始有 Independent Thread Scheduling，warp 可以在分支之外保持分开（Best Practices Guide），但 warp 内所有线程走同一条路时最快。</p>
   <p lang="en"><strong>SIMT</strong> (Single Instruction, Multiple Threads): you write the code of <em>one</em> scalar thread. The hardware groups 32 consecutively numbered threads of a block into a warp and issues one instruction for all 32 at once (CUDA C++ Programming Guide, section “Warps and SIMT”). Each thread has its own registers and may take its own branch; when the threads of one warp take different paths, the warp executes both paths in turn, masking off the threads that did not take each one. This is divergence (Phase 2). Since Volta, Independent Thread Scheduling lets a warp stay diverged beyond the conditional block (Best Practices Guide), but a warp is fastest when all its threads follow the same path.</p>
-  <p lang="zh-CN"><strong>为什么是 32</strong>：编程指南把 warp 定为 32 个线程，代码里可以读 <code>warpSize</code>，NVIDIA 到目前的 GPU 都用 32。这是一个设计取舍（以下是常见的解释，属推断）：一次取指、译码和调度决定服务 32 条通道，控制逻辑被摊到很多运算单元上；更宽的 warp 能摊得更薄，但线程一发散，浪费的通道也更多。还有一个巧合会在 Phase 1 用到：32 个线程各读一个 4 字节的 <code>float</code>，正好是连续的 128 字节。Apple GPU 的对应概念叫 SIMD-group，这台 M5 打印的 <code>threadExecutionWidth</code> 也是 32（Lab B）。实际后果是：block 的线程数应当是 32 的倍数，否则最后一个 warp 有空位。</p>
-  <p lang="en"><strong>Why 32</strong>: the programming guide sets the warp at 32 threads, code can read <code>warpSize</code>, and NVIDIA GPUs to date all use 32. It is a design trade-off (what follows is the common explanation, an inference): one instruction fetch, decode and scheduling decision serves 32 lanes, so the control logic is spread over many arithmetic units; a wider warp would spread it thinner, but would waste more lanes whenever threads diverge. One coincidence will matter in Phase 1: 32 threads each reading a 4-byte <code>float</code> read exactly 128 contiguous bytes. Apple’s GPU calls the same idea a SIMD-group, and this M5 prints a <code>threadExecutionWidth</code> of 32 as well (Lab B). The practical consequence: a block’s thread count should be a multiple of 32, or its last warp has empty lanes.</p>
-  <p lang="zh-CN">延伸阅读：PMPP 第 4 版讲计算架构与调度的一章（warp 与 SIMD 硬件、控制发散）；Hennessy &amp; Patterson 第 4 章中把 GPU 与向量机、SIMD 扩展对照的部分。</p>
-  <p lang="en">Further reading: the chapter on compute architecture and scheduling in PMPP, 4th ed. (warps and SIMD hardware, control divergence); the part of Hennessy &amp; Patterson, Chapter 4, that sets GPUs against vector machines and SIMD extensions.</p>
+  <p lang="zh-CN"><strong>为什么是 32</strong>：编程指南把 warp 定为 32 个线程，代码里可以读 <code>warpSize</code>，指南当前表格里的每一个 compute capability（7.5 到 12.x）warp 大小都是 32。这是一个设计取舍（以下是常见的解释，属推断）：一次取指、译码和调度决定服务 32 条通道，控制逻辑被摊到很多运算单元上；更宽的 warp 能摊得更薄，但线程一发散，浪费的通道也更多。还有一个巧合会在 Phase 1 用到：32 个线程各读一个 4 字节的 <code>float</code>，正好是连续的 128 字节。Apple GPU 的对应概念叫 SIMD-group，这台 M5 打印的 <code>threadExecutionWidth</code> 也是 32（Lab B）。实际后果是：block 的线程数应当是 32 的倍数，否则最后一个 warp 有空位。</p>
+  <p lang="en"><strong>Why 32</strong>: the programming guide sets the warp at 32 threads, code can read <code>warpSize</code>, and every compute capability in the guide’s current table (7.5 to 12.x) has a warp size of 32. It is a design trade-off (what follows is the common explanation, an inference): one instruction fetch, decode and scheduling decision serves 32 lanes, so the control logic is spread over many arithmetic units; a wider warp would spread it thinner, but would waste more lanes whenever threads diverge. One coincidence will matter in Phase 1: 32 threads each reading a 4-byte <code>float</code> read exactly 128 contiguous bytes. Apple’s GPU calls the same idea a SIMD-group, and this M5 prints a <code>threadExecutionWidth</code> of 32 as well (Lab B). The practical consequence: a block’s thread count should be a multiple of 32, or its last warp has empty lanes.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版讲计算架构与调度的一章（warp 与 SIMD 硬件、控制发散）；Hennessy &amp; Patterson 第 4 章中把 GPU 与向量机、SIMD 扩展对照的部分。</p>
+  <p lang="en">Further reading: the chapter on compute architecture and scheduling in PMPP, 5th ed. (warps and SIMD hardware, control divergence); the part of Hennessy &amp; Patterson, Chapter 4, that sets GPUs against vector machines and SIMD extensions.</p>
 
   <h3 lang="zh-CN">3. 编程模型：host、device、kernel、grid、block、thread</h3><h3 lang="en">3. The programming model: host, device, kernel, grid, block, thread</h3>
   <p lang="zh-CN">host 指 CPU 和它的内存，device 指 GPU 和它的内存。用 <code>__global__</code> 声明的函数是 kernel：在 host 上调用，在 device 上执行，写法是 <code>kernel&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;(参数)</code>。每个线程都执行整个函数体，区别只在内置变量：<code>threadIdx</code>（线程在 block 里的编号）、<code>blockIdx</code>（block 在 grid 里的编号）、<code>blockDim</code>（每个 block 的线程数）、<code>gridDim</code>（block 的个数），各自有 x、y、z 三维，本阶段只用 x。</p>
@@ -90,8 +90,8 @@
     <li lang="zh-CN"><strong>启动是异步的</strong>：kernel 启动相对 host 线程是异步的（编程指南），<code>&lt;&lt;&lt; &gt;&gt;&gt;</code> 一返回，CPU 就接着往下走，GPU 可能还没开始。这决定了下面怎样检查错误、怎样计时。</li>
     <li lang="en"><strong>Launches are asynchronous</strong>: a kernel launch is asynchronous with respect to the host thread (programming guide); as soon as <code>&lt;&lt;&lt; &gt;&gt;&gt;</code> returns, the CPU moves on, and the GPU may not have started yet. This decides how errors are checked and how time is measured below.</li>
   </ul>
-  <p lang="zh-CN">延伸阅读：PMPP 第 4 版讲异构数据并行计算的一章（向量加法，第一个内核）和讲多维 grid 与数据的一章。</p>
-  <p lang="en">Further reading: the chapter on heterogeneous data parallel computing in PMPP, 4th ed. (the vector add, the first kernel) and its chapter on multidimensional grids and data.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版讲异构数据并行计算的一章（向量加法，第一个内核）和讲多维 grid 与数据的一章。</p>
+  <p lang="en">Further reading: the chapter on heterogeneous data parallel computing in PMPP, 5th ed. (the vector add, the first kernel) and its chapter on multidimensional grids and data.</p>
 
   <h3 lang="zh-CN">4. 内存空间一览，以及 host 与 device 之间的传输</h3><h3 lang="en">4. Memory spaces at a glance, and transfers between host and device</h3>
   <ul>
@@ -104,8 +104,8 @@
   </ul>
   <p lang="zh-CN"><strong>为什么传输压过了小问题，也压过了向量加法</strong>：向量加法每个元素读 8 字节、写 4 字节，只做一次加法。在 device 上，这 12 字节以几百 GB/s 的速度流过；跨 PCIe Gen3 x16，理论上每个方向大致 16 GB/s。所以把 a、b 搬进去、把 c 搬回来，至少是内核本身时间的约 20 倍，而且不论 n 多大都是这个比例（这是从两个带宽推出的估计，Lab A 会量出你那台 T4 上的真实比例）。问题很小时还有固定开销：每次 <code>cudaMemcpy</code>、每次启动都要花几微秒（大致），和字节数无关，这时内核真正的计算几乎看不见。结论：把数据一次搬上去，在 device 上连着做很多个内核；或者让每个字节承担多得多的运算（矩阵乘，Phase 1 和 Phase 4）。在 Apple 的统一内存上，CPU 和 GPU 读同一块 DRAM，没有这次拷贝，但每次提交 command buffer 仍有固定开销，Lab B 量的就是它。</p>
   <p lang="en"><strong>Why transfers outweigh small problems, and the vector add too</strong>: a vector add reads 8 bytes and writes 4 bytes per element and does a single add. On the device those 12 bytes stream past at hundreds of GB/s; across PCIe Gen3 x16 the theoretical rate is roughly 16 GB/s in each direction. So moving a and b in and c back out takes at least about 20 times as long as the kernel itself, at the same ratio whatever n is (an estimate derived from the two bandwidths; Lab A measures the real ratio on your T4). On small problems there are fixed costs as well: each <code>cudaMemcpy</code> and each launch costs a few microseconds (approximate) regardless of the byte count, and the kernel’s real work all but disappears. The conclusion: move the data over once and run many kernels on it while it stays on the device, or give every byte far more arithmetic (matrix multiply, Phases 1 and 4). On Apple’s unified memory the CPU and GPU read the same DRAM, so this copy does not exist, but every command-buffer submission still has a fixed cost, and that is what Lab B measures.</p>
-  <p lang="zh-CN">延伸阅读：PMPP 第 4 版讲异构数据并行计算的一章（<code>cudaMalloc</code>、<code>cudaMemcpy</code>、device 全局内存）和讲内存架构与数据局部性的一章；Best Practices Guide 中「Data Transfer Between Host and Device」一节。</p>
-  <p lang="en">Further reading: the chapter on heterogeneous data parallel computing in PMPP, 4th ed. (<code>cudaMalloc</code>, <code>cudaMemcpy</code>, device global memory) and its chapter on memory architecture and data locality; the section “Data Transfer Between Host and Device” in the Best Practices Guide.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版讲异构数据并行计算的一章（<code>cudaMalloc</code>、<code>cudaMemcpy</code>、device 全局内存）和讲内存架构与数据局部性的一章；Best Practices Guide 中「Data Transfer Between Host and Device」一节。</p>
+  <p lang="en">Further reading: the chapter on heterogeneous data parallel computing in PMPP, 5th ed. (<code>cudaMalloc</code>, <code>cudaMemcpy</code>, device global memory) and its chapter on memory architecture and data locality; the section “Data Transfer Between Host and Device” in the Best Practices Guide.</p>
 
   <h3 lang="zh-CN">5. 工具链、错误检查与计时</h3><h3 lang="en">5. The toolchain, error checking and timing</h3>
   <ul>
@@ -120,13 +120,13 @@
     <li lang="zh-CN"><strong>Metal 的对应物</strong>：<code>MTLCommandBuffer</code> 完成后，<code>gpuStartTime</code> 和 <code>gpuEndTime</code> 给出 GPU 开始和结束执行这个 command buffer 的时刻，单位是秒；两者之差就是 GPU 时间。错误不靠全局状态，而是看 <code>status</code> 和 <code>error</code>。离线的 Metal 编译器 <code>xcrun metal</code> 不在 Command Line Tools 里（本机 <code>xcrun -f metal</code> 报 unable to find utility），所以 Lab B 用 <code>makeLibrary(source:)</code> 在运行时编译着色器源码。</li>
     <li lang="en"><strong>The Metal counterpart</strong>: once an <code>MTLCommandBuffer</code> completes, <code>gpuStartTime</code> and <code>gpuEndTime</code> give the moments the GPU started and finished executing it, in seconds; their difference is the GPU time. Errors are not a global state: you look at <code>status</code> and <code>error</code>. The offline Metal compiler <code>xcrun metal</code> is not part of the Command Line Tools (on this Mac <code>xcrun -f metal</code> reports unable to find utility), so Lab B compiles the shader source at run time with <code>makeLibrary(source:)</code>.</li>
   </ul>
-  <p lang="zh-CN">延伸阅读：Best Practices Guide 中「Performance Metrics」一章（CPU 计时器与 CUDA GPU 计时器）；Sanders &amp; Kandrot《CUDA by Example》讲事件计时的一章；Cheng 等《Professional CUDA C Programming》讲 CUDA 编程模型的一章（错误处理、内核计时）。</p>
-  <p lang="en">Further reading: the “Performance Metrics” chapter of the Best Practices Guide (CPU timers and CUDA GPU timers); the chapter on timing with events in Sanders &amp; Kandrot, <em>CUDA by Example</em>; the chapter on the CUDA programming model in Cheng et al., <em>Professional CUDA C Programming</em> (error handling, timing a kernel).</p>
+  <p lang="zh-CN">延伸阅读：Best Practices Guide 中「Performance Metrics」一章（CPU 计时器与 CUDA GPU 计时器）；Sanders &amp; Kandrot《CUDA by Example》第 6 章「Constant Memory and Events」（§6.3「Measuring Performance with Events」）；Cheng 等《Professional CUDA C Programming》讲 CUDA 编程模型的一章（错误处理、内核计时）。</p>
+  <p lang="en">Further reading: the “Performance Metrics” chapter of the Best Practices Guide (CPU timers and CUDA GPU timers); Chapter 6, “Constant Memory and Events” (§6.3, “Measuring Performance with Events”), of Sanders &amp; Kandrot, <em>CUDA by Example</em>; the chapter on the CUDA programming model in Cheng et al., <em>Professional CUDA C Programming</em> (error handling, timing a kernel).</p>
 
   <h2 id="compare" lang="zh-CN">对照表：CPU 线程 ↔ CUDA 线程 ↔ Metal 线程</h2><h2 id="compare-en" lang="en">Comparison: CPU thread ↔ CUDA thread ↔ Metal thread</h2>
   <div class="table-wrap">
   <table class="cmp">
-    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th><span lang="zh-CN">CPU 线程（pthread、std::thread）</span><span lang="en">CPU thread (pthread, std::thread)</span></th><th><span lang="zh-CN">CUDA 线程</span><span lang="en">CUDA thread</span></th><th><span lang="zh-CN">Metal 线程</span><span lang="en">Metal thread</span></th></tr>
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th><span lang="zh-CN">CPU 线程（pthread、std::thread）</span><span lang="en">CPU thread (pthread, std::thread)</span></th><th class="cuda"><span lang="zh-CN">CUDA 线程</span><span lang="en">CUDA thread</span></th><th class="metal"><span lang="zh-CN">Metal 线程</span><span lang="en">Metal thread</span></th></tr>
     <tr><td><span lang="zh-CN">谁创建</span><span lang="en">Created by</span></td><td><span lang="zh-CN">程序调用 <code>pthread_create</code>，内核登记一个可调度实体</span><span lang="en">The program calls <code>pthread_create</code>; the OS kernel registers a schedulable entity</span></td><td><span lang="zh-CN">一次 kernel 启动一下子创建整个 grid</span><span lang="en">One kernel launch creates the whole grid at once</span></td><td><span lang="zh-CN">一次 dispatch 创建整个 grid</span><span lang="en">One dispatch creates the whole grid</span></td></tr>
     <tr><td><span lang="zh-CN">典型数量</span><span lang="en">Typical count</span></td><td><span lang="zh-CN">和核数同一量级（本机 10 个核）</span><span lang="en">On the order of the core count (10 cores on this Mac)</span></td><td><span lang="zh-CN">数万到数百万</span><span lang="en">Tens of thousands to millions</span></td><td><span lang="zh-CN">数万到数百万</span><span lang="en">Tens of thousands to millions</span></td></tr>
     <tr><td><span lang="zh-CN">一起执行的一组</span><span lang="en">Group executing together</span></td><td><span lang="zh-CN">没有；数据并行靠 SIMD 向量指令（NEON 一次 4 个 float）</span><span lang="en">None; data parallelism comes from SIMD vector instructions (NEON, 4 floats at a time)</span></td><td><span lang="zh-CN">warp，32 个线程（<code>warpSize</code>）</span><span lang="en">Warp, 32 threads (<code>warpSize</code>)</span></td><td><span lang="zh-CN">SIMD-group，32 个线程（本机 <code>threadExecutionWidth</code>）</span><span lang="en">SIMD-group, 32 threads (<code>threadExecutionWidth</code> on this Mac)</span></td></tr>
@@ -163,7 +163,6 @@
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <!-- cuda -->
       <g data-step="1">
         <text x="30" y="24" class="small" lang="zh-CN">grid：gridDim.x = 8，n = 2000，每个 block 256 线程</text><text x="30" y="24" class="small" lang="en">grid: gridDim.x = 8, n = 2000, 256 threads per block</text>
         <rect class="box" x="30" y="34" width="95" height="44"/><text x="42" y="54" class="mono">block 0</text>
@@ -176,14 +175,12 @@
         <rect class="box" x="765" y="34" width="95" height="44"/><text x="777" y="54" class="mono">block 7</text>
         <text x="777" y="71" class="small" lang="zh-CN">208 个有效</text><text x="777" y="71" class="small" lang="en">208 active</text>
       </g>
-      <!-- cuda -->
       <g data-step="2">
         <path class="lane" d="M345 78 L30 112 M440 78 L870 112"/>
         <rect class="box" x="30" y="112" width="840" height="86"/>
         <text x="42" y="130" class="mono">block 3 · blockDim.x = 256</text>
         <text x="858" y="130" class="small" text-anchor="end">i = blockIdx.x * blockDim.x + threadIdx.x = 768 … 1023</text>
       </g>
-      <!-- cuda -->
       <g data-step="3">
         <rect class="box" x="42" y="140" width="95" height="48"/><text x="52" y="160" class="mono">warp 0</text><text x="52" y="178" class="small">t 0–31</text>
         <rect class="box" x="145" y="140" width="95" height="48"/><text x="155" y="160" class="mono">warp 1</text><text x="155" y="178" class="small">t 32–63</text>
@@ -194,7 +191,6 @@
         <rect class="box" x="660" y="140" width="95" height="48"/><text x="670" y="160" class="mono">warp 6</text><text x="670" y="178" class="small">t 192–223</text>
         <rect class="box" x="763" y="140" width="95" height="48"/><text x="773" y="160" class="mono">warp 7</text><text x="773" y="178" class="small">t 224–255</text>
       </g>
-      <!-- cuda -->
       <g data-step="4">
         <rect class="box" x="30" y="226" width="200" height="164"/><text x="42" y="246" class="mono">SM 0</text>
         <rect class="box" x="42" y="256" width="84" height="30"/><text x="50" y="276" class="mono">block 0</text>
@@ -212,18 +208,16 @@
         <text x="684" y="312" class="small" lang="zh-CN">前面的 block 结束才上</text><text x="684" y="312" class="small" lang="en">start when one finishes</text>
         <text x="684" y="334" class="small" lang="zh-CN">T4 有 40 个 SM，这里画 3 个</text><text x="684" y="334" class="small" lang="en">a T4 has 40 SMs; 3 drawn</text>
       </g>
-      <!-- cuda -->
       <g data-step="5">
         <text x="42" y="310" class="small" lang="zh-CN">warp 调度器，每个周期：</text><text x="42" y="310" class="small" lang="en">warp scheduler, each cycle:</text>
         <text x="42" y="332" class="small" lang="zh-CN">▶ w5 发射一条指令</text><text x="42" y="332" class="small" lang="en">▶ w5 issues an instruction</text>
         <text x="42" y="352" class="small" style="fill: var(--ink-2)" lang="zh-CN">… w0 w1 等全局内存</text><text x="42" y="352" class="small" style="fill: var(--ink-2)" lang="en">… w0 w1 wait on memory</text>
         <text x="42" y="372" class="small" lang="zh-CN">✓ w2 w3 就绪，下个周期可选</text><text x="42" y="372" class="small" lang="en">✓ w2 w3 ready for next cycle</text>
       </g>
-      <!-- metal -->
       <g data-step="6">
-        <text x="30" y="98" class="small" lang="zh-CN">Metal：同样是 grid，由 threadgroup 组成</text><text x="30" y="98" class="small" lang="en">Metal: also a grid, made of threadgroups</text>
-        <text x="30" y="214" class="small" lang="zh-CN">Metal：block 叫 threadgroup，warp 叫 SIMD-group（本机 threadExecutionWidth = 32）</text><text x="30" y="214" class="small" lang="en">Metal: a block is a threadgroup, a warp is a SIMD-group (threadExecutionWidth = 32 here)</text>
-        <text x="30" y="410" class="small" lang="zh-CN">Metal：SM 大致对应 Apple 所说的 GPU core（approximate）</text><text x="30" y="410" class="small" lang="en">Metal: an SM roughly matches what Apple calls a GPU core (approximate)</text>
+        <text x="30" y="98" class="small" style="fill: var(--metal)" lang="zh-CN">Metal：同样是 grid，由 threadgroup 组成</text><text x="30" y="98" class="small" style="fill: var(--metal)" lang="en">Metal: also a grid, made of threadgroups</text>
+        <text x="30" y="214" class="small" style="fill: var(--metal)" lang="zh-CN">Metal：block 叫 threadgroup，warp 叫 SIMD-group（本机 threadExecutionWidth = 32）</text><text x="30" y="214" class="small" style="fill: var(--metal)" lang="en">Metal: a block is a threadgroup, a warp is a SIMD-group (threadExecutionWidth = 32 here)</text>
+        <text x="30" y="410" class="small" style="fill: var(--metal)" lang="zh-CN">Metal：SM 大致对应 Apple 所说的 GPU core（approximate）</text><text x="30" y="410" class="small" style="fill: var(--metal)" lang="en">Metal: an SM roughly matches what Apple calls a GPU core (approximate)</text>
       </g>
     </svg>
   </div>
@@ -252,45 +246,38 @@
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
         </marker>
       </defs>
-      <text x="30" y="24" class="small" lang="zh-CN">CUDA · 独立显卡</text><text x="30" y="24" class="small" lang="en">CUDA · discrete card</text>
+      <text x="30" y="24" class="small" style="fill: var(--cuda)" lang="zh-CN">CUDA · 独立显卡</text><text x="30" y="24" class="small" style="fill: var(--cuda)" lang="en">CUDA · discrete card</text>
       <text x="870" y="24" class="small" text-anchor="end" lang="zh-CN">时间 →</text><text x="870" y="24" class="small" text-anchor="end" lang="en">time →</text>
       <text x="30" y="60" lang="zh-CN">CPU（host）</text><text x="30" y="60" lang="en">CPU (host)</text>
       <text x="30" y="122" lang="zh-CN">PCIe · DMA</text><text x="30" y="122" lang="en">PCIe · DMA</text>
       <text x="30" y="184" lang="zh-CN">GPU（device）</text><text x="30" y="184" lang="en">GPU (device)</text>
       <path class="lane" d="M150 82 L870 82 M150 144 L870 144 M30 230 L870 230"/>
-      <!-- cuda -->
       <g data-step="1">
         <rect class="box" x="150" y="40" width="96" height="32"/><text x="158" y="60" class="mono">cudaMalloc</text>
         <rect class="box" x="150" y="164" width="96" height="32"/><text x="158" y="184" class="small">d_a d_b d_c</text>
       </g>
-      <!-- cuda -->
       <g data-step="2">
         <rect class="box" x="256" y="102" width="200" height="32"/><text x="266" y="122" class="mono">cudaMemcpy H2D</text><text x="266" y="156" class="small" lang="zh-CN">a, b：每元素 8 字节</text><text x="266" y="156" class="small" lang="en">a, b: 8 bytes per element</text>
         <text x="266" y="60" class="small" style="fill: var(--ink-2)" lang="zh-CN">… CPU 等待拷贝</text><text x="266" y="60" class="small" style="fill: var(--ink-2)" lang="en">… CPU waits for the copy</text>
       </g>
-      <!-- cuda -->
       <g data-step="3">
         <rect class="box" x="466" y="40" width="60" height="32"/><text x="474" y="60" class="mono">&lt;&lt;&lt;&gt;&gt;&gt;</text>
         <text x="466" y="96" class="small">+ cudaGetLastError()</text>
         <path class="arrow" d="M496 72 L496 162" style="marker-end: url(#arr)"/>
       </g>
-      <!-- cuda -->
       <g data-step="4">
         <rect class="box" x="500" y="164" width="170" height="32"/><text x="510" y="184" class="mono">vec_add</text>
         <path class="arrow flow" d="M536 56 L670 56"/>
         <text x="546" y="50" class="small">cudaDeviceSynchronize()</text>
       </g>
-      <!-- cuda -->
       <g data-step="5">
         <rect class="box" x="676" y="102" width="100" height="32"/><text x="686" y="122" class="mono">D2H · c</text><text x="676" y="156" class="small" lang="zh-CN">每元素 4 字节</text><text x="676" y="156" class="small" lang="en">4 bytes per element</text>
       </g>
-      <!-- cuda -->
       <g data-step="6">
         <rect class="box" x="784" y="40" width="86" height="32"/><text x="792" y="60" class="mono">cudaFree</text>
       </g>
-      <!-- metal -->
       <g data-step="7">
-        <text x="30" y="254" class="small" lang="zh-CN">Metal · Apple M5 统一内存</text><text x="30" y="254" class="small" lang="en">Metal · Apple M5 unified memory</text>
+        <text x="30" y="254" class="small" style="fill: var(--metal)" lang="zh-CN">Metal · Apple M5 统一内存</text><text x="30" y="254" class="small" style="fill: var(--metal)" lang="en">Metal · Apple M5 unified memory</text>
         <text x="30" y="290">CPU</text>
         <text x="30" y="346">GPU</text>
         <rect class="box" x="150" y="270" width="200" height="32"/><text x="160" y="290" class="mono">makeBuffer(.shared)</text>
@@ -312,12 +299,14 @@
   <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
   <div class="lab">
     <h3 lang="zh-CN">Lab A · Colab T4 上的向量加法：错误检查、事件计时、规模扫描</h3><h3 lang="en">Lab A · A vector add on a Colab T4: error checking, event timing, a size sweep</h3>
-    <div class="note" lang="zh-CN">未运行；根据 CUDA 文档于 2026-11-01 整理。这台 Mac 没有 NVIDIA GPU，下面的程序只在本机用一个桩头文件（stub header）通过了 clang 的 CUDA 语法检查，没有在真实的 GPU 上编译运行过，所以这里不给数字，只描述你应当看到的形状。</div>
-    <div class="note" lang="en">Not run; assembled from the CUDA documentation on 2026-11-01. This Mac has no NVIDIA GPU: the program below has only passed a clang CUDA syntax check here against a stub header, and has not been compiled or run on a real GPU, so this lab gives no numbers, only the shape you should see.</div>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-10-31。根据 CUDA 文档整理。这台 Mac 没有 NVIDIA GPU，下面的程序只在本机用一个桩头文件（stub header）通过了 clang 的 CUDA 语法检查，没有在真实的 GPU 上编译运行过，所以这里不给数字，只描述你应当看到的形状。</div>
+    <div class="note" lang="en"><strong>Not run</strong>, 2026-10-31. Assembled from the CUDA documentation. This Mac has no NVIDIA GPU: the program below has only passed a clang CUDA syntax check here against a stub header, and has not been compiled or run on a real GPU, so this lab gives no numbers, only the shape you should see.</div>
     <ol>
-      <li><span lang="zh-CN">在 Colab 里选 运行时 → 更改运行时类型 → T4 GPU，然后在第一个单元格确认 GPU 和工具链。<code>nvidia-smi</code> 应当列出一块 T4；<code>nvcc --version</code> 打印的版本就是这次会话的 CUDA 工具链，记下它。本页按 CUDA 13.x 写（2026-10-31 时最新为 13.4 Update 2），打印出任何 13.x 都可以；13.x 需要 580 或更新的驱动，<code>nvidia-smi</code> 第一行能看到驱动版本：</span><span lang="en">In Colab choose Runtime → Change runtime type → T4 GPU, then confirm the GPU and the toolchain in the first cell. <code>nvidia-smi</code> should list one T4; the version printed by <code>nvcc --version</code> is this session’s CUDA toolchain, so write it down. This page is written for CUDA 13.x (13.4 Update 2 current on 2026-10-31), and any 13.x is fine; 13.x needs driver 580 or newer, which <code>nvidia-smi</code> shows in its first line:</span><pre data-lang="sh" data-file="Colab cell 1">!nvidia-smi
+      <li><span lang="zh-CN">在 Colab 里选 运行时 → 更改运行时类型 → T4 GPU，然后在第一个单元格确认 GPU 和工具链。<code>nvidia-smi</code> 应当列出一块 T4；<code>nvcc --version</code> 打印的版本就是这次会话的 CUDA 工具链，记下它。本页按 CUDA 13.x 写（2026-10-31 时最新为 13.4 Update 2），打印出任何 13.x 都可以；13.x 需要 580 或更新的驱动，<code>nvidia-smi</code> 第一行能看到驱动版本：</span><span lang="en">In Colab choose Runtime → Change runtime type → T4 GPU, then confirm the GPU and the toolchain in the first cell. <code>nvidia-smi</code> should list one T4; the version printed by <code>nvcc --version</code> is this session’s CUDA toolchain, so write it down. This page is written for CUDA 13.x (13.4 Update 2 current on 2026-10-31), and any 13.x is fine; 13.x needs driver 580 or newer, which <code>nvidia-smi</code> shows in its first line:</span><pre data-lang="sh" data-file="Colab cell 1"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvidia-smi
 !nvcc --version</pre></li>
       <li><span lang="zh-CN">第二个单元格用 <code>%%writefile</code> 把程序写成 <code>vec_add.cu</code>（这一行必须是单元格的第一行）。程序对 n = 2<sup>10</sup> 到 2<sup>26</sup> 的七个规模各做一遍：分配、拷进去（计时）、预热一次后把内核跑 21 次取中位数、拷回来（计时）、逐个元素核对结果：</span><span lang="en">The second cell writes the program to <code>vec_add.cu</code> with <code>%%writefile</code> (that line must be the first line of the cell). For each of seven sizes from n = 2<sup>10</sup> to 2<sup>26</sup> the program allocates, copies in (timed), runs the kernel 21 times after one warm-up and takes the median, copies back (timed), and checks every element of the result:</span><pre data-lang="cpp" data-file="Colab cell 2 · vec_add.cu">%%writefile vec_add.cu
+// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
 // vec_add.cu: vector add with a check macro, cudaEvent timing and a size sweep
 #include &lt;algorithm&gt;
 #include &lt;cstdio&gt;
@@ -403,14 +392,17 @@ int main() {
   CUDA_CHECK(cudaEventDestroy(e0));
   CUDA_CHECK(cudaEventDestroy(e1));
 }</pre></li>
-      <li><span lang="zh-CN">第三个单元格编译并运行：</span><span lang="en">The third cell builds and runs it:</span><pre data-lang="sh" data-file="Colab cell 3">!nvcc -arch=sm_75 -O2 -o vec_add vec_add.cu &amp;&amp; ./vec_add</pre></li>
+      <li><span lang="zh-CN">第三个单元格编译并运行：</span><span lang="en">The third cell builds and runs it:</span><pre data-lang="sh" data-file="Colab cell 3"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvcc -arch=sm_75 -O2 -o vec_add vec_add.cu &amp;&amp; ./vec_add</pre></li>
       <li><span lang="zh-CN">预期输出（定性描述，不是实测）：第一行应当是 T4、<code>sm_75</code>、<code>warpSize=32</code>、<code>maxThreadsPerBlock=1024</code>，SM 数是 40。每一行 <code>bad=0</code>。<code>kernel_ms</code> 在小规模时几乎不随 n 变化，那是启动和事件本身的固定开销；规模变大后它随 n 线性增长，<code>kernel_GB/s</code> 先升后平，停在 T4 标称的 320 GB/s 以下。<code>h2d_ms</code> 和 <code>d2h_ms</code> 在每一个规模上都比 <code>kernel_ms</code> 大得多，大规模时比值应当接近概念 4 估计的 20 倍或更大。</span><span lang="en">Expected output (described, not measured): the first line should show a T4, <code>sm_75</code>, <code>warpSize=32</code>, <code>maxThreadsPerBlock=1024</code> and 40 SMs. Every row shows <code>bad=0</code>. At small sizes <code>kernel_ms</code> barely changes with n, which is the fixed cost of the launch and the events themselves; at larger sizes it grows linearly with n, and <code>kernel_GB/s</code> rises and then levels off below the T4’s rated 320 GB/s. <code>h2d_ms</code> and <code>d2h_ms</code> are much larger than <code>kernel_ms</code> at every size, and at the large sizes the ratio should approach the 20 times estimated in concept 4, or more.</span></li>
       <li><span lang="zh-CN">故意制造两种错误，看它们各在哪里报告：把 <code>block</code> 改成 2048，错误应当由启动后的 <code>cudaGetLastError</code> 报出（配置无效）；改回 256，再把内核里的 <code>if (i &lt; n)</code> 删掉、把 <code>grid</code> 加 1000，越界访问可能在 <code>cudaEventSynchronize</code> 处报出，也可能因为越界的地址恰好可写而什么都不报，这正是 Phase 6 要用 <code>compute-sanitizer</code> 的原因。</span><span lang="en">Make two errors on purpose and see where each is reported: change <code>block</code> to 2048, and the error should come from the <code>cudaGetLastError</code> after the launch (invalid configuration); change it back to 256, then delete <code>if (i &lt; n)</code> from the kernel and add 1000 to <code>grid</code>, and the out-of-bounds access may be reported at <code>cudaEventSynchronize</code>, or may report nothing at all because the stray addresses happen to be writable, which is exactly why Phase 6 uses <code>compute-sanitizer</code>.</span></li>
     </ol>
 
     <h3 lang="zh-CN">Lab B · Metal 版本：同一个内核，在这台 Mac 上实测</h3><h3 lang="en">Lab B · The Metal twin: the same kernel, measured on this Mac</h3>
+
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-10-31。下面的输出都来自这台 Mac 上的实际运行。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-10-31. The outputs below come from actual runs on this Mac.</div>
     <ol>
-      <li><span lang="zh-CN">把下面的程序存成 <code>vadd_sweep.swift</code>。它在运行时把一段 Metal Shading Language 源码编译成 kernel，用 <code>storageModeShared</code> 在统一内存里建三个 buffer，按和 Lab A 一样的七个规模、每个规模预热一次再跑 21 次取中位数。线程组大小 256 对应 <code>blockDim.x = 256</code>，线程组个数用同样的向上取整，内核里有同样的边界检查。GPU 时间来自 command buffer 的 <code>gpuStartTime</code> 和 <code>gpuEndTime</code>；<code>wall_ms</code> 是 CPU 从 <code>commit</code> 到 <code>waitUntilCompleted</code> 返回的时间：</span><span lang="en">Save the program below as <code>vadd_sweep.swift</code>. It compiles a piece of Metal Shading Language source into a kernel at run time, makes three buffers in unified memory with <code>storageModeShared</code>, and for the same seven sizes as Lab A warms up once and takes the median of 21 runs. The threadgroup size of 256 matches <code>blockDim.x = 256</code>, the threadgroup count uses the same ceiling division, and the kernel has the same bounds check. GPU time comes from the command buffer’s <code>gpuStartTime</code> and <code>gpuEndTime</code>; <code>wall_ms</code> is the CPU time from <code>commit</code> until <code>waitUntilCompleted</code> returns:</span><pre data-lang="cpp" data-file="vadd_sweep.swift">// vadd_sweep.swift: Metal vector add with a size sweep; GPU time from the command buffer
+      <li><span lang="zh-CN">把下面的程序存成 <code>vadd_sweep.swift</code>。它在运行时把一段 Metal Shading Language 源码编译成 kernel，用 <code>storageModeShared</code> 在统一内存里建三个 buffer，按和 Lab A 一样的七个规模、每个规模预热一次再跑 21 次取中位数。线程组大小 256 对应 <code>blockDim.x = 256</code>，线程组个数用同样的向上取整，内核里有同样的边界检查。GPU 时间来自 command buffer 的 <code>gpuStartTime</code> 和 <code>gpuEndTime</code>；<code>wall_ms</code> 是 CPU 从 <code>commit</code> 到 <code>waitUntilCompleted</code> 返回的时间：</span><span lang="en">Save the program below as <code>vadd_sweep.swift</code>. It compiles a piece of Metal Shading Language source into a kernel at run time, makes three buffers in unified memory with <code>storageModeShared</code>, and for the same seven sizes as Lab A warms up once and takes the median of 21 runs. The threadgroup size of 256 matches <code>blockDim.x = 256</code>, the threadgroup count uses the same ceiling division, and the kernel has the same bounds check. GPU time comes from the command buffer’s <code>gpuStartTime</code> and <code>gpuEndTime</code>; <code>wall_ms</code> is the CPU time from <code>commit</code> until <code>waitUntilCompleted</code> returns:</span><pre data-lang="swift" data-file="vadd_sweep.swift">// vadd_sweep.swift: Metal vector add with a size sweep; GPU time from the command buffer
 // build: swiftc -O vadd_sweep.swift -o vadd_sweep    run: ./vadd_sweep
 import Foundation
 import Metal
@@ -484,7 +476,7 @@ for lg in [10, 14, 18, 20, 22, 24, 26] {
     print(String(format: "n=2^%-2d %10d  gpu_ms=%8.4f  wall_ms=%8.4f  GB/s=%6.1f  bad=%d",
                  lg, n, g, w, Double(3 * bytes) / (g * 1e6), bad))
 }</pre></li>
-      <li><span lang="zh-CN">编译并运行。下面是实验 Mac（Apple M5，macOS 27.2，Apple Swift 6.4.2）在 2026-11-01（UTC）的实测，不是计算值；这是连续三次运行中的第一次：</span><span lang="en">Build and run it. These are measurements on the lab Mac (Apple M5, macOS 27.2, Apple Swift 6.4.2) on 2026-11-01 (UTC), not computed values; this is the first of three consecutive runs:</span><pre>$ swiftc -O vadd_sweep.swift -o vadd_sweep
+      <li><span lang="zh-CN">编译并运行。下面是实验 Mac（Apple M5，macOS 27.2，Apple Swift 6.4.2）在 2026-10-31（本地时间，PDT）的实测，不是计算值；这是连续三次运行中的第一次：</span><span lang="en">Build and run it. These are measurements on the lab Mac (Apple M5, macOS 27.2, Apple Swift 6.4.2) on 2026-10-31 (local time, PDT), not computed values; this is the first of three consecutive runs:</span><pre>$ swiftc -O vadd_sweep.swift -o vadd_sweep
 $ ./vadd_sweep
 device=Apple M5 threadExecutionWidth=32 maxTotalThreadsPerThreadgroup=1024 hasUnifiedMemory=true
 n=2^10       1024  gpu_ms=  0.0084  wall_ms=  0.1259  GB/s=   1.5  bad=0
@@ -543,30 +535,30 @@ n=2^26   67108864  gpu_ms=  6.3465  wall_ms=  6.5340  GB/s= 126.9  bad=0</pre></
 
   <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
   <ul class="res">
-    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html">CUDA Programming Guide: Programming Model</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html">Intro to CUDA C++</a> <span class="lvl" lang="zh-CN">官方文档，入门：grid、block、warp 与 SIMT，kernel 启动、错误状态和 <code>cudaGetLastError</code>（2026-11-01 可访问）</span><span class="lvl" lang="en">Official docs, beginner: grids, blocks, warps and SIMT, kernel launches, the error state and <code>cudaGetLastError</code> (reachable on 2026-11-01)</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html">CUDA Programming Guide: Programming Model</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html">Intro to CUDA C++</a> <span class="lvl" lang="zh-CN">官方文档，入门：grid、block、warp 与 SIMT，kernel 启动、错误状态和 <code>cudaGetLastError</code>（2026-10-31 可访问）</span><span class="lvl" lang="en">Official docs, beginner: grids, blocks, warps and SIMT, kernel launches, the error state and <code>cudaGetLastError</code> (reachable on 2026-10-31)</span></li>
     <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/understanding-memory.html">CUDA Programming Guide: Understanding Memory</a> <span class="lvl" lang="zh-CN">官方文档，入门到中级：device 内存、page-locked host 内存、统一内存，概念 4</span><span class="lvl" lang="en">Official docs, beginner to intermediate: device memory, page-locked host memory, unified memory; concept 4</span></li>
     <li><a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html">CUDA C++ Best Practices Guide</a> <span class="lvl" lang="zh-CN">官方文档，中级：GPU 计时器、host 与 device 之间的数据传输、每 block 线程数的起点</span><span class="lvl" lang="en">Official docs, intermediate: GPU timers, data transfer between host and device, a starting point for threads per block</span></li>
     <li><a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EVENT.html">CUDA Runtime API: Event Management</a> · <a href="https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html">CUDA Toolkit Release Notes</a> <span class="lvl" lang="zh-CN">参考：<code>cudaEventElapsedTime</code> 的语义与分辨率；Turing 之前架构的移除和当前工具链版本</span><span class="lvl" lang="en">Reference: the semantics and resolution of <code>cudaEventElapsedTime</code>; the removal of pre-Turing architectures and the current toolkit version</span></li>
     <li><a href="https://www.nvidia.com/en-us/data-center/tesla-t4/">NVIDIA T4 product page</a> <span class="lvl" lang="zh-CN">规格：16 GB GDDR6、320+ GB/s、PCIe Gen3 x16、2560 个 CUDA 核心</span><span class="lvl" lang="en">Specifications: 16 GB GDDR6, 320+ GB/s, PCIe Gen3 x16, 2560 CUDA cores</span></li>
-    <li><a href="https://developer.apple.com/documentation/metal/performing-calculations-on-a-gpu">Apple: Performing calculations on a GPU</a> · <a href="https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpustarttime">MTLCommandBuffer.gpuStartTime</a> · <a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification (PDF)</a> <span class="lvl" lang="zh-CN">官方文档：Metal 计算的最小例子（也是向量加法）、GPU 时间戳、MSL 的属性和地址空间，Lab B</span><span class="lvl" lang="en">Official docs: the minimal Metal compute example (also a vector add), GPU timestamps, MSL attributes and address spaces; Lab B</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal/performing-calculations-on-a-gpu">Apple: Performing calculations on a GPU</a> · <a href="https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpustarttime">MTLCommandBuffer.gpuStartTime</a> · <a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification (PDF)</a> <span class="lvl" lang="zh-CN">官方文档（MSL 规范 4.1 版，2026-06-04）：Metal 计算的最小例子（也是向量加法）、GPU 时间戳、MSL 的属性和地址空间，Lab B</span><span class="lvl" lang="en">Official docs (the MSL specification is version 4.1, 2026-06-04): the minimal Metal compute example (also a vector add), GPU timestamps, MSL attributes and address spaces; Lab B</span></li>
     <li><a href="https://developer.nvidia.com/blog/even-easier-introduction-cuda/">Mark Harris, An Even Easier Introduction to CUDA</a> · <a href="https://developer.nvidia.com/blog/how-implement-performance-metrics-cuda-cc/">How to Implement Performance Metrics in CUDA C/C++</a> <span class="lvl" lang="zh-CN">二手资料，入门：NVIDIA 技术博客，一步步写第一个内核，以及用事件计时</span><span class="lvl" lang="en">Secondary, beginner: NVIDIA technical blog posts that build a first kernel step by step and time it with events</span></li>
   </ul>
 
   <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
   <ol class="books">
-    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 4th ed., Morgan Kaufmann, 2022, ISBN 9780323912310. <span class="lvl">引言章对应概念 1（面向延迟与面向吞吐）；讲异构数据并行计算的一章对应概念 3–4 和 Lab A（向量加法、<code>cudaMalloc</code>、<code>cudaMemcpy</code>）；讲多维 grid 的一章对应概念 3；讲计算架构与调度的一章对应概念 1–2 和动画 (a)（warp、SM、延迟容忍）</span></li>
-    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 4th ed., Morgan Kaufmann, 2022, ISBN 9780323912310. <span class="lvl">The introductory chapter matches concept 1 (latency-oriented and throughput-oriented); the chapter on heterogeneous data parallel computing matches concepts 3–4 and Lab A (the vector add, <code>cudaMalloc</code>, <code>cudaMemcpy</code>); the chapter on multidimensional grids matches concept 3; the chapter on compute architecture and scheduling matches concepts 1–2 and diagram (a) (warps, SMs, latency tolerance)</span></li>
-    <li lang="zh-CN">John L. Hennessy &amp; David A. Patterson, 《Computer Architecture: A Quantitative Approach》, 6th ed., Morgan Kaufmann, 2019, ISBN 9780128119051. <span class="lvl">第 4 章「Data-Level Parallelism in Vector, SIMD, and GPU Architectures」对应概念 1–2（GPU 与向量机、SIMD 扩展的对照）</span></li>
-    <li lang="en">John L. Hennessy &amp; David A. Patterson, <em>Computer Architecture: A Quantitative Approach</em>, 6th ed., Morgan Kaufmann, 2019, ISBN 9780128119051. <span class="lvl">Chapter 4, “Data-Level Parallelism in Vector, SIMD, and GPU Architectures”, matches concepts 1–2 (GPUs set against vector machines and SIMD extensions)</span></li>
-    <li lang="zh-CN">Jason Sanders &amp; Edward Kandrot, 《CUDA by Example: An Introduction to General-Purpose GPU Programming》, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">较老但仍清楚：讲 CUDA C 入门和并行编程的两章对应概念 3 与 Lab A 的向量求和；讲事件的一章对应概念 5 的计时</span></li>
-    <li lang="en">Jason Sanders &amp; Edward Kandrot, <em>CUDA by Example: An Introduction to General-Purpose GPU Programming</em>, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">Older but still clear: the two chapters introducing CUDA C and parallel programming in it match concept 3 and the vector sum of Lab A; the chapter on events matches the timing in concept 5</span></li>
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">引言章对应概念 1（面向延迟与面向吞吐）；讲异构数据并行计算的一章对应概念 3–4 和 Lab A（向量加法、<code>cudaMalloc</code>、<code>cudaMemcpy</code>）；讲多维 grid 的一章对应概念 3；讲计算架构与调度的一章对应概念 1–2 和动画 (a)（warp、SM、延迟容忍）</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">The introductory chapter matches concept 1 (latency-oriented and throughput-oriented); the chapter on heterogeneous data parallel computing matches concepts 3–4 and Lab A (the vector add, <code>cudaMalloc</code>, <code>cudaMemcpy</code>); the chapter on multidimensional grids matches concept 3; the chapter on compute architecture and scheduling matches concepts 1–2 and diagram (a) (warps, SMs, latency tolerance)</span></li>
+    <li lang="zh-CN">John L. Hennessy &amp; David A. Patterson, 《Computer Architecture: A Quantitative Approach》, 6th ed., Morgan Kaufmann, 2017 (Elsevier: November 23, 2017), ISBN 9780128119051（第 7 版，Hennessy、Patterson 和 Kozyrakis，2025-12-02，第 4 章和第 7 章标题不变）。 <span class="lvl">第 4 章「Data-Level Parallelism in Vector, SIMD, and GPU Architectures」对应概念 1–2（GPU 与向量机、SIMD 扩展的对照）</span></li>
+    <li lang="en">John L. Hennessy &amp; David A. Patterson, <em>Computer Architecture: A Quantitative Approach</em>, 6th ed., Morgan Kaufmann, 2017 (Elsevier: November 23, 2017), ISBN 9780128119051 (a 7th edition, Hennessy, Patterson and Kozyrakis, 2025-12-02, keeps the chapter 4 and 7 titles). <span class="lvl">Chapter 4, “Data-Level Parallelism in Vector, SIMD, and GPU Architectures”, matches concepts 1–2 (GPUs set against vector machines and SIMD extensions)</span></li>
+    <li lang="zh-CN">Jason Sanders &amp; Edward Kandrot, 《CUDA by Example: An Introduction to General-Purpose GPU Programming》, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">较老但仍清楚：讲 CUDA C 入门和并行编程的两章对应概念 3 与 Lab A 的向量求和；第 6 章「Constant Memory and Events」（§6.3「Measuring Performance with Events」）对应概念 5 的计时</span></li>
+    <li lang="en">Jason Sanders &amp; Edward Kandrot, <em>CUDA by Example: An Introduction to General-Purpose GPU Programming</em>, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">Older but still clear: the two chapters introducing CUDA C and parallel programming in it match concept 3 and the vector sum of Lab A; Chapter 6, “Constant Memory and Events” (§6.3, “Measuring Performance with Events”), matches the timing in concept 5</span></li>
     <li lang="zh-CN">John Cheng, Max Grossman &amp; Ty McKercher, 《Professional CUDA C Programming》, Wrox (Wiley), 2014, ISBN 9781118739327. <span class="lvl">讲 CUDA 编程模型的一章对应概念 3 和 5（grid 与 block 的组织、错误处理、内核计时）；讲 CUDA 执行模型的一章对应概念 2 和动画 (a)（warp、SM、延迟隐藏）</span></li>
     <li lang="en">John Cheng, Max Grossman &amp; Ty McKercher, <em>Professional CUDA C Programming</em>, Wrox (Wiley), 2014, ISBN 9781118739327. <span class="lvl">The chapter on the CUDA programming model matches concepts 3 and 5 (organising grids and blocks, error handling, timing a kernel); the chapter on the CUDA execution model matches concept 2 and diagram (a) (warps, SMs, latency hiding)</span></li>
   </ol>
 
   <nav class="pn">
     <a href="../lab-setup/index.html">← <span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span></a>
-    <a href="../phase-1-memory-hierarchy/index.html">Phase 1 · The Memory Hierarchy →</a>
+    <a href="../phase-1-memory-hierarchy/index.html"><span lang="zh-CN">Phase 1 · 内存层次 →</span><span lang="en">Phase 1 · The Memory Hierarchy →</span></a>
   </nav>
 </div>
 <script src="../../../assets/diagram.js"></script>

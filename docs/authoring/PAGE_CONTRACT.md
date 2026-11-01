@@ -62,7 +62,7 @@ The five Chinese headings 目标, 核心概念, 动画图解, 资料, 参考书�
 11. `nav.pn` with the previous and next lesson links.
 
 The lab-setup page keeps the same skeleton but replaces 前置 with 为什么要隔离 / Why isolate and has one diagram.
-A lab-setup page whose labs run on the host rather than in a VM uses 为什么在本机做 / Why on this Mac in place of 为什么要隔离 (Parallel Programming). The closing phase of a topic may add two sections after the bibliography and before `nav.pn`: 作品项目 / Capstone and 接下来 / What comes next (the kernel topic's Phase 8 and ROS 2's Phase 7 do this), so the topic ends on the project and the pointers to related topics.
+A lab-setup page whose labs run on the host rather than in a VM uses 为什么在本机做 / Why on this Mac in place of 为什么要隔离 (Parallel Programming). A lab-setup page whose labs are split across tiers uses 为什么这样分层 / Why these tiers (GPU Programming with CUDA). The closing phase of a topic may add two sections after the bibliography and before `nav.pn`: 作品项目 / Capstone and 接下来 / What comes next (the kernel topic's Phase 8 and ROS 2's Phase 7 do this), so the topic ends on the project and the pointers to related topics.
 
 ## Bilingual pairing
 
@@ -118,9 +118,9 @@ Four questions, three options each, every wrong option plausible, the explanatio
 
 ## Colours
 
-Global tokens in `assets/style.css`: `--accent` (sage green), `--linux` (ochre) and `--xnu` (indigo) for the kernel topic, `--ros` (blue) and `--gz` (orange) for ROS 2 and simulation. Use them as `th.ros`, `.box.ros`, `style="fill: var(--ros)"`. New topics add their own pair next to these, light and dark values both.
+Global tokens in `assets/style.css`: `--accent` (sage green), `--linux` (ochre) and `--xnu` (indigo) for the kernel topic, `--ros` (blue) and `--gz` (orange) for ROS 2 and simulation, `--cuda` (plum, #8a3b78 light / #e0a0d2 dark) and `--metal` (slate blue, #4b5f8a / #a3b4d6) for GPU Programming with CUDA. Use them as `th.ros`, `.box.ros`, `style="fill: var(--ros)"`. New topics add their own pair next to these, light and dark values both.
 
-A topic colour carries one fixed meaning, the same on every page of the topic (Designer review, 2026-10-31): in the kernel topic ochre is always Linux and indigo always XNU; in ROS 2 blue is always the ROS 2 graph side (nodes, rcl, rmw, DDS), orange always the Gazebo or hardware side, and ochre the kernel beneath. A comparison table gets coloured `th` cells only when its two sides are those two meanings (URDF ↔ SDF, ROS node ↔ Gazebo plugin); a table of executor kinds, QoS profiles or tools uses plain `th`. A roadmap colours one lane or one destination, not every box. Failures, mismatches and errors are marked by a glyph and `--ink-2` text, never by a hue. The hub card illustration uses the brand green only. If a colour would carry no meaning, leave it out.
+A topic colour carries one fixed meaning, the same on every page of the topic (Designer review, 2026-10-31): in the kernel topic ochre is always Linux and indigo always XNU; in ROS 2 blue is always the ROS 2 graph side (nodes, rcl, rmw, DDS), orange always the Gazebo or hardware side, and ochre the kernel beneath; in GPU Programming with CUDA plum is always the NVIDIA/CUDA side, slate blue always the Apple/Metal side, and ochre the kernel beneath. A comparison table gets coloured `th` cells only when its two sides are those two meanings (URDF ↔ SDF, ROS node ↔ Gazebo plugin); a table of executor kinds, QoS profiles or tools uses plain `th`. A roadmap colours one lane or one destination, not every box. Failures, mismatches and errors are marked by a glyph and `--ink-2` text, never by a hue. The hub card illustration uses the brand green only. If a colour would carry no meaning, leave it out.
 
 ## Accuracy
 
