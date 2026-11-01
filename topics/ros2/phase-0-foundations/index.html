@@ -388,7 +388,7 @@ ls ~/ws/install/my_pkg/share/ament_index/resource_index/packages/</pre></li>
     <ol>
       <li><span lang="zh-CN">装上需要的工具（镜像里可能已有其中一部分；容器里默认是 root）：</span><span lang="en">Install the tools you need (the image may already have some of them; the container runs as root by default):</span><pre data-lang="sh">apt-get update
 apt-get install -y iproute2 procps tcpdump</pre></li>
-      <li><span lang="zh-CN">先把这个 shell 切回 domain 0 和子网发现：实验环境默认是 <code>ROS_DOMAIN_ID=42</code> 和 <code>LOCALHOST</code>，而下面的端口按 domain 0 计算，第 3 步还要观察多播。做完 Lab B 关掉这个 shell。</span><span lang="en">First switch this shell back to domain 0 and subnet discovery: the lab environment defaults to <code>ROS_DOMAIN_ID=42</code> and <code>LOCALHOST</code>, but the ports below are computed for domain 0 and step 3 observes multicast. Close this shell when Lab B is done.</span><pre data-lang="sh">export ROS_DOMAIN_ID=0 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET   # 本实验按 domain 0 计算端口并观察多播；实验环境默认是 42 和 LOCALHOST，做完关掉这个 shell</pre>
+      <li><span lang="zh-CN">先把这个 shell 切回 domain 0 和子网发现：实验环境默认是 <code>ROS_DOMAIN_ID=42</code> 和 <code>LOCALHOST</code>，而下面的端口按 domain 0 计算，第 3 步还要观察多播；在 LOCALHOST 下 Fast DDS 会清空多播发现 locator，7400 和 239.255.0.1 都不会出现。做完 Lab B 关掉这个 shell。</span><span lang="en">First switch this shell back to domain 0 and subnet discovery: the lab environment defaults to <code>ROS_DOMAIN_ID=42</code> and <code>LOCALHOST</code>, but the ports below are computed for domain 0 and step 3 observes multicast; under LOCALHOST Fast DDS clears its multicast discovery locators, which is why 7400 and 239.255.0.1 would not appear. Close this shell when Lab B is done.</span><pre data-lang="sh">export ROS_DOMAIN_ID=0 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET   # 本实验按 domain 0 计算端口并观察多播；实验环境默认是 42 和 LOCALHOST，做完关掉这个 shell</pre>
         <span lang="zh-CN">后台启动 talker，看它打开的 UDP socket。按 RTPS port formula，domain 0 的第一个 participant 应该出现 7400 附近的发现端口和 7410、7411 附近的单播端口；Fast DDS 实际打开哪些以输出为准：</span><span lang="en">Start the talker in the background and look at the UDP sockets it opens. By the RTPS port formula, the first participant in domain 0 should show the discovery port around 7400 and unicast ports around 7410 and 7411; go by the output for which ports Fast DDS actually opens:</span><pre data-lang="sh">ros2 run demo_nodes_cpp talker &gt; /dev/null &amp;
 sleep 2
 ss -ulpn | grep talker</pre></li>
@@ -407,7 +407,7 @@ ls -l /dev/shm</pre></li>
 ROS_DOMAIN_ID=7 ros2 run demo_nodes_cpp talker &gt; /dev/null &amp;
 sleep 2
 ss -ulpn | grep talker                          # 期望 9150、9160、9161 附近
-ros2 run demo_nodes_cpp listener                # domain 0：没有输出，Ctrl+C
+ROS_DOMAIN_ID=0 ros2 run demo_nodes_cpp listener  # domain 0：没有输出，Ctrl+C
 ROS_DOMAIN_ID=7 ros2 run demo_nodes_cpp listener  # domain 7：I heard ...</pre></li>
       <li><span lang="zh-CN">可选：抓几个发现报文，看到的就是第 6 层的 RTPS 流量：</span><span lang="en">Optional: capture a few discovery packets; this is the layer 6 RTPS traffic:</span><pre data-lang="sh">tcpdump -ni any udp port 9150 -c 5</pre></li>
     </ol>

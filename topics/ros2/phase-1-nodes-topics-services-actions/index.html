@@ -552,7 +552,7 @@ ros2 run py_srvcli client 2 3                       # Result: 5
 ros2 service list -t
 ros2 service call /add_two_ints example_interfaces/srv/AddTwoInts "{a: 2, b: 3}"
 ros2 topic list --include-hidden-topics</pre></li>
-      <li><span lang="zh-CN">Fibonacci 动作。官方教程「Writing an action server and client」用的 <code>Fibonacci</code> 类型在 <code>action_tutorials_interfaces</code> 里，先确认它已安装（desktop 镜像里大致已有；没有就装 <code>ros-jazzy-action-tutorials-interfaces</code>，包名以 apt 搜索结果为准）：</span><span lang="en">The Fibonacci action. The <code>Fibonacci</code> type used by the official tutorial “Writing an action server and client” lives in <code>action_tutorials_interfaces</code>; first make sure it is installed (the desktop image approximately has it already; otherwise install <code>ros-jazzy-action-tutorials-interfaces</code>, going by what an apt search shows):</span><pre data-lang="sh">ros2 interface show action_tutorials_interfaces/action/Fibonacci
+      <li><span lang="zh-CN">Fibonacci 动作。Jazzy 的「Creating an action」和动作服务端、客户端教程会自己建一个 <code>custom_action_interfaces</code> 包。本页用的是 <code>action_tutorials_interfaces</code> 里完全相同的 Fibonacci 动作，它随 <code>ros-jazzy-desktop</code> 一起安装。照着教程做时把包名换掉即可。先确认它在：</span><span lang="en">The Fibonacci action. The Jazzy “Creating an action” and action server/client tutorials build their own <code>custom_action_interfaces</code> package. This page uses the identical Fibonacci action from <code>action_tutorials_interfaces</code>, which ships with <code>ros-jazzy-desktop</code>. Substitute the name when following the tutorial. Check that it is there:</span><pre data-lang="sh">ros2 interface show action_tutorials_interfaces/action/Fibonacci
 # int32 order
 # ---
 # int32[] sequence
