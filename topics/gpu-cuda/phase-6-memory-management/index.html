@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 6 · Memory Management and Host Integration · GPU Programming with CUDA</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">GPU Programming with CUDA</a>
+    <span class="crumb current" aria-current="page">Phase 6 · Memory Management and Host Integration</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 6 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 6 / 8 · about 1–2 weeks</p>
+  <h1>Memory Management and Host Integration <span class="en" lang="zh-CN">内存管理与宿主集成：统一内存的迁移、预取与建议，零拷贝，流序分配器与内存池，缓存分配器，设备端断言、compute-sanitizer 与 cuda-gdb</span><span class="en" lang="en">Unified memory migration, prefetch and advice, zero-copy, the stream-ordered allocator and memory pools, caching allocators, device-side asserts, compute-sanitizer and cuda-gdb</span></h1>
+  <p class="lede" lang="zh-CN">前几课的数据都是自己用 <code>cudaMalloc</code> 和 <code>cudaMemcpy</code> 搬的。真实程序里，内存从哪来、住在哪、什么时候搬、谁来还，往往比 kernel 本身更决定速度和对错。这一课先把统一内存拆开：第一次访问时页怎样在 CPU 和 GPU 之间迁移，<code>cudaMemPrefetchAsync</code> 和 <code>cudaMemAdvise</code> 怎样替驱动做决定；再看零拷贝（mapped memory）、流序分配器 <code>cudaMallocAsync</code> 和它背后的内存池，以及 PyTorch 这类框架为什么自己再缓存一层；最后是找内存错误的三样工具：设备端 <code>assert</code>、<code>compute-sanitizer</code>（memcheck、racecheck、initcheck）和 <code>cuda-gdb</code>。<strong>哪些跑过、哪些没跑过：</strong>CUDA 部分（Lab A）<strong>未运行</strong>，是 2026-10-31 根据 CUDA 文档整理的；Metal 部分（Lab B）2026-10-31 在这台 Apple M5 上实际运行：同一个流式 kernel 在 shared 和 private 两种存储模式的 buffer 上速度没有稳定的差别（四次运行里两者的中位数最多差约 6%，谁快谁慢不固定），而把数据放进 private 要多一次 blit，这次拷贝和 kernel 本身花的时间差不多。</p>
+  <p class="lede" lang="en">Until now every lesson moved its own data with <code>cudaMalloc</code> and <code>cudaMemcpy</code>. In real programs, where memory comes from, where it lives, when it moves and who gives it back often decide speed and correctness more than the kernel does. This lesson first takes unified memory apart: how pages migrate between CPU and GPU on first touch, and how <code>cudaMemPrefetchAsync</code> and <code>cudaMemAdvise</code> make decisions for the driver. Then come zero-copy (mapped memory), the stream-ordered allocator <code>cudaMallocAsync</code> and the memory pool behind it, and why frameworks such as PyTorch add a cache of their own. Last come three tools for finding memory bugs: the device-side <code>assert</code>, <code>compute-sanitizer</code> (memcheck, racecheck, initcheck) and <code>cuda-gdb</code>. <strong>What was run and what was not:</strong> the CUDA part (Lab A) is <strong>not run</strong>, assembled on 2026-10-31 from the CUDA documentation; the Metal part (Lab B) was actually run on this Apple M5 on 2026-10-31: the same streaming kernel shows no stable difference between buffers in the shared and the private storage mode (across four runs their medians differ by at most about 6%, with no fixed winner), while putting data into private storage costs an extra blit that takes about as long as the kernel itself.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">用三个设备属性判断一台机器属于哪种统一内存形态，说清 <code>cudaMallocManaged</code> 的页第一次被 CPU 或 GPU 访问时发生什么。</li>
+      <li lang="en">Tell from three device attributes which form of unified memory a machine has, and say what happens when a page from <code>cudaMallocManaged</code> is first touched by the CPU or the GPU.</li>
+      <li lang="zh-CN">按 CUDA 13 的签名调用 <code>cudaMemPrefetchAsync</code>（目标是一个 <code>cudaMemLocation</code>），说出 <code>cudaMemAdvise</code> 的六个枚举值各做什么。</li>
+      <li lang="en">Call <code>cudaMemPrefetchAsync</code> with its CUDA 13 signature (the destination is a <code>cudaMemLocation</code>), and say what each of the six <code>cudaMemAdvise</code> values does.</li>
+      <li lang="zh-CN">分清零拷贝（mapped pinned memory）和统一内存，知道零拷贝什么时候合适、为什么不该当主力。</li>
+      <li lang="en">Tell zero-copy (mapped pinned memory) apart from unified memory, and know when zero-copy fits and why it should not carry a kernel’s main traffic.</li>
+      <li lang="zh-CN">用 <code>cudaMallocAsync</code> / <code>cudaFreeAsync</code> 代替循环里的 <code>cudaMalloc</code> / <code>cudaFree</code>，设好内存池的 release threshold，并说清跨流复用要什么依赖。</li>
+      <li lang="en">Replace <code>cudaMalloc</code> / <code>cudaFree</code> in a loop with <code>cudaMallocAsync</code> / <code>cudaFreeAsync</code>, set a pool’s release threshold, and say what dependency reuse across streams needs.</li>
+      <li lang="zh-CN">读懂 PyTorch 的 <code>memory_allocated</code> 和 <code>memory_reserved</code> 的差别，知道缓存分配器为什么会挡住内存检查工具。</li>
+      <li lang="en">Read the difference between PyTorch’s <code>memory_allocated</code> and <code>memory_reserved</code>, and know why a caching allocator gets in the way of memory-checking tools.</li>
+      <li lang="zh-CN">用设备端 <code>assert</code>、<code>compute-sanitizer</code> 的 memcheck、racecheck、initcheck 和 <code>cuda-gdb</code> 找到越界、数据竞争和未初始化读。</li>
+      <li lang="en">Find out-of-bounds accesses, data races and uninitialized reads with the device-side <code>assert</code>, the memcheck, racecheck and initcheck tools of <code>compute-sanitizer</code>, and <code>cuda-gdb</code>.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-1-memory-hierarchy/index.html">Phase 1 · The Memory Hierarchy</a> 的概念 5：统一内存的缺页三步、pinned 内存为什么让拷贝更快。本课从那里接着讲。</li>
+    <li lang="en">Concept 5 of <a href="../phase-1-memory-hierarchy/index.html">Phase 1 · The Memory Hierarchy</a>: the three steps of a unified-memory page fault, and why pinned memory makes copies faster. This lesson continues from there.</li>
+    <li lang="zh-CN"><a href="../phase-5-streams-and-graphs/index.html">Phase 5 · Streams, Graphs and Concurrency</a>：流、事件、<code>cudaStreamWaitEvent</code> 和 <code>cudaMemcpyAsync</code>。预取和流序分配都是排进流里的操作。</li>
+    <li lang="en"><a href="../phase-5-streams-and-graphs/index.html">Phase 5 · Streams, Graphs and Concurrency</a>: streams, events, <code>cudaStreamWaitEvent</code> and <code>cudaMemcpyAsync</code>. Prefetches and stream-ordered allocations are operations queued on a stream.</li>
+    <li lang="zh-CN">Kernel Engineering 的 <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5 · Device Drivers</a>：DMA 和 IOMMU。pinned 内存和零拷贝都建立在驱动把主机物理页交给设备 DMA 这件事上。</li>
+    <li lang="en">Kernel Engineering <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5 · Device Drivers</a>: DMA and the IOMMU. Pinned memory and zero-copy both rest on the driver handing physical host pages to the device for DMA.</li>
+    <li lang="zh-CN">按 <a href="../lab-setup/index.html">实验环境</a> 第一层准备的 Colab T4（本课的 CUDA 实验不需要剖析器的计数器权限），以及这台 Mac 上的 <code>swiftc</code>。</li>
+    <li lang="en">The Colab T4 of tier 1 in <a href="../lab-setup/index.html">Lab environment</a> (this lesson’s CUDA lab needs no profiler counter permissions), and <code>swiftc</code> on this Mac.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 统一内存的几种形态，和第一次访问时的迁移</h3><h3 lang="en">1. The forms of unified memory, and migration on first touch</h3>
+  <p lang="zh-CN">CUDA 编程指南（「Understanding Memory」和「Unified Memory」两节，2026-10-31 读取）把统一内存分成四种形态，用三个设备属性区分：<code>cudaDevAttrConcurrentManagedAccess</code> 为 1 表示完整支持，为 0 表示有限支持（Windows、WSL 和部分 Tegra）；完整支持时，<code>cudaDevAttrPageableMemoryAccess</code> 为 1 表示所有系统内存（连 <code>malloc</code> 的都算）都是统一内存，为 0 表示只有显式分配的 managed 内存才是；所有系统内存都统一时，<code>cudaDevAttrPageableMemoryAccessUsesHostPageTables</code> 说明一致性靠硬件（1，比如 Grace Hopper 的 ATS）还是软件（0，Linux 的 HMM）。指南写明 HMM 需要 Linux 内核 6.1.24+、6.2.11+ 或 6.3+，compute capability 7.5 以上，以及 535 以上的驱动并使用开源内核模块。Colab 的 T4 是插在 PCIe 上的独立卡，属于 CPU 和 GPU 各有一套页表的「软件一致」系统；它具体落在哪一种形态，要看那台虚拟机的内核和驱动，Lab A 的第一行输出会告诉你（推断：本页没有在 Colab 上查过）。</p>
+  <p lang="en">The CUDA Programming Guide (the “Understanding Memory” and “Unified Memory” sections, read 2026-10-31) divides unified memory into four forms, told apart by three device attributes: <code>cudaDevAttrConcurrentManagedAccess</code> is 1 for full support and 0 for limited support (Windows, WSL and some Tegra devices); with full support, <code>cudaDevAttrPageableMemoryAccess</code> is 1 when all system memory, even memory from <code>malloc</code>, is unified memory, and 0 when only explicitly allocated managed memory is; when all system memory is unified, <code>cudaDevAttrPageableMemoryAccessUsesHostPageTables</code> says whether coherence comes from hardware (1, such as the ATS of Grace Hopper) or from software (0, Linux HMM). The guide states that HMM needs Linux kernel 6.1.24+, 6.2.11+ or 6.3+, compute capability 7.5 or higher, and a 535+ driver with the open kernel modules. The Colab T4 is a discrete card on PCIe, a “software-coherent” system in which the CPU and the GPU keep separate page tables; which form it falls into depends on the kernel and driver of that virtual machine, and the first output line of Lab A tells you (an inference: this page did not check it on Colab).</p>
+  <p lang="zh-CN">在完整支持的系统上，<code>cudaMallocManaged</code> 只给出一段 CPU 和 GPU 共用的虚拟地址。指南的分配器对照表写明，它的物理页按 <strong>first touch / hint</strong> 放置：谁先访问一页，那一页就落在谁的内存里，除非用 advice 另行指定；落在 CPU 上的页用系统页大小（多数系统 4 KiB 或 64 KiB），驻留在 GPU 上的页是 2 MB（指南注明 GPU 端的页大小以后可能改变）。默认机制是「缺页再迁移」（fault-and-migrate）：GPU 访问一页物理上在主机的内存时缺页，驱动让主机那边的页表项失效、把数据搬过 PCIe、在 GPU 页表里建新项（Phase 1 的三步），然后线程才能继续。指南还提醒，GPU 上的 TLB 缺失比 CPU 上贵得多。这就是为什么「CPU 初始化、GPU 第一次跑」的那次 kernel 会慢得多：它的时间里装着成千上万次缺页处理。动画 (a) 一步一步画出这个过程。</p>
+  <p lang="en">On a system with full support, <code>cudaMallocManaged</code> hands out a range of virtual addresses shared by CPU and GPU. The allocator table of the guide says its physical pages are placed by <strong>first touch / hint</strong>: whichever processor touches a page first gets that page in its memory, unless advice says otherwise; pages on the CPU use the system page size (4 KiB or 64 KiB on most systems), and pages resident on the GPU are 2 MB (the guide notes that GPU-side page sizes may change in future). The default mechanism is fault-and-migrate: when the GPU touches a page that physically lives on the host, it faults, the driver invalidates the host page-table entry, moves the data across PCIe and creates an entry in the GPU page table (Phase 1’s three steps), and only then can the thread continue. The guide also warns that TLB misses are much more expensive on the GPU than on the CPU. This is why the first kernel after a CPU initialisation is so much slower: its time contains thousands of fault services. Diagram (a) draws the process step by step.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 24 章「Advanced practices and future evolution」（章名按 Elsevier 的目录核对；本页推断它和第 4 版同名一章一样讲主机与设备的交互和统一内存，没有核对章内内容）；Bryant 与 O'Hallaron《Computer Systems: A Programmer's Perspective》第 9 章「Virtual Memory」讲按需分页和缺页处理本身。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 24, “Advanced practices and future evolution” (the title checked against Elsevier’s table of contents; this page infers that, like the chapter of the same name in the 4th edition, it covers host–device interaction and unified memory, and did not check its contents); Bryant and O'Hallaron, <em>Computer Systems: A Programmer's Perspective</em>, Chapter 9, “Virtual Memory”, on demand paging and fault handling themselves.</p>
+
+  <h3 lang="zh-CN">2. 预取和建议：替驱动做决定</h3><h3 lang="en">2. Prefetch and advice: deciding for the driver</h3>
+  <p lang="zh-CN">缺页迁移是驱动在不知道你要做什么的情况下的兜底。你知道得更多时，有两种办法告诉它（CUDA Runtime API 参考的「Memory Management」一节，CUDA 13.4，2026-10-31 读取）：</p>
+  <p lang="en">Fault-and-migrate is the driver’s fallback when it does not know what you intend. When you know more, there are two ways to tell it (the “Memory Management” part of the CUDA Runtime API reference, CUDA 13.4, read 2026-10-31):</p>
+  <ul>
+    <li lang="zh-CN"><strong>预取</strong>：<code>cudaMemPrefetchAsync(const void* devPtr, size_t count, cudaMemLocation location, unsigned int flags, cudaStream_t stream = 0)</code>。目标是一个 <code>cudaMemLocation</code>：<code>type = cudaMemLocationTypeDevice</code> 加 <code>id</code> 为设备号，或 <code>cudaMemLocationTypeHost</code>（此时 <code>id</code> 被忽略）；<code>flags</code> 文档写明「留作将来使用，现在必须为 0」。它是按流排序的操作：在流里前面的工作完成后才开始迁移，在后面的工作开始前完成。范围会按 CPU 页大小对齐；还没有物理页的部分直接在目标上分配。预取到 GPU 要求设备的 <code>concurrentManagedAccess</code> 不为 0。较早的教程和代码里传的是一个整数设备号；本页读的 13.4 参考里只有 <code>cudaMemLocation</code> 这一种写法，旧代码要改（旧写法来自记忆，推断）。</li>
+    <li lang="en"><strong>Prefetch</strong>: <code>cudaMemPrefetchAsync(const void* devPtr, size_t count, cudaMemLocation location, unsigned int flags, cudaStream_t stream = 0)</code>. The destination is a <code>cudaMemLocation</code>: <code>type = cudaMemLocationTypeDevice</code> with <code>id</code> set to the device ordinal, or <code>cudaMemLocationTypeHost</code> (whose <code>id</code> is ignored); for <code>flags</code> the reference says “flags for future use, must be zero now”. It is a stream-ordered operation: migration starts only after earlier work in the stream has finished and completes before later work starts. The range is aligned to the CPU page size, and parts with no physical memory yet are populated directly on the destination. Prefetching to a GPU requires a non-zero <code>concurrentManagedAccess</code> on that device. Older tutorials and code pass an integer device number; the 13.4 reference read for this page shows only the <code>cudaMemLocation</code> form, so old code needs changing (the older form is from memory, an inference).</li>
+    <li lang="zh-CN"><strong>建议</strong>：<code>cudaMemAdvise(const void* devPtr, size_t count, cudaMemoryAdvise advice, cudaMemLocation location)</code>。<code>cudaMemoryAdvise</code> 有六个值，三对「设置 / 撤销」：
+      <code>cudaMemAdviseSetReadMostly</code> / <code>cudaMemAdviseUnsetReadMostly</code>：数据主要被读、偶尔被写；任何处理器读它都会在自己的内存里建一份只读副本，有人写时除写的那份以外全部失效；<code>location</code> 被忽略。
+      <code>cudaMemAdviseSetPreferredLocation</code> / <code>cudaMemAdviseUnsetPreferredLocation</code>：数据的首选位置；页在首选位置、访问方又能直接建映射时，就不迁移，否则照常迁移；它不阻止 <code>cudaMemPrefetchAsync</code>。文档特别提醒：首选位置设为显存而页在主机和设备之间来回颠簸时，驱动原本会把它固定在主机，设了首选位置就会一直颠簸下去。
+      <code>cudaMemAdviseSetAccessedBy</code> / <code>cudaMemAdviseUnsetAccessedBy</code>：这个处理器会访问这段数据；它不迁移数据，而是让数据始终映射在那个处理器的页表里，避免缺页；数据因为别的原因迁移时映射跟着更新。</li>
+    <li lang="en"><strong>Advice</strong>: <code>cudaMemAdvise(const void* devPtr, size_t count, cudaMemoryAdvise advice, cudaMemLocation location)</code>. <code>cudaMemoryAdvise</code> has six values, three set-and-unset pairs:
+      <code>cudaMemAdviseSetReadMostly</code> / <code>cudaMemAdviseUnsetReadMostly</code>: the data is mostly read and only occasionally written; any processor that reads it gets a read-only copy in its own memory, and a write invalidates every copy except the writer’s; <code>location</code> is ignored.
+      <code>cudaMemAdviseSetPreferredLocation</code> / <code>cudaMemAdviseUnsetPreferredLocation</code>: where the data should preferably live; when a page is in its preferred location and the accessing processor can map it directly, no migration happens, otherwise it migrates as usual; it does not prevent <code>cudaMemPrefetchAsync</code>. The reference warns specifically: when a page thrashes between host and device, the driver would normally pin it to host memory, but with the preferred location set to the device it keeps thrashing indefinitely.
+      <code>cudaMemAdviseSetAccessedBy</code> / <code>cudaMemAdviseUnsetAccessedBy</code>: this processor will access the data; it does not migrate anything, but keeps the data mapped in that processor’s page tables so that accesses do not fault; if the data migrates for some other reason, the mapping follows it.</li>
+  </ul>
+  <p lang="zh-CN">两者常常一起用：一个只读的大表设 ReadMostly，让每张卡各有一份；一块「多数时候在主机、偶尔被 GPU 看一眼」的数据设首选位置为主机、再对 GPU 设 AccessedBy，GPU 就经 PCIe 直接读它，不搬；一块马上要被 kernel 整块用到的数据，就在同一个流里先预取过去。Lab A 把「不预取」「预取」「主机 + AccessedBy」三种做法放在同一个 kernel 上比较。</p>
+  <p lang="en">The two often go together: a large read-only table gets ReadMostly, so each GPU holds its own copy; data that mostly lives on the host and is only glanced at by the GPU gets the host as its preferred location plus AccessedBy for the GPU, so the GPU reads it across PCIe without moving it; data a kernel is about to use in full is prefetched first, in the same stream. Lab A compares no prefetch, prefetch, and host plus AccessedBy on the same kernel.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 CUDA 13 的预取和建议接口；依据是 CUDA Runtime API 参考里 <code>cudaMemPrefetchAsync</code> 与 <code>cudaMemAdvise</code> 的说明，以及编程指南「Unified Memory」一节的「Performance Hints」（见资料）。</p>
+  <p lang="en">Further reading: no book in the bibliography covers the CUDA 13 prefetch and advice interfaces; this rests on the descriptions of <code>cudaMemPrefetchAsync</code> and <code>cudaMemAdvise</code> in the CUDA Runtime API reference and on “Performance Hints” in the “Unified Memory” section of the programming guide (see Resources).</p>
+
+  <h3 lang="zh-CN">3. pinned 内存、DMA 和零拷贝</h3><h3 lang="en">3. Pinned memory, DMA and zero-copy</h3>
+  <p lang="zh-CN">pinned（页锁定）主机内存的道理在驱动那一层：GPU 的拷贝引擎用 DMA 按物理地址读写主机内存，那些物理页在传输期间不能被换出或挪动（Kernel Engineering <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5</a> 的概念 4 讲 DMA 和 IOMMU）。<code>cudaHostAlloc</code> 的说明给出两个后果：设备能直接访问这块内存，所以拷贝带宽比可分页内存高得多；但分配太多会减少系统可用于分页的内存、拖慢整个系统，所以应当省着用，主要用作主机和设备之间的中转区。它的几个标志彼此独立：<code>cudaHostAllocPortable</code>（所有 CUDA 上下文都把它当 pinned），<code>cudaHostAllocMapped</code>（映射进 CUDA 地址空间），<code>cudaHostAllocWriteCombined</code>（写合并：CPU 写、设备读时传得快，但多数 CPU 读它很慢）。</p>
+  <p lang="en">The reason for pinned (page-locked) host memory lies in the driver: the copy engine of the GPU reads and writes host memory by physical address through DMA, and those physical pages must not be swapped out or moved during the transfer (concept 4 of Kernel Engineering <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5</a> covers DMA and the IOMMU). The description of <code>cudaHostAlloc</code> gives two consequences: the device can access this memory directly, so copies reach much higher bandwidth than from pageable memory; but allocating too much reduces the memory the system has for paging and degrades the whole system, so use it sparingly, mainly as a staging area between host and device. Its flags are independent of each other: <code>cudaHostAllocPortable</code> (pinned for every CUDA context), <code>cudaHostAllocMapped</code> (mapped into the CUDA address space) and <code>cudaHostAllocWriteCombined</code> (write-combined: fast to transfer when the CPU writes and the device reads, but slow for most CPUs to read).</p>
+  <p lang="zh-CN"><strong>零拷贝</strong>就是 mapped memory：编程指南写明「mapped memory 在以前的文档里也叫 zero-copy memory」。没有 HMM 或 ATS 时，把主机分配映射进 GPU 的地址空间，kernel 就能用指针直接读写主机内存，不需要先拷贝。用 <code>cudaHostAlloc(..., cudaHostAllocMapped)</code> 分配后，<code>cudaHostGetDevicePointer</code> 给出设备端指针；在统一虚拟地址（UVA）下，<code>cudaMallocHost</code> 和 <code>cudaHostAlloc</code> 的内存会自动映射，以前需要的 <code>cudaSetDeviceFlags(cudaDeviceMapHost)</code> 已经不需要了。代价同样写在指南里：mapped memory 一直留在 CPU 内存里，GPU 的每次访问都要走 PCIe 或 NVLink C2C，延迟高得多、带宽低得多；它不保证所有访问类型（比如原子操作）在所有系统上都支持；指南的原话是，它不应被当作统一内存或显式内存管理的高性能替代品，来承担 kernel 的主要内存需求。合适的用处是：只读一次的数据、很小的标志位或结果、CPU 写 GPU 读的流式数据。和统一内存比：统一内存多数时候会把页迁到访问它的处理器那边，迁过去以后就能用满显存带宽；mapped memory 永远不搬。</p>
+  <p lang="en"><strong>Zero-copy</strong> is mapped memory: the programming guide says “mapped memory has also been referred to as zero-copy memory in previous documents”. Without HMM or ATS, a host allocation mapped into the GPU’s address space lets a kernel read and write host memory through a pointer, with no copy first. After <code>cudaHostAlloc(..., cudaHostAllocMapped)</code>, <code>cudaHostGetDevicePointer</code> returns the device-side pointer; under unified virtual addressing (UVA), memory from <code>cudaMallocHost</code> and <code>cudaHostAlloc</code> is mapped automatically, and the old <code>cudaSetDeviceFlags(cudaDeviceMapHost)</code> is no longer needed. The price is in the guide too: mapped memory stays in CPU memory, so every GPU access crosses PCIe or NVLink C2C with much higher latency and much lower bandwidth; it does not guarantee that every kind of access, atomics for example, is supported on every system; and in the guide’s words it should not be considered a performant alternative to unified memory or explicit memory management for the majority of a kernel’s memory needs. It suits data read once, small flags or results, and streams the CPU writes and the GPU reads. Compared with unified memory: unified memory usually migrates pages to the processor that touches them, after which the kernel gets full device bandwidth; mapped memory never moves.</p>
+  <p lang="zh-CN">延伸阅读：Corbet、Rubini 与 Kroah-Hartman《Linux Device Drivers》第 3 版第 15 章「Memory Mapping and DMA」（驱动怎样把页交给设备 DMA）；PMPP 第 5 版第 24 章（推断，同上）；CUDA 编程指南的「Page-Locked Host Memory」和「Mapped Memory」两小节。</p>
+  <p lang="en">Further reading: Corbet, Rubini and Kroah-Hartman, <em>Linux Device Drivers</em>, 3rd ed., Chapter 15, “Memory Mapping and DMA” (how a driver hands pages to a device for DMA); PMPP, 5th ed., Chapter 24 (an inference, as above); the “Page-Locked Host Memory” and “Mapped Memory” subsections of the CUDA Programming Guide.</p>
+
+  <h3 lang="zh-CN">4. 流序分配器与内存池</h3><h3 lang="en">4. The stream-ordered allocator and memory pools</h3>
+  <p lang="zh-CN">编程指南「Stream-Ordered Memory Allocator」一节开头一句话说清了问题：用 <code>cudaMalloc</code> 和 <code>cudaFree</code> 管理内存会让 GPU 在所有正在执行的流之间同步。一个每步都分配、释放临时 buffer 的循环，因此会把 Phase 5 辛苦叠起来的并发一次次掐断。流序分配器（CUDA 11.2 起）把分配和释放变成流里的操作：</p>
+  <p lang="en">The “Stream-Ordered Memory Allocator” section of the programming guide states the problem in its first sentence: managing memory with <code>cudaMalloc</code> and <code>cudaFree</code> causes the GPU to synchronize across all executing CUDA streams. A loop that allocates and frees a temporary buffer on every step therefore keeps cutting off the concurrency that Phase 5 worked to build. The stream-ordered allocator (since CUDA 11.2) makes allocation and freeing operations on a stream:</p>
+  <ul>
+    <li lang="zh-CN"><strong><code>cudaMallocAsync(void** devPtr, size_t size, cudaStream_t hStream)</code> 和 <code>cudaFreeAsync(void* devPtr, cudaStream_t hStream)</code></strong>：分配在流执行到那里时才「生效」，释放在流执行到那里时把内存还回池里。文档的规则：释放之后的任何访问都是未定义行为；别的流要用这块内存，必须用事件把顺序接上（分配流里记事件、使用流 <code>cudaStreamWaitEvent</code>，用完再记事件、释放流等它）。<code>cudaMalloc</code> 的内存可以用 <code>cudaFreeAsync</code> 释放，反过来也行。设备是否支持，用 <code>cudaDevAttrMemoryPoolsSupported</code> 查。</li>
+    <li lang="en"><strong><code>cudaMallocAsync(void** devPtr, size_t size, cudaStream_t hStream)</code> and <code>cudaFreeAsync(void* devPtr, cudaStream_t hStream)</code></strong>: the allocation takes effect when the stream reaches it, and the free returns the memory to the pool when the stream reaches it. The documented rules: any access after the free is undefined behavior; for another stream to use the memory, events must connect the order (record an event in the allocating stream, <code>cudaStreamWaitEvent</code> in the using stream, record again when done, and have the freeing stream wait on it). Memory from <code>cudaMalloc</code> may be freed with <code>cudaFreeAsync</code>, and the other way round. Whether a device supports the allocator is queried with <code>cudaDevAttrMemoryPoolsSupported</code>.</li>
+    <li lang="zh-CN"><strong>内存池</strong>：每个设备有一个默认池（<code>cudaDeviceGetDefaultMemPool</code>，指南称为隐式池；它的分配是不可迁移的显存，不支持进程间共享），<code>cudaMallocAsync</code> 从设备的当前池里分配（<code>cudaDeviceSetMemPool</code> / <code>cudaDeviceGetMemPool</code>）。<code>cudaMemPoolCreate</code> 建显式池（可以要求进程间共享、最大池大小、特定 NUMA 节点等），<code>cudaMallocFromPoolAsync</code> 从指定的池分配；还有 <code>cudaMemPoolSetAttribute</code>、<code>cudaMemPoolGetAttribute</code>、<code>cudaMemPoolSetAccess</code>、<code>cudaMemPoolTrimTo</code>、<code>cudaMemPoolDestroy</code>。CUDA 13.4 另有按位置取池的 <code>cudaMemGetDefaultMemPool</code>、<code>cudaMemGetMemPool</code> 和 <code>cudaMemSetMemPool</code>（以上名字都在 13.4 的 Runtime API 参考里核对过）。</li>
+    <li lang="en"><strong>Memory pools</strong>: every device has a default pool (<code>cudaDeviceGetDefaultMemPool</code>; the guide calls it the implicit pool; its allocations are non-migratable device memory, and it does not support IPC), and <code>cudaMallocAsync</code> allocates from the device’s current pool (<code>cudaDeviceSetMemPool</code> / <code>cudaDeviceGetMemPool</code>). <code>cudaMemPoolCreate</code> creates an explicit pool (which can ask for IPC, a maximum pool size, a particular NUMA node and so on), and <code>cudaMallocFromPoolAsync</code> allocates from a named pool; there are also <code>cudaMemPoolSetAttribute</code>, <code>cudaMemPoolGetAttribute</code>, <code>cudaMemPoolSetAccess</code>, <code>cudaMemPoolTrimTo</code> and <code>cudaMemPoolDestroy</code>. CUDA 13.4 also has <code>cudaMemGetDefaultMemPool</code>, <code>cudaMemGetMemPool</code> and <code>cudaMemSetMemPool</code>, which take a location (every name here was checked in the 13.4 Runtime API reference).</li>
+    <li lang="zh-CN"><strong>release threshold</strong>：<code>cudaMemPoolAttrReleaseThreshold</code> 是池在尝试把内存还给操作系统之前最多留住的字节数，<strong>默认 0</strong>：池持有的内存超过阈值时，下一次流、事件或上下文同步就会尝试归还。所以默认设置下，每次同步后池都会缩回去，下一轮又要向系统要。指南的做法是把阈值设成 <code>UINT64_MAX</code>，需要时再用 <code>cudaMemPoolTrimTo(pool, minBytesToKeep)</code> 手动缩。<code>cudaMemPoolAttrReservedMemCurrent</code>、<code>...UsedMemCurrent</code> 和两个 High 值用来看池实际占了多少。</li>
+    <li lang="en"><strong>The release threshold</strong>: <code>cudaMemPoolAttrReleaseThreshold</code> is the number of bytes a pool holds on to before trying to release memory back to the OS, and it <strong>defaults to 0</strong>: when the pool holds more than the threshold, the next stream, event or context synchronize tries to release the excess. With the default, then, the pool shrinks after every synchronization and has to ask the OS again on the next round. The guide’s remedy is to set the threshold to <code>UINT64_MAX</code> and shrink by hand with <code>cudaMemPoolTrimTo(pool, minBytesToKeep)</code> when needed. <code>cudaMemPoolAttrReservedMemCurrent</code>, <code>...UsedMemCurrent</code> and the two High values show how much the pool actually holds.</li>
+    <li lang="zh-CN"><strong>复用策略</strong>（三个属性，默认都打开）：<code>cudaMemPoolReuseFollowEventDependencies</code>：分配流对那次释放有流序依赖（比如经过事件）时，可以复用另一个流释放的内存；<code>cudaMemPoolReuseAllowOpportunistic</code>：没有依赖、但那次释放已经执行完时也可以复用；<code>cudaMemPoolReuseAllowInternalDependencies</code>：允许分配器自己插入流依赖来复用。指南提醒，后两种会带来运行之间不一样的分配模式，或以意想不到的方式把工作串行化，需要确定性时可以关掉。动画 (b) 画出一个池在两个流之间怎样分块。</li>
+    <li lang="en"><strong>Reuse policies</strong> (three attributes, all on by default): <code>cudaMemPoolReuseFollowEventDependencies</code> lets an allocation reuse memory freed in another stream when the allocating stream has a stream-order dependency on that free (through an event, for example); <code>cudaMemPoolReuseAllowOpportunistic</code> allows reuse with no dependency once the free has already completed; <code>cudaMemPoolReuseAllowInternalDependencies</code> lets the allocator insert stream dependencies of its own in order to reuse. The guide warns that the last two introduce run-to-run variance in allocation patterns or can serialise work in unexpected ways, so turn them off when you need determinism. Diagram (b) shows one pool handing out blocks across two streams.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲流序分配器；依据是编程指南的「Stream-Ordered Memory Allocator」一节和 Runtime API 参考的「Stream Ordered Memory Allocator」一组函数（见资料）。PMPP 第 5 版第 19 章「Multi-GPU API」（第 5 版新增，本页没有核对它是否讲到内存池，推断）可作为多卡多流背景。</p>
+  <p lang="en">Further reading: no book in the bibliography covers the stream-ordered allocator; this rests on the “Stream-Ordered Memory Allocator” section of the programming guide and the “Stream Ordered Memory Allocator” group of functions in the Runtime API reference (see Resources). PMPP, 5th ed., Chapter 19, “Multi-GPU API” (new in the 5th edition; this page did not check whether it covers memory pools, an inference), gives the multi-GPU, multi-stream background.</p>
+
+  <h3 lang="zh-CN">5. 框架里的缓存分配器：以 PyTorch 为例</h3><h3 lang="en">5. Caching allocators in frameworks: PyTorch as the example</h3>
+  <p lang="zh-CN">深度学习框架每一步都会创建和丢弃大量张量，如果每次都调 <code>cudaMalloc</code> / <code>cudaFree</code>，同步的代价会压过计算。PyTorch 的做法是在用户态自己缓存一层，和内存池是同一个想法。下面的要点来自 PyTorch 2.15 文档的「CUDA semantics」笔记（2026-10-31 读取），只讲轮廓：</p>
+  <p lang="en">A deep-learning framework creates and drops huge numbers of tensors every step; calling <code>cudaMalloc</code> / <code>cudaFree</code> each time would let synchronization outweigh the compute. PyTorch caches a layer of its own in user space, the same idea as a memory pool. The points below come from the “CUDA semantics” notes of the PyTorch 2.15 documentation (read 2026-10-31), in outline only:</p>
+  <ul>
+    <li lang="zh-CN"><strong>缓存</strong>：PyTorch 用缓存分配器加速分配，释放不需要设备同步。代价是分配器留着的空闲内存在 <code>nvidia-smi</code> 里看起来仍被占用。<code>torch.cuda.memory_allocated()</code> 是张量实际占用的，<code>memory_reserved()</code> 是分配器管着的总量；<code>empty_cache()</code> 把未用的缓存还给别的程序，但不会让 PyTorch 自己多出可用内存。</li>
+    <li lang="en"><strong>Caching</strong>: PyTorch uses a caching allocator to speed up allocation, and freeing needs no device synchronization. The price is that the allocator’s idle memory still looks used in <code>nvidia-smi</code>. <code>torch.cuda.memory_allocated()</code> is what tensors actually occupy, and <code>memory_reserved()</code> is everything the allocator manages; <code>empty_cache()</code> returns unused cached memory for other programs, but does not give PyTorch itself more usable memory.</li>
+    <li lang="zh-CN"><strong>按流记账</strong>：<code>Tensor.record_stream</code> 的说明写明，缓存分配器只知道张量是在哪个流上分配的；张量在别的流上用过时，分配器可能过早复用它的内存。<code>record_stream</code> 告诉分配器还有哪些流用过它。这和概念 4 里「跨流复用要事件依赖」是同一个问题。</li>
+    <li lang="en"><strong>Booked per stream</strong>: the description of <code>Tensor.record_stream</code> says the caching allocator is aware only of the stream where a tensor was allocated; if the tensor is used on another stream, the allocator may reuse its memory too early. <code>record_stream</code> tells the allocator which other streams have used it. This is the same problem as concept 4’s need for an event dependency when reusing across streams.</li>
+    <li lang="zh-CN"><strong>配置</strong>：环境变量 <code>PYTORCH_ALLOC_CONF</code>（<code>PYTORCH_CUDA_ALLOC_CONF</code> 是保留给向后兼容的别名），格式 <code>&lt;option&gt;:&lt;value&gt;,...</code>。<code>backend</code> 可选 <code>native</code>（默认，PyTorch 自己的实现）或 <code>cudaMallocAsync</code>（CUDA 的流序分配器，要 CUDA 11.4 或更新）；<code>native</code> 把内存分成小块和大块管理，<code>large_segment_size_mb</code> 默认 20 MB，<code>max_split_size_mb</code> 不让分配器切分超过这个大小的块，用来对付碎片导致的内存不足；<code>expandable_segments</code>（实验性）让分配可以扩展，适合批大小不断变化的情况。</li>
+    <li lang="en"><strong>Configuration</strong>: the environment variable <code>PYTORCH_ALLOC_CONF</code> (<code>PYTORCH_CUDA_ALLOC_CONF</code> is an alias kept for backward compatibility), in the form <code>&lt;option&gt;:&lt;value&gt;,...</code>. <code>backend</code> is <code>native</code> (the default, PyTorch’s own implementation) or <code>cudaMallocAsync</code> (CUDA’s stream-ordered allocator, which needs CUDA 11.4 or newer); <code>native</code> manages small and large blocks, <code>large_segment_size_mb</code> defaults to 20 MB, and <code>max_split_size_mb</code> stops the allocator from splitting blocks larger than that size, a remedy for out-of-memory errors caused by fragmentation; <code>expandable_segments</code> (experimental) makes allocations expandable, for batch sizes that keep changing.</li>
+    <li lang="zh-CN"><strong>和检查工具打架</strong>：文档写明缓存分配器会干扰内存检查工具，调试内存错误时设 <code>PYTORCH_NO_CUDA_MEMORY_CACHING=1</code> 关掉缓存。原因（推断）：越界访问落进分配器缓存着的、仍然有效的大块里，检查工具看不出它越界。GPU 上的错误要尽早报到出错的那一行，可以设 <code>CUDA_LAUNCH_BLOCKING=1</code> 让每次启动同步。</li>
+    <li lang="en"><strong>Fighting the checkers</strong>: the documentation says a caching allocator interferes with memory-checking tools, and to set <code>PYTORCH_NO_CUDA_MEMORY_CACHING=1</code> to disable caching when debugging memory errors. The reason (an inference): an out-of-bounds access lands inside a large block the allocator is caching, which is still valid memory, so the checker cannot see it is out of bounds. To have a GPU error reported at the line that caused it, set <code>CUDA_LAUNCH_BLOCKING=1</code> so every launch is synchronous.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 PyTorch 的分配器；依据是 PyTorch 2.15 文档的「CUDA semantics」笔记中「Memory management」和「Optimizing memory usage with PYTORCH_ALLOC_CONF」两节，以及 <code>torch.Tensor.record_stream</code> 的说明（见资料）。PMPP 第 5 版第 18 章「Deep learning」讲深度学习负载本身。</p>
+  <p lang="en">Further reading: no book in the bibliography covers PyTorch’s allocator; this rests on the “Memory management” and “Optimizing memory usage with PYTORCH_ALLOC_CONF” parts of the “CUDA semantics” notes in the PyTorch 2.15 documentation and the description of <code>torch.Tensor.record_stream</code> (see Resources). PMPP, 5th ed., Chapter 18, “Deep learning”, covers the deep-learning workload itself.</p>
+
+  <h3 lang="zh-CN">6. 设备端断言与 compute-sanitizer</h3><h3 lang="en">6. Device-side asserts and compute-sanitizer</h3>
+  <p lang="zh-CN"><strong>设备端 <code>assert</code></strong>（编程指南，「C++ Language Extensions」的 Assertion 一节）：表达式为 0 时停止 kernel。在调试器里运行会触发断点；否则每个断言失败的线程在主机下一次 <code>cudaDeviceSynchronize</code>、<code>cudaStreamSynchronize</code> 或 <code>cudaEventSynchronize</code> 之后向 stderr 打印一行 <code>&lt;文件&gt;:&lt;行&gt;:&lt;函数&gt;: block: [x,y,z], thread: [x,y,z] Assertion `&lt;表达式&gt;` failed.</code>。之后 CUDA 上下文就坏了，后续所有 CUDA 调用都返回 <code>cudaErrorAssert</code>，只能重启进程。断言会影响性能，发布版用 <code>-DNDEBUG</code> 关掉，所以表达式里不能有副作用。</p>
+  <p lang="en"><strong>The device-side <code>assert</code></strong> (programming guide, the Assertion part of “C++ Language Extensions”): it stops the kernel when the expression is 0. Under a debugger it triggers a breakpoint; otherwise every thread whose assertion failed prints a line <code>&lt;file&gt;:&lt;line&gt;:&lt;function&gt;: block: [x,y,z], thread: [x,y,z] Assertion `&lt;expression&gt;` failed.</code> to stderr after the host next calls <code>cudaDeviceSynchronize</code>, <code>cudaStreamSynchronize</code> or <code>cudaEventSynchronize</code>. After that the CUDA context is corrupted and every later CUDA call fails with <code>cudaErrorAssert</code>; only a new process recovers. Asserts cost performance, so release builds turn them off with <code>-DNDEBUG</code>, which is why the expression must have no side effects.</p>
+  <p lang="zh-CN"><strong><code>compute-sanitizer</code></strong>（本页读的是 Compute Sanitizer v2026.3.0 的文档）是 CUDA 工具包自带的功能正确性检查套件，四个工具用 <code>--tool</code> 选：</p>
+  <p lang="en"><strong><code>compute-sanitizer</code></strong> (this page read the documentation of Compute Sanitizer v2026.3.0) is the functional-correctness suite that ships with the CUDA toolkit; its four tools are chosen with <code>--tool</code>:</p>
+  <ul>
+    <li lang="zh-CN"><strong>memcheck</strong>（默认工具）：精确定位并归因越界和未对齐的内存访问，也报告 GPU 遇到的硬件异常、<code>malloc</code>/<code>free</code> 错误和 CUDA API 错误。泄漏检查要显式打开：<code>--leak-check full</code>。<code>--padding</code> 在每个分配后面加一段填充区，让紧挨着的两个 buffer 之间的越界也能被发现。</li>
+    <li lang="en"><strong>memcheck</strong> (the default tool): precisely detects and attributes out-of-bounds and misaligned memory accesses, and also reports hardware exceptions the GPU hits, <code>malloc</code>/<code>free</code> errors and CUDA API errors. Leak checking must be enabled explicitly: <code>--leak-check full</code>. <code>--padding</code> adds a padding area after each allocation, so overflows between two back-to-back buffers are caught too.</li>
+    <li lang="zh-CN"><strong>racecheck</strong>：报告 shared memory 上的数据访问冒险（hazard）：写后写（WAW）、写后读（RAW）、读后写（WAR）。报告有两种模式，<code>--racecheck-report</code> 取 <code>analysis</code>（默认，把许多冒险归纳成「哪一行的写和哪一行的读之间有竞争」）、<code>hazard</code>（逐字节的详细报告）或 <code>all</code>。修法：线程之间用 <code>__syncthreads()</code>，同一个 warp 内用 <code>__syncwarp()</code>。文档提醒 racecheck 不做任何内存访问错误检查，应先用 memcheck 确认程序没有内存错误。</li>
+    <li lang="en"><strong>racecheck</strong>: reports data-access hazards on shared memory: write-after-write (WAW), read-after-write (RAW) and write-after-read (WAR). Reports come in two modes: <code>--racecheck-report</code> takes <code>analysis</code> (the default, which condenses many hazards into “a race between the write on this line and the read on that line”), <code>hazard</code> (detailed, byte-accurate reports) or <code>all</code>. The fixes: <code>__syncthreads()</code> between threads, <code>__syncwarp()</code> within a warp. The documentation warns that racecheck performs no memory-access error checking, so run memcheck first to make sure the program is free of memory errors.</li>
+    <li lang="zh-CN"><strong>initcheck</strong>：报告 GPU 读了未初始化的 global memory（文档的例子是 <code>cudaMemset</code> 的大小按元素而不是按字节传，四分之三的内存没被初始化）；<code>--initcheck-address-space shared</code> 或 <code>all</code> 把 shared memory 也纳入；<code>--track-unused-memory</code> 报告分配了却从没写过的内存。</li>
+    <li lang="en"><strong>initcheck</strong>: reports GPU reads of uninitialized global memory (the documentation’s example passes the size to <code>cudaMemset</code> in elements instead of bytes, leaving three quarters of the memory uninitialized); <code>--initcheck-address-space shared</code> or <code>all</code> includes shared memory as well; <code>--track-unused-memory</code> reports memory that was allocated but never written.</li>
+    <li lang="zh-CN"><strong>synccheck</strong>：报告同步原语的非法用法（文档的例子是只有一部分线程到达的 <code>__syncthreads()</code> 屏障）。本课不展开。</li>
+    <li lang="en"><strong>synccheck</strong>: reports invalid uses of synchronization primitives (the documentation’s example is a <code>__syncthreads()</code> barrier reached by only some of the threads in a block). This lesson does not go further into it.</li>
+  </ul>
+  <p lang="zh-CN">编译时加 <code>-lineinfo</code>，报告就能指到源代码行而不影响优化级别；<code>-G</code> 生成完整调试信息但会关掉优化。文档还提到 memcheck 专用的编译期插桩 <code>-fdevice-sanitize=memcheck</code>，它更快，但不附带调试信息，仍要和 <code>-lineinfo</code> 或 <code>-G</code> 一起用。</p>
+  <p lang="en">Build with <code>-lineinfo</code> and reports point to source lines without changing the optimisation level; <code>-G</code> generates full debug information but turns off optimisation. The documentation also describes compile-time instrumentation for memcheck, <code>-fdevice-sanitize=memcheck</code>, which is faster but implies no debug information, so it still needs <code>-lineinfo</code> or <code>-G</code> alongside.</p>
+  <pre data-lang="sh" data-file="on Colab or the rented machine"># 未运行 · not run; assembled from the Compute Sanitizer documentation (v2026.3.0) on 2026-10-31
+compute-sanitizer ./app                                  # memcheck, the default tool
+compute-sanitizer --tool memcheck --leak-check full ./app
+compute-sanitizer --tool racecheck --racecheck-report analysis ./app
+compute-sanitizer --tool initcheck --track-unused-memory ./app</pre>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 Compute Sanitizer；依据是 NVIDIA 的 Compute Sanitizer 文档（v2026.3.0）和编程指南的 Assertion 一节（见资料）。数据竞争和屏障本身在 PMPP 第 5 版第 4 章「Compute architecture and scheduling」（同步与 <code>__syncthreads</code>）。</p>
+  <p lang="en">Further reading: no book in the bibliography covers Compute Sanitizer; this rests on NVIDIA’s Compute Sanitizer documentation (v2026.3.0) and the Assertion part of the programming guide (see Resources). Data races and barriers themselves are in PMPP, 5th ed., Chapter 4, “Compute architecture and scheduling” (synchronization and <code>__syncthreads</code>).</p>
+
+  <h3 lang="zh-CN">7. cuda-gdb</h3><h3 lang="en">7. cuda-gdb</h3>
+  <p lang="zh-CN"><code>cuda-gdb</code>（文档 v13.4）是在 GDB 上加了 CUDA 命令的调试器，目标平台是 Linux 和 QNX；它的 macOS 主机客户端已经被移除，所以和 CUDA 一样只能在云端机器上用。要点：</p>
+  <p lang="en"><code>cuda-gdb</code> (documentation v13.4) is GDB with CUDA commands added, for Linux and QNX targets; its macOS host client has been removed, so, like CUDA itself, it runs only on the cloud machines. The essentials:</p>
+  <ul>
+    <li lang="zh-CN"><strong>编译</strong>：<code>nvcc -g -G foo.cu -o foo</code>。<code>-G</code> 会强制 <code>-O0</code>（只保留很少的死代码消除和寄存器溢出优化），程序变大变慢，有些只在优化后出现的 bug 会因此消失。</li>
+    <li lang="en"><strong>Build</strong>: <code>nvcc -g -G foo.cu -o foo</code>. <code>-G</code> forces <code>-O0</code> (keeping only very limited dead-code elimination and register-spilling optimisations), so the program gets bigger and slower, and some bugs that appear only when optimised may vanish.</li>
+    <li lang="zh-CN"><strong>焦点</strong>：GPU 上有成千上万个线程，<code>cuda-gdb</code> 一次「站」在一个上。<code>info cuda kernels</code>、<code>info cuda blocks</code>、<code>info cuda threads</code> 列出它们；<code>cuda kernel 0</code>、<code>cuda thread (15)</code> 或 <code>cuda device 0 sm 1 warp 2 lane 3</code> 切换焦点，没给出的坐标沿用当前值；切过去以后 <code>print threadIdx</code>、<code>backtrace</code> 照常用。</li>
+    <li lang="en"><strong>Focus</strong>: a GPU runs thousands of threads, and <code>cuda-gdb</code> stands on one at a time. <code>info cuda kernels</code>, <code>info cuda blocks</code> and <code>info cuda threads</code> list them; <code>cuda kernel 0</code>, <code>cuda thread (15)</code> or <code>cuda device 0 sm 1 warp 2 lane 3</code> switch the focus, with any coordinates left out taken from the current focus; after the switch, <code>print threadIdx</code> and <code>backtrace</code> work as usual.</li>
+    <li lang="zh-CN"><strong>断点</strong>：<code>break foo.cu:23 if threadIdx.x == 1 &amp;&amp; i &lt; 5</code> 是条件断点，条件里可以用 <code>threadIdx</code>、<code>blockIdx</code>，不能调函数；它每次都会被求值，所以会拖慢运行。<code>set cuda break_on_launch application</code> 在每个 kernel 的第一条指令停下。</li>
+    <li lang="en"><strong>Breakpoints</strong>: <code>break foo.cu:23 if threadIdx.x == 1 &amp;&amp; i &lt; 5</code> is a conditional breakpoint whose condition may use <code>threadIdx</code> and <code>blockIdx</code> but no function calls; it is evaluated on every hit, so it slows the run down. <code>set cuda break_on_launch application</code> stops at the first instruction of every kernel.</li>
+    <li lang="zh-CN"><strong>自动查错</strong>：<code>set cuda api_failures stop</code> 让任何返回致命错误的 CUDA API 调用停下（默认 <code>ignore</code> 只打印警告）；<code>set cuda launch_blocking on</code> 让启动同步，错误就停在出错的那次启动上。GPU 异常有编号，比如 <code>CUDA_EXCEPTION_14</code>「Warp Illegal Address」：一个线程访问了非法的 global、local 或 shared 地址，调试器会停在那条指令上。</li>
+    <li lang="en"><strong>Automatic error checks</strong>: <code>set cuda api_failures stop</code> stops at any CUDA API call that returns a fatal error (the default, <code>ignore</code>, only prints a warning); <code>set cuda launch_blocking on</code> makes launches synchronous, so an error stops at the launch that caused it. GPU exceptions are numbered, such as <code>CUDA_EXCEPTION_14</code>, “Warp Illegal Address”: a thread accessed an illegal global, local or shared address, and the debugger stops at that instruction.</li>
+  </ul>
+  <p lang="zh-CN">顺序上，先 <code>assert</code> 和检查宏把错误暴露出来，再用 <code>compute-sanitizer</code> 定位是哪一类内存错误、在哪一行，最后才用 <code>cuda-gdb</code> 停到那个线程上看状态。Colab 的单元格不是交互式终端，<code>cuda-gdb</code> 更适合在租用机器的 SSH 里用（推断）。</p>
+  <p lang="en">In order: let <code>assert</code> and the check macro expose the error first, use <code>compute-sanitizer</code> to find which kind of memory error it is and on which line, and only then use <code>cuda-gdb</code> to stop on that thread and look at its state. A Colab cell is not an interactive terminal, so <code>cuda-gdb</code> is better used over SSH on the rented machine (an inference).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 <code>cuda-gdb</code>；依据是 NVIDIA 的 CUDA-GDB 文档 v13.4（见资料）。GDB 本身的用法参考 GNU 的 GDB 手册。</p>
+  <p lang="en">Further reading: no book in the bibliography covers <code>cuda-gdb</code>; this rests on NVIDIA’s CUDA-GDB documentation v13.4 (see Resources). For GDB itself, see the GNU GDB manual.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：分配 API ↔ 内存住在哪 ↔ 什么时候用</h2><h2 id="compare-en" lang="en">Comparison: allocation API ↔ where memory lives ↔ when to use it</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">分配方式</span><span lang="en">Allocation</span></th><th><span lang="zh-CN">物理内存在哪</span><span lang="en">Where the physical memory lives</span></th><th><span lang="zh-CN">谁能访问</span><span lang="en">Who can access it</span></th><th><span lang="zh-CN">什么时候用</span><span lang="en">When to use it</span></th></tr>
+    <tr><td><span lang="zh-CN"><code>cudaMalloc</code></span><span lang="en"><code>cudaMalloc</code></span></td><td><span lang="zh-CN">显存，2 MB 页</span><span lang="en">Device memory, 2 MB pages</span></td><td><span lang="zh-CN">只有 GPU；主机用 <code>cudaMemcpy</code> 进出</span><span lang="en">The GPU only; the host goes through <code>cudaMemcpy</code></span></td><td><span lang="zh-CN">默认选择：大块、长期、只在 GPU 上用的数据。注意它和 <code>cudaFree</code> 会在所有流之间同步</span><span lang="en">The default: large, long-lived data used only on the GPU. Note that it and <code>cudaFree</code> synchronize across all streams</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>cudaMallocAsync</code>、<code>cudaMallocFromPoolAsync</code></span><span lang="en"><code>cudaMallocAsync</code>, <code>cudaMallocFromPoolAsync</code></span></td><td><span lang="zh-CN">显存，来自内存池</span><span lang="en">Device memory, from a memory pool</span></td><td><span lang="zh-CN">GPU；跨流使用要有事件依赖</span><span lang="en">The GPU; use on another stream needs an event dependency</span></td><td><span lang="zh-CN">循环里反复分配释放、多个流；把 release threshold 调高，池就不会每次同步都缩回去</span><span lang="en">Repeated allocate and free in a loop, many streams; raise the release threshold so the pool does not shrink at every synchronization</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>cudaMallocManaged</code></span><span lang="en"><code>cudaMallocManaged</code></span></td><td><span lang="zh-CN">谁先碰就在谁那边，之后按缺页或预取迁移</span><span lang="en">Wherever it is first touched, then migrated by faults or prefetches</span></td><td><span lang="zh-CN">CPU 和 GPU，同一个指针</span><span lang="en">CPU and GPU, through the same pointer</span></td><td><span lang="zh-CN">原型、带指针的复杂结构、超过显存大小的数据；要快就配预取和建议</span><span lang="en">Prototypes, complex structures full of pointers, data larger than device memory; for speed add prefetch and advice</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>cudaMallocHost</code>、<code>cudaHostAlloc</code></span><span lang="en"><code>cudaMallocHost</code>, <code>cudaHostAlloc</code></span></td><td><span lang="zh-CN">主机内存，页锁定</span><span lang="en">Host memory, page-locked</span></td><td><span lang="zh-CN">CPU；GPU 的拷贝引擎直接 DMA</span><span lang="en">The CPU; the GPU’s copy engines DMA it directly</span></td><td><span lang="zh-CN"><code>cudaMemcpyAsync</code> 的中转区（Phase 5）；省着用，它会减少系统可分页的内存</span><span lang="en">Staging for <code>cudaMemcpyAsync</code> (Phase 5); use sparingly, since it reduces the memory the system can page</span></td></tr>
+    <tr><td><span lang="zh-CN">mapped（零拷贝）：<code>cudaHostAlloc(…, cudaHostAllocMapped)</code></span><span lang="en">Mapped (zero-copy): <code>cudaHostAlloc(…, cudaHostAllocMapped)</code></span></td><td><span lang="zh-CN">主机内存，页锁定，永远不搬</span><span lang="en">Host memory, page-locked, never moved</span></td><td><span lang="zh-CN">CPU；GPU 每次访问都经 PCIe 或 NVLink C2C</span><span lang="en">The CPU; every GPU access crosses PCIe or NVLink C2C</span></td><td><span lang="zh-CN">只读一次的数据、小的标志位或结果；不要承担 kernel 的主要流量</span><span lang="en">Data read once, small flags or results; never a kernel’s main traffic</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>malloc</code>、<code>new</code>（可分页）</span><span lang="en"><code>malloc</code>, <code>new</code> (pageable)</span></td><td><span lang="zh-CN">主机内存，可被换出</span><span lang="en">Host memory, may be swapped out</span></td><td><span lang="zh-CN">CPU；有 HMM 或 ATS 时 GPU 也能直接访问</span><span lang="en">The CPU; the GPU too where HMM or ATS is present</span></td><td><span lang="zh-CN">普通主机数据；拷给 GPU 时比 pinned 慢（Phase 1）</span><span lang="en">Ordinary host data; copies to the GPU are slower than from pinned memory (Phase 1)</span></td></tr>
+    <tr><td><span lang="zh-CN">PyTorch 缓存分配器</span><span lang="en">PyTorch caching allocator</span></td><td><span lang="zh-CN">显存，框架自己缓存的段</span><span lang="en">Device memory, in segments the framework caches</span></td><td><span lang="zh-CN">GPU；只按分配时的流记账</span><span lang="en">The GPU; booked only to the allocating stream</span></td><td><span lang="zh-CN">框架默认；<code>memory_reserved</code> 看它占了多少，查内存错误时关掉缓存</span><span lang="en">The framework default; <code>memory_reserved</code> shows what it holds; turn caching off when hunting memory errors</span></td></tr>
+    <tr><td><span lang="zh-CN">Metal <code>.storageModeShared</code></span><span lang="en">Metal <code>.storageModeShared</code></span></td><td><span lang="zh-CN">系统内存（Apple 的统一内存）</span><span lang="en">System memory (Apple’s unified memory)</span></td><td><span lang="zh-CN">CPU 和 GPU，不需要拷贝；同步由你负责</span><span lang="en">CPU and GPU with no copy; synchronization is your job</span></td><td><span lang="zh-CN">Apple 芯片上 buffer 和纹理的默认；CPU 写、GPU 读的数据</span><span lang="en">The default for buffers and textures on Apple silicon; data the CPU writes and the GPU reads</span></td></tr>
+    <tr><td><span lang="zh-CN">Metal <code>.storageModePrivate</code></span><span lang="en">Metal <code>.storageModePrivate</code></span></td><td><span lang="zh-CN">系统内存，只有 GPU 能访问</span><span lang="en">System memory, accessible only to the GPU</span></td><td><span lang="zh-CN">只有 GPU；CPU 拿到的 <code>contents()</code> 是空指针</span><span lang="en">The GPU only; <code>contents()</code> gives the CPU a null pointer</span></td><td><span lang="zh-CN">由 GPU 产生、GPU 使用的中间数据；从 CPU 来的数据要先 blit 进去</span><span lang="en">Intermediate data the GPU produces and consumes; data from the CPU must be blitted in first</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 统一内存：第一次访问时页的迁移</h3><h3 lang="en">(a) Unified memory: page migration on first touch</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 430" data-interval="2600"
+         data-captions='["全图：左边是 CPU 内存，右边是 GPU 显存，中间是 PCIe。上半部分是不预取时的默认过程（缺页再迁移），下半部分是三种替驱动做决定的做法。这是插在 PCIe 上的独立卡（软件一致），比如 Colab 的 T4。按播放逐步看。", "1. cudaMallocManaged 只给出一段 CPU 和 GPU 共用的虚拟地址，还没有物理页。页落在哪边，由谁先访问决定（first touch），除非用 advice 另行指定。", "2. CPU 先写 x（fill）：CPU 是第一个访问者，物理页就落在主机内存里，用系统页大小，多数系统是 4 KiB 或 64 KiB。", "3. 第一次启动 kernel：GPU 线程访问 x，GPU 的页表里没有这一页，发生缺页，线程停下来等。", "4. 驱动处理缺页：让主机那边的页表项失效，把数据经 PCIe 搬过来，在 GPU 页表里建新项。按缺页逐页搬，这就是第一次启动慢的原因。驻留在 GPU 上的页是 2 MB。", "5. 第二次启动：页已经在显存里，kernel 能用满显存带宽，时间和 cudaMalloc 的版本一样。", "6. 另一种做法：启动前在同一个流里 cudaMemPrefetchAsync 到 GPU。整块一次搬完，按流顺序，在 kernel 开始前完成，kernel 不再缺页。flags 必须是 0。", "7. CPU 读结果 y：反过来缺页，页又迁回主机。也可以先把 y 预取到 host（cudaMemLocationTypeHost），再读。", "8. 不想搬：对 x 设首选位置为主机，并对 GPU 设 AccessedBy。数据留在主机，GPU 页表里建好映射，kernel 经 PCIe 直接读写，不缺页也不迁移，但每次访问都慢。"]'
+         data-captions-en='["The whole picture: CPU memory on the left, GPU memory on the right, PCIe between them. The top half is the default with no prefetch (fault and migrate); the bottom half shows three ways to decide for the driver. This is a discrete card on PCIe (software coherent), such as the Colab T4. Press Play to step through.", "1. cudaMallocManaged hands out a range of virtual addresses shared by CPU and GPU, with no physical pages yet. Which side a page lands on is decided by whoever touches it first (first touch), unless advice says otherwise.", "2. The CPU writes x first (fill): the CPU is the first to touch it, so the physical pages land in host memory at the system page size, 4 KiB or 64 KiB on most systems.", "3. The first kernel launch: a GPU thread touches x, the GPU page table has no entry for that page, a page fault occurs, and the thread stalls.", "4. The driver services the fault: it invalidates the host page-table entry, moves the data across PCIe and creates an entry in the GPU page table. Pages move fault by fault, which is why the first launch is slow. Pages resident on the GPU are 2 MB.", "5. The second launch: the pages are already in device memory, so the kernel gets full device bandwidth and takes as long as the cudaMalloc version.", "6. The alternative: before the launch, cudaMemPrefetchAsync to the GPU in the same stream. Everything moves in bulk, in stream order, finishing before the kernel starts, so the kernel takes no faults. flags must be 0.", "7. The CPU reads the result y: faults in the other direction move the pages back to the host. Or prefetch y to the host first (cudaMemLocationTypeHost) and then read it.", "8. To move nothing: give x the host as its preferred location and set AccessedBy for the GPU. The data stays on the host, the GPU page table gets a mapping, and the kernel reads and writes across PCIe with no faults and no migration, but every access is slow."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <!-- cuda -->
+      <rect class="box" x="30" y="30" width="260" height="150"/>
+      <text x="44" y="54" lang="zh-CN">CPU 内存</text><text x="44" y="54" lang="en">CPU memory</text>
+      <text x="44" y="72" class="small" lang="zh-CN">系统页：4 KiB 或 64 KiB</text><text x="44" y="72" class="small" lang="en">system pages: 4 KiB or 64 KiB</text>
+      <rect class="box" x="610" y="30" width="260" height="150"/>
+      <text x="624" y="54" lang="zh-CN">GPU 显存（T4）</text><text x="624" y="54" lang="en">GPU memory (T4)</text>
+      <text x="624" y="72" class="small" lang="zh-CN">GPU 驻留页：2 MB</text><text x="624" y="72" class="small" lang="en">GPU-resident pages: 2 MB</text>
+      <rect class="lane" x="44" y="84" width="50" height="34"/><rect class="lane" x="104" y="84" width="50" height="34"/><rect class="lane" x="164" y="84" width="50" height="34"/><rect class="lane" x="224" y="84" width="50" height="34"/>
+      <rect class="lane" x="624" y="84" width="50" height="34"/><rect class="lane" x="684" y="84" width="50" height="34"/><rect class="lane" x="744" y="84" width="50" height="34"/><rect class="lane" x="804" y="84" width="50" height="34"/>
+      <text x="450" y="176" class="small" text-anchor="middle">PCIe</text>
+      <path class="lane" d="M30 200 L870 200"/>
+      <g data-step="1"><text x="450" y="46" class="mono" text-anchor="middle">cudaMallocManaged(&amp;x, bytes)</text><text x="450" y="64" class="small" text-anchor="middle" lang="zh-CN">只有虚拟地址，还没有物理页</text><text x="450" y="64" class="small" text-anchor="middle" lang="en">virtual addresses only, no pages yet</text></g>
+      <g data-step="2"><rect class="box" x="44" y="84" width="50" height="34"/><rect class="box" x="104" y="84" width="50" height="34"/><rect class="box" x="164" y="84" width="50" height="34"/><rect class="box" x="224" y="84" width="50" height="34"/><text x="62" y="106" class="mono">x</text><text x="122" y="106" class="mono">x</text><text x="182" y="106" class="mono">x</text><text x="242" y="106" class="mono">x</text><text x="44" y="144" class="small" lang="zh-CN">fill(x)：CPU 第一个访问</text><text x="44" y="144" class="small" lang="en">fill(x): the CPU touches first</text></g>
+      <g data-step="3"><text x="624" y="144" class="small" style="fill: var(--ink-2)" lang="zh-CN">✕ 第一次启动：GPU 缺页</text><text x="624" y="144" class="small" style="fill: var(--ink-2)" lang="en">✕ 1st launch: GPU page fault</text></g>
+      <g data-step="4"><path class="arrow flow" d="M282 101 L620 101" style="marker-end: url(#arr)"/><text x="450" y="92" class="small" text-anchor="middle" lang="zh-CN">按缺页逐页搬，经 PCIe</text><text x="450" y="92" class="small" text-anchor="middle" lang="en">fault by fault, across PCIe</text><text x="450" y="126" class="small" text-anchor="middle" lang="zh-CN">主机页表项失效，GPU 建新项</text><text x="450" y="126" class="small" text-anchor="middle" lang="en">host entry invalidated, GPU entry made</text></g>
+      <g data-step="4 5"><rect class="box" x="624" y="84" width="50" height="34"/><rect class="box" x="684" y="84" width="50" height="34"/><rect class="box" x="744" y="84" width="50" height="34"/><rect class="box" x="804" y="84" width="50" height="34"/><text x="642" y="106" class="mono">x</text><text x="702" y="106" class="mono">x</text><text x="762" y="106" class="mono">x</text><text x="822" y="106" class="mono">x</text></g>
+      <g data-step="5"><text x="624" y="164" class="small" lang="zh-CN">第二次启动：页已在显存，满带宽</text><text x="624" y="164" class="small" lang="en">2nd launch: pages already here</text></g>
+      <g data-step="6"><text x="30" y="226" class="mono">cudaMemPrefetchAsync(x, bytes, gpu, 0, s)</text><rect class="box" x="30" y="238" width="120" height="30"/><text x="44" y="258" class="small" lang="zh-CN">x（主机）</text><text x="44" y="258" class="small" lang="en">x (host)</text><path class="arrow flow" d="M154 253 L606 253" style="marker-end: url(#arr)"/><text x="380" y="246" class="small" text-anchor="middle" lang="zh-CN">整块一次搬完，按流顺序，不缺页</text><text x="380" y="246" class="small" text-anchor="middle" lang="en">in bulk, in stream order, no faults</text><rect class="box" x="610" y="238" width="120" height="30"/><text x="624" y="258" class="small" lang="zh-CN">x（显存）</text><text x="624" y="258" class="small" lang="en">x (device)</text><text x="740" y="258" class="small" lang="zh-CN">然后 kernel</text><text x="740" y="258" class="small" lang="en">then the kernel</text></g>
+      <g data-step="7"><rect class="box" x="610" y="294" width="120" height="30"/><text x="624" y="314" class="small" lang="zh-CN">y（显存）</text><text x="624" y="314" class="small" lang="en">y (device)</text><path class="arrow flow" d="M606 309 L154 309" style="marker-end: url(#arr)"/><text x="380" y="302" class="small" text-anchor="middle" lang="zh-CN">CPU 读 y：反向缺页，迁回主机</text><text x="380" y="302" class="small" text-anchor="middle" lang="en">the CPU reads y: faults move it back</text><text x="380" y="328" class="small" text-anchor="middle" lang="zh-CN">或先把 y 预取到 host</text><text x="380" y="328" class="small" text-anchor="middle" lang="en">or prefetch y to the host first</text><rect class="box" x="30" y="294" width="120" height="30"/><text x="44" y="314" class="small" lang="zh-CN">y（主机）</text><text x="44" y="314" class="small" lang="en">y (host)</text></g>
+      <g data-step="8"><text x="30" y="372" class="mono">cudaMemAdvise(x, bytes, SetPreferredLocation, host) + SetAccessedBy(gpu)</text><text x="30" y="394" class="small" lang="zh-CN">数据留在主机，GPU 页表里建好映射，kernel 经 PCIe 直接访问：不缺页、不迁移，但每次访问都慢</text><text x="30" y="394" class="small" lang="en">the data stays on the host and the GPU maps it; the kernel reads across PCIe: no faults, no migration, every access slow</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 一个内存池在两个流之间分配</h3><h3 lang="en">(b) One memory pool serving two streams</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 440" data-interval="2600"
+         data-captions='["全图：上面是设备的默认内存池，中间是两个流，时间从左往右。cudaMallocAsync 和 cudaFreeAsync 都是排进流里的操作，内存在池和流之间来回，不必每次找操作系统。按播放逐步看。", "1. stream 1 里 cudaMallocAsync(A)：池里还没有空闲块，池向系统申请一块（这一步贵），交给 A。分配在流执行到这里时才生效，不阻塞主机和别的流。", "2. stream 1 里 kernel 用 A，然后 cudaFreeAsync(A)：流执行到释放时，块回到池里，并不还给系统。释放之后再访问 A 是未定义行为。", "3. stream 1 在释放后记录事件 e，stream 2 cudaStreamWaitEvent(e) 之后 cudaMallocAsync(B)：分配流对那次释放有事件依赖，池按 ReuseFollowEventDependencies 把块 1 直接给 B，不向系统要。", "4. 更早时 stream 2 里的 cudaMallocAsync(D)：A 还在用，又没有依赖，池只好另拿块 2。若那次释放恰好已经执行完，ReuseAllowOpportunistic 也许能复用；ReuseAllowInternalDependencies 允许池自己插依赖。后两种带来运行之间的不确定。", "5. release threshold 默认是 0：池持有的内存超过阈值时，下一次同步就把多余的还给系统，下一轮又要重新申请。设成 UINT64_MAX 就一直留着，需要时用 cudaMemPoolTrimTo 手动缩。", "6. 框架里的缓存分配器是同一个想法：PyTorch 把释放的块留在自己手里，所以 memory_reserved 大于 memory_allocated，nvidia-smi 显示的占用也更大。它只按分配时的流记账，跨流使用要 record_stream。"]'
+         data-captions-en='["The whole picture: the default memory pool of the device on top, two streams in the middle, time running left to right. cudaMallocAsync and cudaFreeAsync are both operations queued on a stream, so memory moves between the pool and the streams without asking the OS every time. Press Play to step through.", "1. cudaMallocAsync(A) in stream 1: the pool has no free block yet, so it reserves one from the OS (the expensive step) and hands it to A. The allocation takes effect when the stream reaches it, without blocking the host or other streams.", "2. In stream 1 a kernel uses A, then cudaFreeAsync(A): when the stream reaches the free, the block goes back to the pool, not to the OS. Touching A after the free is undefined behavior.", "3. Stream 1 records event e after the free; stream 2 runs cudaStreamWaitEvent(e) and then cudaMallocAsync(B). The allocating stream depends on the free through the event, so under ReuseFollowEventDependencies the pool hands block 1 straight to B without asking the OS.", "4. Earlier, cudaMallocAsync(D) in stream 2: A is still in use and there is no dependency, so the pool takes another block, block 2. Had the free already completed, ReuseAllowOpportunistic might reuse it; ReuseAllowInternalDependencies lets the pool insert a dependency of its own. These two bring run-to-run variance.", "5. The release threshold defaults to 0: once the pool holds more than the threshold, the next synchronization returns the excess to the OS, and the next round has to reserve it again. Set it to UINT64_MAX to keep the memory, and shrink by hand with cudaMemPoolTrimTo when needed.", "6. A caching allocator in a framework is the same idea: PyTorch keeps freed blocks for itself, so memory_reserved exceeds memory_allocated and nvidia-smi shows more in use. It books memory only to the allocating stream, so use on another stream needs record_stream."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <!-- cuda -->
+      <rect class="box" x="30" y="30" width="840" height="90"/>
+      <text x="44" y="52" lang="zh-CN">设备的默认内存池</text><text x="44" y="52" lang="en">The default memory pool of the device</text>
+      <text x="856" y="52" class="mono" text-anchor="end">cudaMallocAsync / cudaFreeAsync</text>
+      <rect class="lane" x="204" y="66" width="150" height="40"/>
+      <text x="30" y="172" class="mono">stream 1</text>
+      <text x="30" y="262" class="mono">stream 2</text>
+      <path class="lane" d="M100 167 L870 167 M100 257 L870 257"/>
+      <path class="arrow" d="M110 320 L860 320"/>
+      <text x="860" y="340" class="small" text-anchor="end" lang="zh-CN">时间</text><text x="860" y="340" class="small" text-anchor="end" lang="en">time</text>
+      <g data-step="1 2 3"><rect class="box" x="44" y="66" width="150" height="40"/><text x="56" y="91" lang="zh-CN">块 1</text><text x="56" y="91" lang="en">block 1</text></g>
+      <g data-step="1"><path class="arrow" d="M100 106 L150 146"/><rect class="box" x="110" y="150" width="145" height="34"/><text x="118" y="172" class="mono">cudaMallocAsync(A)</text><text x="118" y="202" class="small" lang="zh-CN">池空：向系统申请</text><text x="118" y="202" class="small" lang="en">pool empty: from the OS</text></g>
+      <g data-step="2"><rect class="box" x="265" y="150" width="120" height="34"/><text x="275" y="172" class="mono">kernel(A)</text><rect class="box" x="395" y="150" width="145" height="34"/><text x="403" y="172" class="mono">cudaFreeAsync(A)</text><path class="arrow" d="M460 148 L162 110"/><text x="403" y="202" class="small" lang="zh-CN">块回到池里</text><text x="403" y="202" class="small" lang="en">block back to the pool</text></g>
+      <g data-step="3"><circle class="box" cx="550" cy="167" r="5"/><text x="546" y="145" class="small">e</text><path class="arrow" style="stroke-dasharray: 4 3" d="M553 172 L598 236"/><rect class="box" x="560" y="240" width="140" height="34"/><text x="568" y="262" class="mono">WaitEvent(e)</text><rect class="box" x="710" y="240" width="150" height="34"/><text x="718" y="262" class="mono">cudaMallocAsync(B)</text><text x="718" y="292" class="small" lang="zh-CN">经事件依赖复用块 1</text><text x="718" y="292" class="small" lang="en">reuses block 1 via e</text></g>
+      <g data-step="4"><rect class="box" x="204" y="66" width="150" height="40"/><text x="216" y="91" lang="zh-CN">块 2（新）</text><text x="216" y="91" lang="en">block 2 (new)</text><rect class="box" x="265" y="240" width="145" height="34"/><text x="273" y="262" class="mono">cudaMallocAsync(D)</text><text x="273" y="292" class="small" lang="zh-CN">A 还在用：另拿块 2</text><text x="273" y="292" class="small" lang="en">A still in use: block 2</text></g>
+      <g data-step="5"><text x="110" y="366" class="mono">cudaMemPoolAttrReleaseThreshold</text><text x="110" y="384" class="small" lang="zh-CN">默认 0：同步时把多余的还给系统；设成 UINT64_MAX 就一直留着，cudaMemPoolTrimTo 手动缩</text><text x="110" y="384" class="small" lang="en">default 0: the excess goes back to the OS at a sync; UINT64_MAX keeps it; cudaMemPoolTrimTo shrinks by hand</text></g>
+      <g data-step="6"><text x="110" y="410" class="mono">PyTorch: memory_allocated() ≤ memory_reserved()</text><text x="110" y="428" class="small" lang="zh-CN">框架里的缓存分配器：同一个想法，按分配时的流记账，跨流要 record_stream</text><text x="110" y="428" class="small" lang="en">a caching allocator in the framework: the same idea, booked to the allocating stream; other streams need record_stream</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 Colab 的 T4 上：统一内存预取与否，再用 racecheck 抓一个 shared memory 竞争</h3><h3 lang="en">Lab A · On the Colab T4: unified memory with and without prefetch, then catching a shared-memory race with racecheck</h3>
+    <div class="note" lang="zh-CN">本实验<strong>未运行</strong>，是 2026-10-31 根据 CUDA 文档（CUDA 13.4 Runtime API 参考、编程指南）和 Compute Sanitizer 文档（v2026.3.0）整理的。<code>um_prefetch.cu</code> 和 <code>race.cu</code> 在实验机上用 clang 的 CUDA 前端对照一个桩头文件做过语法检查，主机端和 <code>sm_75</code> 设备端都通过（<code>race.cu</code> 加不加 <code>-DFIXED</code> 都通过）；桩头文件里的函数签名照 13.4 的 Runtime API 参考。它们没有被 <code>nvcc</code> 编译过，也没有在 GPU 上运行过，<code>compute-sanitizer</code> 一次也没有跑过，所以下面不给任何数字，只描述你应当看到的形状。</div>
+    <div class="note" lang="en">This lab was <strong>not run</strong>; it was assembled on 2026-10-31 from the CUDA documentation (the CUDA 13.4 Runtime API reference and the programming guide) and the Compute Sanitizer documentation (v2026.3.0). <code>um_prefetch.cu</code> and <code>race.cu</code> were syntax-checked on the lab Mac with clang’s CUDA front end against a stub header, and both the host side and the <code>sm_75</code> device side passed (<code>race.cu</code> with and without <code>-DFIXED</code>); the signatures in the stub follow the 13.4 Runtime API reference. They have not been compiled by <code>nvcc</code> or run on a GPU, and <code>compute-sanitizer</code> has not been run once, so this lab gives no numbers, only the shape you should see.</div>
+    <ol>
+      <li><span lang="zh-CN">新建 notebook，运行时选 T4 GPU（见实验环境页）。第一个单元格记下 GPU、工具链，并确认 <code>compute-sanitizer</code> 在 PATH 上。找不到时到工具包目录下找（文档的例子用的是 <code>/usr/local/cuda/compute-sanitizer/compute-sanitizer</code>；Colab 上的位置是大致路径，未核对）：</span><span lang="en">Create a notebook with the T4 GPU runtime (see the lab environment page). In the first cell, record the GPU and the toolchain and confirm that <code>compute-sanitizer</code> is on the PATH. If it is not, look under the toolkit directory (the documentation’s example uses <code>/usr/local/cuda/compute-sanitizer/compute-sanitizer</code>; on Colab this is an approximate path, not checked):</span><pre data-lang="sh" data-file="Colab cell 1"># 未运行 · not run; assembled from the CUDA and Compute Sanitizer documentation on 2026-10-31
+!nvidia-smi
+!nvcc --version
+!compute-sanitizer --version</pre></li>
+      <li><span lang="zh-CN">第二个单元格写出 <code>um_prefetch.cu</code>。同一个流式 kernel（每个元素读一次、写一次，256 MB 一个数组）在五种内存上各跑两次：<code>cudaMalloc</code> 加拷贝（基线）、managed 不预取、managed 先预取、managed 设「首选主机 + GPU AccessedBy」、mapped 零拷贝。每次都由 CPU 先写输入，所以 CPU 是第一个访问者。输入是小整数，<code>2x + 1</code> 在 float 里是精确的，每种做法都和期望值逐个比较：</span><span lang="en">The second cell writes <code>um_prefetch.cu</code>. The same streaming kernel (one read and one write per element, 256 MB per array) runs twice on each of five kinds of memory: <code>cudaMalloc</code> plus a copy (the baseline), managed with no prefetch, managed with a prefetch first, managed with “preferred host plus AccessedBy for the GPU”, and mapped zero-copy. Each time the CPU writes the input first, so the CPU is the first to touch it. The inputs are small integers and <code>2x + 1</code> is exact in float, so every variant is compared element by element with the expected value:</span><pre data-lang="cpp" data-file="Colab cell 2 · um_prefetch.cu">%%writefile um_prefetch.cu
+// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// um_prefetch.cu: the same kernel on explicit, managed (with and without prefetch, with advice) and mapped memory
+// build: nvcc -arch=sm_75 -O3 um_prefetch.cu -o um_prefetch
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;vector&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); std::exit(1); } } while (0)
+
+// one read and one write per element: the time is all data movement
+__global__ void scale(const float* x, float* y, size_t n) {
+    size_t i = blockIdx.x * size_t(blockDim.x) + threadIdx.x;
+    if (i &lt; n) y[i] = 2.0f * x[i] + 1.0f;
+}
+
+const size_t N = size_t(1) &lt;&lt; 26;                 // 64 Mi floats: 256 MB per array
+const size_t BYTES = N * sizeof(float);
+const int THREADS = 256;
+const unsigned BLOCKS = unsigned((N + THREADS - 1) / THREADS);
+
+// GPU time between two events around whatever enqueue() puts on stream s
+template &lt;class F&gt; float ms_on(cudaStream_t s, F enqueue) {
+    cudaEvent_t a, b;
+    CHECK(cudaEventCreate(&amp;a)); CHECK(cudaEventCreate(&amp;b));
+    CHECK(cudaEventRecord(a, s));
+    enqueue();
+    CHECK(cudaGetLastError());
+    CHECK(cudaEventRecord(b, s)); CHECK(cudaEventSynchronize(b));
+    float ms = 0; CHECK(cudaEventElapsedTime(&amp;ms, a, b));
+    CHECK(cudaEventDestroy(a)); CHECK(cudaEventDestroy(b));
+    return ms;
+}
+// the CPU writes x first, so the CPU touches every page first
+void fill(float* x) { for (size_t i = 0; i &lt; N; ++i) x[i] = float(i % 1024); }
+size_t mismatches(const float* y) {
+    size_t bad = 0;
+    for (size_t i = 0; i &lt; N; ++i) bad += y[i] != 2.0f * float(i % 1024) + 1.0f;
+    return bad;
+}
+void report(const char* name, float before, float k1, float k2, size_t bad) {
+    std::printf("%-30s before %8.3f ms  kernel 1st %8.3f ms  2nd %8.3f ms  mismatches %zu\n", name, before, k1, k2, bad);
+}
+
+int main() {
+    const int dev = 0;
+    CHECK(cudaSetDevice(dev));
+    int cma = 0, pma = 0;
+    CHECK(cudaDeviceGetAttribute(&amp;cma, cudaDevAttrConcurrentManagedAccess, dev));
+    CHECK(cudaDeviceGetAttribute(&amp;pma, cudaDevAttrPageableMemoryAccess, dev));
+    std::printf("concurrentManagedAccess=%d pageableMemoryAccess=%d\n", cma, pma);
+    if (!cma) { std::fprintf(stderr, "limited unified memory here: prefetch to the GPU is not supported\n"); return 1; }
+
+    cudaStream_t s;
+    CHECK(cudaStreamCreate(&amp;s));
+    cudaMemLocation gpu = {}; gpu.type = cudaMemLocationTypeDevice; gpu.id = dev;
+    cudaMemLocation host = {}; host.type = cudaMemLocationTypeHost; host.id = 0;   // id is ignored for the host
+    auto launch = [&amp;](const float* x, float* y) { return ms_on(s, [&amp;] { scale&lt;&lt;&lt;BLOCKS, THREADS, 0, s&gt;&gt;&gt;(x, y, N); }); };
+    scale&lt;&lt;&lt;1, 1, 0, s&gt;&gt;&gt;(nullptr, nullptr, 0);   // create the context and load the module before any timing
+    CHECK(cudaStreamSynchronize(s));
+
+    {   // 1. explicit: cudaMalloc plus cudaMemcpy, the baseline; "before" is the copy in
+        std::vector&lt;float&gt; hx(N), hy(N);
+        fill(hx.data());
+        float *x, *y;
+        CHECK(cudaMalloc(&amp;x, BYTES)); CHECK(cudaMalloc(&amp;y, BYTES));
+        float before = ms_on(s, [&amp;] { CHECK(cudaMemcpyAsync(x, hx.data(), BYTES, cudaMemcpyHostToDevice, s)); });
+        float k1 = launch(x, y), k2 = launch(x, y);
+        CHECK(cudaMemcpy(hy.data(), y, BYTES, cudaMemcpyDeviceToHost));
+        report("explicit cudaMalloc", before, k1, k2, mismatches(hy.data()));
+        CHECK(cudaFree(x)); CHECK(cudaFree(y));
+    }
+    {   // 2. managed, no prefetch: the first launch faults the pages of x over from the host, one fault at a time
+        float *x, *y;
+        CHECK(cudaMallocManaged(&amp;x, BYTES)); CHECK(cudaMallocManaged(&amp;y, BYTES));
+        fill(x);
+        float k1 = launch(x, y), k2 = launch(x, y);
+        report("managed, no prefetch", 0.0f, k1, k2, mismatches(y));   // the CPU read faults y back to the host
+        CHECK(cudaFree(x)); CHECK(cudaFree(y));
+    }
+    {   // 3. managed with prefetch: move x and y to the GPU in bulk, in stream order, before the kernel
+        float *x, *y;
+        CHECK(cudaMallocManaged(&amp;x, BYTES)); CHECK(cudaMallocManaged(&amp;y, BYTES));
+        fill(x);
+        float before = ms_on(s, [&amp;] {
+            CHECK(cudaMemPrefetchAsync(x, BYTES, gpu, 0, s));            // flags must be 0
+            CHECK(cudaMemPrefetchAsync(y, BYTES, gpu, 0, s));
+        });
+        float k1 = launch(x, y), k2 = launch(x, y);
+        CHECK(cudaMemPrefetchAsync(y, BYTES, host, 0, s));              // bring the result back before the CPU reads it
+        CHECK(cudaStreamSynchronize(s));
+        report("managed + prefetch", before, k1, k2, mismatches(y));
+        CHECK(cudaFree(x)); CHECK(cudaFree(y));
+    }
+    {   // 4. managed with advice: keep the data on the host and let the GPU map it instead of migrating
+        float *x, *y;
+        CHECK(cudaMallocManaged(&amp;x, BYTES)); CHECK(cudaMallocManaged(&amp;y, BYTES));
+        for (float* p : {x, y}) {
+            CHECK(cudaMemAdvise(p, BYTES, cudaMemAdviseSetPreferredLocation, host));
+            CHECK(cudaMemAdvise(p, BYTES, cudaMemAdviseSetAccessedBy, gpu));
+        }
+        fill(x);
+        float k1 = launch(x, y), k2 = launch(x, y);
+        report("managed, host + accessed-by", 0.0f, k1, k2, mismatches(y));
+        CHECK(cudaFree(x)); CHECK(cudaFree(y));
+    }
+    {   // 5. zero-copy: mapped pinned host memory; every GPU access crosses PCIe
+        float *hx, *hy, *x, *y;
+        CHECK(cudaHostAlloc(&amp;hx, BYTES, cudaHostAllocMapped)); CHECK(cudaHostAlloc(&amp;hy, BYTES, cudaHostAllocMapped));
+        CHECK(cudaHostGetDevicePointer(&amp;x, hx, 0)); CHECK(cudaHostGetDevicePointer(&amp;y, hy, 0));
+        fill(hx);
+        float k1 = launch(x, y), k2 = launch(x, y);
+        report("mapped (zero-copy)", 0.0f, k1, k2, mismatches(hy));
+        CHECK(cudaFreeHost(hx)); CHECK(cudaFreeHost(hy));
+    }
+    CHECK(cudaStreamDestroy(s));
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">第三个单元格编译并运行：</span><span lang="en">The third cell builds and runs it:</span><pre data-lang="sh" data-file="Colab cell 3"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvcc -arch=sm_75 -O3 um_prefetch.cu -o um_prefetch &amp;&amp; ./um_prefetch</pre><span lang="zh-CN">预期（定性，推断）：第一行打印 <code>concurrentManagedAccess=1</code>（Linux 上的 T4）；<code>pageableMemoryAccess</code> 是 0 还是 1 取决于那台虚拟机有没有 HMM，记下它。每一行的 <code>mismatches</code> 都是 0。<code>explicit cudaMalloc</code> 的两次 kernel 都快、彼此接近，<code>before</code> 是 256 MB 的拷贝时间。<code>managed, no prefetch</code> 的第一次 kernel 比第二次慢得多，因为它的时间里装着缺页迁移；第二次接近基线。<code>managed + prefetch</code> 的两次 kernel 都接近基线，迁移的代价挪到了 <code>before</code> 里，而且「预取加第一次 kernel」应当比「不预取的第一次 kernel」短，因为整块搬比逐页缺页高效。<code>managed, host + accessed-by</code> 和 <code>mapped (zero-copy)</code> 的两次 kernel 都慢、而且两次差不多：数据从不搬到显存，每次都经 PCIe 读写。</span><span lang="en">Expected (qualitative, an inference): the first line prints <code>concurrentManagedAccess=1</code> (a T4 on Linux); whether <code>pageableMemoryAccess</code> is 0 or 1 depends on whether that virtual machine has HMM, so note it. Every row shows 0 <code>mismatches</code>. Both kernels of <code>explicit cudaMalloc</code> are fast and close to each other, and <code>before</code> is the time to copy 256 MB. The first kernel of <code>managed, no prefetch</code> is much slower than the second, because its time contains the fault-driven migration; the second is close to the baseline. Both kernels of <code>managed + prefetch</code> are close to the baseline, the cost of migration has moved into <code>before</code>, and “prefetch plus first kernel” should be shorter than “first kernel without prefetch”, because moving in bulk is more efficient than faulting page by page. Both kernels of <code>managed, host + accessed-by</code> and of <code>mapped (zero-copy)</code> are slow and about equal: the data never moves to device memory and every access crosses PCIe.</span></li>
+      <li><span lang="zh-CN">第四个单元格写出 <code>race.cu</code>：一个 block 求和，每个线程把自己的数写进 shared memory，线程 0 再读全部 256 个数。中间少了一个 <code>__syncthreads()</code>，线程 0 可能在别的 warp 写完之前就去读。<code>-DFIXED</code> 把屏障加回来：</span><span lang="en">The fourth cell writes <code>race.cu</code>: a block sum in which every thread writes its value to shared memory and thread 0 then reads all 256. A <code>__syncthreads()</code> is missing in between, so thread 0 may read before other warps have written. <code>-DFIXED</code> puts the barrier back:</span><pre data-lang="cpp" data-file="Colab cell 4 · race.cu">%%writefile race.cu
+// 未运行 · not run; assembled from the CUDA and Compute Sanitizer documentation on 2026-10-31
+// race.cu: a block sum that forgets one __syncthreads(), for compute-sanitizer --tool racecheck
+// build: nvcc -arch=sm_75 -lineinfo race.cu -o race        fixed: add -DFIXED
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); std::exit(1); } } while (0)
+#define THREADS 256
+
+__global__ void block_sum(const int* in, int* out) {
+    __shared__ int s[THREADS];
+    s[threadIdx.x] = in[blockIdx.x * THREADS + threadIdx.x];   // every thread writes its own slot
+#ifdef FIXED
+    __syncthreads();                                           // the missing barrier
+#endif
+    if (threadIdx.x == 0) {                                    // thread 0 reads all 256 slots
+        int sum = 0;
+        for (int i = 0; i &lt; THREADS; ++i) sum += s[i];
+        out[blockIdx.x] = sum;
+    }
+}
+
+int main() {
+    const int blocks = 64, n = blocks * THREADS;
+    int *in, *out;
+    CHECK(cudaMallocManaged(&amp;in, n * sizeof(int))); CHECK(cudaMallocManaged(&amp;out, blocks * sizeof(int)));
+    for (int i = 0; i &lt; n; ++i) in[i] = 1;                     // every block should sum to 256
+    block_sum&lt;&lt;&lt;blocks, THREADS&gt;&gt;&gt;(in, out);
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+    int wrong = 0;
+    for (int b = 0; b &lt; blocks; ++b) wrong += out[b] != THREADS;
+    std::printf("blocks with a wrong sum: %d of %d\n", wrong, blocks);
+    CHECK(cudaFree(in)); CHECK(cudaFree(out));
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">第五个单元格先照常运行，再按文档的建议先跑 memcheck、后跑 racecheck。<code>-lineinfo</code> 让报告指到源代码行：</span><span lang="en">The fifth cell runs it normally first, then, as the documentation advises, memcheck before racecheck. <code>-lineinfo</code> lets the reports point to source lines:</span><pre data-lang="sh" data-file="Colab cell 5"># 未运行 · not run; assembled from the Compute Sanitizer documentation (v2026.3.0) on 2026-10-31
+!nvcc -arch=sm_75 -lineinfo race.cu -o race &amp;&amp; ./race
+!compute-sanitizer --tool memcheck ./race
+!compute-sanitizer --tool racecheck ./race</pre><span lang="zh-CN">预期（定性，推断）：直接运行时，<code>blocks with a wrong sum</code> 很可能是 0：数据竞争不一定每次都显形，这正是需要工具的原因。memcheck 不报错，因为没有越界或未对齐的访问。racecheck 在默认的 analysis 模式下报告一处竞争，形如文档例子里的「Race reported between Write access at … race.cu:&lt;写 shared 的那一行&gt; and Read access at … race.cu:&lt;线程 0 读 shared 的那一行&gt;」，后面跟着归并的冒险数，末尾有 <code>RACECHECK SUMMARY</code>。行号以你那份文件为准。</span><span lang="en">Expected (qualitative, an inference): run directly, <code>blocks with a wrong sum</code> is quite likely 0: a data race does not show itself every time, which is exactly why a tool is needed. memcheck reports no errors, since there is no out-of-bounds or misaligned access. racecheck, in its default analysis mode, reports one race shaped like the documentation’s example, “Race reported between Write access at … race.cu:&lt;the line writing shared memory&gt; and Read access at … race.cu:&lt;the line where thread 0 reads shared memory&gt;”, followed by the number of hazards merged into it, with a <code>RACECHECK SUMMARY</code> at the end. The line numbers are whatever your file has.</span></li>
+      <li><span lang="zh-CN">第六个单元格加上屏障再查一次，并用 hazard 模式看一份逐字节的报告来对比：</span><span lang="en">The sixth cell adds the barrier and checks again, and for comparison shows a byte-accurate report in hazard mode:</span><pre data-lang="sh" data-file="Colab cell 6"># 未运行 · not run; assembled from the Compute Sanitizer documentation (v2026.3.0) on 2026-10-31
+!nvcc -arch=sm_75 -lineinfo -DFIXED race.cu -o race_fixed &amp;&amp; compute-sanitizer --tool racecheck ./race_fixed
+!compute-sanitizer --tool racecheck --racecheck-report hazard ./race 2&gt;&amp;1 | head -20</pre><span lang="zh-CN">预期（定性，推断）：<code>race_fixed</code> 的 racecheck 不报告任何冒险，程序打印 0 个错误的 block。hazard 模式对同一个错误程序给出很多条记录，每条对应一个字节，写明是哪种冒险（这里是 RAW：写后读）、哪个 block、哪两个线程、各在哪一行。</span><span lang="en">Expected (qualitative, an inference): racecheck reports no hazards for <code>race_fixed</code>, and the program prints 0 blocks with a wrong sum. Hazard mode gives the same broken program many records, one per byte, each naming the kind of hazard (here RAW, read after write), the block, the two threads and the line of each.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 版本：Apple 统一内存上的 shared 与 private 存储模式</h3><h3 lang="en">Lab B · The Metal twin: shared and private storage modes on Apple’s unified memory</h3>
+    <ol>
+      <li><span lang="zh-CN">先读 Apple 的文档（2026-10-31 读取）。「Choosing a resource storage mode for Apple GPUs」：Apple GPU 是统一内存模型，CPU 和 GPU 共用系统内存，但能不能访问取决于存储模式；<code>shared</code> 是 CPU 和 GPU 都能访问的系统内存，<code>private</code> 是只有 GPU 能访问的系统内存，<code>memoryless</code> 是 GPU 里的 tile memory，只能用于纹理。<code>MTLStorageMode.shared</code> 的说明：这是 Apple 芯片上 <code>MTLBuffer</code> 和 <code>MTLTexture</code> 的默认模式；CPU 或 GPU 改了内容之后，由你负责在另一方访问之前让这些修改完成。<code>MTLStorageMode.private</code> 的说明：Metal 可能对 private 资源做 shared 资源不允许的额外优化。「Copying data to a private resource」：private 资源比 shared 资源性能更好，但 CPU 不能写它，所以要先写进 shared buffer，再用 blit encoder 的 <code>copy(from:sourceOffset:to:destinationOffset:size:)</code> 拷进去；同一篇又写明，在 macOS 上 Metal 不会为了 GPU 访问重排 buffer 的内容或布局。对 private buffer 调 <code>contents()</code> 得到的是空指针。这些话放在一起，留下一个可以量的问题：在这台 Mac 上，同一个 kernel 读写 private buffer 会不会比 shared 快，值不值得多付那一次 blit？</span><span lang="en">First read Apple’s documentation (read 2026-10-31). “Choosing a resource storage mode for Apple GPUs”: Apple GPUs have a unified memory model in which CPU and GPU share system memory, but access depends on the storage mode; <code>shared</code> is system memory both CPU and GPU can access, <code>private</code> is system memory only the GPU can access, and <code>memoryless</code> is tile memory inside the GPU, for textures only. The description of <code>MTLStorageMode.shared</code>: it is the default for <code>MTLBuffer</code> and <code>MTLTexture</code> on Apple silicon, and when either CPU or GPU changes the contents you are responsible for making those changes complete before the other side accesses them. The description of <code>MTLStorageMode.private</code>: Metal may apply additional optimizations to private resources that are not allowed on shared ones. “Copying data to a private resource”: private resources perform better than shared ones, but the CPU cannot write them, so data is written to a shared buffer first and copied in with the blit encoder’s <code>copy(from:sourceOffset:to:destinationOffset:size:)</code>; the same article also says that in macOS, Metal does not reformat buffer contents or layout to improve GPU access. <code>contents()</code> on a private buffer returns a null pointer. Put together, these leave a question you can measure: on this Mac, does the same kernel run faster on a private buffer than on a shared one, and is it worth the extra blit?</span></li>
+      <li><span lang="zh-CN">把下面的程序存成 <code>metal_storage.swift</code>。它先让 GPU 忙 0.3 秒，让时钟升上来（不加这一步时，三次运行里有两次，第一个尺寸的部分操作慢了约 1.6 倍，和 Phase 4 看到的一样）；然后在 64 MB 和 256 MB 两个尺寸上量四件事：shared 拷进 private 的 blit、kernel 在两个 shared buffer 上、同一个 kernel 在两个 private buffer 上、把 private 的结果 blit 回 shared。每件事第一次的时间单独报告，再预热 2 次，测 11 次取中位数；GPU 时间取自每个命令缓冲区的 <code>gpuStartTime</code> 和 <code>gpuEndTime</code>。最后在 CPU 上核对 shared 和 blit 回来的两份结果：</span><span lang="en">Save the program below as <code>metal_storage.swift</code>. It first keeps the GPU busy for 0.3 seconds so the clock ramps up (without this step, some operations at the first size were about 1.6 times slower in two of three runs, as Phase 4 saw); then, at 64 MB and 256 MB, it measures four things: the blit from shared into private, the kernel on two shared buffers, the same kernel on two private buffers, and the blit of the private result back into shared memory. The first run of each is reported on its own, then 2 warm-ups, then the median of 11; GPU time comes from each command buffer’s <code>gpuStartTime</code> and <code>gpuEndTime</code>. Last, the CPU checks both the shared result and the one blitted back:</span><pre data-lang="swift" data-file="metal_storage.swift">// metal_storage.swift: shared vs private storage on Apple's unified memory.
+// The CPU fills a shared buffer, a blit copies it into a private one, and the same streaming kernel
+// runs on a shared pair and on a private pair. GPU time from each command buffer's gpuStartTime/gpuEndTime.
+// build: swiftc -O metal_storage.swift -o metal_storage    run: ./metal_storage
+import Foundation
+import Metal
+setvbuf(stdout, nil, _IOLBF, 0)              // line-buffered, so each result appears as soon as it is printed
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+// one read and one write per element: a pure streaming kernel
+kernel void scale(device const float* x [[buffer(0)]], device float* y [[buffer(1)]],
+                  constant uint&amp; n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    if (i &lt; n) y[i] = 2.0f * x[i] + 1.0f;
+}
+"""
+
+func fail(_ m: String) -&gt; Never { print("error: \(m)"); exit(1) }
+guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else { fail("no Metal device") }
+print("device=\(dev.name) hasUnifiedMemory=\(dev.hasUnifiedMemory) recommendedMaxWorkingSetSize_MB=\(dev.recommendedMaxWorkingSetSize &gt;&gt; 20)")
+let lib: MTLLibrary
+do { lib = try dev.makeLibrary(source: src, options: nil) } catch { fail("compile: \(error)") }
+guard let fn = lib.makeFunction(name: "scale") else { fail("no function scale") }
+let pso: MTLComputePipelineState
+do { pso = try dev.makeComputePipelineState(function: fn) } catch { fail("pipeline: \(error)") }
+
+func median(_ x: [Double]) -&gt; Double { let s = x.sorted(); return s[s.count / 2] }
+let warm = 2, reps = 11
+
+// one command buffer; GPU milliseconds from its start and end times
+func gpuMs(_ encode: (MTLCommandBuffer) -&gt; Void) -&gt; Double {
+    guard let cb = q.makeCommandBuffer() else { fail("command buffer") }
+    encode(cb); cb.commit(); cb.waitUntilCompleted()
+    if cb.status != .completed { fail("command buffer: \(String(describing: cb.error))") }
+    return (cb.gpuEndTime - cb.gpuStartTime) * 1e3
+}
+func blit(_ from: MTLBuffer, _ to: MTLBuffer, _ bytes: Int) -&gt; (MTLCommandBuffer) -&gt; Void {
+    return { cb in
+        guard let b = cb.makeBlitCommandEncoder() else { fail("blit encoder") }
+        b.copy(from: from, sourceOffset: 0, to: to, destinationOffset: 0, size: bytes)
+        b.endEncoding()
+    }
+}
+func kernel(_ x: MTLBuffer, _ y: MTLBuffer, _ n: Int) -&gt; (MTLCommandBuffer) -&gt; Void {
+    return { cb in
+        guard let e = cb.makeComputeCommandEncoder() else { fail("compute encoder") }
+        var un = UInt32(n)
+        e.setComputePipelineState(pso)
+        e.setBuffer(x, offset: 0, index: 0); e.setBuffer(y, offset: 0, index: 1); e.setBytes(&amp;un, length: 4, index: 2)
+        e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        e.endEncoding()
+    }
+}
+// the first run on fresh buffers is reported on its own, then 2 warm-ups, then the median of 11.
+// GB/s counts the bytes read plus the bytes written (2 x buffer size for a copy and for the kernel)
+func measure(_ name: String, _ n: Int, _ enc: (MTLCommandBuffer) -&gt; Void) {
+    let first = gpuMs(enc)
+    for _ in 0..&lt;warm { _ = gpuMs(enc) }
+    let ms = median((0..&lt;reps).map { _ in gpuMs(enc) })
+    let traffic = Double(2 * n * 4)
+    print(String(format: "n=%8d MB=%3d %-22@ first_ms=%8.3f median_ms=%8.3f GB/s=%6.1f",
+                 n, (n * 4) &gt;&gt; 20, name as NSString, first, ms, traffic / (ms / 1e3) / 1e9))
+}
+
+// keep the GPU busy for about 0.3 s first, so the clock has ramped up before anything is measured
+do {
+    guard let a = dev.makeBuffer(length: 1 &lt;&lt; 26, options: .storageModePrivate),
+          let b = dev.makeBuffer(length: 1 &lt;&lt; 26, options: .storageModePrivate) else { fail("warm-up buffers") }
+    let start = Date()
+    while Date().timeIntervalSince(start) &lt; 0.3 { _ = gpuMs(kernel(a, b, 1 &lt;&lt; 24)) }
+}
+
+for n in [1 &lt;&lt; 24, 1 &lt;&lt; 26] {                     // 64 MB and 256 MB per buffer
+    let bytes = n * 4
+    guard let xs = dev.makeBuffer(length: bytes, options: .storageModeShared),
+          let ys = dev.makeBuffer(length: bytes, options: .storageModeShared),
+          let xp = dev.makeBuffer(length: bytes, options: .storageModePrivate),
+          let yp = dev.makeBuffer(length: bytes, options: .storageModePrivate),
+          let back = dev.makeBuffer(length: bytes, options: .storageModeShared) else { fail("buffers") }
+    // shared: the CPU writes straight into the memory the GPU will read; no copy exists
+    let px = xs.contents().bindMemory(to: Float.self, capacity: n)
+    for i in 0..&lt;n { px[i] = Float(i % 1024) }    // small integers: 2x+1 is exact in float
+    // private: the CPU cannot write it, so the data goes in by a GPU blit from the shared buffer
+    measure("blit shared-&gt;private", n, blit(xs, xp, bytes))
+    measure("kernel on shared", n, kernel(xs, ys, n))
+    measure("kernel on private", n, kernel(xp, yp, n))
+    // to read a private result on the CPU, blit it back into a shared buffer first
+    measure("blit private-&gt;shared", n, blit(yp, back, bytes))
+    let py = ys.contents().bindMemory(to: Float.self, capacity: n)
+    let pb = back.contents().bindMemory(to: Float.self, capacity: n)
+    var bad = 0
+    for i in 0..&lt;n { let want = 2 * Float(i % 1024) + 1; if py[i] != want { bad += 1 }; if pb[i] != want { bad += 1 } }
+    print("n=\(n) mismatches=\(bad)")
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是实验 Mac（Apple M5，32 GB，macOS 27.2，Apple Swift 6.4.2）在 2026-10-31 22:38（本机时间，PDT）的完整输出，是实测值，不是计算值；同一晚 22:23 还连续跑了三次，用于下一步的范围：</span><span lang="en">Build and run it. Below is the full output on the lab Mac (Apple M5, 32 GB, macOS 27.2, Apple Swift 6.4.2) at 22:38 on 2026-10-31 (local time, PDT), measured rather than computed; three more consecutive runs at 22:23 the same evening give the ranges in the next step:</span><pre data-lang="sh">$ swiftc -O metal_storage.swift -o metal_storage
+$ ./metal_storage
+device=Apple M5 hasUnifiedMemory=true recommendedMaxWorkingSetSize_MB=25559
+n=16777216 MB= 64 blit shared-&gt;private first_ms=   1.084 median_ms=   1.034 GB/s= 129.8
+n=16777216 MB= 64 kernel on shared first_ms=   1.059 median_ms=   1.074 GB/s= 125.0
+n=16777216 MB= 64 kernel on private first_ms=   1.047 median_ms=   1.012 GB/s= 132.6
+n=16777216 MB= 64 blit private-&gt;shared first_ms=   1.064 median_ms=   1.044 GB/s= 128.6
+n=16777216 mismatches=0
+n=67108864 MB=256 blit shared-&gt;private first_ms=   4.494 median_ms=   4.221 GB/s= 127.2
+n=67108864 MB=256 kernel on shared first_ms=   4.953 median_ms=   4.099 GB/s= 131.0
+n=67108864 MB=256 kernel on private first_ms=   4.535 median_ms=   4.082 GB/s= 131.5
+n=67108864 MB=256 blit private-&gt;shared first_ms=   4.856 median_ms=   4.202 GB/s= 127.8
+n=67108864 mismatches=0</pre></li>
+      <li><span lang="zh-CN">读懂 shared 和 private。GB/s 按读加写两倍于 buffer 大小计。四次运行里，kernel 在 shared 上的中位数是 64 MB 0.995–1.074 ms、256 MB 4.050–4.099 ms，在 private 上是 64 MB 1.007–1.036 ms、256 MB 4.050–4.295 ms。同一次运行里两者最多差约 6%，有时 shared 快，有时 private 快，没有稳定的赢家。所以在这台机器上，对这种按顺序读写的 buffer，private 没有带来可测的速度优势；这和 Apple 那句「macOS 上 Metal 不会为 GPU 访问重排 buffer 内容或布局」一致（推断：Apple 没有说明 private 的「额外优化」具体是什么，它们也许只对纹理有用）。</span><span lang="en">Read shared against private. GB/s counts reads plus writes, twice the buffer size. Across the four runs, the kernel’s median on shared buffers was 0.995–1.074 ms at 64 MB and 4.050–4.099 ms at 256 MB, and on private buffers 1.007–1.036 ms at 64 MB and 4.050–4.295 ms at 256 MB. Within one run the two differ by at most about 6%, sometimes with shared ahead and sometimes private, so there is no stable winner. On this machine, then, for buffers read and written in order, private brings no measurable speed advantage; this matches Apple’s statement that in macOS, Metal does not reformat buffer contents or layout for GPU access (an inference: Apple does not say what the “additional optimizations” of private are, and they may matter only for textures).</span></li>
+      <li><span lang="zh-CN">读懂 blit 的代价。shared 拷进 private 的 blit 在四次运行里是 64 MB 1.022–1.034 ms、256 MB 4.169–4.221 ms，blit 回 shared 是 1.035–1.073 ms 和 4.166–4.238 ms，都和 kernel 本身差不多：这几种操作搬的字节一样多，都跑在约 130 GB/s 附近，看起来都被同一份内存带宽限住了（推断）。所以对「CPU 写、GPU 读一遍」的数据，放进 private 等于多付一整次读写；private 适合的是 GPU 自己产生、自己反复用的中间数据，它们本来就不需要 CPU 碰。</span><span lang="en">Read the cost of the blit. The blit from shared into private took 1.022–1.034 ms at 64 MB and 4.169–4.221 ms at 256 MB across the four runs, and the blit back into shared took 1.035–1.073 ms and 4.166–4.238 ms, all about the same as the kernel itself: these operations move the same number of bytes, all run near 130 GB/s, and appear to be held by the same memory bandwidth (an inference). For data the CPU writes and the GPU reads once, then, putting it into private storage costs one whole extra read and write; private suits intermediate data the GPU produces and reuses itself, which the CPU never needed to touch.</span></li>
+      <li><span lang="zh-CN">和 Lab A 对照。这里没有 Lab A 里那种「第一次启动慢好几倍」：64 MB 时 <code>first_ms</code> 和中位数几乎一样，因为 shared buffer 的页本来就在 CPU 和 GPU 共用的内存里，没有可迁移的地方（推断）。256 MB 时，四次运行里有三次，第一次往一个新 buffer 里写的操作多出最多约 1 ms（比如上面输出里 kernel on shared 的 4.953 对 4.099 ms），22:23:36 那次没有；Metal 不报告原因（推断：可能是系统第一次为这些页建立 GPU 映射）。换句话说，Apple 的 <code>shared</code> 像一份永远不需要迁移的 managed 内存，CUDA 的独立卡上要靠预取和建议才能接近这一点。</span><span lang="en">Compare with Lab A. There is no first launch several times slower, as in Lab A: at 64 MB <code>first_ms</code> is almost the same as the median, because the pages of a shared buffer already sit in memory that CPU and GPU share, with nowhere to migrate to (an inference). At 256 MB, in three of the four runs, the first operation writing into a fresh buffer took up to about 1 ms longer (for example kernel on shared in the output above, 4.953 against 4.099 ms), and the run at 22:23:36 showed none; Metal does not report why (an inference: perhaps the system setting up GPU mappings for those pages the first time). Put another way, Apple’s <code>shared</code> is like managed memory that never needs to migrate; on a discrete CUDA card, prefetch and advice are how you get close to that.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 在 Colab 上的完整输出（含 <code>nvcc --version</code>、<code>compute-sanitizer --version</code> 和两个设备属性），一张表列出五种内存各自两次 kernel 的时间和 <code>before</code>；racecheck 在 analysis 和 hazard 两种模式下对 <code>race</code> 的报告，以及对 <code>race_fixed</code> 的干净结果；Lab B 在你的 Mac 上至少三次运行的输出；以及 10 行以内的解释：不预取时第一次 kernel 慢在哪，预取把这笔代价挪到了哪里，为什么零拷贝两次都慢，为什么程序结果正确却仍然有竞争，以及在 Apple 统一内存上 private 什么时候值得那一次 blit。</div>
+    <div class="note" lang="en">Deliverables: the full Lab A output from Colab (with <code>nvcc --version</code>, <code>compute-sanitizer --version</code> and the two device attributes), and a table of the two kernel times and <code>before</code> for each of the five kinds of memory; the racecheck reports on <code>race</code> in analysis and in hazard mode, and the clean result on <code>race_fixed</code>; the output of at least three Lab B runs on your Mac; and an explanation in 10 lines or fewer of where the first kernel loses time without prefetch, where prefetch moves that cost, why zero-copy is slow both times, why a program with correct output can still race, and when, on Apple’s unified memory, private storage is worth its blit.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="gpu/phase-6">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 在 Colab 的 T4 上，一块 <code>cudaMallocManaged</code> 的数组由 CPU 初始化后交给 kernel。程序已经预热过上下文，可第一次启动仍比第二次慢得多。最合理的解释和改法是什么？</p>
+      <p lang="en">1. On the Colab T4, an array from <code>cudaMallocManaged</code> is initialised by the CPU and then handed to a kernel. The program has already warmed up its context, yet the first launch is still much slower than the second. What is the most reasonable explanation and fix?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">GPU 时钟还没升上来；第一次启动前多跑几次空 kernel 就好</span><span lang="en">The GPU clock has not ramped up; run a few empty kernels before the first launch</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">页由 CPU 先碰而落在主机，第一次启动按缺页逐页迁移；在同一个流里先 <code>cudaMemPrefetchAsync</code> 到 GPU</span><span lang="en">The CPU touched the pages first, so they sit on the host and the first launch migrates them fault by fault; <code>cudaMemPrefetchAsync</code> them to the GPU in the same stream first</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">managed 内存其实一直放在页锁定的主机内存里，每次都经 PCIe；改用 <code>cudaMalloc</code></span><span lang="en">Managed memory actually always lives in page-locked host memory and goes across PCIe every time; switch to <code>cudaMalloc</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">时钟爬升会让最早的短 kernel 慢一些，但第二次立刻变快、而且差距很大，指向的是只发生一次的事情：缺页迁移，a 不对。c 描述的是 mapped（零拷贝）内存：那样的话两次启动都慢，不会第二次变快。managed 内存按 first touch 放置、缺页时迁移，预取把这笔代价整块挪到 kernel 之前。</span><span lang="en">A clock ramp slows the earliest short kernels a little, but a large gap that vanishes on the second launch points to something that happens once: fault-driven migration, so a is wrong. c describes mapped (zero-copy) memory, where both launches would be slow and the second would not speed up. Managed memory is placed by first touch and migrates on faults, and a prefetch moves that cost, in bulk, ahead of the kernel.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">2. 对一段 managed 内存、以 GPU 为 <code>location</code> 调用 <code>cudaMemAdvise(..., cudaMemAdviseSetAccessedBy, ...)</code>，会发生什么？</p>
+      <p lang="en">2. What happens when you call <code>cudaMemAdvise(..., cudaMemAdviseSetAccessedBy, ...)</code> on a range of managed memory with the GPU as the <code>location</code>?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">数据立即迁到这块 GPU 的显存</span><span lang="en">The data migrates to that GPU’s memory right away</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">不迁移数据，但让数据一直映射在这块 GPU 的页表里，它访问时不缺页；数据别处迁移时映射跟着更新</span><span lang="en">Nothing migrates, but the data stays mapped in that GPU’s page tables so its accesses do not fault; if the data migrates for another reason, the mapping follows</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">在这块 GPU 上建一份只读副本，有人写时其他副本失效</span><span lang="en">A read-only copy is made on that GPU, and other copies are invalidated when someone writes</span></label>
+      <div class="why" hidden><span lang="zh-CN">立即迁移是 <code>cudaMemPrefetchAsync</code> 做的事，a 不对；Runtime API 参考明确说 AccessedBy 不引起数据迁移。只读副本和写时失效是 <code>cudaMemAdviseSetReadMostly</code> 的行为，c 不对。</span><span lang="en">Migrating right away is what <code>cudaMemPrefetchAsync</code> does, so a is wrong; the Runtime API reference says plainly that AccessedBy causes no data migration. Read-only copies with invalidation on write are the behavior of <code>cudaMemAdviseSetReadMostly</code>, so c is wrong.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 一个多流程序在每一步用 <code>cudaMalloc</code> / <code>cudaFree</code> 分配和释放临时 buffer，Nsight Systems 的时间线上各流之间不断出现空隙。最对症的改法是什么？</p>
+      <p lang="en">3. A multi-stream program allocates and frees a temporary buffer with <code>cudaMalloc</code> / <code>cudaFree</code> on every step, and the Nsight Systems timeline keeps showing gaps between the streams. What is the most direct fix?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">换成同一个流里的 <code>cudaMallocAsync</code> / <code>cudaFreeAsync</code>，把池的 <code>cudaMemPoolAttrReleaseThreshold</code> 调高，跨流使用时用事件接上顺序</span><span lang="en">Switch to <code>cudaMallocAsync</code> / <code>cudaFreeAsync</code> on the stream, raise the pool’s <code>cudaMemPoolAttrReleaseThreshold</code>, and connect the order with events where another stream uses the buffer</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">换成 <code>cudaMallocManaged</code>，让驱动去管</span><span lang="en">Switch to <code>cudaMallocManaged</code> and let the driver handle it</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">换成 <code>cudaHostAlloc(..., cudaHostAllocMapped)</code>，这样就不在显存里分配了</span><span lang="en">Switch to <code>cudaHostAlloc(..., cudaHostAllocMapped)</code>, so nothing is allocated in device memory</span></label>
+      <div class="why" hidden><span lang="zh-CN">编程指南写明 <code>cudaMalloc</code> 和 <code>cudaFree</code> 会让 GPU 在所有流之间同步，这正是空隙的来源；流序分配器把分配变成流里的操作，池在阈值以内留住内存。b 改的是数据住在哪，不是分配这一步，还会带来缺页迁移。c 让 kernel 的每次访问都走 PCIe，比空隙更糟，pinned 内存分配本身也不便宜。</span><span lang="en">The programming guide says <code>cudaMalloc</code> and <code>cudaFree</code> make the GPU synchronize across all streams, which is where the gaps come from; the stream-ordered allocator turns allocation into a stream operation, and the pool keeps memory up to its threshold. b changes where the data lives, not the allocation step, and adds fault-driven migration. c sends every kernel access across PCIe, which is worse than the gaps, and allocating pinned memory is not cheap either.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">4. Lab A 的 <code>race.cu</code> 少了一个 <code>__syncthreads()</code>，你连跑十次结果都对。下面哪一句是对的？</p>
+      <p lang="en">4. Lab A’s <code>race.cu</code> is missing a <code>__syncthreads()</code>, and ten runs in a row all give the right result. Which statement is correct?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">十次都对，说明这里没有竞争，屏障可以省掉</span><span lang="en">Ten correct runs show there is no race, so the barrier can be left out</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN"><code>compute-sanitizer --tool memcheck</code> 会把它报告成越界访问</span><span lang="en"><code>compute-sanitizer --tool memcheck</code> will report it as an out-of-bounds access</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN"><code>compute-sanitizer --tool racecheck</code> 会报告写 shared 的那一行和线程 0 读 shared 的那一行之间的竞争；加上屏障后报告消失</span><span lang="en"><code>compute-sanitizer --tool racecheck</code> reports a race between the line writing shared memory and the line where thread 0 reads it; with the barrier added, the report goes away</span></label>
+      <div class="why" hidden><span lang="zh-CN">数据竞争是否显形取决于 warp 的调度时机，换一张卡、换一个负载就可能出错，所以 a 不对。memcheck 查的是越界、未对齐和 API 错误，这里所有访问都在界内，它不报错；查 shared memory 冒险的是 racecheck，b 不对。</span><span lang="en">Whether a race shows depends on how warps happen to be scheduled, and another card or another load may break it, so a is wrong. memcheck looks for out-of-bounds and misaligned accesses and API errors, and every access here is in bounds, so it reports nothing; racecheck is the tool for shared-memory hazards, so b is wrong.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html">CUDA Programming Guide: Unified Memory</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/understanding-memory.html">Understanding Memory</a> <span class="lvl" lang="zh-CN">官方文档，中级到高级（2026-10-31 读取）：四种统一内存形态和三个设备属性、分配器对照表（first touch、页大小）、缺页与页表、Performance Hints、Mapped Memory 与零拷贝</span><span class="lvl" lang="en">Official docs, intermediate to advanced (read 2026-10-31): the four forms of unified memory and their three device attributes, the allocator table (first touch, page sizes), faults and page tables, Performance Hints, Mapped Memory and zero-copy</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/stream-ordered-memory-allocation.html">CUDA Programming Guide: Stream-Ordered Memory Allocator</a> <span class="lvl" lang="zh-CN">官方文档，中级（2026-10-31 读取）：<code>cudaMallocAsync</code>、默认池与显式池、release threshold、复用策略、跨流的事件依赖</span><span class="lvl" lang="en">Official docs, intermediate (read 2026-10-31): <code>cudaMallocAsync</code>, default and explicit pools, the release threshold, reuse policies, event dependencies across streams</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__MEMORY.html">CUDA Runtime API: Memory Management</a> · <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__MEMORY__POOLS.html">Stream Ordered Memory Allocator</a> · <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html">Data types</a> <span class="lvl" lang="zh-CN">参考（CUDA 13.4，2026-10-31 读取）：<code>cudaMemPrefetchAsync</code> 与 <code>cudaMemAdvise</code> 的签名和语义、<code>cudaMemoryAdvise</code> 的六个值、<code>cudaHostAlloc</code> 的标志、池函数和 <code>cudaMemPoolAttr</code></span><span class="lvl" lang="en">Reference (CUDA 13.4, read 2026-10-31): the signatures and semantics of <code>cudaMemPrefetchAsync</code> and <code>cudaMemAdvise</code>, the six <code>cudaMemoryAdvise</code> values, the flags of <code>cudaHostAlloc</code>, the pool functions and <code>cudaMemPoolAttr</code></span></li>
+    <li><a href="https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html">Compute Sanitizer</a> <span class="lvl" lang="zh-CN">官方文档（v2026.3.0，2026-10-31 读取）：memcheck、racecheck（analysis 与 hazard 两种报告）、initcheck、synccheck，命令行选项和例子</span><span class="lvl" lang="en">Official docs (v2026.3.0, read 2026-10-31): memcheck, racecheck (analysis and hazard reports), initcheck, synccheck, command-line options and examples</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-gdb/index.html">CUDA-GDB</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/cpp-language-extensions.html">CUDA Programming Guide: C++ Language Extensions</a> <span class="lvl" lang="zh-CN">官方文档（CUDA-GDB v13.4，2026-10-31 读取）：<code>-g -G</code>、焦点切换、条件断点、<code>api_failures</code>、异常编号；编程指南的 Assertion 一节讲设备端 <code>assert</code></span><span class="lvl" lang="en">Official docs (CUDA-GDB v13.4, read 2026-10-31): <code>-g -G</code>, switching focus, conditional breakpoints, <code>api_failures</code>, exception codes; the Assertion part of the programming guide covers the device-side <code>assert</code></span></li>
+    <li><a href="https://docs.pytorch.org/docs/2.15/notes/cuda.html">PyTorch: CUDA semantics</a> · <a href="https://docs.pytorch.org/docs/2.15/generated/torch.Tensor.record_stream.html">torch.Tensor.record_stream</a> <span class="lvl" lang="zh-CN">官方文档，中级（PyTorch 2.15，2026-10-31 读取）：缓存分配器、<code>memory_allocated</code> 与 <code>memory_reserved</code>、<code>PYTORCH_ALLOC_CONF</code>、按流记账</span><span class="lvl" lang="en">Official docs, intermediate (PyTorch 2.15, read 2026-10-31): the caching allocator, <code>memory_allocated</code> and <code>memory_reserved</code>, <code>PYTORCH_ALLOC_CONF</code>, per-stream booking</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal/choosing-a-resource-storage-mode-for-apple-gpus">Choosing a resource storage mode for Apple GPUs</a> · <a href="https://developer.apple.com/documentation/metal/copying-data-to-a-private-resource">Copying data to a private resource</a> · <a href="https://developer.apple.com/documentation/metal/mtlstoragemode">MTLStorageMode</a> · <a href="https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpustarttime">gpuStartTime</a> <span class="lvl" lang="zh-CN">官方文档（2026-10-31 读取）：shared、private、memoryless 的语义，blit 进 private 的做法，命令缓冲区的 GPU 时间，Lab B</span><span class="lvl" lang="en">Official docs (read 2026-10-31): the meaning of shared, private and memoryless, how to blit into private storage, a command buffer’s GPU times; Lab B</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 24 章「Advanced practices and future evolution」对应概念 1 和 3（主机与设备的交互、统一内存、零拷贝；推断，见概念 1）；第 4 章「Compute architecture and scheduling」对应 Lab A 的屏障与竞争；第 2 章「Heterogeneous data parallel computing」是 <code>cudaMalloc</code> 和 <code>cudaMemcpy</code> 的起点；第 18 章「Deep learning」和第 19 章「Multi-GPU API」是概念 4、5 的背景。章名按 Elsevier 的目录核对（2026-10-31）</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 24, “Advanced practices and future evolution”, matches concepts 1 and 3 (host–device interaction, unified memory, zero-copy; an inference, see concept 1); Chapter 4, “Compute architecture and scheduling”, matches the barrier and race of Lab A; Chapter 2, “Heterogeneous data parallel computing”, is the starting point for <code>cudaMalloc</code> and <code>cudaMemcpy</code>; Chapters 18, “Deep learning”, and 19, “Multi-GPU API”, are background for concepts 4 and 5. Chapter titles checked against Elsevier’s table of contents (2026-10-31)</span></li>
+    <li lang="zh-CN">Jonathan Corbet, Alessandro Rubini &amp; Greg Kroah-Hartman, 《Linux Device Drivers》, 3rd ed., O'Reilly, 2005. <span class="lvl">第 15 章「Memory Mapping and DMA」对应概念 3：驱动怎样把主机页交给设备做 DMA；API 停在 2.6 时代 · 免费在线：<a href="https://lwn.net/Kernel/LDD3/">lwn.net/Kernel/LDD3</a></span></li>
+    <li lang="en">Jonathan Corbet, Alessandro Rubini &amp; Greg Kroah-Hartman, <em>Linux Device Drivers</em>, 3rd ed., O'Reilly, 2005. <span class="lvl">Chapter 15, “Memory Mapping and DMA”, matches concept 3: how a driver hands host pages to a device for DMA; the API stops at the 2.6 era · free online: <a href="https://lwn.net/Kernel/LDD3/">lwn.net/Kernel/LDD3</a></span></li>
+    <li lang="zh-CN">Randal E. Bryant &amp; David R. O'Hallaron, 《Computer Systems: A Programmer's Perspective》, 3rd ed., Pearson, 2016. <span class="lvl">第 9 章「Virtual Memory」对应概念 1 和动画 (a)：按需分页、页表、缺页处理</span></li>
+    <li lang="en">Randal E. Bryant &amp; David R. O'Hallaron, <em>Computer Systems: A Programmer's Perspective</em>, 3rd ed., Pearson, 2016. <span class="lvl">Chapter 9, “Virtual Memory”, matches concept 1 and diagram (a): demand paging, page tables, fault handling</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-5-streams-and-graphs/index.html">← <span lang="zh-CN">Phase 5 · 流、图与并发</span><span lang="en">Phase 5 · Streams, Graphs and Concurrency</span></a>
+    <a href="../phase-7-stack-and-capstone/index.html"><span lang="zh-CN">Phase 7 · 软件栈、可移植性与作品项目</span><span lang="en">Phase 7 · The Stack, Portability and the Capstone</span> →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
