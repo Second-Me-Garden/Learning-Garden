@@ -1,0 +1,878 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 4 · MoE Kernels · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page">Phase 4 · MoE Kernels</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 4 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 4 / 9 · about 1–2 weeks</p>
+  <h1>MoE Kernels <span class="en" lang="zh-CN">MoE 内核：路由与 top-k、moe_align_block_size 的排序与补齐、Triton fused_moe 与 DeepGEMM 的分组 GEMM、DeepEP 的 dispatch 与 combine，以及补齐浪费和块大小的取舍</span><span class="en" lang="en">Routing and top-k, sorting and padding with moe_align_block_size, grouped GEMMs in Triton fused_moe and DeepGEMM, DeepEP’s dispatch and combine, and the trade between padding waste and block size</span></h1>
+  <p class="lede" lang="zh-CN">MoE 层里每个 token 只走 E 个专家中的 k 个，于是一层 FFN 变成了 E 个形状相同、行数各不相同的小 GEMM。内核要解决三件事：先把（token，槽位）按专家排好、每个专家的行数补到块大小 BM 的整数倍，这是 <code>moe_align_block_size</code>；再用一次启动算完所有专家，每个 M 块只属于一个专家、只读一份权重，这是分组 GEMM（Triton 的 <code>fused_moe_kernel</code>，Hopper 上 FP8 块量化权重用 DeepGEMM）；专家分在多块 GPU 上时，还要把 token 发过去、把结果收回来，这是 DeepEP 的 dispatch 和 combine。补齐的行要白算，BM 越大白算越多，但每块权重被复用的行也越多。这台 Apple M5 上实测：4096 个 token、64 个专家、每 token 4 个专家时，BM = 64 浪费 9.9% 的行却比浪费 2.4% 的 BM = 16 快约 1.8 倍（12.2 对 21.9 ms）；只有 64 个 token 时每个专家平均 4 行，BM = 32 浪费 87% 仍然最快，因为这时内核在读权重，算力本来就闲着。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-11-01 在这台 Apple M5 上实际运行，数字原样贴出；Lab A 在 L4 上量 <code>moe_align_block_size</code> 的补齐浪费、在 H100 上跑 DeepGEMM 的分组 GEMM，<strong>未运行</strong>，是 2026-11-01 根据 SGLang v0.5.22 的源码和 DeepGEMM、DeepEP 的文档整理的；DeepEP 要多块 GPU，只作描述。</p>
+  <p class="lede" lang="en">In a MoE layer each token goes through only k of E experts, so one FFN layer turns into E small GEMMs of the same shape but different row counts. The kernels have three jobs: first sort the (token, slot) entries by expert and pad each expert’s rows to a multiple of the block size BM, which is <code>moe_align_block_size</code>; then compute every expert in one launch, with each M block belonging to exactly one expert and reading one set of weights, which is the grouped GEMM (Triton’s <code>fused_moe_kernel</code>, and DeepGEMM for FP8 block-quantized weights on Hopper); and when the experts are spread over several GPUs, send the tokens there and bring the results back, which is DeepEP’s dispatch and combine. Padding rows are computed for nothing, and a larger BM pads more, but it also lets more rows reuse each weight tile. Measured on this Apple M5 with 4096 tokens, 64 experts and 4 experts per token: BM = 64 wastes 9.9% of its rows and is still about 1.8 times as fast as BM = 16, which wastes 2.4% (12.2 against 21.9 ms); with only 64 tokens, each expert gets 4 rows on average, and BM = 32 wastes 87% yet is the fastest, because the kernel is then reading weights and its arithmetic sits idle anyway. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-11-01 and its numbers are pasted as they came; Lab A, which measures the padding waste of <code>moe_align_block_size</code> on an L4 and runs DeepGEMM’s grouped GEMM on an H100, is <strong>not run</strong>, assembled on 2026-11-01 from the SGLang v0.5.22 source and the DeepGEMM and DeepEP documentation; DeepEP needs several GPUs and is only described.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说清一个 MoE 层从路由器 logits 到输出的每一步：top-k、（token，槽位）展平、按专家分组、两次专家 GEMM 和加权合并，以及 DeepSeek-V3 的 sigmoid 打分、分组限制和只用于选路的偏置。</li>
+      <li lang="en">Explain each step of a MoE layer from the router logits to the output: top-k, flattening into (token, slot) entries, grouping by expert, the two expert GEMMs and the weighted combine, plus DeepSeek-V3’s sigmoid scoring, group limit and routing-only bias.</li>
+      <li lang="zh-CN">读懂 SGLang v0.5.22 的 <code>moe_align_block_size</code> CUDA 内核：共享内存里的原子计数、按 BM 取整、前缀和、每块的专家号，以及第二个内核用原子游标把每一项写进它的位置；并算出 <code>sorted_token_ids</code> 的上界。</li>
+      <li lang="en">Read SGLang v0.5.22’s <code>moe_align_block_size</code> CUDA kernel: atomic counting in shared memory, rounding up to BM, the prefix sum, the expert of each block, and the second kernel that writes each entry to its place through an atomic cursor; and work out the upper bound of <code>sorted_token_ids</code>.</li>
+      <li lang="zh-CN">说明分组 GEMM 怎样用 <code>sorted_token_ids</code> 和 <code>expert_ids</code> 在一次启动里算完所有专家，Triton 的 <code>fused_moe_kernel</code> 怎样处理补齐行和 FP8 块缩放，以及 DeepGEMM 的 contiguous 与 masked 两种布局各用在哪里。</li>
+      <li lang="en">Explain how a grouped GEMM uses <code>sorted_token_ids</code> and <code>expert_ids</code> to compute every expert in one launch, how Triton’s <code>fused_moe_kernel</code> handles padding rows and FP8 block scales, and where DeepGEMM’s contiguous and masked layouts are each used.</li>
+      <li lang="zh-CN">说出专家并行时 DeepEP 的 dispatch 和 combine 做什么、normal 与 low-latency 两种模式的区别，以及 SGLang 用哪些参数打开它。</li>
+      <li lang="en">State what DeepEP’s dispatch and combine do under expert parallelism, how the normal and low-latency modes differ, and which SGLang flags turn it on.</li>
+      <li lang="zh-CN">给定 token 数、k、E 和 BM，估出补齐浪费，并解释为什么浪费最少的 BM 不一定最快（Lab A 在 L4 上量，Lab B 在 Metal 上量）。</li>
+      <li lang="en">Given the token count, k, E and BM, estimate the padding waste, and explain why the BM with the least waste is not necessarily the fastest (measured on the L4 in Lab A and in Metal in Lab B).</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-the-stack/index.html">Phase 0 · 自顶向下的栈</a>：运算强度、拐点，以及为什么批大小小的解码受带宽限制。概念 5 用同样的账算 MoE 解码。</li>
+    <li lang="en"><a href="../phase-0-the-stack/index.html">Phase 0 · The Stack, Top to Bottom</a>: arithmetic intensity, the ridge point, and why decode at small batch sizes is bandwidth-bound. Concept 5 does the same sums for MoE decode.</li>
+    <li lang="zh-CN"><a href="../phase-2-prefill-and-decode/index.html">Phase 2 · 预填充与解码</a>：FA3 的 FP8 块量化，以及 DeepSeek 式模型的形状。本页的 DeepGEMM 用的是同一种「每块一个缩放因子」的思路。</li>
+    <li lang="en"><a href="../phase-2-prefill-and-decode/index.html">Phase 2 · Prefill and Decode</a>: FA3’s FP8 block quantization, and the shapes of DeepSeek-style models. DeepGEMM on this page uses the same one-scale-per-block idea.</li>
+    <li lang="zh-CN"><a href="../../gpu-cuda/index.html">GPU Programming with CUDA</a>：分块 GEMM、shared memory、原子操作和前缀和。<code>moe_align_block_size</code> 就是一个直方图加一次扫描，分组 GEMM 就是多了一层间接寻址的分块 GEMM。</li>
+    <li lang="en"><a href="../../gpu-cuda/index.html">GPU Programming with CUDA</a>: tiled GEMM, shared memory, atomics and the prefix sum. <code>moe_align_block_size</code> is a histogram plus one scan, and a grouped GEMM is a tiled GEMM with one more level of indirection.</li>
+    <li lang="zh-CN">按 <a href="../lab-setup/index.html">实验环境</a> 准备好 L4 上的 <code>sglang-lab</code> 容器（Lab A 的第 1–3 步；第 4 步是 H100 层）和这台 Mac 上的 <code>swiftc</code>（Lab B）。</li>
+    <li lang="en">Prepare the <code>sglang-lab</code> container on the L4 (steps 1–3 of Lab A; step 4 is the H100 tier) and <code>swiftc</code> on this Mac (Lab B), following <a href="../lab-setup/index.html">Lab environment</a>.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 路由与 top-k</h3><h3 lang="en">1. Routing and top-k</h3>
+  <p lang="zh-CN">稀疏门控的 MoE 层由 Shazeer 等（arXiv:1701.06538，读的是 v1）提出，摘要的说法是：一个可训练的门控网络为每个样本决定用哪些专家的稀疏组合。今天的 LLM 里，每一层 MoE 对每个 token 做同样的几步：</p>
+  <p lang="en">The sparsely gated MoE layer comes from Shazeer et al. (arXiv:1701.06538, read at v1), whose abstract puts it this way: a trainable gating network determines a sparse combination of experts to use for each example. In today’s LLMs, every MoE layer does the same few steps for every token:</p>
+  <ol>
+    <li lang="zh-CN">路由器是一个小线性层：T 个 token 的隐状态乘 E × K 的门控权重，得到 T × E 的 logits。</li>
+    <li lang="en">The router is a small linear layer: the hidden states of T tokens times an E × K gate weight give T × E logits.</li>
+    <li lang="zh-CN">每行打分（softmax，或 DeepSeek-V3 的 sigmoid），取最大的 k 个，得到 <code>topk_ids</code>（T × k 个专家号）和 <code>topk_weights</code>（T × k 个权重，通常在选中的 k 个里重新归一化）。</li>
+    <li lang="en">Score each row (softmax, or sigmoid in DeepSeek-V3), keep the largest k, and get <code>topk_ids</code> (T × k expert numbers) and <code>topk_weights</code> (T × k weights, usually renormalized over the k chosen).</li>
+    <li lang="zh-CN">把 T × k 展平成 T·k 项，第 i 项属于 token i // k。每个专家拿到属于它的那些项，做门与上投影的 GEMM、SiLU-and-mul、下投影的 GEMM。</li>
+    <li lang="en">Flatten T × k into T·k entries; entry i belongs to token i // k. Each expert takes its own entries and runs the gate-and-up GEMM, SiLU-and-mul and the down GEMM.</li>
+    <li lang="zh-CN">合并：每个 token 把自己 k 个专家的输出按权重加起来。</li>
+    <li lang="en">Combine: each token adds up the outputs of its k experts, weighted.</li>
+  </ol>
+  <p lang="zh-CN">两个真实形状（Hugging Face 上的 <code>config.json</code>，2026-11-01 读取）。Qwen3-30B-A3B：128 个专家，每 token 8 个，隐藏维 2048，专家中间维 768，48 层。DeepSeek-V3：256 个路由专家加 1 个共享专家，每 token 8 个，隐藏维 7168，专家中间维 2048，<code>scoring_func</code> 是 sigmoid，<code>n_group</code> 8、<code>topk_group</code> 4，<code>topk_method</code> 是 <code>noaux_tc</code>，<code>routed_scaling_factor</code> 2.5。DeepSeek-V3 技术报告（arXiv:2412.19437，v2）讲 DeepSeekMoE 的一节说明了这些字段：亲和度用 sigmoid 算，在选中的分数之间归一化得到门控值；为了负载均衡，给每个专家加一个偏置项，只用于决定 top-k，乘到输出上的门控值仍来自原始分数；每个 token 最多发往 4 个节点。对内核来说，这些都只是改变 <code>topk_ids</code> 和 <code>topk_weights</code> 怎么算，后面的排序、GEMM 和合并完全一样。</p>
+  <p lang="en">Two real shapes (the <code>config.json</code> files on Hugging Face, read 2026-11-01). Qwen3-30B-A3B: 128 experts, 8 per token, hidden size 2048, expert intermediate size 768, 48 layers. DeepSeek-V3: 256 routed experts plus 1 shared expert, 8 per token, hidden size 7168, expert intermediate size 2048, <code>scoring_func</code> sigmoid, <code>n_group</code> 8 and <code>topk_group</code> 4, <code>topk_method</code> <code>noaux_tc</code>, <code>routed_scaling_factor</code> 2.5. The DeepSeekMoE section of the DeepSeek-V3 technical report (arXiv:2412.19437, v2) explains these fields: affinities are computed with a sigmoid and normalized among the selected scores to give the gating values; for load balancing, each expert gets a bias term that is used only to decide the top-k, while the gating value multiplied into the output still comes from the original score; and each token is sent to at most 4 nodes. For the kernels, all of this only changes how <code>topk_ids</code> and <code>topk_weights</code> are computed; the sorting, the GEMMs and the combine that follow are exactly the same.</p>
+  <p lang="zh-CN">在 SGLang v0.5.22 里，入口是 <code>python/sglang/srt/layers/moe/topk.py</code> 的 <code>select_experts</code>（第 2545 行），返回 <code>StandardTopKOutput(topk_weights, topk_ids, router_logits)</code>（第 343 行）。softmax 打分走 <code>fused_topk</code>（第 1061 行），在 CUDA 上调用 JIT 编译的 Triton 路由内核 <code>moe_fused_gate</code>，源码注释写的是「Unified Triton router (subsumes the AOT topk_softmax CUDA kernel)」（第 1120 行）；DeepSeek 式的分组、带偏置的 top-k 走 <code>biased_grouped_topk_gpu</code>（第 1777 行）。路由本身很便宜（T × E × K 的一个小 GEMM 加一次选择），它的输出决定了后面每个专家各拿到几行：解码时 T 很小，128 个专家里只有少数几个各拿到一两行。</p>
+  <p lang="en">In SGLang v0.5.22 the entry point is <code>select_experts</code> in <code>python/sglang/srt/layers/moe/topk.py</code> (line 2545), which returns <code>StandardTopKOutput(topk_weights, topk_ids, router_logits)</code> (line 343). Softmax scoring goes through <code>fused_topk</code> (line 1061), which on CUDA calls the JIT-compiled Triton router <code>moe_fused_gate</code>; the source comment reads “Unified Triton router (subsumes the AOT topk_softmax CUDA kernel)” (line 1120). DeepSeek-style grouped, biased top-k goes through <code>biased_grouped_topk_gpu</code> (line 1777). Routing itself is cheap (one small T × E × K GEMM plus a selection); its output decides how many rows each expert gets afterwards: in decode T is small, and only a few of 128 experts get one or two rows each.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 MoE 路由，这一概念依据 Shazeer 等的稀疏门控 MoE 论文和 DeepSeek-V3 技术报告讲 DeepSeekMoE 的一节。</p>
+  <p lang="en">Further reading: no book in the bibliography covers MoE routing; this concept rests on the sparsely gated MoE paper of Shazeer et al. and the DeepSeekMoE section of the DeepSeek-V3 technical report.</p>
+
+  <h3 lang="zh-CN">2. moe_align_block_size：按专家排序并补齐</h3><h3 lang="en">2. moe_align_block_size: sort and pad per expert</h3>
+  <p lang="zh-CN">分组 GEMM 要的输入是：同一个专家的项挨在一起，而且每个专家占的行数是 GEMM 的 M 块大小 BM 的整数倍，这样每个 M 块只属于一个专家。<code>moe_align_block_size</code> 产生三样东西（Python 包装 <code>srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py</code> 的文档字符串，第 38–74 行）：</p>
+  <p lang="en">A grouped GEMM wants its input arranged so that the entries of one expert sit together and each expert occupies a multiple of the GEMM’s M block size BM, so that every M block belongs to exactly one expert. <code>moe_align_block_size</code> produces three things (the docstring of the Python wrapper, <code>srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py</code>, lines 38–74):</p>
+  <ul>
+    <li lang="zh-CN"><code>sorted_token_ids</code>：按专家排好的项号 i（0 到 T·k − 1），每个专家的段尾用 T·k 这个值补齐，后面的 GEMM 把它当作不存在的行。</li>
+    <li lang="en"><code>sorted_token_ids</code>: entry numbers i (0 to T·k − 1) sorted by expert, each expert’s segment padded at its end with the value T·k, which the GEMM afterwards treats as a row that does not exist.</li>
+    <li lang="zh-CN"><code>expert_ids</code>：每个 BM 大小的块属于哪个专家。</li>
+    <li lang="en"><code>expert_ids</code>: which expert each BM-sized block belongs to.</li>
+    <li lang="zh-CN"><code>num_tokens_post_padded</code>：补齐之后的总行数。</li>
+    <li lang="en"><code>num_tokens_post_padded</code>: the total row count after padding.</li>
+  </ul>
+  <p lang="zh-CN">CUDA 实现在 <code>python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu</code>（v0.5.22，2026-11-01 用 curl 取回）。主机端函数（第 328–398 行）按规模选路：项数少于 1024 且专家不多于 64 时，用一个线程块的 small-batch 内核（第 346 行）；否则发两个内核：</p>
+  <p lang="en">The CUDA implementation is <code>python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu</code> (v0.5.22, fetched with curl on 2026-11-01). The host function (lines 328–398) picks a path by size: fewer than 1024 entries and at most 64 experts take a single-block small-batch kernel (line 346); otherwise two kernels are launched:</p>
+  <ol>
+    <li lang="zh-CN"><code>moe_align_block_size_kernel</code>，2 个线程块、每块 1024 个线程（第 370 行）。第 1 号块只负责把整个 <code>sorted_token_ids</code> 填成补齐值（第 72–87 行）。第 0 号块在 shared memory 里用 <code>atomicAdd</code> 数出每个专家的项数（第 104–108 行），把每个计数向上取整到 BM 的倍数（第 115 行），做一次 warp 级的两层前缀和（第 172–221 行），写出总数和每个专家的起点 <code>cumsum</code>，再用二分查找给每个块定专家号（第 226–240 行）。</li>
+    <li lang="en"><code>moe_align_block_size_kernel</code>, 2 thread blocks of 1024 threads (line 370). Block 1 only fills the whole of <code>sorted_token_ids</code> with the padding value (lines 72–87). Block 0 counts each expert’s entries with <code>atomicAdd</code> in shared memory (lines 104–108), rounds each count up to a multiple of BM (line 115), runs a two-level warp prefix sum (lines 172–221), writes the total and each expert’s start <code>cumsum</code>, and gives each block its expert with a binary search (lines 226–240).</li>
+    <li lang="zh-CN"><code>count_and_sort_expert_tokens_kernel</code>，每块 256 个线程、最多 65535 块（第 384–395 行）：每个线程拿一项，对它所属专家的游标做一次 <code>atomicAdd</code>，得到的位置就是它在 <code>sorted_token_ids</code> 里的下标（第 27–43 行）。所以同一个专家段内的顺序取决于原子操作的先后，不是固定的。</li>
+    <li lang="en"><code>count_and_sort_expert_tokens_kernel</code>, 256 threads per block and at most 65535 blocks (lines 384–395): each thread takes one entry and does one <code>atomicAdd</code> on its expert’s cursor; the position it gets is its index in <code>sorted_token_ids</code> (lines 27–43). The order inside one expert’s segment therefore depends on the order of the atomics and is not fixed.</li>
+  </ol>
+  <p lang="zh-CN">这就是一个直方图、一次扫描和一次分散写，没有真正的排序。有两个细节。第一，专家号进内核前都加了 1（第 39、106 行），包装函数相应地传入 <code>num_experts + 1</code>（第 153–163 行），注释说专家并行时被过滤掉的专家号是 −1，一共有 <code>num_experts + 1</code> 个号（第 103 行）：−1 落进第 0 个桶，GEMM 看到 −1 就跳过这一块。第二，缓冲区按最坏情况分配：每个桶最多补 BM − 1 行，所以上界是 T·k + (E + 1)(BM − 1)，再向上取整到 4 的倍数，因为补齐时用 int4 一次写 4 个（第 87–92 行）。这个上界在 CPU 上就能算出来，不必等 GPU 数完，CUDA 图（Phase 3）要的正是这样固定大小的缓冲区。</p>
+  <p lang="en">This is a histogram, one scan and one scatter, with no real sort. Two details. First, every expert number is incremented by 1 on the way in (lines 39 and 106), and the wrapper accordingly passes <code>num_experts + 1</code> (lines 153–163); its comment says that under expert parallelism filtered experts have the number −1, giving <code>num_experts + 1</code> numbers in all (line 103): −1 lands in bucket 0, and the GEMM skips any block marked −1. Second, the buffers are sized for the worst case: each bucket pads at most BM − 1 rows, so the bound is T·k + (E + 1)(BM − 1), rounded up to a multiple of 4 because the padding is written four at a time with int4 stores (lines 87–92). The bound can be computed on the CPU without waiting for the GPU to count, and fixed-size buffers like this are exactly what CUDA graphs (Phase 3) need.</p>
+  <p lang="zh-CN">v0.5.22 还有另外两条路。项数不超过 64 且专家多于 63 时，包装函数改用 Triton 写的单次启动内核 <code>moe_align_small_numel</code>（第 108–128 行；上限 <code>SMALL_NUMEL_LIMIT = 64</code> 在 <code>kernels/ops/moe/moe_align_small_numel.py</code> 第 19 行），批大小为 1 的解码正好落在这里。<code>kernels/ops/moe/moe_align.py</code> 是同一个算子的 JIT 版本，编译的是 <code>kernels/jit/csrc/moe/moe_align_kernel.cu</code>；默认路径不用它，只有打开实验性的 LoRA 优化开关时才走（包装函数第 130–151 行）。默认路径通过 <code>kernels/ops/moe/__init__.py</code> 的注册表（第 32–43、85–97 行）调用 <code>sgl_kernel</code> 轮子里那个 AOT 内核。</p>
+  <p lang="en">v0.5.22 has two more paths. With at most 64 entries and more than 63 experts, the wrapper switches to a single-launch Triton kernel, <code>moe_align_small_numel</code> (lines 108–128; the limit <code>SMALL_NUMEL_LIMIT = 64</code> is on line 19 of <code>kernels/ops/moe/moe_align_small_numel.py</code>), which is exactly where decode at batch size 1 lands. <code>kernels/ops/moe/moe_align.py</code> is a JIT version of the same op, compiling <code>kernels/jit/csrc/moe/moe_align_kernel.cu</code>; the default path does not use it, and it is taken only when an experimental LoRA optimization switch is on (wrapper lines 130–151). The default path calls the AOT kernel in the <code>sgl_kernel</code> wheel through the registry in <code>kernels/ops/moe/__init__.py</code> (lines 32–43 and 85–97).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版讲并行直方图的一章（共享内存里的私有化计数和原子操作，正是第 0 号块数专家的做法）和讲前缀和的一章（把补齐后的计数变成每个专家的起点）。</p>
+  <p lang="en">Further reading: the chapter of PMPP, 5th ed., on parallel histograms (privatized counts in shared memory and atomics, exactly how block 0 counts experts) and the chapter on the prefix sum (turning the padded counts into each expert’s start).</p>
+
+  <h3 lang="zh-CN">3. 分组 GEMM：Triton 的 fused_moe 与 DeepGEMM</h3><h3 lang="en">3. Grouped GEMMs: Triton’s fused_moe and DeepGEMM</h3>
+  <p lang="zh-CN">E 个专家的 GEMM 形状相同（N、K 固定），只有 M（行数）各不相同。一个一个启动，就是 E 次启动，而且解码时每次只有几行。分组 GEMM 只启动一次：网格按（M 块，N 块）展开，每个程序从 <code>expert_ids</code> 查出自己的专家，从 <code>sorted_token_ids</code> 查出自己的行。</p>
+  <p lang="en">The GEMMs of the E experts have the same shape (N and K fixed) and differ only in M, the row count. Launching them one by one means E launches, each with only a few rows in decode. A grouped GEMM launches once: the grid spans (M block, N block), and each program looks up its expert in <code>expert_ids</code> and its rows in <code>sorted_token_ids</code>.</p>
+  <p lang="zh-CN"><strong>Triton 的 <code>fused_moe_kernel</code></strong>（<code>python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py</code> 第 325 行；调用它的 <code>srt/layers/moe/moe_runner/triton_utils/fused_moe.py</code> 第 3 行注明改编自 vLLM）。按源码，一个程序做这些事：</p>
+  <p lang="en"><strong>Triton’s <code>fused_moe_kernel</code></strong> (line 325 of <code>python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py</code>; the caller, <code>srt/layers/moe/moe_runner/triton_utils/fused_moe.py</code>, notes on line 3 that it is adapted from vLLM). By the source, one program does the following:</p>
+  <ul>
+    <li lang="zh-CN">如果 <code>pid_m × BLOCK_SIZE_M</code> 已经超过 <code>num_tokens_post_padded</code>，直接返回（第 442–444 行）：网格是按上界开的，多出来的块什么也不做。</li>
+    <li lang="en">If <code>pid_m × BLOCK_SIZE_M</code> is already past <code>num_tokens_post_padded</code>, return at once (lines 442–444): the grid is launched for the upper bound, and the extra blocks do nothing.</li>
+    <li lang="zh-CN">读这一块的 BM 个项号，<code>token_mask = offs_token &lt; num_valid_tokens</code> 标出哪些是真行（第 446–448 行）；读这一块的专家号（第 450 行），−1 就写零或返回（第 453 行）。</li>
+    <li lang="en">Read this block’s BM entry numbers, with <code>token_mask = offs_token &lt; num_valid_tokens</code> marking the real rows (lines 446–448); read this block’s expert (line 450), and on −1 write zeros or return (line 453).</li>
+    <li lang="zh-CN">A 的行地址是 <code>offs_token // top_k</code>（第 484 行）：项号除以 k 就是 token 的行，隐状态不必为 k 个专家复制 k 份。B 是这个专家的权重（第 492 行）。</li>
+    <li lang="en">The address of a row of A is <code>offs_token // top_k</code> (line 484): dividing the entry number by k gives the token’s row, so the hidden state need not be copied k times for k experts. B is this expert’s weight (line 492).</li>
+    <li lang="zh-CN">沿 K 循环时，A 用 <code>mask=token_mask</code>、<code>other=0.0</code> 加载（第 548–559 行）：补齐行不读显存，但它们照样占着矩阵乘的那几行，这就是补齐浪费的算力。FP8 块量化时，每走一个 K 块乘一次两边的缩放：<code>accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]</code>（第 587 行）。</li>
+    <li lang="en">Along the K loop, A is loaded with <code>mask=token_mask</code> and <code>other=0.0</code> (lines 548–559): padding rows read no memory, but they still occupy their rows of the matrix product, which is the compute that padding wastes. With FP8 block quantization, both scales are applied once per K block: <code>accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]</code> (line 587).</li>
+  </ul>
+  <p lang="zh-CN">一层 MoE 是两次这样的调用夹一次激活：门与上投影的 GEMM（<code>fused_moe.py</code> 第 656 行），SiLU-and-mul，下投影的 GEMM（第 893 行），最后用 <code>moe_sum_reduce</code> 把每个 token 的 k 行按权重加起来（第 958–1003 行一带）。BM 从哪来：<code>fused_moe.py</code> 第 502–504 行用配置里的 <code>BLOCK_SIZE_M</code> 调 <code>moe_align_block_size</code>；配置先查按专家数、N 和 GPU 型号调好的 JSON 文件，查不到就用 <code>get_default_config</code>（<code>fused_moe_triton_config.py</code> 第 180–261 行）：BF16 默认 64，行数不超过专家数时降到 16；FP8 块量化默认 64，<code>BLOCK_SIZE_N</code> 和 <code>BLOCK_SIZE_K</code> 取块量化的形状。</p>
+  <p lang="en">One MoE layer is two such calls around one activation: the gate-and-up GEMM (<code>fused_moe.py</code>, line 656), SiLU-and-mul, the down GEMM (line 893), and finally <code>moe_sum_reduce</code>, which adds up each token’s k rows with their weights (around lines 958–1003). Where BM comes from: lines 502–504 of <code>fused_moe.py</code> call <code>moe_align_block_size</code> with the config’s <code>BLOCK_SIZE_M</code>; the config is first looked up in JSON files tuned per expert count, N and GPU model, and otherwise comes from <code>get_default_config</code> (<code>fused_moe_triton_config.py</code>, lines 180–261): 64 by default for BF16, dropping to 16 when the row count is at most the expert count; 64 by default for FP8 block quantization, with <code>BLOCK_SIZE_N</code> and <code>BLOCK_SIZE_K</code> taken from the quantization block shape.</p>
+  <p lang="zh-CN"><strong>FP8 块量化。</strong>DeepSeek-V3 技术报告（第 3.3.2 节）的细粒度量化：激活按 1 × 128 的小片缩放（每个 token 每 128 个通道一个缩放因子），权重按 128 × 128 的块缩放（每 128 个输入通道乘 128 个输出通道一个）；报告说这样缩放能随更小的分组适应离群值，并且每个 1 × 128 激活片和 128 × 128 权重块的最大绝对值都是在线算的。发布的 <code>config.json</code> 与此一致：<code>fmt</code> 是 <code>e4m3</code>，<code>weight_block_size</code> 是 [128, 128]，<code>activation_scheme</code> 是 <code>dynamic</code>。</p>
+  <p lang="en"><strong>FP8 block quantization.</strong> The fine-grained quantization of the DeepSeek-V3 technical report (section 3.3.2): activations are scaled in 1 × 128 tiles (one scale per token per 128 channels) and weights in 128 × 128 blocks (one per 128 input channels by 128 output channels); the report says that scaling over these smaller groups adapts to outliers, and that the maximum absolute value of each 1 × 128 activation tile and 128 × 128 weight block is computed online. The released <code>config.json</code> agrees: <code>fmt</code> is <code>e4m3</code>, <code>weight_block_size</code> is [128, 128], and <code>activation_scheme</code> is <code>dynamic</code>.</p>
+  <p lang="zh-CN"><strong>DeepGEMM</strong>（README，标签 v2.1.1.post3，2026-11-01 读取）是专为这种格式写的 FP8 GEMM 库，所有内核在运行时用一个轻量的 JIT 模块编译，要求 SM90 或 SM100，SM90 要 CUDA 12.3 以上。它的分组 GEMM 只沿 M 分组，N 和 K 必须固定，README 说这是为形状相同的 MoE 专家设计的。两种布局：</p>
+  <p lang="en"><strong>DeepGEMM</strong> (README at the v2.1.1.post3 tag, read 2026-11-01) is an FP8 GEMM library written for exactly this format; all kernels are compiled at run time by a lightweight JIT module, and it requires SM90 or SM100, with CUDA 12.3 or later for SM90. Its grouped GEMMs group only along M, with N and K fixed, which the README says is designed for MoE experts of the same shape. Two layouts:</p>
+  <ul>
+    <li lang="zh-CN"><strong>contiguous</strong>（<code>m_grouped_fp8_gemm_nt_contiguous</code>）：用于训练前向和推理预填充，各专家的 token 拼成一个张量，每个专家段对齐到 GEMM 的 M 块大小（<code>get_mk_alignment_for_contiguous_layout()</code>）。仓库自己的测试生成器（<code>tests/generators.py</code> 第 183–205 行）给每一行一个专家号 <code>m_indices</code>，补齐行标成 −1：与 <code>moe_align_block_size</code> 是同一个想法，只是按行而不是按块记专家。</li>
+    <li lang="en"><strong>contiguous</strong> (<code>m_grouped_fp8_gemm_nt_contiguous</code>): for training forward passes and inference prefill; each expert’s tokens are concatenated into one tensor, with each expert’s segment aligned to the GEMM M block size (<code>get_mk_alignment_for_contiguous_layout()</code>). The repository’s own test generator (<code>tests/generators.py</code>, lines 183–205) gives each row an expert number in <code>m_indices</code> and marks padding rows −1: the same idea as <code>moe_align_block_size</code>, recorded per row instead of per block.</li>
+    <li lang="zh-CN"><strong>masked</strong>（<code>m_grouped_fp8_gemm_nt_masked</code>）：用于解码阶段开着 CUDA 图、CPU 不知道每个专家收到几个 token 的情况；给一个掩码张量，内核只算有效的部分。README 举的例子就是把 DeepEP 低延迟内核的输出直接当输入。</li>
+    <li lang="en"><strong>masked</strong> (<code>m_grouped_fp8_gemm_nt_masked</code>): for decode with CUDA graphs on, when the CPU does not know how many tokens each expert received; given a mask tensor, the kernel computes only the valid part. The README’s example is feeding it the output of DeepEP’s low-latency kernels directly.</li>
+  </ul>
+  <p lang="zh-CN">SGLang 用 <code>--moe-runner-backend deep_gemm</code> 选它（取值表在 <code>srt/arg_groups/choices.py</code> 第 136–156 行，参数定义在 <code>arg_groups/fields/exec_.py</code> 第 821–828 行，默认 <code>auto</code>）。包装层 <code>srt/layers/deep_gemm_wrapper/entrypoint.py</code> 调用的正是 <code>deep_gemm.m_grouped_fp8_gemm_nt_contiguous</code>（第 157 行）和 masked 版本（第 81 行）。注意 SGLang 依赖的是自己发布的 <code>sgl-deep-gemm==0.2.2</code>（<code>python/pyproject.toml</code> 第 80 行），不是上游的某个标签；本页引用的是上游 v2.1.1.post3 的 README，两者的接口是否完全一致没有逐项核对，包装层第 174–176 行就允许对齐值以元组形式返回。DeepGEMM 的 README 还报告在 H800 上最高 1550 TFLOPS，这是作者的数字，本页没有复现。</p>
+  <p lang="en">SGLang selects it with <code>--moe-runner-backend deep_gemm</code> (the choices are on lines 136–156 of <code>srt/arg_groups/choices.py</code>, the flag on lines 821–828 of <code>arg_groups/fields/exec_.py</code>, default <code>auto</code>). The wrapper, <code>srt/layers/deep_gemm_wrapper/entrypoint.py</code>, calls exactly <code>deep_gemm.m_grouped_fp8_gemm_nt_contiguous</code> (line 157) and the masked version (line 81). Note that SGLang depends on its own release, <code>sgl-deep-gemm==0.2.2</code> (<code>python/pyproject.toml</code>, line 80), not on an upstream tag; this page cites the upstream README at v2.1.1.post3, and whether the two interfaces match item by item was not checked: the wrapper’s lines 174–176 already allow the alignment to come back as a tuple. DeepGEMM’s README also reports up to 1550 TFLOPS on an H800; that is the authors’ figure, not reproduced here.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版讲矩阵乘法与分块的一章（每个权重块被一个 M 块的所有行复用，正是 BM 越大复用越多的原因）。FP8 块量化和 DeepGEMM 本身，参考书目里没有书讲，依据是 DeepSeek-V3 技术报告第 3.3 节和 DeepGEMM 的 README。</p>
+  <p lang="en">Further reading: the chapter of PMPP, 5th ed., on matrix multiplication with tiling (each weight tile reused by every row of an M block, which is why a larger BM means more reuse). No book in the bibliography covers FP8 block quantization or DeepGEMM itself; they rest on section 3.3 of the DeepSeek-V3 technical report and the DeepGEMM README.</p>
+
+  <h3 lang="zh-CN">4. 专家并行：DeepEP 的 dispatch 与 combine</h3><h3 lang="en">4. Expert parallelism: DeepEP’s dispatch and combine</h3>
+  <p lang="zh-CN">专家太多、一块 GPU 放不下时，把专家分到多块 GPU 上（专家并行，EP）。这时每个 token 的隐状态要先发到持有它那 k 个专家的 GPU 上（dispatch，一次 all-to-all），在那里做分组 GEMM，再把结果发回来、按权重加起来（combine，又一次 all-to-all）。DeepSeek-V3 技术报告给的部署：预填充时 MoE 部分用 EP32；解码时最小部署单元是 40 个节点、320 块 GPU，MoE 部分 EP320，每块 GPU 只放一个专家，dispatch 和 combine 走 InfiniBand 上的点对点传输。</p>
+  <p lang="en">When there are too many experts for one GPU, the experts are spread over several GPUs (expert parallelism, EP). Each token’s hidden state must then first be sent to the GPUs holding its k experts (dispatch, one all-to-all), go through the grouped GEMM there, and come back to be added up with its weights (combine, another all-to-all). The deployment in the DeepSeek-V3 technical report: EP32 for the MoE part in prefill; in decode, a minimum deployment unit of 40 nodes with 320 GPUs, EP320 for the MoE part, one expert per GPU, with dispatch and combine done as point-to-point transfers over InfiniBand.</p>
+  <p lang="zh-CN">DeepEP（README，标签 v1.2.1，2026-11-01 读取）就是这两次 all-to-all 的 GPU 内核库，分两套：</p>
+  <p lang="en">DeepEP (README at the v1.2.1 tag, read 2026-11-01) is the GPU kernel library for these two all-to-alls, in two sets:</p>
+  <ul>
+    <li lang="zh-CN"><strong>normal</strong>：高吞吐，可以把数据从 NVLink 域转发到 RDMA 域，用于训练和推理预填充，可以限定占用的 SM 数（README 的例子是 <code>Buffer.set_num_sms(24)</code>）。先用 <code>get_dispatch_layout</code> 算出每个 rank、每个专家收多少，再 <code>dispatch</code>、<code>combine</code>。README 的注释说 dispatch 时 CPU 要等 GPU 发来的接收计数，所以与 CUDA 图不兼容。README 在 H800（NVLink 约 160 GB/s）上测得机内 EP8 的 dispatch 瓶颈带宽 153 GB/s。</li>
+    <li lang="en"><strong>normal</strong>: high throughput, able to forward data from the NVLink domain to the RDMA domain, for training and inference prefill, with control over the number of SMs used (the README’s example is <code>Buffer.set_num_sms(24)</code>). <code>get_dispatch_layout</code> first works out how much each rank and each expert receives, then come <code>dispatch</code> and <code>combine</code>. The README’s comment says the CPU waits for the received count signalled by the GPU during dispatch, so it is not compatible with CUDA graphs. The README measured a dispatch bottleneck bandwidth of 153 GB/s for intranode EP8 on H800s (about 160 GB/s NVLink).</li>
+    <li lang="zh-CN"><strong>low-latency</strong>：为解码写的，最初只走 RDMA，README 2025.06.05 的更新说现在尽量用 NVLink；<code>low_latency_dispatch</code> 和 <code>low_latency_combine</code> 与 CUDA 图兼容，并提供一种基于 hook 的通信与计算重叠，不占 SM。README 在 H800 加 400 Gb/s InfiniBand 上、每批 128 个 token、隐藏维 7168、top-8 时，EP8 的 dispatch 77 µs、combine 114 µs。它的输出格式正好喂给 DeepGEMM 的 masked 分组 GEMM。</li>
+    <li lang="en"><strong>low-latency</strong>: written for decode, originally pure RDMA, and per the README’s 2025.06.05 update now using NVLink as much as possible; <code>low_latency_dispatch</code> and <code>low_latency_combine</code> are compatible with CUDA graphs and offer hook-based overlap of communication and computation that occupies no SMs. The README measured, on H800s with 400 Gb/s InfiniBand, 128 tokens per batch, hidden size 7168 and top-8, 77 µs for dispatch and 114 µs for combine at EP8. Its output format feeds DeepGEMM’s masked grouped GEMM directly.</li>
+  </ul>
+  <p lang="zh-CN">以上性能数字都是 README 作者的，本页没有复现。README 的要求一节写的是 Ampere（SM80）、Hopper（SM90）或支持 SM90 PTX ISA 的架构，机内通信要 NVLink，跨机要 RDMA，并依赖 NVSHMEM。在 SGLang v0.5.22 里打开它的参数：<code>--moe-a2a-backend deepep</code>（<code>exec_.py</code> 第 773–806 行，默认 <code>none</code>）、<code>--deepep-mode</code>（第 835–838 行，帮助文字说默认 <code>auto</code> 即解码批用 <code>low_latency</code>、预填充批用 <code>normal</code>）和 <code>--ep-size</code>（<code>arg_groups/fields/parallel.py</code> 第 269–275 行，别名 <code>--expert-parallel-size</code>、<code>--ep</code>）。调度器在 <code>srt/layers/moe/token_dispatcher/deepep.py</code>：normal 模式调 <code>buffer.get_dispatch_layout</code>（第 646 行）、<code>buffer.dispatch</code>（第 666 行）、<code>buffer.combine</code>（第 721 行），low-latency 模式调 <code>buffer.low_latency_dispatch</code>（第 841 行）和 <code>buffer.low_latency_combine</code>（第 948 行）。SGLang 依赖的是自己的 <code>sgl-deep-ep==0.1.2.post1</code>（<code>pyproject.toml</code> 第 79 行），与上游 v1.2.1 的差别本页没有核对。</p>
+  <p lang="en">All of these performance figures are the README authors’; this page did not reproduce them. The README’s requirements section lists Ampere (SM80), Hopper (SM90) or architectures supporting the SM90 PTX ISA, NVLink for intranode and RDMA for internode communication, and a dependency on NVSHMEM. The SGLang v0.5.22 flags that turn it on: <code>--moe-a2a-backend deepep</code> (<code>exec_.py</code>, lines 773–806, default <code>none</code>), <code>--deepep-mode</code> (lines 835–838, whose help text says the default <code>auto</code> means <code>low_latency</code> for decode batches and <code>normal</code> for prefill batches) and <code>--ep-size</code> (<code>arg_groups/fields/parallel.py</code>, lines 269–275, aliases <code>--expert-parallel-size</code> and <code>--ep</code>). The dispatcher is in <code>srt/layers/moe/token_dispatcher/deepep.py</code>: normal mode calls <code>buffer.get_dispatch_layout</code> (line 646), <code>buffer.dispatch</code> (line 666) and <code>buffer.combine</code> (line 721); low-latency mode calls <code>buffer.low_latency_dispatch</code> (line 841) and <code>buffer.low_latency_combine</code> (line 948). SGLang depends on its own <code>sgl-deep-ep==0.1.2.post1</code> (<code>pyproject.toml</code>, line 79), and how it differs from upstream v1.2.1 was not checked here.</p>
+  <p lang="zh-CN">为什么本专题不跑它：dispatch 和 combine 的本职是在多块 GPU 之间搬数据，一块 H100 上没有可发往的对端，至少要一台多卡、带 NVLink 的机器，跨机还要 RDMA。本专题的云端每层只租一块 GPU，所以 DeepEP 只作描述，Lab A 里也不给它的命令。</p>
+  <p lang="en">Why this topic does not run it: the whole job of dispatch and combine is moving data between GPUs, and one H100 has no peer to send to; it needs at least one multi-GPU machine with NVLink, plus RDMA across machines. This topic’s cloud tiers rent one GPU each, so DeepEP is only described, and Lab A gives no commands for it.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 DeepEP 或 MoE 的 all-to-all，这一概念依据 DeepEP 的 README 和 DeepSeek-V3 技术报告讲推理部署的第 3.4 节。</p>
+  <p lang="en">Further reading: no book in the bibliography covers DeepEP or the MoE all-to-all; this concept rests on the DeepEP README and section 3.4 of the DeepSeek-V3 technical report, on inference and deployment.</p>
+
+  <h3 lang="zh-CN">5. 补齐浪费与块大小的取舍</h3><h3 lang="en">5. Padding waste and the block-size trade</h3>
+  <p lang="zh-CN">设专家 e 拿到 n<sub>e</sub> 行，补齐后是 ⌈n<sub>e</sub> / BM⌉ × BM 行。浪费的比例是补齐行占补齐后总行数的比例。两个极端：</p>
+  <p lang="en">Let expert e receive n<sub>e</sub> rows; after padding it has ⌈n<sub>e</sub> / BM⌉ × BM rows. The waste is the share of padding rows in the padded total. Two extremes:</p>
+  <ul>
+    <li lang="zh-CN"><strong>解码，n<sub>e</sub> 远小于 BM。</strong>Qwen3-30B-A3B 解码一个 token：8 项分给 8 个不同的专家，各 1 行，BM = 16 时补到 128 行，浪费 120 / 128 ≈ 94%。但这一步本来就受带宽限制：每个专家的三块权重是 3 × 768 × 2048 ≈ 472 万个参数，BF16 约 9.4 MB，8 个专家约 75.5 MB，而有用的运算只有 2 × 472 万 × 8 ≈ 7550 万 FLOP，强度约 1 FLOP/字节，远低于任何 GPU 的拐点。白算的行用的是本来闲着的算力，时间几乎全花在读权重上（这是由 config 推出的，不是测量值）。这时 BM 小一点的好处是线程块更多、更快把权重读完，Lab B 在 T = 64 时看到的正是这个。</li>
+    <li lang="en"><strong>Decode, n<sub>e</sub> far below BM.</strong> Decoding one token of Qwen3-30B-A3B: 8 entries go to 8 different experts with 1 row each; at BM = 16 they pad to 128 rows, a waste of 120 / 128 ≈ 94%. But this step is bandwidth-bound anyway: each expert’s three weight matrices hold 3 × 768 × 2048 ≈ 4.72 million parameters, about 9.4 MB in BF16, about 75.5 MB for 8 experts, while the useful arithmetic is only 2 × 4.72 million × 8 ≈ 75.5 million FLOP, an intensity of about 1 FLOP per byte, far below the ridge of any GPU. The wasted rows use compute that would sit idle anyway, and the time goes almost entirely into reading the weights (derived from the config, not measured). What a smaller BM buys here is more thread blocks that finish reading the weights sooner, which is what Lab B sees at T = 64.</li>
+    <li lang="zh-CN"><strong>预填充，n<sub>e</sub> 远大于 BM。</strong>每个专家最多补 BM − 1 行，如果余数大致均匀，平均补约 (BM − 1) / 2 行。8192 个 token、k = 8、128 个专家，平均每个专家 512 行，BM = 64 时平均补约 31.5 行，浪费约 5.8%（推断：假设余数均匀）。这时 GEMM 受算力限制，浪费的行是真金白银；但 BM 越大，每块权重被越多的行复用、每个线程块里矩阵乘的活越整，GEMM 本身跑得越快。</li>
+    <li lang="en"><strong>Prefill, n<sub>e</sub> far above BM.</strong> Each expert pads at most BM − 1 rows, and about (BM − 1) / 2 on average if the remainders are roughly uniform. With 8192 tokens, k = 8 and 128 experts, each expert averages 512 rows; at BM = 64 it pads about 31.5 rows on average, a waste of about 5.8% (an inference assuming uniform remainders). Here the GEMM is compute-bound and wasted rows cost real time; but a larger BM lets each weight tile be reused by more rows and gives each thread block a fuller matrix product, so the GEMM itself runs faster.</li>
+  </ul>
+  <p lang="zh-CN">所以 BM 的取舍是：小 BM 浪费少、线程块多；大 BM 复用多、每块效率高，但补齐多。最快的 BM 由行数决定，这就是 SGLang 的配置要按 M 分档、并按 GPU 型号调表的原因（概念 3）。还有第三条路：MegaBlocks（Gale 等，arXiv:2211.15841，v1）的摘要说，现有框架逼用户在丢弃 token 和在补齐上浪费算力与内存之间二选一，它把 MoE 改写成块稀疏运算，从不丢 token。Lab B 在 M5 上把这个取舍量了出来：4096 个 token 时 BM = 64 最快，64 个 token 时 BM = 32 最快。</p>
+  <p lang="en">So the BM trade is this: a small BM wastes less and gives more thread blocks; a large BM reuses more and makes each block more efficient, but pads more. The fastest BM depends on the row count, which is why SGLang’s configs are bucketed by M and tuned per GPU model (concept 3). There is a third way: the abstract of MegaBlocks (Gale et al., arXiv:2211.15841, v1) says existing frameworks force users to choose between dropping tokens and wasting computation and memory on padding, and it recasts MoE as block-sparse operations that never drop tokens. Lab B measures this trade on the M5: BM = 64 is fastest at 4096 tokens, and BM = 32 at 64 tokens.</p>
+  <p lang="zh-CN">延伸阅读：Hennessy &amp; Patterson 第 4 章讲 Roofline 的一节（为什么解码时白算的行几乎不要钱）；PMPP 第 5 版讲矩阵乘法与分块的一章（块越大复用越多）。</p>
+  <p lang="en">Further reading: the Roofline section of Hennessy &amp; Patterson, Chapter 4 (why wasted rows cost almost nothing in decode); the chapter of PMPP, 5th ed., on matrix multiplication with tiling (larger tiles, more reuse).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：MoE 阶段 ↔ 内核 ↔ 库 ↔ 硬件层</h2><h2 id="compare-en" lang="en">Comparison: MoE stage ↔ kernel ↔ library ↔ hardware tier</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">MoE 阶段</span><span lang="en">MoE stage</span></th><th><span lang="zh-CN">内核（v0.5.22）</span><span lang="en">Kernel (v0.5.22)</span></th><th><span lang="zh-CN">库</span><span lang="en">Library</span></th><th><span lang="zh-CN">硬件层</span><span lang="en">Hardware tier</span></th></tr>
+    <tr><td><span lang="zh-CN">路由与 top-k</span><span lang="en">Routing and top-k</span></td><td><span lang="zh-CN"><code>moe_fused_gate</code>（Triton，JIT，softmax 打分）；DeepSeek 式的分组、带偏置 top-k 用 <code>biased_grouped_topk_gpu</code></span><span lang="en"><code>moe_fused_gate</code> (Triton, JIT, softmax scoring); DeepSeek-style grouped, biased top-k uses <code>biased_grouped_topk_gpu</code></span></td><td><span lang="zh-CN">SGLang 自己的 <code>sglang.kernels</code></span><span lang="en">SGLang’s own <code>sglang.kernels</code></span></td><td><span lang="zh-CN">L4（sm_89）；Triton v3.9.0 要求计算能力 8.0 以上</span><span lang="en">L4 (sm_89); Triton v3.9.0 needs compute capability 8.0 or higher</span></td></tr>
+    <tr><td><span lang="zh-CN">排序与补齐</span><span lang="en">Sort and pad</span></td><td><span lang="zh-CN"><code>moe_align_block_size</code>（AOT CUDA，两个内核：计数加扫描，再分散写）；不超过 64 项时 <code>moe_align_small_numel</code>（Triton）</span><span lang="en"><code>moe_align_block_size</code> (AOT CUDA, two kernels: count and scan, then scatter); <code>moe_align_small_numel</code> (Triton) for at most 64 entries</span></td><td><span lang="zh-CN"><code>sglang-kernel</code> 轮子（模块名 <code>sgl_kernel</code>）</span><span lang="en">The <code>sglang-kernel</code> wheel (module <code>sgl_kernel</code>)</span></td><td><span lang="zh-CN">L4；Lab A 第 1–3 步</span><span lang="en">L4; Lab A steps 1–3</span></td></tr>
+    <tr><td><span lang="zh-CN">分组 GEMM，BF16</span><span lang="en">Grouped GEMM, BF16</span></td><td><span lang="zh-CN"><code>fused_moe_kernel</code>（Triton），门与上投影、下投影各调一次，中间 SiLU-and-mul</span><span lang="en"><code>fused_moe_kernel</code> (Triton), called once for gate-and-up and once for down, with SiLU-and-mul between</span></td><td><span lang="zh-CN">SGLang 里的 Triton 内核，改编自 vLLM</span><span lang="en">Triton kernels inside SGLang, adapted from vLLM</span></td><td><span lang="zh-CN">L4</span><span lang="en">L4</span></td></tr>
+    <tr><td><span lang="zh-CN">分组 GEMM，FP8 的 128 × 128 块量化权重</span><span lang="en">Grouped GEMM, FP8 weights in 128 × 128 blocks</span></td><td><span lang="zh-CN">同一个 Triton 内核的块缩放分支；或 DeepGEMM 的 <code>m_grouped_fp8_gemm_nt_contiguous</code>（预填充）与 <code>m_grouped_fp8_gemm_nt_masked</code>（解码），<code>--moe-runner-backend deep_gemm</code></span><span lang="en">The block-scale branch of the same Triton kernel; or DeepGEMM’s <code>m_grouped_fp8_gemm_nt_contiguous</code> (prefill) and <code>m_grouped_fp8_gemm_nt_masked</code> (decode), via <code>--moe-runner-backend deep_gemm</code></span></td><td><span lang="zh-CN">DeepGEMM（SGLang 依赖 <code>sgl-deep-gemm</code> 0.2.2）</span><span lang="en">DeepGEMM (SGLang depends on <code>sgl-deep-gemm</code> 0.2.2)</span></td><td><span lang="zh-CN">DeepGEMM：H100（README 要求 SM90 或 SM100），Lab A 第 4 步；Triton 的 FP8 分支在 L4 上能否用，本页没有核对</span><span lang="en">DeepGEMM: H100 (the README requires SM90 or SM100), Lab A step 4; whether the Triton FP8 branch works on an L4 was not checked here</span></td></tr>
+    <tr><td><span lang="zh-CN">合并</span><span lang="en">Combine</span></td><td><span lang="zh-CN"><code>moe_sum_reduce</code>：每个 token 的 k 行按权重相加</span><span lang="en"><code>moe_sum_reduce</code>: each token’s k rows added with their weights</span></td><td><span lang="zh-CN"><code>sgl_kernel</code>，或 Triton 版 <code>moe_sum_reduce_triton</code></span><span lang="en"><code>sgl_kernel</code>, or the Triton <code>moe_sum_reduce_triton</code></span></td><td><span lang="zh-CN">L4</span><span lang="en">L4</span></td></tr>
+    <tr><td><span lang="zh-CN">专家并行的 dispatch 与 combine</span><span lang="en">Expert-parallel dispatch and combine</span></td><td><span lang="zh-CN">DeepEP 的 normal 内核（预填充）与 low-latency 内核（解码），<code>--moe-a2a-backend deepep</code></span><span lang="en">DeepEP’s normal kernels (prefill) and low-latency kernels (decode), via <code>--moe-a2a-backend deepep</code></span></td><td><span lang="zh-CN">DeepEP（SGLang 依赖 <code>sgl-deep-ep</code> 0.1.2.post1）</span><span lang="en">DeepEP (SGLang depends on <code>sgl-deep-ep</code> 0.1.2.post1)</span></td><td><span lang="zh-CN">多卡：机内 NVLink，跨机 RDMA；本专题只作描述，不上机</span><span lang="en">Several GPUs: NVLink inside a machine, RDMA across machines; described in this topic, never run</span></td></tr>
+  </table>
+  </div>
+  <p class="small" lang="zh-CN">文件、函数名和参数都按 v0.5.22 标签下的源文件，2026-11-01 用 curl 取回核对；DeepGEMM 与 DeepEP 按 v2.1.1.post3 与 v1.2.1 标签下的 README。这张表的两侧不是 NVIDIA 与 Apple，所以表头不着色。</p>
+  <p class="small" lang="en">Files, function names and flags follow the source files at the v0.5.22 tag, fetched with curl and checked on 2026-11-01; DeepGEMM and DeepEP follow their READMEs at the v2.1.1.post3 and v1.2.1 tags. The two sides of this table are not NVIDIA and Apple, so its headers carry no colour.</p>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 路由到专家，按专家排序并补齐成块</h3><h3 lang="en">(a) Tokens routed to experts, sorted and padded into blocks</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 450" data-interval="2800"
+         data-captions='["全图：6 个 token，4 个专家，每个 token 选 2 个（k = 2），块大小 BM = 4。从上往下依次是路由结果、展平后的 12 项、每个专家的计数与补齐、排好的 sorted_token_ids，以及每块属于哪个专家。按播放逐步看。",
+           "1. 路由：路由器给每个 token 打分，取最大的 2 个专家。t0 选了 E2 和 E0，t1 选了 E0 和 E1，依此类推。",
+           "2. 展平：6 × 2 的 topk_ids 变成 12 项，第 i 项属于 token i // 2。之后所有内核都只认项号 i，不再区分 token 和槽位。",
+           "3. 计数：每个线程拿一项，对它的专家在 shared memory 里做一次原子加。E0 有 5 项，E1 有 2 项，E2 有 4 项，E3 有 1 项，共 12 项。",
+           "4. 补齐与前缀和：每个计数向上取整到 BM = 4 的倍数，得到 8、4、4、4；对它们做前缀和，得到每个专家段的起点 0、8、12、16，总数 20。",
+           "5. 分散写：第二个内核里每项对自己专家的游标做原子加，拿到的位置就是它在 sorted_token_ids 里的下标。段尾空着的位置早已填成 12，也就是 P，表示不存在的行。",
+           "6. expert_ids：20 行切成 5 个块，每块 4 行、只属于一个专家：E0 占两块，E1、E2、E3 各一块。分组 GEMM 的每个 M 块就从这里查自己的专家。",
+           "7. 浪费：12 项补成 20 行，8 行白算，占 40%。缓冲区按最坏情况在 CPU 上就分配好：12 + (4 + 1) × (4 − 1) = 27，按 4 取整为 28。"]'
+         data-captions-en='["The whole picture: 6 tokens, 4 experts, 2 experts per token (k = 2), block size BM = 4. From top to bottom: the routing result, the 12 flattened entries, the count and padding of each expert, the sorted sorted_token_ids, and which expert each block belongs to. Press Play to step through.",
+           "1. Routing: the router scores each token and keeps its 2 best experts. t0 picks E2 and E0, t1 picks E0 and E1, and so on.",
+           "2. Flatten: the 6 × 2 topk_ids become 12 entries, and entry i belongs to token i // 2. From here on every kernel knows only the entry number i, not tokens and slots.",
+           "3. Count: each thread takes one entry and does one atomic add in shared memory for its expert. E0 has 5 entries, E1 2, E2 4 and E3 1, 12 in all.",
+           "4. Pad and prefix sum: each count is rounded up to a multiple of BM = 4, giving 8, 4, 4 and 4; their prefix sum gives the start of each expert segment, 0, 8, 12 and 16, and the total, 20.",
+           "5. Scatter: in the second kernel each entry does an atomic add on its expert cursor, and the position it gets is its index in sorted_token_ids. The empty slots at segment ends were already filled with 12, that is P, meaning a row that does not exist.",
+           "6. expert_ids: the 20 rows are cut into 5 blocks of 4 rows, each belonging to one expert only: E0 takes two blocks and E1, E2 and E3 one each. Each M block of the grouped GEMM looks up its expert here.",
+           "7. Waste: 12 entries are padded to 20 rows, so 8 rows, 40%, are computed for nothing. The buffers are sized for the worst case on the CPU in advance: 12 + (4 + 1) × (4 − 1) = 27, rounded up to 28."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="24" class="small" lang="zh-CN">1. 路由：每个 token 选 2 个专家（k = 2，E = 4）</text><text x="30" y="24" class="small" lang="en">1. Routing: each token picks 2 experts (k = 2, E = 4)</text>
+      <rect class="box" x="30" y="34" width="130" height="36"/><rect class="box" x="170" y="34" width="130" height="36"/><rect class="box" x="310" y="34" width="130" height="36"/>
+      <rect class="box" x="450" y="34" width="130" height="36"/><rect class="box" x="590" y="34" width="130" height="36"/><rect class="box" x="730" y="34" width="130" height="36"/>
+      <g data-step="1">
+        <rect class="box" x="30" y="34" width="130" height="36"/><rect class="box" x="170" y="34" width="130" height="36"/><rect class="box" x="310" y="34" width="130" height="36"/>
+        <rect class="box" x="450" y="34" width="130" height="36"/><rect class="box" x="590" y="34" width="130" height="36"/><rect class="box" x="730" y="34" width="130" height="36"/>
+      </g>
+      <text x="44" y="57" class="mono">t0 → E2, E0</text><text x="184" y="57" class="mono">t1 → E0, E1</text><text x="324" y="57" class="mono">t2 → E2, E3</text>
+      <text x="464" y="57" class="mono">t3 → E0, E2</text><text x="604" y="57" class="mono">t4 → E1, E0</text><text x="744" y="57" class="mono">t5 → E2, E0</text>
+
+      <text x="30" y="98" class="small" lang="zh-CN">2. 展平：第 i 项属于 token i // 2</text><text x="30" y="98" class="small" lang="en">2. Flatten: entry i belongs to token i // 2</text>
+      <rect class="box" x="30" y="106" width="64" height="38"/><rect class="box" x="100" y="106" width="64" height="38"/><rect class="box" x="170" y="106" width="64" height="38"/><rect class="box" x="240" y="106" width="64" height="38"/>
+      <rect class="box" x="310" y="106" width="64" height="38"/><rect class="box" x="380" y="106" width="64" height="38"/><rect class="box" x="450" y="106" width="64" height="38"/><rect class="box" x="520" y="106" width="64" height="38"/>
+      <rect class="box" x="590" y="106" width="64" height="38"/><rect class="box" x="660" y="106" width="64" height="38"/><rect class="box" x="730" y="106" width="64" height="38"/><rect class="box" x="800" y="106" width="64" height="38"/>
+      <g data-step="2">
+        <rect class="box" x="30" y="106" width="64" height="38"/><rect class="box" x="100" y="106" width="64" height="38"/><rect class="box" x="170" y="106" width="64" height="38"/><rect class="box" x="240" y="106" width="64" height="38"/>
+        <rect class="box" x="310" y="106" width="64" height="38"/><rect class="box" x="380" y="106" width="64" height="38"/><rect class="box" x="450" y="106" width="64" height="38"/><rect class="box" x="520" y="106" width="64" height="38"/>
+        <rect class="box" x="590" y="106" width="64" height="38"/><rect class="box" x="660" y="106" width="64" height="38"/><rect class="box" x="730" y="106" width="64" height="38"/><rect class="box" x="800" y="106" width="64" height="38"/>
+      </g>
+      <text x="38" y="121" class="small">i = 0</text><text x="108" y="121" class="small">i = 1</text><text x="178" y="121" class="small">i = 2</text><text x="248" y="121" class="small">i = 3</text>
+      <text x="318" y="121" class="small">i = 4</text><text x="388" y="121" class="small">i = 5</text><text x="458" y="121" class="small">i = 6</text><text x="528" y="121" class="small">i = 7</text>
+      <text x="598" y="121" class="small">i = 8</text><text x="668" y="121" class="small">i = 9</text><text x="738" y="121" class="small">i = 10</text><text x="808" y="121" class="small">i = 11</text>
+      <text x="38" y="138" class="mono">E2</text><text x="108" y="138" class="mono">E0</text><text x="178" y="138" class="mono">E0</text><text x="248" y="138" class="mono">E1</text>
+      <text x="318" y="138" class="mono">E2</text><text x="388" y="138" class="mono">E3</text><text x="458" y="138" class="mono">E0</text><text x="528" y="138" class="mono">E2</text>
+      <text x="598" y="138" class="mono">E1</text><text x="668" y="138" class="mono">E0</text><text x="738" y="138" class="mono">E2</text><text x="808" y="138" class="mono">E0</text>
+
+      <text x="30" y="172" class="small" lang="zh-CN">3–4. 计数，补到 BM = 4 的倍数，前缀和给出每段起点</text><text x="30" y="172" class="small" lang="en">3–4. Count, pad to a multiple of BM = 4, prefix sum gives each segment start</text>
+      <rect class="box" x="30" y="180" width="200" height="48"/><rect class="box" x="240" y="180" width="200" height="48"/><rect class="box" x="450" y="180" width="200" height="48"/><rect class="box" x="660" y="180" width="200" height="48"/>
+      <g data-step="3">
+        <rect class="box" x="30" y="180" width="200" height="48"/><rect class="box" x="240" y="180" width="200" height="48"/><rect class="box" x="450" y="180" width="200" height="48"/><rect class="box" x="660" y="180" width="200" height="48"/>
+      </g>
+      <text x="42" y="200" lang="zh-CN">E0：5 项</text><text x="42" y="200" lang="en">E0: 5 entries</text>
+      <text x="252" y="200" lang="zh-CN">E1：2 项</text><text x="252" y="200" lang="en">E1: 2 entries</text>
+      <text x="462" y="200" lang="zh-CN">E2：4 项</text><text x="462" y="200" lang="en">E2: 4 entries</text>
+      <text x="672" y="200" lang="zh-CN">E3：1 项</text><text x="672" y="200" lang="en">E3: 1 entry</text>
+      <g data-step="4">
+        <text x="42" y="219" class="small" lang="zh-CN">补到 8 · 起点 0</text><text x="42" y="219" class="small" lang="en">padded to 8 · start 0</text>
+        <text x="252" y="219" class="small" lang="zh-CN">补到 4 · 起点 8</text><text x="252" y="219" class="small" lang="en">padded to 4 · start 8</text>
+        <text x="462" y="219" class="small" lang="zh-CN">补到 4 · 起点 12</text><text x="462" y="219" class="small" lang="en">padded to 4 · start 12</text>
+        <text x="672" y="219" class="small" lang="zh-CN">补到 4 · 起点 16，总数 20</text><text x="672" y="219" class="small" lang="en">padded to 4 · start 16, total 20</text>
+      </g>
+
+      <text x="30" y="252" class="small" lang="zh-CN">5. sorted_token_ids：按专家分散写入，P = 12 表示补齐行</text><text x="30" y="252" class="small" lang="en">5. sorted_token_ids: scattered by expert; P = 12 marks a padding row</text>
+      <rect class="box" x="30" y="260" width="38" height="32"/><rect class="box" x="72" y="260" width="38" height="32"/><rect class="box" x="114" y="260" width="38" height="32"/><rect class="box" x="156" y="260" width="38" height="32"/>
+      <rect class="box" x="198" y="260" width="38" height="32"/><rect class="box" x="240" y="260" width="38" height="32"/><rect class="box" x="282" y="260" width="38" height="32"/><rect class="box" x="324" y="260" width="38" height="32"/>
+      <rect class="box" x="366" y="260" width="38" height="32"/><rect class="box" x="408" y="260" width="38" height="32"/><rect class="box" x="450" y="260" width="38" height="32"/><rect class="box" x="492" y="260" width="38" height="32"/>
+      <rect class="box" x="534" y="260" width="38" height="32"/><rect class="box" x="576" y="260" width="38" height="32"/><rect class="box" x="618" y="260" width="38" height="32"/><rect class="box" x="660" y="260" width="38" height="32"/>
+      <rect class="box" x="702" y="260" width="38" height="32"/><rect class="box" x="744" y="260" width="38" height="32"/><rect class="box" x="786" y="260" width="38" height="32"/><rect class="box" x="828" y="260" width="38" height="32"/>
+      <g data-step="5">
+        <rect class="box" x="30" y="260" width="38" height="32"/><rect class="box" x="72" y="260" width="38" height="32"/><rect class="box" x="114" y="260" width="38" height="32"/><rect class="box" x="156" y="260" width="38" height="32"/>
+        <rect class="box" x="198" y="260" width="38" height="32"/><rect class="box" x="366" y="260" width="38" height="32"/><rect class="box" x="408" y="260" width="38" height="32"/>
+        <rect class="box" x="534" y="260" width="38" height="32"/><rect class="box" x="576" y="260" width="38" height="32"/><rect class="box" x="618" y="260" width="38" height="32"/><rect class="box" x="660" y="260" width="38" height="32"/>
+        <rect class="box" x="702" y="260" width="38" height="32"/>
+      </g>
+      <text x="44" y="281" class="mono">1</text><text x="86" y="281" class="mono">2</text><text x="128" y="281" class="mono">6</text><text x="170" y="281" class="mono">9</text>
+      <text x="208" y="281" class="mono">11</text><text x="254" y="281" class="small">P</text><text x="296" y="281" class="small">P</text><text x="338" y="281" class="small">P</text>
+      <text x="380" y="281" class="mono">3</text><text x="422" y="281" class="mono">8</text><text x="464" y="281" class="small">P</text><text x="506" y="281" class="small">P</text>
+      <text x="548" y="281" class="mono">0</text><text x="590" y="281" class="mono">4</text><text x="632" y="281" class="mono">7</text><text x="670" y="281" class="mono">10</text>
+      <text x="716" y="281" class="mono">5</text><text x="758" y="281" class="small">P</text><text x="800" y="281" class="small">P</text><text x="842" y="281" class="small">P</text>
+
+      <text x="30" y="318" class="small" lang="zh-CN">6. expert_ids：每块 4 行，一块只属于一个专家</text><text x="30" y="318" class="small" lang="en">6. expert_ids: 4 rows per block, each block owned by one expert</text>
+      <rect class="box" x="30" y="326" width="164" height="30"/><rect class="box" x="198" y="326" width="164" height="30"/><rect class="box" x="366" y="326" width="164" height="30"/>
+      <rect class="box" x="534" y="326" width="164" height="30"/><rect class="box" x="702" y="326" width="164" height="30"/>
+      <g data-step="6">
+        <rect class="box" x="30" y="326" width="164" height="30"/><rect class="box" x="198" y="326" width="164" height="30"/><rect class="box" x="366" y="326" width="164" height="30"/>
+        <rect class="box" x="534" y="326" width="164" height="30"/><rect class="box" x="702" y="326" width="164" height="30"/>
+      </g>
+      <text x="42" y="346" lang="zh-CN">块 0 · E0</text><text x="42" y="346" lang="en">block 0 · E0</text>
+      <text x="210" y="346" lang="zh-CN">块 1 · E0</text><text x="210" y="346" lang="en">block 1 · E0</text>
+      <text x="378" y="346" lang="zh-CN">块 2 · E1</text><text x="378" y="346" lang="en">block 2 · E1</text>
+      <text x="546" y="346" lang="zh-CN">块 3 · E2</text><text x="546" y="346" lang="en">block 3 · E2</text>
+      <text x="714" y="346" lang="zh-CN">块 4 · E3</text><text x="714" y="346" lang="en">block 4 · E3</text>
+
+      <path class="lane" d="M30 370 L870 370"/>
+      <g data-step="7">
+        <text x="30" y="394" lang="zh-CN">实际 12 项，补齐后 20 行：浪费 8 / 20 = 40%</text><text x="30" y="394" lang="en">12 real entries, 20 rows after padding: waste 8 / 20 = 40%</text>
+        <text x="30" y="416" class="mono" lang="zh-CN">E0 补 3 行 · E1 补 2 行 · E2 不补 · E3 补 3 行</text><text x="30" y="416" class="mono" lang="en">E0 pads 3 · E1 pads 2 · E2 pads 0 · E3 pads 3</text>
+        <text x="30" y="438" class="mono" lang="zh-CN">缓冲区上界：12 + (4 + 1) × (4 − 1) = 27，按 4 取整为 28</text><text x="30" y="438" class="mono" lang="en">Buffer bound: 12 + (4 + 1) × (4 − 1) = 27, rounded up to 28</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 在补齐的块上做分组 GEMM，再合并</h3><h3 lang="en">(b) The grouped GEMM over the padded blocks, and the combine</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 480" data-interval="2800"
+         data-captions='["全图：接着动画 (a)。左边是按 sorted_token_ids 收集来的 5 个块，中间是 4 个专家的权重，右边是每项一行的输出 C 和最后的合并。按播放逐步看。",
+           "1. 一次启动：网格按 (N / BN) 乘上界块数展开，每个程序负责一个 M 块和一段 N 列。网格按上界开，超过补齐后总行数的块一进来就返回。",
+           "2. 块 0：从 expert_ids 查到 E0，只读 W_E0。它的 4 行是项 1、2、6、9，项号除以 k 就是 token 的行，所以隐状态不用复制 k 份。",
+           "3. 块 1 只有一行真数据（项 11），另外 3 行是 P。A 按掩码读成 0，不读显存，但矩阵乘照样算这 3 行，结果不写回。这就是补齐浪费的算力。",
+           "4. 块 2、3、4 分别用 E1、E2、E3 的权重。5 个块、4 个专家，在同一次启动里算完：这就是分组 GEMM，与一个专家一次启动相比少了 E − 1 次启动。",
+           "5. 结果按项号写回 C：每项一行，共 12 行，补齐行不写。第一次 GEMM 是门与上投影，之后接 SiLU-and-mul。",
+           "6. 下投影是第二次分组 GEMM，沿用同一套 sorted_token_ids 和 expert_ids，不必重新排序。",
+           "7. 合并：每个 token 把自己 2 行的结果按 topk_weights 加起来，SGLang 里是 moe_sum_reduce。专家并行时，这一步之前还要把结果从别的 GPU 收回来，那是 DeepEP 的 combine。",
+           "8. Lab B 在这台 M5 上的实测：64 个专家、k = 4、4096 个 token 时，BM = 16 用 21.9 ms、浪费 2.4%，BM = 64 用 12.2 ms、浪费 9.9%；只有 64 个 token 时 BM = 32 最快，浪费 87%。"]'
+         data-captions-en='["The whole picture, continuing diagram (a): on the left, the 5 blocks gathered through sorted_token_ids; in the middle, the weights of the 4 experts; on the right, the output C with one row per entry, and the final combine. Press Play to step through.",
+           "1. One launch: the grid spans (N / BN) times the bound in blocks, and each program owns one M block and one stretch of N columns. The grid is sized for the bound, and blocks past the padded total return at once.",
+           "2. Block 0 looks up E0 in expert_ids and reads only W_E0. Its 4 rows are entries 1, 2, 6 and 9; dividing an entry number by k gives the token row, so hidden states are not copied k times.",
+           "3. Block 1 holds only one real row (entry 11), and the other 3 are P. A is loaded as 0 under the mask, with no memory read, but the matrix product still computes those 3 rows and the result is dropped. This is the compute that padding wastes.",
+           "4. Blocks 2, 3 and 4 use the weights of E1, E2 and E3. Five blocks and four experts finish in the same launch: that is the grouped GEMM, E − 1 fewer launches than one per expert.",
+           "5. Results are written back to C by entry number: one row per entry, 12 rows, with padding rows not stored. The first GEMM is the gate-and-up projection, followed by SiLU-and-mul.",
+           "6. The down projection is a second grouped GEMM over the same sorted_token_ids and expert_ids, with no new sort.",
+           "7. Combine: each token adds up its 2 result rows with its topk_weights, done by moe_sum_reduce in SGLang. Under expert parallelism, the results must first come back from the other GPUs, which is the combine of DeepEP.",
+           "8. Measured by Lab B on this M5 with 64 experts and k = 4: at 4096 tokens, BM = 16 takes 21.9 ms and wastes 2.4%, BM = 64 takes 12.2 ms and wastes 9.9%; with only 64 tokens, BM = 32 is fastest and wastes 87%."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="24" class="small" lang="zh-CN">A：按 sorted_token_ids 收集的行</text><text x="30" y="24" class="small" lang="en">A: rows gathered by sorted_token_ids</text>
+      <text x="340" y="24" class="small" lang="zh-CN">B：各专家的权重</text><text x="340" y="24" class="small" lang="en">B: expert weights</text>
+      <text x="600" y="24" class="small" lang="zh-CN">C 与合并</text><text x="600" y="24" class="small" lang="en">C and the combine</text>
+      <rect class="box" x="30" y="40" width="250" height="40"/><rect class="box" x="30" y="90" width="250" height="40"/><rect class="box" x="30" y="140" width="250" height="40"/>
+      <rect class="box" x="30" y="190" width="250" height="40"/><rect class="box" x="30" y="240" width="250" height="40"/>
+      <rect class="box" x="340" y="40" width="200" height="44"/><rect class="box" x="340" y="102" width="200" height="44"/><rect class="box" x="340" y="164" width="200" height="44"/><rect class="box" x="340" y="226" width="200" height="44"/>
+      <rect class="box" x="600" y="40" width="270" height="104"/>
+      <rect class="box" x="600" y="180" width="270" height="90"/>
+
+      <g data-step="1">
+        <rect class="box" x="30" y="40" width="250" height="40"/><rect class="box" x="30" y="90" width="250" height="40"/><rect class="box" x="30" y="140" width="250" height="40"/>
+        <rect class="box" x="30" y="190" width="250" height="40"/><rect class="box" x="30" y="240" width="250" height="40"/>
+        <text x="30" y="326" lang="zh-CN">1. 网格 = (N / BN) × 上界块数；超过补齐后总行数的块一进来就返回</text><text x="30" y="326" lang="en">1. Grid = (N / BN) × the bound in blocks; blocks past the padded total return at once</text>
+      </g>
+      <g data-step="2">
+        <rect class="box" x="30" y="40" width="250" height="40"/><rect class="box" x="340" y="40" width="200" height="44"/>
+        <path class="arrow" d="M280 60 L336 62"/>
+        <text x="30" y="348" lang="zh-CN">2. expert_ids[0] = 0：只读 W_E0；行号 i // 2 就是 token，隐状态不复制</text><text x="30" y="348" lang="en">2. expert_ids[0] = 0: read only W_E0; row i // 2 is the token, so hidden states are not copied</text>
+      </g>
+      <g data-step="3">
+        <rect class="box" x="30" y="90" width="250" height="40"/>
+        <path class="arrow" d="M280 110 L336 72"/>
+        <text x="30" y="370" lang="zh-CN">3. P 行：A 按掩码读成 0，矩阵乘照做，结果不写回，这就是补齐浪费</text><text x="30" y="370" lang="en">3. P rows: A is loaded as 0 under the mask, the product runs anyway, the result is dropped: padding waste</text>
+      </g>
+      <g data-step="4">
+        <rect class="box" x="30" y="140" width="250" height="40"/><rect class="box" x="30" y="190" width="250" height="40"/><rect class="box" x="30" y="240" width="250" height="40"/>
+        <rect class="box" x="340" y="102" width="200" height="44"/><rect class="box" x="340" y="164" width="200" height="44"/><rect class="box" x="340" y="226" width="200" height="44"/>
+        <path class="arrow" d="M280 160 L336 124"/><path class="arrow" d="M280 210 L336 186"/><path class="arrow" d="M280 260 L336 248"/>
+        <text x="30" y="392" lang="zh-CN">4. 五个块、四个专家，一次启动算完：这就是分组 GEMM</text><text x="30" y="392" lang="en">4. Five blocks and four experts in one launch: that is the grouped GEMM</text>
+      </g>
+      <g data-step="5">
+        <rect class="box" x="600" y="40" width="270" height="104"/>
+        <path class="arrow" d="M540 92 L596 92"/>
+      </g>
+      <g data-step="6">
+        <text x="30" y="414" lang="zh-CN">6. 下投影是第二次分组 GEMM，沿用同一套 sorted_token_ids 和 expert_ids</text><text x="30" y="414" lang="en">6. The down projection is a second grouped GEMM over the same sorted_token_ids and expert_ids</text>
+      </g>
+      <g data-step="7">
+        <rect class="box" x="600" y="180" width="270" height="90"/>
+        <path class="arrow" d="M735 144 L735 176"/>
+      </g>
+
+      <text x="42" y="65" lang="zh-CN">块 0 · E0 · 项 1 2 6 9</text><text x="42" y="65" lang="en">block 0 · E0 · entries 1 2 6 9</text>
+      <text x="42" y="115" lang="zh-CN">块 1 · E0 · 项 11 P P P</text><text x="42" y="115" lang="en">block 1 · E0 · entries 11 P P P</text>
+      <text x="42" y="165" lang="zh-CN">块 2 · E1 · 项 3 8 P P</text><text x="42" y="165" lang="en">block 2 · E1 · entries 3 8 P P</text>
+      <text x="42" y="215" lang="zh-CN">块 3 · E2 · 项 0 4 7 10</text><text x="42" y="215" lang="en">block 3 · E2 · entries 0 4 7 10</text>
+      <text x="42" y="265" lang="zh-CN">块 4 · E3 · 项 5 P P P</text><text x="42" y="265" lang="en">block 4 · E3 · entries 5 P P P</text>
+      <text x="352" y="67" class="mono">W_E0 · N × K</text><text x="352" y="129" class="mono">W_E1 · N × K</text>
+      <text x="352" y="191" class="mono">W_E2 · N × K</text><text x="352" y="253" class="mono">W_E3 · N × K</text>
+      <text x="612" y="66" class="mono">C[i] = X[i // 2] · W_eᵀ</text>
+      <text x="612" y="88" class="small" lang="zh-CN">每项一行，共 12 行</text><text x="612" y="88" class="small" lang="en">one row per entry, 12 rows</text>
+      <text x="612" y="108" class="small" lang="zh-CN">P 行算了，但不写回</text><text x="612" y="108" class="small" lang="en">P rows computed, never stored</text>
+      <text x="612" y="128" class="small" lang="zh-CN">门与上投影之后接 SiLU-and-mul</text><text x="612" y="128" class="small" lang="en">gate-and-up, then SiLU-and-mul</text>
+      <text x="612" y="206" class="mono">out[t] = w[t,0]·C[2t]</text>
+      <text x="668" y="226" class="mono">+ w[t,1]·C[2t+1]</text>
+      <text x="612" y="254" class="small" lang="zh-CN">moe_sum_reduce：按权重相加</text><text x="612" y="254" class="small" lang="en">moe_sum_reduce: the weighted sum</text>
+
+      <path class="lane" d="M30 302 L870 302"/>
+      <g data-step="8">
+        <text x="30" y="444" lang="zh-CN">8. Lab B 实测（M5，64 个专家，k = 4）：T = 4096 时 BM = 16 用 21.9 ms，BM = 64 用 12.2 ms</text><text x="30" y="444" lang="en">8. Measured by Lab B (M5, 64 experts, k = 4): at T = 4096, BM = 16 takes 21.9 ms and BM = 64 12.2 ms</text>
+        <text x="30" y="466" class="mono" lang="zh-CN">浪费 2.4% 对 9.9%；T = 64 时 BM = 32 最快（1.62 ms），浪费 87%</text><text x="30" y="466" class="mono" lang="en">waste 2.4% against 9.9%; at T = 64, BM = 32 is fastest (1.62 ms), waste 87%</text>
+      </g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 L4 上量 moe_align_block_size 的补齐浪费；H100 层：DeepGEMM 的分组 GEMM</h3><h3 lang="en">Lab A · Measure the padding waste of moe_align_block_size on an L4; the H100 tier: a DeepGEMM grouped GEMM</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。L4 层（第 1–3 步）和 H100 层（第 4 步）都没有运行。根据 SGLang v0.5.22 的源码（<code>python/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py</code>、<code>python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu</code>、<code>kernels/ops/moe/moe_align_small_numel.py</code>、<code>srt/layers/deep_gemm_wrapper/entrypoint.py</code>）和 DeepGEMM v2.1.1.post3 的 README 与测试代码（<code>tests/generators.py</code>、<code>tests/test_fp8.py</code>、<code>deep_gemm/utils/math.py</code>）整理。命令都在 <a href="../lab-setup/index.html">实验环境</a> 页的 <code>sglang-lab</code> 容器里执行（用 <code>docker exec -it sglang-lab bash</code> 进去，<code>/work</code> 挂在主机的 <code>$HOME/llm-lab</code>）。两个脚本都只调内核，不起服务器，不开网络端口，也不下载模型。还没有租用的机器，所以这里不给数字，只描述应当看到的形状。DeepEP 要多块 GPU，这里不给它的命令（概念 4）。租用、计费和停机的规则见实验环境页。</div>
+    <div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Neither the L4 tier (steps 1–3) nor the H100 tier (step 4) has been run. Assembled from the SGLang v0.5.22 source (<code>python/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py</code>, <code>python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu</code>, <code>kernels/ops/moe/moe_align_small_numel.py</code>, <code>srt/layers/deep_gemm_wrapper/entrypoint.py</code>) and the DeepGEMM v2.1.1.post3 README and test code (<code>tests/generators.py</code>, <code>tests/test_fp8.py</code>, <code>deep_gemm/utils/math.py</code>). Every command runs in the <code>sglang-lab</code> container of the <a href="../lab-setup/index.html">Lab environment</a> page (enter it with <code>docker exec -it sglang-lab bash</code>; <code>/work</code> is mounted from the host’s <code>$HOME/llm-lab</code>). Both scripts only call kernels: they start no server, open no network port and download no model. There is no rented machine yet, so this lab gives no numbers, only the shape you should see. DeepEP needs several GPUs, and no commands are given for it here (concept 4). The rules for renting, billing and shutting down are on the lab environment page.</div>
+    <ol>
+      <li><span lang="zh-CN">L4 层：把下面的脚本存成 <code>/work/align_waste.py</code>。它用 Qwen3-30B-A3B 的路由形状（128 个专家，每 token 8 个）造一个合成路由，<code>skew</code> 大于 0 时让编号小的专家更热门；对 5 种 token 数、4 种块大小调用 SGLang 自己的 <code>moe_align_block_size</code> 包装函数，检查每一项恰好出现一次，算出浪费，并用 CUDA 事件量 50 次的中位数：</span><span lang="en">The L4 tier: save the script below as <code>/work/align_waste.py</code>. It builds a synthetic routing with the routing shape of Qwen3-30B-A3B (128 experts, 8 per token), with <code>skew</code> above 0 making the low-numbered experts popular; for 5 token counts and 4 block sizes it calls SGLang’s own <code>moe_align_block_size</code> wrapper, checks that every entry appears exactly once, works out the waste, and times the median of 50 calls with CUDA events:</span><pre data-lang="py" data-file="align_waste.py"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the library documentation on 2026-11-01
+# align_waste.py: padding waste of moe_align_block_size against block size, on a synthetic routing (L4 tier)
+import torch
+from sglang.srt.layers.moe.moe_runner.triton_utils.moe_align_block_size import moe_align_block_size
+
+torch.manual_seed(0)
+E, TOPK, dev = 128, 8, "cuda"            # Qwen3-30B-A3B: num_experts 128, num_experts_per_tok 8 (config.json)
+
+
+def routing(T, skew):
+    # synthetic router logits; skew &gt; 0 makes the low-numbered experts popular
+    logits = torch.randn(T, E, device=dev) + skew * torch.linspace(2.0, -2.0, E, device=dev)
+    return logits.topk(TOPK, dim=-1).indices.to(torch.int32)
+
+
+def median_ms(fn, reps=50):
+    times = []
+    for _ in range(reps + 1):
+        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        start.record(); fn(); end.record(); torch.cuda.synchronize()
+        times.append(start.elapsed_time(end))
+    return sorted(times[1:])[reps // 2]            # drop the first call, take the median
+
+
+print(f"{'T':&gt;5} {'skew':&gt;4} {'BM':&gt;4} {'entries':&gt;8} {'padded':&gt;8} {'waste':&gt;7} {'align_us':&gt;9}")
+for T in (1, 16, 128, 1024, 8192):
+    for skew in (0.0, 1.0):
+        ids = routing(T, skew)
+        real = ids.numel()
+        for bm in (16, 32, 64, 128):
+            sorted_ids, expert_ids, post = moe_align_block_size(ids, bm, E)
+            padded = int(post.item())
+            body = sorted_ids[:padded]
+            # every real entry 0 .. real-1 appears exactly once; padding slots hold the value real
+            assert torch.equal(torch.sort(body[body &lt; real]).values,
+                               torch.arange(real, device=dev, dtype=torch.int32))
+            us = median_ms(lambda: moe_align_block_size(ids, bm, E)) * 1e3
+            print(f"{T:5d} {skew:4.1f} {bm:4d} {real:8d} {padded:8d} {(padded - real) / padded:7.1%} {us:9.1f}")</pre></li>
+      <li><span lang="zh-CN">运行它：</span><span lang="en">Run it:</span><pre data-lang="sh" data-file="in the container, L4"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the library documentation on 2026-11-01
+cd /work
+python3 align_waste.py | tee align_waste.txt</pre><span lang="zh-CN">预期结果（定性描述，不是实测）：T = 1 时 8 项分给 8 个专家各 1 行，浪费就是 1 − 1/BM，BM = 16 时约 94%，而且与 <code>skew</code> 无关；这一行走的是 Triton 的 <code>moe_align_small_numel</code>（8 项不超过 64，专家数 129 个桶多于 63），其余各行走 AOT 的两个 CUDA 内核。T 越大，同一个 BM 的浪费越小；同一个 T，BM 越大浪费越大。<code>skew = 1.0</code> 时热门专家行多、冷门专家行少，行少的专家贡献了大部分补齐，所以中等 T 的浪费应当比均匀路由时高（推断）。<code>align_us</code> 应当是微秒量级，并且几乎不随 BM 变化，因为内核做的事（计数、扫描、分散写）与 BM 无关，BM 只改变取整。这些浪费比例只取决于路由，可以先在 CPU 上用概念 5 的公式算一遍，再与输出对照。</span><span lang="en">Expected result (described, not measured): at T = 1, 8 entries go to 8 experts with 1 row each, so the waste is exactly 1 − 1/BM, about 94% at BM = 16, whatever the <code>skew</code>; this row takes Triton’s <code>moe_align_small_numel</code> (8 entries are at most 64, and 129 buckets are more than 63), and all other rows take the two AOT CUDA kernels. The larger T, the smaller the waste at a given BM; at a given T, the larger BM, the larger the waste. With <code>skew = 1.0</code> the popular experts get many rows and the unpopular ones few, the experts with few rows contribute most of the padding, so the waste at medium T should be higher than with uniform routing (an inference). <code>align_us</code> should be of the order of microseconds and should barely change with BM, since the work the kernels do (counting, scanning, scattering) does not depend on BM; BM only changes the rounding. These waste ratios depend only on the routing, so work them out on the CPU first with the formula of concept 5, then compare them with the output.</span></li>
+      <li><span lang="zh-CN">读源码对照输出。打开 <code>moe_align_kernel.cu</code> 的第 346 行：128 个专家多于 64，所以这里永远不会走 small-batch 内核。再看第 370 行和第 390 行：两次启动，第一次 2 个线程块，第二次的块数随项数增长。把 T = 8192、BM = 64 那一行的 <code>padded</code> 与上界 T·k + 129 × 63 比一比，应当远小于它，说明上界只在每个专家都差一行凑满一块时才会达到。</span><span lang="en">Read the source against the output. Open line 346 of <code>moe_align_kernel.cu</code>: 128 experts are more than 64, so the small-batch kernel is never taken here. Then look at lines 370 and 390: two launches, the first with 2 thread blocks, the second with a block count that grows with the entries. Compare <code>padded</code> in the T = 8192, BM = 64 row with the bound T·k + 129 × 63; it should be far below it, showing that the bound is reached only when every expert falls one row short of a full block.</span></li>
+      <li><span lang="zh-CN"><strong>H100 层（sm_90），DeepGEMM 的分组 GEMM。</strong>换到租用的 H100，把下面的脚本存成 <code>/work/grouped_fp8.py</code>。形状取 DeepSeek-V3 的一个专家：K = 7168（隐藏维），N = 4096（门与上投影并排，2 × 2048；这种并排是融合 MoE 内核的常见做法，属推断），每块 GPU 8 个本地专家（256 个专家分在 EP32 上，与技术报告的预填充部署一致）。量化按技术报告和 DeepGEMM 的 <code>deep_gemm/utils/math.py</code>：激活每 token 每 128 通道一个缩放因子，权重每 128 × 128 一个，缩放因子是最大绝对值除以 448（E4M3 的最大值）。脚本自己写这两个量化函数，不依赖 <code>deep_gemm.utils</code>，因为 SGLang 装的是自己的 <code>sgl-deep-gemm</code>，它的工具函数是否与上游相同没有核对；调用方式按 SGLang 包装层（<code>entrypoint.py</code> 第 157–159 行）：</span><span lang="en"><strong>The H100 tier (sm_90), a DeepGEMM grouped GEMM.</strong> Move to a rented H100 and save the script below as <code>/work/grouped_fp8.py</code>. The shapes are one DeepSeek-V3 expert: K = 7168 (the hidden size), N = 4096 (gate and up side by side, 2 × 2048; laying them side by side is common practice for fused MoE kernels, an inference), and 8 local experts per GPU (256 experts over EP32, as in the report’s prefill deployment). The quantization follows the report and DeepGEMM’s <code>deep_gemm/utils/math.py</code>: one scale per token per 128 channels for activations and one per 128 × 128 block for weights, each scale being the largest absolute value divided by 448 (the largest E4M3 value). The script writes these two quantization functions itself rather than relying on <code>deep_gemm.utils</code>, because SGLang installs its own <code>sgl-deep-gemm</code>, whose utilities were not checked against upstream; the call follows SGLang’s wrapper (<code>entrypoint.py</code>, lines 157–159):</span><pre data-lang="py" data-file="grouped_fp8.py"># H100 tier · 未运行 · not run; assembled from the SGLang source at v0.5.22 and the library documentation on 2026-11-01
+# grouped_fp8.py: DeepGEMM m-grouped FP8 GEMM, contiguous layout, 1x128 activation scales, 128x128 weight scales
+import random
+
+import torch
+import deep_gemm
+
+random.seed(0); torch.manual_seed(0)
+G, N, K, dev = 8, 4096, 7168, "cuda"     # 8 local experts; N = 2 x 2048 (gate and up), K = 7168 (DeepSeek-V3)
+
+
+def per_token_fp8(x):                    # activations: one scale per token per 128 channels (1 x 128 tiles)
+    m, k = x.shape
+    v = x.view(m, k // 128, 128).float()
+    sf = v.abs().amax(dim=2).clamp(min=1e-4) / 448.0
+    return (v / sf.unsqueeze(2)).to(torch.float8_e4m3fn).view(m, k), sf
+
+
+def per_block_fp8(w):                    # weights: one scale per 128 x 128 block
+    n, k = w.shape
+    v = w.view(n // 128, 128, k // 128, 128).float()
+    sf = v.abs().amax(dim=(1, 3), keepdim=True).clamp(min=1e-4) / 448.0
+    return (v / sf).to(torch.float8_e4m3fn).view(n, k), sf.view(n // 128, k // 128)
+
+
+def median_ms(fn, reps=30):
+    times = []
+    for _ in range(reps + 1):
+        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        start.record(); fn(); end.record(); torch.cuda.synchronize()
+        times.append(start.elapsed_time(end))
+    return sorted(times[1:])[reps // 2]
+
+
+align = deep_gemm.get_mk_alignment_for_contiguous_layout()
+align = align[0] if isinstance(align, tuple) else align    # SGLang's wrapper allows a tuple (entrypoint.py 174-176)
+print("device:", torch.cuda.get_device_name(), " M alignment per expert:", align)
+
+w = torch.randn(G, N, K, device=dev, dtype=torch.bfloat16) * 0.02
+w_q = torch.empty(G, N, K, device=dev, dtype=torch.float8_e4m3fn)
+w_sf = torch.empty(G, N // 128, K // 128, device=dev, dtype=torch.float)
+for g in range(G):
+    w_q[g], w_sf[g] = per_block_fp8(w[g])
+
+print(f"{'rows/expert':&gt;11} {'real':&gt;7} {'padded':&gt;7} {'waste':&gt;6} {'ms':&gt;8} {'useful TFLOP/s':&gt;15} {'rel err':&gt;8}")
+for per_expert in (16, 64, 256, 1024, 4096):
+    real = [max(1, int(per_expert * random.uniform(0.7, 1.3))) for _ in range(G)]
+    padded = [(r + align - 1) // align * align for r in real]
+    M = sum(padded)
+    m_indices = torch.full((M,), -1, device=dev, dtype=torch.int32)   # -1 marks a padding row
+    start = 0
+    for g, (r, p) in enumerate(zip(real, padded)):
+        m_indices[start:start + r] = g
+        start += p
+    a = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
+    a_q = per_token_fp8(a)
+    d = torch.empty(M, N, device=dev, dtype=torch.bfloat16)
+    run = lambda: deep_gemm.m_grouped_fp8_gemm_nt_contiguous(a_q, (w_q, w_sf), d, m_indices)
+    run(); torch.cuda.synchronize()                             # the first call JIT-compiles the kernel
+    ref = a[:1].float() @ w[0].float().t()                      # row 0 belongs to expert 0
+    err = ((d[:1].float() - ref).abs().max() / ref.abs().max()).item()
+    ms = median_ms(run)
+    useful = 2.0 * sum(real) * N * K
+    print(f"{per_expert:11d} {sum(real):7d} {M:7d} {(M - sum(real)) / M:6.1%} {ms:8.3f} "
+          f"{useful / (ms * 1e9):15.1f} {err:8.4f}")</pre><span lang="zh-CN">运行 <code>python3 /work/grouped_fp8.py</code>。预期结果（定性描述，不是实测）：第一行之前有一次 JIT 编译，要等一会儿（README 说内核在运行时编译）。打印出的对齐值就是每个专家段要补到的 M 块大小。每个专家只有几十行时浪费很高、有用的 TFLOP/s 很低，这时内核在读 8 × 4096 × 7168 字节的 FP8 权重（约 235 MB），受带宽限制；每个专家几千行时浪费降到几个百分点以下，TFLOP/s 应当高出一个数量级以上（推断）。<code>rel err</code> 是第 0 行相对 BF16 参考的最大误差，应当很小，是 FP8 量化带来的；DeepGEMM 自己的测试用的是另一个指标 <code>calc_diff</code>，断言它小于 0.001（<code>tests/test_fp8.py</code> 第 74 行）。再在 L4 上运行一次同一个脚本，应当失败（推断：README 要求 SM90 或 SM100）；看清它报什么错，不要绕过。</span><span lang="en">Run <code>python3 /work/grouped_fp8.py</code>. Expected result (described, not measured): before the first row there is one JIT compilation, which takes a while (the README says kernels are compiled at run time). The printed alignment is the M block size each expert segment is padded to. With only tens of rows per expert the waste is high and the useful TFLOP/s low, because the kernel is then reading 8 × 4096 × 7168 bytes of FP8 weights (about 235 MB) and is bandwidth-bound; with thousands of rows per expert the waste drops below a few percent and the TFLOP/s should be more than an order of magnitude higher (an inference). <code>rel err</code> is the largest error of row 0 relative to the BF16 reference and should be small, coming from FP8 quantization; DeepGEMM’s own test uses a different metric, <code>calc_diff</code>, and asserts it is below 0.001 (<code>tests/test_fp8.py</code>, line 74). Then run the same script once on the L4: it should fail (an inference: the README requires SM90 or SM100); read the error it gives rather than working around it.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 对照：top-k 路由、排序补齐与分组 GEMM</h3><h3 lang="en">Lab B · The Metal twin: top-k routing, align-and-pad and a grouped GEMM</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01。下面的输出都来自这台 Mac 上的实际运行。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01. The outputs below come from actual runs on this Mac.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>moe.swift</code>。它在运行时编译五个 Metal 内核，形状是 64 个专家、每 token 4 个、隐藏维 K = 1024、专家输出宽 N = 1024，FP16 的输入与权重（专家权重共约 134 MB），FP32 的累加和输出。<code>route_topk</code> 每个 token 一个 SIMD-group，算 64 个 logits，挑出最大的 4 个并在其中做 softmax。<code>align_count</code> 和 <code>align_scatter</code> 是概念 2 那两个 CUDA 内核的移植：一个线程组在 threadgroup memory 里原子计数、取整、扫描，写出每块的专家号和每个专家的游标；再一项一个线程，原子地领位置写入。<code>grouped_gemm</code> 是分组 GEMM：每个线程组负责 BM 行乘 32 列，从 <code>expert_of_block</code> 查专家，按 <code>sorted_ids</code> 收集行（项号除以 k 就是 token），补齐行读成 0、照算不存，矩阵乘用 8 × 8 的 <code>simdgroup_matrix</code>。<code>combine</code> 按权重把每个 token 的 4 行加起来。token 数取 64、512、4096，BM 取 16、32、64。每个配置预热一次后跑 21 次取中位数，GPU 时间来自 command buffer 的 <code>gpuStartTime</code> 和 <code>gpuEndTime</code>。程序在 CPU 上做三项检查：16 个 token 的路由与 Double 参考比对，排序补齐的每一项恰好出现一次且落在自己专家的段里，8 个 token 的输出与 Double 参考比对：</span><span lang="en">Save the program below as <code>moe.swift</code>. It compiles five Metal kernels at run time, shaped as 64 experts, 4 per token, hidden size K = 1024 and expert output width N = 1024, with FP16 inputs and weights (about 134 MB of expert weights) and FP32 accumulators and outputs. <code>route_topk</code> gives each token one SIMD-group, which computes 64 logits, picks the largest 4 and softmaxes over them. <code>align_count</code> and <code>align_scatter</code> port the two CUDA kernels of concept 2: one threadgroup counts atomically in threadgroup memory, rounds, scans, and writes the expert of each block and the cursor of each expert; then one thread per entry atomically claims a position and writes there. <code>grouped_gemm</code> is the grouped GEMM: each threadgroup owns BM rows by 32 columns, looks up its expert in <code>expert_of_block</code>, gathers its rows through <code>sorted_ids</code> (an entry number divided by k is the token), loads padding rows as 0 and computes but never stores them, and does the matrix product with 8 × 8 <code>simdgroup_matrix</code> tiles. <code>combine</code> adds up each token’s 4 rows with their weights. The token counts are 64, 512 and 4096 and BM is 16, 32 and 64. Each configuration warms up once and then runs 21 times for the median, with GPU time from the command buffer’s <code>gpuStartTime</code> and <code>gpuEndTime</code>. The program makes three checks on the CPU: the routing of 16 tokens against a Double reference, every aligned entry appearing exactly once and inside its own expert’s segment, and the output of 8 tokens against a Double reference:</span><pre data-lang="swift" data-file="moe.swift">// moe.swift: top-k routing, align-and-pad (moe_align_block_size) and a grouped GEMM over the padded blocks, in Metal.
+// E experts, top-k per token, hidden K, expert output width N; FP16 inputs and weights, FP32 accumulators and outputs.
+// GPU time from the command buffer, median of 21 runs after one warm-up.
+// build: swiftc -O moe.swift -o moe    run: ./moe
+import Foundation
+import Metal
+
+let source = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+constant uint E = 64;      // experts
+constant uint TOPK = 4;    // experts per token
+constant uint K = 1024;    // hidden size (GEMM reduction dim)
+constant uint N = 1024;    // expert output width
+constant uint BN = 32;     // output columns per threadgroup
+constant uint BK = 32;     // reduction step per tile
+
+// 1. routing: one SIMD-group per token. Lane j scores experts j and j + 32, then the SIMD-group picks the top-k
+// logits one at a time and softmaxes over them (= softmax over all E, keep top-k, renormalize).
+kernel void route_topk(device const half* X [[buffer(0)]], device const half* Wg [[buffer(1)]],
+                       device int* topk_ids [[buffer(2)]], device float* topk_w [[buffer(3)]],
+                       uint t [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    device const half* x = X + ulong(t) * K;
+    device const half* g0 = Wg + ulong(lane) * K;
+    device const half* g1 = Wg + ulong(lane + 32) * K;
+    float v0 = 0.0f, v1 = 0.0f;
+    for (uint k = 0; k &lt; K; k += 4) {
+        float4 xv = float4(*(device const half4*)(x + k));
+        v0 += dot(xv, float4(*(device const half4*)(g0 + k)));
+        v1 += dot(xv, float4(*(device const half4*)(g1 + k)));
+    }
+    float sel[TOPK]; int ids[TOPK];
+    for (uint j = 0; j &lt; TOPK; j++) {
+        float m = simd_max(max(v0, v1));
+        uint cand = (v0 == m) ? lane : ((v1 == m) ? lane + 32 : 0xffffffffu);
+        uint e = simd_min(cand);                                   // lowest expert index holding the max
+        sel[j] = m; ids[j] = int(e);
+        if (e == lane) v0 = -INFINITY; else if (e == lane + 32) v1 = -INFINITY;
+    }
+    if (lane == 0) {
+        float s = 0.0f;
+        for (uint j = 0; j &lt; TOPK; j++) s += exp(sel[j] - sel[0]);
+        for (uint j = 0; j &lt; TOPK; j++) { topk_ids[t * TOPK + j] = ids[j]; topk_w[t * TOPK + j] = exp(sel[j] - sel[0]) / s; }
+    }
+}
+
+// 2a. align, one threadgroup: count entries per expert, round each count up to a multiple of BM, exclusive scan,
+// write the padded total, the owning expert of every block, each expert's write cursor, and fill sorted_ids
+// with the padding sentinel numel (the CUDA kernel's pad_sorted_token_ids).
+kernel void align_count(device const int* topk_ids [[buffer(0)]], device int* sorted_ids [[buffer(1)]],
+                        device int* expert_of_block [[buffer(2)]], device int* total_post_pad [[buffer(3)]],
+                        device atomic_int* cursor [[buffer(4)]], constant uint&amp; numel [[buffer(5)]],
+                        constant uint&amp; BM [[buffer(6)]], constant uint&amp; max_padded [[buffer(7)]],
+                        uint tid [[thread_index_in_threadgroup]], uint ntid [[threads_per_threadgroup]]) {
+    threadgroup atomic_int counts[E];
+    threadgroup int start[E + 1];
+    if (tid &lt; E) atomic_store_explicit(&amp;counts[tid], 0, memory_order_relaxed);
+    for (uint i = tid; i &lt; max_padded; i += ntid) sorted_ids[i] = int(numel);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i &lt; numel; i += ntid) atomic_fetch_add_explicit(&amp;counts[topk_ids[i]], 1, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {                                                // E = 64: a serial scan is enough
+        int acc = 0;
+        for (uint e = 0; e &lt; E; e++) {
+            start[e] = acc;
+            int c = atomic_load_explicit(&amp;counts[e], memory_order_relaxed);
+            acc += (c + int(BM) - 1) / int(BM) * int(BM);
+        }
+        start[E] = acc; *total_post_pad = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid &lt; E) {
+        atomic_store_explicit(&amp;cursor[tid], start[tid], memory_order_relaxed);
+        for (int b = start[tid] / int(BM); b &lt; start[tid + 1] / int(BM); b++) expert_of_block[b] = int(tid);
+    }
+}
+
+// 2b. scatter: one thread per (token, slot) entry takes the next position in its expert's segment
+// (count_and_sort_expert_tokens_kernel in the CUDA source). Order inside a segment is whatever the atomics give.
+kernel void align_scatter(device const int* topk_ids [[buffer(0)]], device int* sorted_ids [[buffer(1)]],
+                          device atomic_int* cursor [[buffer(2)]], constant uint&amp; numel [[buffer(3)]],
+                          uint i [[thread_position_in_grid]]) {
+    if (i &gt;= numel) return;
+    int pos = atomic_fetch_add_explicit(&amp;cursor[topk_ids[i]], 1, memory_order_relaxed);
+    sorted_ids[pos] = int(i);
+}
+
+// 3. grouped GEMM: threadgroup (n-tile, m-block) computes BM sorted rows x BN columns of C = X[token] . W[e]^T,
+// where e = expert_of_block[m-block]. Rows are gathered through sorted_ids; padding rows (id == numel) load zeros,
+// are multiplied like any other row, and are not stored. BM / 8 SIMD-groups, each an 8-row strip of 8x8 tiles.
+kernel void grouped_gemm(device const half* X [[buffer(0)]], device const half* W [[buffer(1)]],
+                         device const int* sorted_ids [[buffer(2)]], device const int* expert_of_block [[buffer(3)]],
+                         device const int* total_post_pad [[buffer(4)]], device float* C [[buffer(5)]],
+                         constant uint&amp; numel [[buffer(6)]], constant uint&amp; BM [[buffer(7)]],
+                         uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                         uint sg [[simdgroup_index_in_threadgroup]]) {
+    uint mb = tg.y, n0 = tg.x * BN, ntid = BM * 4;                 // BM / 8 SIMD-groups of 32 threads
+    if (mb * BM &gt;= uint(*total_post_pad)) return;                 // the grid is sized for the worst case
+    uint e = uint(expert_of_block[mb]);
+    threadgroup half As[64][BK];
+    threadgroup half Ws[BN][BK];
+    threadgroup float Cs[64][BN];
+    threadgroup int rowId[64];
+    if (tid &lt; BM) rowId[tid] = sorted_ids[mb * BM + tid];
+    simdgroup_float8x8 acc[4];
+    for (uint j = 0; j &lt; 4; j++) acc[j] = make_filled_simdgroup_matrix&lt;float, 8, 8&gt;(0.0f);
+    for (uint k0 = 0; k0 &lt; K; k0 += BK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tid; i &lt; BM * BK / 4; i += ntid) {          // gather BM token rows of X
+            uint r = i / (BK / 4), c = (i % (BK / 4)) * 4;
+            int id = rowId[r];
+            half4 v = (uint(id) &lt; numel) ? *(device const half4*)(X + ulong(uint(id) / TOPK) * K + k0 + c) : half4(0.0h);
+            *(threadgroup half4*)&amp;As[r][c] = v;
+        }
+        for (uint i = tid; i &lt; BN * BK / 4; i += ntid) {          // BN rows of this expert's weight
+            uint r = i / (BK / 4), c = (i % (BK / 4)) * 4;
+            *(threadgroup half4*)&amp;Ws[r][c] = *(device const half4*)(W + (ulong(e) * N + n0 + r) * K + k0 + c);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0; kk &lt; BK; kk += 8) {
+            simdgroup_half8x8 a;
+            simdgroup_load(a, &amp;As[sg * 8][kk], BK);
+            for (uint j = 0; j &lt; 4; j++) {
+                simdgroup_half8x8 b;
+                simdgroup_load(b, &amp;Ws[j * 8][kk], BK, ulong2(0, 0), true);   // transposed: b[k][n] = W[n][k]
+                simdgroup_multiply_accumulate(acc[j], a, b, acc[j]);
+            }
+        }
+    }
+    for (uint j = 0; j &lt; 4; j++) simdgroup_store(acc[j], &amp;Cs[sg * 8][j * 8], BN);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i &lt; BM * BN; i += ntid) {                   // scatter real rows back to C[(token, slot)]
+        uint r = i / BN, c = i % BN;
+        int id = rowId[r];
+        if (uint(id) &lt; numel) C[ulong(id) * N + n0 + c] = Cs[r][c];
+    }
+}
+
+// 4. combine: out[t] = sum over the token's k slots of weight * C[(t, slot)] (moe_sum in the CUDA source).
+kernel void combine(device const float* C [[buffer(0)]], device const float* topk_w [[buffer(1)]],
+                    device float* out [[buffer(2)]], uint2 gid [[thread_position_in_grid]]) {
+    uint n = gid.x, t = gid.y;
+    float s = 0.0f;
+    for (uint j = 0; j &lt; TOPK; j++) s += topk_w[t * TOPK + j] * C[(ulong(t) * TOPK + j) * N + n];
+    out[ulong(t) * N + n] = s;
+}
+"""
+
+func fail(_ msg: String) -&gt; Never { print("error: \(msg)"); exit(1) }
+guard let dev = MTLCreateSystemDefaultDevice(), let queue = dev.makeCommandQueue() else { fail("no Metal device") }
+let lib: MTLLibrary
+do { lib = try dev.makeLibrary(source: source, options: nil) } catch { fail("compile: \(error)") }
+func pipeline(_ name: String) -&gt; MTLComputePipelineState {
+    guard let fn = lib.makeFunction(name: name) else { fail("no function \(name)") }
+    do { return try dev.makeComputePipelineState(function: fn) } catch { fail("pipeline \(name): \(error)") }
+}
+let routePSO = pipeline("route_topk"), countPSO = pipeline("align_count"), scatterPSO = pipeline("align_scatter")
+let gemmPSO = pipeline("grouped_gemm"), combinePSO = pipeline("combine")
+print("device=\(dev.name) threadExecutionWidth=\(gemmPSO.threadExecutionWidth) maxTotalThreadsPerThreadgroup=\(gemmPSO.maxTotalThreadsPerThreadgroup)")
+
+let E = 64, TOPK = 4, K = 1024, N = 1024, reps = 21
+func median(_ v: [Double]) -&gt; Double { let s = v.sorted(); return s[s.count / 2] }
+func time(_ encode: (MTLComputeCommandEncoder) -&gt; Void) -&gt; Double {      // one warm-up, then the median of `reps`
+    var ms: [Double] = []
+    for r in 0...reps {
+        guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { fail("encoder") }
+        encode(enc); enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if cb.status != .completed { fail("command buffer: \(String(describing: cb.error))") }
+        if r &gt; 0 { ms.append((cb.gpuEndTime - cb.gpuStartTime) * 1e3) }
+    }
+    return median(ms)
+}
+func buffer(_ bytes: Int) -&gt; MTLBuffer {
+    guard let b = dev.makeBuffer(length: max(bytes, 16), options: .storageModeShared) else { fail("buffer of \(bytes) bytes") }
+    return b
+}
+var seed: UInt32 = 12345
+func rnd() -&gt; Float { seed = seed &amp;* 1664525 &amp;+ 1013904223; return Float(seed &gt;&gt; 8) / 16777216.0 - 0.5 }
+func halves(_ count: Int, scale: Float) -&gt; (MTLBuffer, UnsafeMutablePointer&lt;Float16&gt;) {
+    let b = buffer(count * 2), p = b.contents().bindMemory(to: Float16.self, capacity: count)
+    for i in 0..&lt;count { p[i] = Float16(rnd() * scale) }
+    return (b, p)
+}
+func ints(_ b: MTLBuffer, _ n: Int) -&gt; UnsafeMutablePointer&lt;Int32&gt; { b.contents().bindMemory(to: Int32.self, capacity: n) }
+func floats(_ b: MTLBuffer, _ n: Int) -&gt; UnsafeMutablePointer&lt;Float&gt; { b.contents().bindMemory(to: Float.self, capacity: n) }
+
+let (Wgb, pWg) = halves(E * K, scale: 0.25)                     // router weight [E][K]
+let (Wb, pW) = halves(E * N * K, scale: 0.125)                   // expert weights [E][N][K], 128 MB
+print("-- E=\(E) experts, top-k=\(TOPK), hidden K=\(K), expert width N=\(N); FP16 in, FP32 accumulate; weights \(E * N * K * 2 / 1_000_000) MB")
+
+for T in [64, 512, 4096] {
+    let numel = T * TOPK
+    let (Xb, pX) = halves(T * K, scale: 1.0)
+    let idsB = buffer(numel * 4), wB = buffer(numel * 4)
+    let routeMs = time { enc in
+        enc.setComputePipelineState(routePSO)
+        enc.setBuffer(Xb, offset: 0, index: 0); enc.setBuffer(Wgb, offset: 0, index: 1)
+        enc.setBuffer(idsB, offset: 0, index: 2); enc.setBuffer(wB, offset: 0, index: 3)
+        enc.dispatchThreadgroups(MTLSize(width: T, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+    }
+    let ids = ints(idsB, numel), tw = floats(wB, numel)
+    // check routing on the CPU for 16 tokens: same top-k set, weights within 1e-3
+    var routeBad = 0
+    for c in 0..&lt;16 {
+        let t = c * (T / 16)
+        var logit = [Double](repeating: 0, count: E)
+        for e in 0..&lt;E { var a = 0.0; for k in 0..&lt;K { a += Double(pX[t * K + k]) * Double(pWg[e * K + k]) }; logit[e] = a }
+        let top = (0..&lt;E).sorted { logit[$0] &gt; logit[$1] }.prefix(TOPK)
+        let mx = logit[top.first!]; let s = top.reduce(0.0) { $0 + exp(logit[$1] - mx) }
+        for (j, e) in top.enumerated() {
+            if Int(ids[t * TOPK + j]) != e || abs(Double(tw[t * TOPK + j]) - exp(logit[e] - mx) / s) &gt; 1e-3 { routeBad += 1 }
+        }
+    }
+    var counts = [Int](repeating: 0, count: E)
+    for i in 0..&lt;numel { counts[Int(ids[i])] += 1 }
+    let used = counts.filter { $0 &gt; 0 }.count
+    print(String(format: "T=%-5d entries=%-6d experts used=%d/%d  per-expert rows min/avg/max=%d/%.1f/%d  route_ms=%.4f  route_mismatch=%d/%d",
+                 T, numel, used, E, counts.min()!, Double(numel) / Double(E), counts.max()!, routeMs, routeBad, 16 * TOPK))
+
+    let Cb = buffer(numel * N * 4), outB = buffer(T * N * 4)
+    for BM in [16, 32, 64] {
+        let maxPadded = numel + E * (BM - 1)                        // worst case: every expert one row short of a block
+        let maxBlocks = (maxPadded + BM - 1) / BM
+        let sortedB = buffer(maxPadded * 4), eobB = buffer(maxBlocks * 4), totB = buffer(4), curB = buffer(E * 4)
+        var n32 = UInt32(numel), bm32 = UInt32(BM), mp32 = UInt32(maxPadded)
+        let encodeAlign: (MTLComputeCommandEncoder) -&gt; Void = { enc in
+            enc.setComputePipelineState(countPSO)
+            enc.setBuffer(idsB, offset: 0, index: 0); enc.setBuffer(sortedB, offset: 0, index: 1)
+            enc.setBuffer(eobB, offset: 0, index: 2); enc.setBuffer(totB, offset: 0, index: 3); enc.setBuffer(curB, offset: 0, index: 4)
+            enc.setBytes(&amp;n32, length: 4, index: 5); enc.setBytes(&amp;bm32, length: 4, index: 6); enc.setBytes(&amp;mp32, length: 4, index: 7)
+            enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
+            enc.setComputePipelineState(scatterPSO)                 // same encoder: runs after align_count
+            enc.setBuffer(idsB, offset: 0, index: 0); enc.setBuffer(sortedB, offset: 0, index: 1); enc.setBuffer(curB, offset: 0, index: 2)
+            enc.setBytes(&amp;n32, length: 4, index: 3)
+            enc.dispatchThreads(MTLSize(width: numel, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
+        let alignMs = time(encodeAlign)
+        // check the alignment on the CPU: padded total, every entry exactly once, each segment holds only its expert
+        let total = Int(ints(totB, 1)[0]), sorted = ints(sortedB, maxPadded), eob = ints(eobB, maxBlocks)
+        var expectTotal = 0; for c in counts { expectTotal += (c + BM - 1) / BM * BM }
+        var seen = [Bool](repeating: false, count: numel); var alignBad = (total == expectTotal) ? 0 : 1
+        for p in 0..&lt;total {
+            let id = Int(sorted[p]), e = Int(eob[p / BM])
+            if id == numel { continue }
+            if id &gt; numel || seen[id] || Int(ids[id]) != e { alignBad += 1 } else { seen[id] = true }
+        }
+        alignBad += seen.filter { !$0 }.count
+        let blocks = total / BM
+        let gemmMs = time { enc in
+            enc.setComputePipelineState(gemmPSO)
+            enc.setBuffer(Xb, offset: 0, index: 0); enc.setBuffer(Wb, offset: 0, index: 1)
+            enc.setBuffer(sortedB, offset: 0, index: 2); enc.setBuffer(eobB, offset: 0, index: 3)
+            enc.setBuffer(totB, offset: 0, index: 4); enc.setBuffer(Cb, offset: 0, index: 5)
+            enc.setBytes(&amp;n32, length: 4, index: 6); enc.setBytes(&amp;bm32, length: 4, index: 7)
+            enc.dispatchThreadgroups(MTLSize(width: N / 32, height: maxBlocks, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: BM / 8 * 32, height: 1, depth: 1))
+        }
+        let combineMs = time { enc in
+            enc.setComputePipelineState(combinePSO)
+            enc.setBuffer(Cb, offset: 0, index: 0); enc.setBuffer(wB, offset: 0, index: 1); enc.setBuffer(outB, offset: 0, index: 2)
+            enc.dispatchThreads(MTLSize(width: N, height: T, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
+        // check the MoE output on the CPU for 8 tokens against a Double reference built from the GPU's routing
+        let out = floats(outB, T * N); var worst = 0.0, refMax = 0.0
+        for c in 0..&lt;8 {
+            let t = c * (T / 8) + (T / 16)
+            for n in stride(from: 0, to: N, by: 37) {
+                var r = 0.0
+                for j in 0..&lt;TOPK {
+                    let e = Int(ids[t * TOPK + j]); var a = 0.0
+                    for k in 0..&lt;K { a += Double(pX[t * K + k]) * Double(pW[(e * N + n) * K + k]) }
+                    r += Double(tw[t * TOPK + j]) * a
+                }
+                worst = max(worst, abs(Double(out[t * N + n]) - r)); refMax = max(refMax, abs(r))
+            }
+        }
+        let waste = Double(total - numel) / Double(total)
+        let useful = 2.0 * Double(numel) * Double(N) * Double(K), executed = 2.0 * Double(total) * Double(N) * Double(K)
+        let wMB = Double(used) * Double(N * K * 2) / 1e6                 // weights of the experts that got any token
+        print(String(format: "  BM=%-3d padded=%-6d blocks=%-5d waste=%5.1f%%  align_ms=%.4f  gemm_ms=%8.4f  useful_TFLOP/s=%5.2f  executed_TFLOP/s=%5.2f  weight_GB/s=%6.1f  combine_ms=%.4f  align_bad=%d  max_abs_err=%.1e (ref max %.1f)",
+                     BM, total, blocks, waste * 100, alignMs, gemmMs, useful / (gemmMs * 1e9), executed / (gemmMs * 1e9),
+                     wMB / gemmMs, combineMs, alignBad, worst, refMax))
+    }
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是实验 Mac（Apple M5，macOS 27.2，Apple Swift 6.4.2）在 2026-11-01（本地时间，PDT）的实测，不是计算值；这是连续三次运行中的第一次：</span><span lang="en">Build and run it. These are measurements on the lab Mac (Apple M5, macOS 27.2, Apple Swift 6.4.2) on 2026-11-01 (local time, PDT), not computed values; this is the first of three consecutive runs:</span><pre>$ swiftc -O moe.swift -o moe
+$ ./moe
+device=Apple M5 threadExecutionWidth=32 maxTotalThreadsPerThreadgroup=1024
+-- E=64 experts, top-k=4, hidden K=1024, expert width N=1024; FP16 in, FP32 accumulate; weights 134 MB
+T=64    entries=256    experts used=63/64  per-expert rows min/avg/max=0/4.0/9  route_ms=0.0620  route_mismatch=0/64
+  BM=16  padded=1008   blocks=63    waste= 74.6%  align_ms=0.0395  gemm_ms=  1.8483  useful_TFLOP/s= 0.29  executed_TFLOP/s= 1.14  weight_GB/s=  71.5  combine_ms=0.0089  align_bad=0  max_abs_err=4.3e-07 (ref max 0.4)
+  BM=32  padded=2016   blocks=63    waste= 87.3%  align_ms=0.0086  gemm_ms=  1.6195  useful_TFLOP/s= 0.33  executed_TFLOP/s= 2.61  weight_GB/s=  81.6  combine_ms=0.0089  align_bad=0  max_abs_err=4.3e-07 (ref max 0.4)
+  BM=64  padded=4032   blocks=63    waste= 93.7%  align_ms=0.0086  gemm_ms=  2.5999  useful_TFLOP/s= 0.21  executed_TFLOP/s= 3.25  weight_GB/s=  50.8  combine_ms=0.0090  align_bad=0  max_abs_err=4.3e-07 (ref max 0.4)
+T=512   entries=2048   experts used=64/64  per-expert rows min/avg/max=21/32.0/52  route_ms=0.0472  route_mismatch=0/64
+  BM=16  padded=2512   blocks=157   waste= 18.5%  align_ms=0.0091  gemm_ms=  3.9417  useful_TFLOP/s= 1.09  executed_TFLOP/s= 1.34  weight_GB/s=  34.1  combine_ms=0.0588  align_bad=0  max_abs_err=5.9e-07 (ref max 0.5)
+  BM=32  padded=2944   blocks=92    waste= 30.4%  align_ms=0.0091  gemm_ms=  2.4007  useful_TFLOP/s= 1.79  executed_TFLOP/s= 2.57  weight_GB/s=  55.9  combine_ms=0.0587  align_bad=0  max_abs_err=5.9e-07 (ref max 0.5)
+  BM=64  padded=4096   blocks=64    waste= 50.0%  align_ms=0.0092  gemm_ms=  2.7182  useful_TFLOP/s= 1.58  executed_TFLOP/s= 3.16  weight_GB/s=  49.4  combine_ms=0.0588  align_bad=0  max_abs_err=5.9e-07 (ref max 0.5)
+T=4096  entries=16384  experts used=64/64  per-expert rows min/avg/max=224/256.0/284  route_ms=0.3369  route_mismatch=0/64
+  BM=16  padded=16784  blocks=1049  waste=  2.4%  align_ms=0.0154  gemm_ms= 21.9316  useful_TFLOP/s= 1.57  executed_TFLOP/s= 1.60  weight_GB/s=   6.1  combine_ms=0.6579  align_bad=0  max_abs_err=3.4e-07 (ref max 0.5)
+  BM=32  padded=17248  blocks=539   waste=  5.0%  align_ms=0.0149  gemm_ms= 13.0843  useful_TFLOP/s= 2.63  executed_TFLOP/s= 2.76  weight_GB/s=  10.3  combine_ms=0.6580  align_bad=0  max_abs_err=3.4e-07 (ref max 0.5)
+  BM=64  padded=18176  blocks=284   waste=  9.9%  align_ms=0.0149  gemm_ms= 12.2019  useful_TFLOP/s= 2.82  executed_TFLOP/s= 3.12  weight_GB/s=  11.0  combine_ms=0.6650  align_bad=0  max_abs_err=3.4e-07 (ref max 0.5)</pre></li>
+      <li><span lang="zh-CN">先看检查。三种 token 数下 <code>route_mismatch</code> 都是 0/64，<code>align_bad</code> 都是 0，输出的最大绝对误差在 10<sup>-7</sup> 量级，而参考值的量级是 0.4–0.5：路由、排序补齐和分组 GEMM 都算对了。专家内部的顺序由原子操作决定，每次运行可能不同，检查只要求每一项恰好出现一次，与 CUDA 内核的行为一致。</span><span lang="en">Look at the checks first. At all three token counts <code>route_mismatch</code> is 0/64 and <code>align_bad</code> is 0, and the largest absolute output error is of order 10<sup>-7</sup> against reference values of order 0.4–0.5: the routing, the align-and-pad and the grouped GEMM are all correct. The order inside each expert is set by the atomics and may differ between runs; the check only requires every entry to appear exactly once, which matches the behaviour of the CUDA kernel.</span></li>
+      <li><span lang="zh-CN">读浪费一列。它只取决于路由和 BM，三次运行完全相同。T = 64 时 256 项分给 63 个专家，平均每个 4 行，最多 9 行，所以无论 BM 取多少，每个专家都只有 1 块，浪费 74.6%、87.3%、93.7%。T = 512 时平均 32 行，浪费 18.5%、30.4%、50.0%。T = 4096 时平均 256 行，浪费降到 2.4%、5.0%、9.9%，接近概念 5 的 (BM − 1) / 2 估计：BM = 64 时每个专家平均多出 28.0 行，估计是 31.5 行。</span><span lang="en">Read the waste column. It depends only on the routing and BM, and is identical across the three runs. At T = 64, 256 entries go to 63 experts, 4 rows on average and 9 at most, so whatever BM is, each expert has exactly 1 block, and the waste is 74.6%, 87.3% and 93.7%. At T = 512 the average is 32 rows and the waste 18.5%, 30.4% and 50.0%. At T = 4096 the average is 256 rows and the waste drops to 2.4%, 5.0% and 9.9%, close to the (BM − 1) / 2 estimate of concept 5: at BM = 64 each expert pads 28.0 rows on average, against an estimate of 31.5.</span></li>
+      <li><span lang="zh-CN">读时间一列，这是本实验的重点。T = 4096 时 BM = 64 用 12.2 ms，BM = 16 用 21.9 ms：多浪费四倍的行，反而快约 1.8 倍。<code>executed_TFLOP/s</code>（连补齐行一起算）从 1.60 升到 3.12：BM 越大，每块权重被越多的行复用，每个线程组里矩阵乘的活越多。T = 64 时排名变了：BM = 32 最快（1.62 ms），BM = 64 最慢（2.60 ms）。这时一次 GEMM 要读约 132 MB 的专家权重，<code>weight_GB/s</code> 到 81.6，而 <code>useful_TFLOP/s</code> 只有 0.33：内核在读权重，补齐的行用的是闲着的算力，但 BM = 64 的每个线程组算的白行多了一倍，又把时间拖长（推断）。三次运行之间每个 GEMM 时间相差最多约 1%。<code>align_ms</code> 只有 0.009–0.015 ms，比 GEMM 小两到三个数量级，而且不随 BM 变化；每次运行测的第一个配置（T = 64，BM = 16）都是约 0.04 ms，本页没有解释这个差别。</span><span lang="en">Read the time columns; this is the point of the lab. At T = 4096, BM = 64 takes 12.2 ms and BM = 16 takes 21.9 ms: four times the wasted rows, and yet about 1.8 times as fast. <code>executed_TFLOP/s</code> (counting the padding rows too) rises from 1.60 to 3.12: the larger BM, the more rows reuse each weight tile and the more matrix work each threadgroup does. At T = 64 the ranking changes: BM = 32 is fastest (1.62 ms) and BM = 64 slowest (2.60 ms). One GEMM then reads about 132 MB of expert weights, <code>weight_GB/s</code> reaches 81.6 and <code>useful_TFLOP/s</code> is only 0.33: the kernel is reading weights and the padding rows use idle compute, but each BM = 64 threadgroup computes twice as many empty rows, which drags the time out again (an inference). Across the three runs each GEMM time varied by about 1% at most. <code>align_ms</code> is only 0.009–0.015 ms, two to three orders of magnitude below the GEMM, and does not change with BM; the first configuration measured in every run (T = 64, BM = 16) took about 0.04 ms, a difference this page does not explain.</span></li>
+      <li><span lang="zh-CN">自己改两处。第一，让路由偏向少数专家：给 <code>Wgb</code> 的前 8 行乘 2（或在 <code>route_topk</code> 里给前 8 个专家的 logit 加一个偏置），看 T = 512 时的浪费和 GEMM 时间怎样变。第二，加一个 BM = 128 的配置（要把 <code>grouped_gemm</code> 里 <code>As</code>、<code>Cs</code>、<code>rowId</code> 的 64 改成 128，线程组变成 512 个线程），在 T = 4096 上看它是否还比 BM = 64 快，threadgroup memory 是否还放得下。</span><span lang="en">Change two things yourself. First, skew the routing towards a few experts: multiply the first 8 rows of <code>Wgb</code> by 2 (or add a bias to the logits of the first 8 experts in <code>route_topk</code>), and see how the waste and the GEMM time change at T = 512. Second, add a BM = 128 configuration (change the 64 in <code>As</code>, <code>Cs</code> and <code>rowId</code> of <code>grouped_gemm</code> to 128, making threadgroups of 512 threads), and see at T = 4096 whether it still beats BM = 64 and whether threadgroup memory still fits.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>align_waste.txt</code>（每个 T、<code>skew</code> 和 BM 的项数、补齐后行数、浪费和对齐时间）和 H100 层 <code>grouped_fp8.py</code> 的输出表；Lab B 在你的 Mac 上连续三次运行的输出，以及偏斜路由和 BM = 128 两处改动的结果；一段 10 行以内的解释：为什么补齐要按专家做到 BM 的整数倍，为什么解码时浪费九成仍然不要紧，以及为什么预填充时浪费最少的 BM 不是最快的。</div>
+    <div class="note" lang="en">Deliverables: Lab A’s <code>align_waste.txt</code> (entries, padded rows, waste and align time for each T, <code>skew</code> and BM) and the output table of <code>grouped_fp8.py</code> on the H100 tier; the output of three consecutive Lab B runs on your Mac, and the results of the two changes, skewed routing and BM = 128; and an explanation in 10 lines or fewer of why padding is done per expert to a multiple of BM, why wasting nine tenths in decode still does not matter, and why in prefill the BM with the least waste is not the fastest.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/phase-4">
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">1. <code>moe_align_block_size</code> 为什么要把每个专家的行数补到 BLOCK_SIZE_M 的整数倍？</p>
+      <p lang="en">1. Why does <code>moe_align_block_size</code> pad each expert’s row count to a multiple of BLOCK_SIZE_M?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">这样分组 GEMM 的每个 M 块只属于一个专家，只需查一次专家号、读一份权重</span><span lang="en">So that every M block of the grouped GEMM belongs to one expert and needs one expert lookup and one set of weights</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">这样每个专家拿到的行数相同，负载就均衡了</span><span lang="en">So that every expert gets the same number of rows, which balances the load</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">FP8 的 tensor core 只接受行数是 128 的倍数的矩阵</span><span lang="en">FP8 tensor cores only accept matrices whose row count is a multiple of 128</span></label>
+      <div class="why" hidden><span lang="zh-CN">补齐只把每个专家的行数向上取整到 BM 的倍数，热门专家仍然比冷门的多好几块，所以 b 不对，负载均衡是路由偏置和冗余专家的事。c 不对：BM 在 SGLang 的默认配置里是 16 或 64，BF16 也一样要补齐，与 FP8 无关。a 正确：Triton 内核每个程序读一次 <code>expert_ids[pid_m]</code>，整块都乘同一个专家的权重，所以一块里不能混两个专家。</span><span lang="en">Padding only rounds each expert’s row count up to a multiple of BM, and a popular expert still gets several more blocks than an unpopular one, so b is wrong; load balancing is the job of routing biases and redundant experts. c is wrong: BM is 16 or 64 in SGLang’s default configs, and BF16 pads just the same, so it has nothing to do with FP8. a is right: each program of the Triton kernel reads <code>expert_ids[pid_m]</code> once and multiplies the whole block by that one expert’s weights, so a block cannot mix two experts.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">2. Qwen3-30B-A3B（128 个专家，每 token 8 个）解码一个 token，BM = 16。补齐浪费大约是多少，这一步主要花时间在哪里？</p>
+      <p lang="en">2. Qwen3-30B-A3B (128 experts, 8 per token) decodes one token with BM = 16. About how much is the padding waste, and where does this step mainly spend its time?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">约 50%；时间花在补齐行的矩阵乘上</span><span lang="en">About 50%; the time goes into the matrix products of the padding rows</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">约 94%；时间花在读那 8 个专家的权重上</span><span lang="en">About 94%; the time goes into reading the weights of those 8 experts</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">0%；只有一个 token 时不需要补齐</span><span lang="en">0%; with one token there is no padding</span></label>
+      <div class="why" hidden><span lang="zh-CN">8 项分给 8 个不同的专家，各 1 行，每个补到 16 行，共 128 行，其中 120 行是补齐，约 94%，所以 a 和 c 都不对；c 还忽略了补齐是按专家做的，一个专家只有一行也要补满一块。浪费虽高，这一步的强度只有约 1 FLOP/字节，8 个专家约 75.5 MB 的权重要从显存读一遍，白算的行用的是本来闲着的算力。</span><span lang="en">The 8 entries go to 8 different experts with 1 row each, each padded to 16 rows, 128 rows in all, of which 120 are padding, about 94%, so a and c are both wrong; c also forgets that padding is per expert, and an expert with a single row still fills a whole block. High as the waste is, this step’s intensity is only about 1 FLOP per byte: about 75.5 MB of weights for the 8 experts must be read from memory once, and the wasted rows use compute that would sit idle anyway.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">3. Lab B 在 4096 个 token 时，BM = 64 浪费 9.9%，BM = 16 浪费 2.4%，但 BM = 64 快约 1.8 倍。主要原因是什么？</p>
+      <p lang="en">3. In Lab B at 4096 tokens, BM = 64 wastes 9.9% and BM = 16 wastes 2.4%, yet BM = 64 is about 1.8 times as fast. What is the main reason?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">BM = 64 时对齐内核快得多</span><span lang="en">The align kernel is much faster with BM = 64</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">BM = 64 时补齐行不参与矩阵乘</span><span lang="en">With BM = 64 the padding rows take no part in the matrix product</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">每块权重被 64 行而不是 16 行复用，每个线程组的矩阵乘更满，执行速率从约 1.6 升到约 3.1 TFLOP/s</span><span lang="en">Each weight tile is reused by 64 rows instead of 16 and each threadgroup’s matrix product is fuller, raising the executed rate from about 1.6 to about 3.1 TFLOP/s</span></label>
+      <div class="why" hidden><span lang="zh-CN">对齐内核在三种 BM 下都是约 0.015 ms，比 GEMM 小三个数量级，所以 a 不对。补齐行在 Lab B 的内核里和 Triton 内核里一样，读成 0 之后照样参与矩阵乘，所以 b 不对，那正是浪费的定义。c 正确：多算约 8% 的行（18176 对 16784），换来执行速率接近翻倍。</span><span lang="en">The align kernel takes about 0.015 ms at all three BM values, three orders of magnitude below the GEMM, so a is wrong. Padding rows, in Lab B’s kernel as in the Triton kernel, are loaded as 0 and still take part in the matrix product, so b is wrong; that is the very definition of the waste. c is right: computing about 8% more rows (18176 against 16784) buys nearly twice the executed rate.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. 专家并行的解码阶段，SGLang 的 <code>--deepep-mode auto</code> 选 DeepEP 的哪种内核，为什么？</p>
+      <p lang="en">4. In the decode phase under expert parallelism, which DeepEP kernels does SGLang’s <code>--deepep-mode auto</code> choose, and why?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">low-latency：它与 CUDA 图兼容，延迟低，输出能直接喂给 DeepGEMM 的 masked 分组 GEMM</span><span lang="en">Low-latency: it is compatible with CUDA graphs, has low latency, and its output feeds DeepGEMM’s masked grouped GEMM directly</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">normal：它的带宽最高，解码最需要带宽</span><span lang="en">Normal: it has the highest bandwidth, which decode needs most</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">都不选：解码时每个 token 只有一个，不需要 dispatch</span><span lang="en">Neither: in decode each token is alone and needs no dispatch</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>exec_.py</code> 的帮助文字说 <code>auto</code> 对解码批用 <code>low_latency</code>、对预填充批用 <code>normal</code>。normal 内核在 dispatch 时 CPU 要等 GPU 的接收计数，DeepEP 的 README 说这与 CUDA 图不兼容，而解码步要进 CUDA 图，所以 b 不对。c 不对：专家分在多块 GPU 上时，一个 token 的 8 个专家多半不在本卡，每一步都要发出去再收回来。</span><span lang="en">The help text in <code>exec_.py</code> says <code>auto</code> means <code>low_latency</code> for decode batches and <code>normal</code> for prefill batches. During dispatch the normal kernels make the CPU wait for the GPU’s received count, which the DeepEP README says is incompatible with CUDA graphs, and decode steps run in CUDA graphs, so b is wrong. c is wrong: with the experts spread over several GPUs, most of one token’s 8 experts are not on the local GPU, so every step sends the token out and brings the results back.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/csrc/moe/moe_align_kernel.cu">aot/csrc/moe/moe_align_kernel.cu</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py">triton_utils/moe_align_block_size.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/moe/moe_align.py">ops/moe/moe_align.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/moe/moe_align_small_numel.py">ops/moe/moe_align_small_numel.py</a> <span class="lvl" lang="zh-CN">源码，中级（v0.5.22 标签，2026-11-01 用 curl 取回）：排序补齐的 CUDA 内核、Python 包装与它的上界、JIT 版本和小批量的 Triton 版本；概念 2、动画 (a) 和 Lab A</span><span class="lvl" lang="en">Source, intermediate (the v0.5.22 tag, fetched with curl on 2026-11-01): the align-and-pad CUDA kernel, the Python wrapper and its bound, the JIT version and the small-batch Triton version; concept 2, diagram (a) and Lab A</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py">ops/moe/fused_moe_triton_kernels.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py">triton_utils/fused_moe.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py">fused_moe_triton_config.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/moe/topk.py">srt/layers/moe/topk.py</a> <span class="lvl" lang="zh-CN">源码，中级到进阶：Triton 的 <code>fused_moe_kernel</code>、一层 MoE 的调用顺序、默认的块大小，以及路由；概念 1、3 和动画 (b)</span><span class="lvl" lang="en">Source, intermediate to advanced: Triton’s <code>fused_moe_kernel</code>, the call order of one MoE layer, the default block sizes, and routing; concepts 1 and 3 and diagram (b)</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/moe/token_dispatcher/deepep.py">token_dispatcher/deepep.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/moe/moe_runner/deep_gemm.py">moe_runner/deep_gemm.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py">deep_gemm_wrapper/entrypoint.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/exec_.py">arg_groups/fields/exec_.py</a> <span class="lvl" lang="zh-CN">源码，进阶：SGLang 怎样调用 DeepEP 的两种模式和 DeepGEMM 的两种布局，以及 <code>--moe-a2a-backend</code>、<code>--moe-runner-backend</code>、<code>--deepep-mode</code> 三个参数；概念 3、4</span><span class="lvl" lang="en">Source, advanced: how SGLang calls DeepEP’s two modes and DeepGEMM’s two layouts, and the three flags <code>--moe-a2a-backend</code>, <code>--moe-runner-backend</code> and <code>--deepep-mode</code>; concepts 3 and 4</span></li>
+    <li><a href="https://github.com/deepseek-ai/DeepGEMM/tree/v2.1.1.post3">deepseek-ai/DeepGEMM @ v2.1.1.post3</a> · <a href="https://github.com/deepseek-ai/DeepGEMM/blob/v2.1.1.post3/tests/test_fp8.py">tests/test_fp8.py</a> <span class="lvl" lang="zh-CN">README 与测试代码，进阶（2026-11-01 读取）：contiguous 与 masked 两种分组布局、对齐要求、硬件要求，以及 FP8 量化的参考写法；概念 3 和 Lab A 第 4 步</span><span class="lvl" lang="en">README and test code, advanced (read 2026-11-01): the contiguous and masked grouped layouts, the alignment requirement, the hardware requirements, and reference FP8 quantization; concept 3 and Lab A step 4</span></li>
+    <li><a href="https://github.com/deepseek-ai/DeepEP/tree/v1.2.1">deepseek-ai/DeepEP @ v1.2.1</a> <span class="lvl" lang="zh-CN">README，进阶（2026-11-01 读取）：normal 与 low-latency 两套 dispatch 和 combine 内核、作者在 H800 上的测量、硬件与网络要求；概念 4</span><span class="lvl" lang="en">README, advanced (read 2026-11-01): the normal and low-latency sets of dispatch and combine kernels, the authors’ measurements on H800s, hardware and network requirements; concept 4</span></li>
+    <li><a href="https://arxiv.org/abs/2412.19437">DeepSeek-AI, DeepSeek-V3 Technical Report (arXiv:2412.19437, v2)</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json">DeepSeek-V3 config.json</a> · <a href="https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json">Qwen3-30B-A3B config.json</a> <span class="lvl" lang="zh-CN">论文与配置，中级到进阶：DeepSeekMoE 的路由（第 2.1.2 节）、FP8 细粒度量化（第 3.3.2 节）、推理部署与专家并行（第 3.4 节），以及本页用到的模型形状（2026-11-01 读取）</span><span class="lvl" lang="en">Paper and configurations, intermediate to advanced: DeepSeekMoE routing (section 2.1.2), fine-grained FP8 quantization (section 3.3.2), inference deployment and expert parallelism (section 3.4), and the model shapes used on this page (read 2026-11-01)</span></li>
+    <li><a href="https://arxiv.org/abs/1701.06538">Shazeer et al., Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer (arXiv:1701.06538, v1)</a> · <a href="https://arxiv.org/abs/2211.15841">Gale et al., MegaBlocks: Efficient Sparse Training with Mixture-of-Experts (arXiv:2211.15841, v1)</a> <span class="lvl" lang="zh-CN">论文，中级：稀疏门控 MoE 的提出，以及丢 token 与补齐之间的取舍和块稀疏的替代办法；概念 1、5</span><span class="lvl" lang="en">Papers, intermediate: the introduction of the sparsely gated MoE, and the choice between dropping tokens and padding, with block sparsity as the alternative; concepts 1 and 5</span></li>
+    <li><a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification</a> · <a href="https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpustarttime">MTLCommandBuffer.gpuStartTime</a> <span class="lvl" lang="zh-CN">官方文档，中级：Lab B 用到的 <code>simdgroup_matrix</code>、<code>simd_max</code>、<code>simd_min</code>、threadgroup 与 device 上的原子操作，以及 GPU 时间戳</span><span class="lvl" lang="en">Official docs, intermediate: the <code>simdgroup_matrix</code>, <code>simd_max</code>, <code>simd_min</code>, threadgroup and device atomics used in Lab B, and the GPU timestamps</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">讲并行直方图的一章（共享内存私有化与原子计数）和讲前缀和的一章对应概念 2 与 Lab B 的对齐内核；讲矩阵乘法与分块的一章对应概念 3、5 与 Lab B 的分组 GEMM（块越大复用越多）</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">The chapter on parallel histograms (privatization in shared memory and atomic counting) and the chapter on the prefix sum match concept 2 and Lab B’s align kernels; the chapter on matrix multiplication with tiling matches concepts 3 and 5 and Lab B’s grouped GEMM (larger tiles, more reuse)</span></li>
+    <li lang="zh-CN">John L. Hennessy &amp; David A. Patterson, 《Computer Architecture: A Quantitative Approach》, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">第 4 章「Data-Level Parallelism in Vector, SIMD, and GPU Architectures」中讲 Roofline 可视化性能模型的一节对应概念 5：解码时 MoE 的 GEMM 远在拐点以下，白算的行几乎不花时间</span></li>
+    <li lang="en">John L. Hennessy &amp; David A. Patterson, <em>Computer Architecture: A Quantitative Approach</em>, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">The section on the Roofline visual performance model in Chapter 4, “Data-Level Parallelism in Vector, SIMD, and GPU Architectures”, matches concept 5: in decode the MoE GEMMs sit far below the ridge, so wasted rows cost almost no time</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-3-cuda-graphs-plan-run/index.html">← <span lang="zh-CN">Phase 3 · CUDA 图与 plan()/run() 拆分</span><span lang="en">Phase 3 · CUDA Graphs and the plan()/run() Split</span></a>
+    <a href="../phase-5-fusions/index.html"><span lang="zh-CN">Phase 5 · 融合 →</span><span lang="en">Phase 5 · Fusions →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
