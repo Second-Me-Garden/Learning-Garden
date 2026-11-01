@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 1 · Attention and KV-Cache Layouts · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page">Phase 1 · Attention and KV-Cache Layouts</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 1 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 1 / 9 · about 1–2 weeks</p>
+  <h1>Attention and KV-Cache Layouts <span class="en" lang="zh-CN">注意力与 KV 缓存布局：radix 树、按 token 散落的页、indptr/indices 这份 CSR 合同、只算一次共享前缀的 cascade</span><span class="en" lang="en">The radix tree, token-granular scattered pages, the indptr/indices CSR contract, and cascade attention that computes a shared prefix once</span></h1>
+  <p class="lede" lang="zh-CN">运行时（第 2 层）怎么存 KV 缓存，决定了注意力内核（第 4 层）怎么读它。SGLang 的 RadixAttention 把所有请求的 KV 放在一个按 token 分槽的池子里，用一棵 radix 树记住哪段 token 前缀已经算过、放在哪些槽位；两个请求共享前缀时，它们的槽位表里就是同一串槽位号，KV 不复制。代价是每个请求的 KV 散落在池子各处，内核不能再按「起点 + 长度」连续读，而要通过 FlashInfer 规定的两个数组 <code>indptr</code> 和 <code>indices</code>（一种 CSR 格式）逐个找到槽位。这一阶段在 v0.5.22 的源码里跟着这两个数组从 radix 树一路走到 FlashInfer 的 <code>plan()</code>，再看 cascade 怎样把共享前缀只读一次。这台 Apple M5 上实测：B = 64 个请求、每个 8192 个 token 的解码注意力，KV 完全打乱成单 token 页时比连续缓存只慢约 4%；一半前缀共享时反而快约三分之一，因为重复读到的槽位落在缓存里。</p>
+  <p class="lede" lang="en">How the runtime (layer 2) stores the KV cache decides how the attention kernel (layer 4) reads it. SGLang’s RadixAttention keeps the KV of every request in one pool of token-sized slots, and a radix tree remembers which token prefixes have already been computed and which slots hold them; when two requests share a prefix, their slot tables hold the same run of slot numbers, and no KV is copied. The price is that each request’s KV lies scattered across the pool, so the kernel can no longer read it as a start plus a length; it has to find every slot through the two arrays FlashInfer defines, <code>indptr</code> and <code>indices</code> (a CSR format). This phase follows those two arrays through the v0.5.22 source, from the radix tree to FlashInfer’s <code>plan()</code>, then looks at how cascade attention reads a shared prefix only once. Measured on this Apple M5: decode attention over B = 64 requests of 8192 tokens each is only about 4% slower when the KV is fully shuffled into one-token pages than over a contiguous cache; with half of the prefix shared it is about a third faster, because the repeated slots are served from the cache.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出 SGLang radix 树的一个节点存什么（键是 token 序列，值是 KV 池的槽位号），以及匹配、分裂、加锁和驱逐各在 <code>radix_cache.py</code> 的哪里。</li>
+      <li lang="en">Say what a node of SGLang’s radix tree stores (the key is a token sequence, the value is KV-pool slot numbers), and where matching, splitting, locking and eviction live in <code>radix_cache.py</code>.</li>
+      <li lang="zh-CN">给定几个请求的槽位，手写出 FlashInfer 分页 API 要的 <code>kv_indptr</code>、<code>kv_indices</code> 和 <code>kv_last_page_len</code>，以及不分页的 ragged API 要的 <code>indptr</code>。</li>
+      <li lang="en">Given the slots of a few requests, write out by hand the <code>kv_indptr</code>, <code>kv_indices</code> and <code>kv_last_page_len</code> that FlashInfer’s paged API takes, and the <code>indptr</code> its unpaged ragged API takes.</li>
+      <li lang="zh-CN">用注意力状态的合并（log-sum-exp）解释 cascade 为什么能只算一次共享前缀，以及 SGLang 预填充里同样的合并出现在哪。</li>
+      <li lang="en">Explain with the merge of attention states (log-sum-exp) why cascade attention can compute a shared prefix once, and where the same merge appears in SGLang’s prefill.</li>
+      <li lang="zh-CN">在 <code>flashinfer_backend.py</code> 里指出一个解码批次的 <code>kv_indptr</code> 和 <code>kv_indices</code> 是在哪一行、由哪个内核建出来的。</li>
+      <li lang="en">Point to the line in <code>flashinfer_backend.py</code> where a decode batch’s <code>kv_indptr</code> and <code>kv_indices</code> are built, and to the kernel that builds them.</li>
+      <li lang="zh-CN">在 Metal 里写一个通过 indptr/indices 取 KV 的解码注意力内核，量出它和连续缓存的带宽差。</li>
+      <li lang="en">Write a decode attention kernel in Metal that fetches KV through indptr/indices, and measure its bandwidth against a contiguous cache.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-the-stack/index.html">Phase 0</a>：四层、一步解码里的算子、为什么解码受带宽限制。本阶段的 Lab B 就是在量这个带宽。</li>
+    <li lang="en"><a href="../phase-0-the-stack/index.html">Phase 0</a>: the four layers, the ops of one decode step, and why decode is bandwidth-bound. Lab B of this phase measures exactly that bandwidth.</li>
+    <li lang="zh-CN">注意力本身：<code>softmax(q·Kᵀ / √d)·V</code>，多头和 GQA（多个查询头共用一个 KV 头），以及 KV 缓存为什么存在。</li>
+    <li lang="en">Attention itself: <code>softmax(q·Kᵀ / √d)·V</code>, multiple heads and GQA (several query heads sharing one KV head), and why the KV cache exists.</li>
+    <li lang="zh-CN">GPU 专题里的 warp 级归约（<code>__shfl_xor_sync</code>，在 Metal 里是 <code>simd_sum</code>）和合并访存。</li>
+    <li lang="en">From the GPU topic: warp-level reductions (<code>__shfl_xor_sync</code>, which is <code>simd_sum</code> in Metal) and coalesced memory access.</li>
+    <li lang="zh-CN">操作系统里的分页和页表：PagedAttention 的名字就来自这里。</li>
+    <li lang="en">Paging and page tables from operating systems: PagedAttention takes its name from them.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+  <p lang="zh-CN">下文的源码路径和行号都在 SGLang 的 <code>v0.5.22</code> 标签下，FlashInfer 的在 <code>v0.7.1</code> 标签下（SGLang 的 <code>python/pyproject.toml</code> 钉的就是 <code>flashinfer_python[cu13]==0.7.1</code>），都是 2026-11-01 从 raw.githubusercontent.com 取回后读的。</p><p lang="en">Every source path and line number below is at the <code>v0.5.22</code> tag of SGLang, and FlashInfer’s at its <code>v0.7.1</code> tag (SGLang’s <code>python/pyproject.toml</code> pins exactly <code>flashinfer_python[cu13]==0.7.1</code>); all were fetched from raw.githubusercontent.com and read on 2026-11-01.</p>
+
+  <h3 lang="zh-CN">1. RadixAttention：一棵以 token 为键、以槽位为值的 radix 树</h3><h3 lang="en">1. RadixAttention: a radix tree keyed by tokens, valued by slots</h3>
+  <p lang="zh-CN">SGLang 论文（arXiv:2312.07104 v2）的说法是：运行时不在请求结束后丢掉 KV，而是把所有请求的 KV 作为一个 LRU 缓存放在 radix 树里，新请求来了先找最长的已缓存前缀，只为剩下的 token 做预填充。radix 树是压缩过的前缀树（trie）：一条边上可以挂一整段 token，而不是一个 token 一层。v0.5.22 里它在 <code>python/sglang/srt/mem_cache/radix_cache.py</code>：</p><p lang="en">The SGLang paper (arXiv:2312.07104 v2) puts it this way: the runtime does not throw the KV away when a request ends; it keeps the KV of all requests as an LRU cache inside a radix tree, and a new request first looks up its longest cached prefix and prefills only the remaining tokens. A radix tree is a compressed prefix tree (trie): one edge can carry a whole run of tokens instead of one token per level. At v0.5.22 it lives in <code>python/sglang/srt/mem_cache/radix_cache.py</code>:</p>
+  <ul>
+    <li lang="zh-CN"><strong>节点</strong>（<code>TreeNode</code>，第 250–278 行）：<code>key</code> 是这段 token 的 id，<code>value</code> 是一个张量，放的是这些 token 在 KV 池里的<strong>槽位号</strong>，不是 K 和 V 本身；<code>lock_ref</code> 是引用计数，<code>last_access_time</code> 给驱逐策略用。<code>value</code> 为 <code>None</code> 表示已被驱逐。</li>
+    <li lang="en"><strong>The node</strong> (<code>TreeNode</code>, lines 250–278): <code>key</code> holds the token ids of the run, and <code>value</code> is a tensor holding the <strong>slot numbers</strong> of those tokens in the KV pool, not the K and V themselves; <code>lock_ref</code> is a reference count, and <code>last_access_time</code> feeds the eviction policy. A <code>value</code> of <code>None</code> means the node was evicted.</li>
+    <li lang="zh-CN"><strong>匹配</strong>（<code>match_prefix</code>，第 364 行起；遍历在 <code>_match_prefix_helper</code>，第 651 行）：沿树往下走，把一路上各节点的 <code>value</code> 收集起来，拼起来就是已缓存前缀的槽位。如果匹配在某个节点的中间结束，就调用 <code>_split_node</code>（第 677 行）把它切成两段，让边界恰好落在节点之间；切的只是槽位号张量，KV 本身不动。</li>
+    <li lang="en"><strong>Matching</strong> (<code>match_prefix</code>, from line 364; the walk is in <code>_match_prefix_helper</code>, line 651): walk down the tree and collect the <code>value</code> of each node on the way; joined together they are the slots of the cached prefix. If the match ends in the middle of a node, <code>_split_node</code> (line 677) cuts it in two so that the boundary falls exactly between nodes; only the tensor of slot numbers is cut, and the KV itself does not move.</li>
+    <li lang="zh-CN"><strong>插入</strong>（<code>insert</code>，第 428 行）：请求算完新 token 后，把整条 token 序列和它的槽位插回树里，已存在的部分只更新访问时间，新的部分成为新节点。</li>
+    <li lang="en"><strong>Insertion</strong> (<code>insert</code>, line 428): after a request computes new tokens, its whole token sequence and slots go back into the tree; the parts already there only get a fresh access time, and the new part becomes a new node.</li>
+    <li lang="zh-CN"><strong>加锁</strong>（<code>inc_lock_ref</code> / <code>dec_lock_ref</code>，第 582–616 行）：正在运行的请求从自己的末端节点一路往上把 <code>lock_ref</code> 加一。论文写的是「每个节点维护一个引用计数，表示有多少个运行中的请求在用它；计数为零才可驱逐」。</li>
+    <li lang="en"><strong>Locking</strong> (<code>inc_lock_ref</code> / <code>dec_lock_ref</code>, lines 582–616): a running request adds one to <code>lock_ref</code> on every node from its last node up to the root. The paper says each node keeps a reference counter of how many running requests use it, and a node is evictable only when the counter is zero.</li>
+    <li lang="zh-CN"><strong>驱逐</strong>（<code>evict</code>，第 552–580 行）：把可驱逐的叶子放进一个按策略排序的堆，逐个弹出，把它 <code>value</code> 里的槽位还给分配器（<code>free_segment</code>），父节点变成叶子后也进堆。策略由 <code>--radix-eviction-policy</code> 选，默认 <code>lru</code>，还有 lfu、slru、priority、tlru（<code>python/sglang/srt/arg_groups/fields/memory.py</code> 第 25–41 行）；<code>--disable-radix-cache</code> 整个关掉它（第 64 行）。</li>
+    <li lang="en"><strong>Eviction</strong> (<code>evict</code>, lines 552–580): the evictable leaves go into a heap ordered by the policy and are popped one by one; the slots in each <code>value</code> go back to the allocator (<code>free_segment</code>), and a parent that becomes a leaf joins the heap. The policy is chosen by <code>--radix-eviction-policy</code>, default <code>lru</code>, with lfu, slru, priority and tlru as the others (lines 25–41 of <code>python/sglang/srt/arg_groups/fields/memory.py</code>); <code>--disable-radix-cache</code> turns the whole thing off (line 64).</li>
+  </ul>
+  <p lang="zh-CN">调度器那一侧，论文还给了缓存感知调度：等待队列按「最长共享前缀优先」排序，论文指出这等价于对 radix 树做深度优先遍历，能提高命中率。键里除了 token 还可以带一个 <code>extra_key</code>（<code>match_prefix</code> 的文档字符串）：不同 LoRA 适配器的请求即使 token 相同，也不会共享节点。</p><p lang="en">On the scheduler side, the paper adds cache-aware scheduling: the waiting queue is sorted longest-shared-prefix first, which the paper notes is equivalent to a depth-first walk of the radix tree and raises the hit rate. Besides tokens, a key can carry an <code>extra_key</code> (the docstring of <code>match_prefix</code>): requests for different LoRA adapters never share nodes even when their tokens are identical.</p>
+  <p lang="zh-CN">延伸阅读：Sedgewick 和 Wayne《Algorithms》第 4 版 5.2 节 Tries（前缀树和它的压缩形式）；Chip Huyen《AI Engineering》讲推理优化的第 9 章里关于提示缓存（prompt caching）的部分（服务层面为什么要复用前缀）。</p><p lang="en">Further reading: section 5.2, Tries, of Sedgewick and Wayne, <em>Algorithms</em>, 4th ed. (prefix trees and their compressed form); the part on prompt caching in chapter 9, on inference optimization, of Chip Huyen’s <em>AI Engineering</em> (why a server reuses prefixes at all).</p>
+
+  <h3 lang="zh-CN">2. 按 token 分槽的页：散落，并且跨请求共享</h3><h3 lang="en">2. Token-granular pages: scattered and shared across requests</h3>
+  <p lang="zh-CN">KV 存在哪里，要看两张表，都在 <code>python/sglang/srt/mem_cache/memory_pool.py</code>：</p><p lang="en">Where the KV lives takes two tables, both in <code>python/sglang/srt/mem_cache/memory_pool.py</code>:</p>
+  <ul>
+    <li lang="zh-CN"><strong>KV 池</strong>（<code>MHATokenToKVPool</code>，第 2198 行）：默认的 NHD 布局下，每一层一个 K 张量和一个 V 张量，形状是 <code>(size + page_size, head_num, head_dim)</code>（<code>_kv_buffer_shapes</code>，第 2518–2529 行）。第一维就是<strong>槽位</strong>：一个槽位放一个 token 在这一层的全部 KV 头。多出来的那一页是填充页，CUDA 图里填充出来的假 token 写到这里（第 2538 行的注释）。</li>
+    <li lang="en"><strong>The KV pool</strong> (<code>MHATokenToKVPool</code>, line 2198): in the default NHD layout, each layer has one K tensor and one V tensor of shape <code>(size + page_size, head_num, head_dim)</code> (<code>_kv_buffer_shapes</code>, lines 2518–2529). The first dimension is the <strong>slot</strong>: one slot holds all KV heads of one token at this layer. The extra page is a padding page that absorbs the writes of dummy padded tokens in CUDA graphs (the comment at line 2538).</li>
+    <li lang="zh-CN"><strong>槽位表</strong>（<code>ReqToTokenPool</code>，第 374 行）：一个 <code>int32</code> 张量 <code>req_to_token</code>，形状 <code>(size + 1, max_context_len)</code>（第 404–406 行），每个运行中的请求占一行，第 <em>t</em> 列是它第 <em>t</em> 个 token 的槽位号。第 0 行同样是给 CUDA 图填充用的。</li>
+    <li lang="en"><strong>The slot table</strong> (<code>ReqToTokenPool</code>, line 374): an <code>int32</code> tensor <code>req_to_token</code> of shape <code>(size + 1, max_context_len)</code> (lines 404–406); each running request owns one row, and column <em>t</em> holds the slot number of its <em>t</em>-th token. Row 0 is again a padding row for CUDA graphs.</li>
+  </ul>
+  <p lang="zh-CN">论文写明这些 KV 张量「以非连续的分页布局存放，每页的大小等于一个 token」。v0.5.22 的 FlashInfer 后端仍是这样交给内核的：它调 <code>plan</code> 时页大小那个位置参数写死为 <code>1</code>，<code>kv_last_page_len</code> 全是 1（<code>python/sglang/srt/layers/attention/flashinfer_backend.py</code> 第 461–463、1807、1826、2343 行）。<code>--page-size</code> 选项存在（<code>fields/schedule.py</code> 第 139 行，默认 <code>None</code>，启动时再解析）；页大于 1 时，radix 树的匹配长度向下取整到页的整数倍（<code>RadixKey.page_aligned</code>，第 147–151 行），而建索引的 Triton 内核把页号还原成 token 槽位：<code>token = entry * ps + pos % ps</code>（<code>python/sglang/kernels/ops/kvcache/kv_indices.py</code> 的文档字符串），所以 FlashInfer 看到的还是逐 token 的槽位。</p><p lang="en">The paper states that these KV tensors are stored in a non-contiguous, paged layout where the size of each page is one token. The v0.5.22 FlashInfer backend still hands them to the kernel that way: when it calls <code>plan</code>, the positional page-size argument is the literal <code>1</code>, and <code>kv_last_page_len</code> is all ones (lines 461–463, 1807, 1826 and 2343 of <code>python/sglang/srt/layers/attention/flashinfer_backend.py</code>). A <code>--page-size</code> option exists (line 139 of <code>fields/schedule.py</code>, default <code>None</code>, resolved at start-up); with pages larger than one, the radix match length is rounded down to a whole number of pages (<code>RadixKey.page_aligned</code>, lines 147–151), and the Triton kernel that builds the indices turns page numbers back into token slots as <code>token = entry * ps + pos % ps</code> (the docstring of <code>python/sglang/kernels/ops/kvcache/kv_indices.py</code>), so FlashInfer still sees one slot per token.</p>
+  <p lang="zh-CN">两个后果。<strong>散落</strong>：分配器从空闲槽位里随便拿，请求结束、节点被驱逐后槽位又回到空闲表，服务一段时间以后，一个请求的 token 在池里基本是乱序的（推断，依据是驱逐逐节点归还槽位）。<strong>共享</strong>：请求 B 命中请求 A 留下的前缀时，B 那一行 <code>req_to_token</code> 的前几列直接写上 A 的槽位号，后面的列才写新分配的槽位（<code>mem_cache/allocation.py</code> 第 97–104 行）；两行指向同一批槽位，KV 只存一份。这和操作系统里两个进程把同一个物理页映射进各自的页表是同一个想法；PagedAttention（Kwon 等，arXiv:2309.06180）先在 vLLM 里用块（block）做了这件事，SGLang 把块缩到了一个 token。</p><p lang="en">Two consequences follow. <strong>Scattering</strong>: the allocator takes any free slot, and slots return to the free list when requests end and nodes are evicted, so after a while of serving, the tokens of one request sit in the pool in essentially random order (inference, based on eviction returning slots node by node). <strong>Sharing</strong>: when request B hits the prefix that request A left behind, the first columns of B’s row of <code>req_to_token</code> are simply written with A’s slot numbers, and only the later columns get newly allocated slots (lines 97–104 of <code>mem_cache/allocation.py</code>); the two rows point at the same slots, and the KV is stored once. It is the same idea as two processes mapping one physical page into their own page tables; PagedAttention (Kwon et al., arXiv:2309.06180) first did this in vLLM with blocks of tokens, and SGLang shrinks the block to one token.</p>
+  <p lang="zh-CN">延伸阅读：Arpaci-Dusseau《Operating Systems: Three Easy Pieces》第 18 章 Introduction to Paging 和第 20 章 Advanced Page Tables（页表、共享页，以及页太大时的内部碎片）。</p><p lang="en">Further reading: chapter 18, Introduction to Paging, and chapter 20, Advanced Page Tables, of Arpaci-Dusseau, <em>Operating Systems: Three Easy Pieces</em> (page tables, shared pages, and the internal fragmentation of pages that are too large).</p>
+
+  <h3 lang="zh-CN">3. CSR 合同：indptr 和 indices</h3><h3 lang="en">3. The CSR contract: indptr and indices</h3>
+  <p lang="zh-CN">FlashInfer 不管理页表。它的文档 <code>docs/tutorials/kv_layout.rst</code> 的 FAQ 写得很直接：分页表怎么分配、怎么回收由服务引擎决定，FlashInfer 只负责在给定的 KV 上算注意力。两边之间的合同就是几个 <code>int32</code> 数组（文档特别提醒用 <code>int64</code> 会出索引错误）：</p><p lang="en">FlashInfer does not manage the page table. The FAQ of its <code>docs/tutorials/kv_layout.rst</code> says it plainly: how the page table is allocated and reclaimed is up to the serving engine, and FlashInfer only computes attention over the KV it is given. The contract between the two is a handful of <code>int32</code> arrays (the documentation warns that <code>int64</code> causes indexing errors):</p>
+  <ul>
+    <li lang="zh-CN"><strong>Ragged（不分页）</strong>：所有请求的 K/V 无填充地首尾相接放在一个 <code>data</code> 张量里，<code>indptr</code> 有 <code>num_requests + 1</code> 个元素，首元素为 0，请求 <em>i</em> 的数据是 <code>data[indptr[i]:indptr[i+1]]</code>。API 是 <code>BatchPrefillWithRaggedKVCacheWrapper</code>，用于预填充时新算出的 K/V。</li>
+    <li lang="en"><strong>Ragged (unpaged)</strong>: the K/V of all requests are packed end to end without padding in one <code>data</code> tensor; <code>indptr</code> has <code>num_requests + 1</code> elements starting at 0, and request <em>i</em>’s data is <code>data[indptr[i]:indptr[i+1]]</code>. The API is <code>BatchPrefillWithRaggedKVCacheWrapper</code>, used for the freshly computed K/V of a prefill.</li>
+    <li lang="zh-CN"><strong>Paged（分页）</strong>：文档把页表看成一个块稀疏矩阵，用 CSR 格式索引。<code>kv_indptr</code>（长 <code>num_requests + 1</code>）是每个请求页数的前缀和；<code>kv_indices</code>（长 <code>kv_indptr[-1]</code>）是所有请求页号的拼接；<code>kv_last_page_len</code>（长 <code>num_requests</code>）是每个请求最后一页里的条目数，在 1 和 <code>page_size</code> 之间。请求 <em>i</em> 的 KV 长度是 <code>page_size × (页数 − 1) + last_page_len[i]</code>。API 是 <code>BatchDecodeWithPagedKVCacheWrapper</code> 和 <code>BatchPrefillWithPagedKVCacheWrapper</code>。</li>
+    <li lang="en"><strong>Paged</strong>: the documentation treats the page table as a block-sparse matrix indexed in CSR format. <code>kv_indptr</code> (length <code>num_requests + 1</code>) is the prefix sum of each request’s page count; <code>kv_indices</code> (length <code>kv_indptr[-1]</code>) is the concatenation of all requests’ page numbers; <code>kv_last_page_len</code> (length <code>num_requests</code>) is the number of entries in each request’s last page, between 1 and <code>page_size</code>. Request <em>i</em>’s KV length is <code>page_size × (pages − 1) + last_page_len[i]</code>. The APIs are <code>BatchDecodeWithPagedKVCacheWrapper</code> and <code>BatchPrefillWithPagedKVCacheWrapper</code>.</li>
+  </ul>
+  <p lang="zh-CN">用动画 (a) 的三个请求算一遍：A、B、C 各有 9、9、6 个 token，页大小 1，于是 <code>kv_indptr = [0, 9, 18, 24]</code>，<code>kv_indices</code> 是三行槽位号首尾相接的 24 个数，<code>kv_last_page_len = [1, 1, 1]</code>。页大小为 1 时，最后一页总是满的，<code>kv_indices</code> 退化成「每个 token 一个槽位号」。FlashInfer 论文（arXiv:2501.01005 v2）把这一点说成块稀疏行（BSR）格式的块大小 <code>(B<sub>r</sub>, B<sub>c</sub>)</code>：<code>B<sub>c</sub></code> 由 KV 缓存管理算法决定，SGLang 的 <code>B<sub>c</sub> = 1</code> 就是论文所说的 vector-sparse；内核先把这些行收集到共享内存里，再在连续的数据上用 Tensor Core。</p><p lang="en">Work it through for the three requests of diagram (a): A, B and C have 9, 9 and 6 tokens, the page size is 1, so <code>kv_indptr = [0, 9, 18, 24]</code>, <code>kv_indices</code> is the 24 numbers of the three slot rows end to end, and <code>kv_last_page_len = [1, 1, 1]</code>. With a page size of 1 the last page is always full, and <code>kv_indices</code> reduces to one slot number per token. The FlashInfer paper (arXiv:2501.01005 v2) puts this as the block size <code>(B<sub>r</sub>, B<sub>c</sub>)</code> of a block-sparse row (BSR) format: <code>B<sub>c</sub></code> is set by the KV-cache management algorithm, and SGLang’s <code>B<sub>c</sub> = 1</code> is what the paper calls vector-sparse; the kernel first gathers those rows into shared memory, then uses Tensor Cores on the now-contiguous data.</p>
+  <p lang="zh-CN">同一份 <code>plan()</code> 产生的辅助数据结构可以被所有 Transformer 层复用（<code>flashinfer/decode.py</code> 第 966 行起 <code>BatchDecodeWithPagedKVCacheWrapper</code> 的文档字符串）：数组每个批次建一次，而不是每层一次。另外，KV 张量本身的最后三维可以是 <code>NHD</code>（token、头、维度）或 <code>HND</code>，默认 <code>NHD</code>，和 SGLang 池子的 <code>(槽位, 头, 维度)</code> 一致。</p><p lang="en">The auxiliary data structures one <code>plan()</code> produces are reused by every Transformer layer (the docstring of <code>BatchDecodeWithPagedKVCacheWrapper</code>, from line 966 of <code>flashinfer/decode.py</code>): the arrays are built once per batch, not once per layer. Separately, the last three dimensions of the KV tensor itself can be <code>NHD</code> (token, head, dimension) or <code>HND</code>; the default is <code>NHD</code>, which matches the <code>(slot, head, dimension)</code> of SGLang’s pool.</p>
+  <p lang="zh-CN">延伸阅读：Hwu、Kirk、El Hajj《Programming Massively Parallel Processors》第 5 版讲稀疏矩阵计算的一章（CSR 格式，以及 SpMV 为什么受间接访存的限制）。</p><p lang="en">Further reading: the chapter on sparse matrix computation of Hwu, Kirk and El Hajj, <em>Programming Massively Parallel Processors</em>, 5th ed. (the CSR format, and why SpMV is limited by indirect memory access).</p>
+
+  <h3 lang="zh-CN">4. Cascade：共享前缀只算一次</h3><h3 lang="en">4. Cascade attention: computing a shared prefix once</h3>
+  <p lang="zh-CN">共享前缀省下了显存，却没有省下读。普通的分页解码里，64 个请求共享同一个长系统提示，就有 64 个线程块各自把这段前缀的 KV 从显存读一遍。cascade 的根据是 FlashInfer 文档 <code>docs/tutorials/recursive_attention.rst</code> 里的<strong>注意力状态</strong>：一个查询对一组 KV 下标 <em>I</em> 的注意力，可以完整地用两样东西描述，输出 <code>v(I)</code> 和 log-sum-exp <code>s(I) = log Σ exp(s<sub>i</sub>)</code>。两组不相交的下标的状态可以合并：</p><p lang="en">A shared prefix saves memory, but not reads. In plain paged decode, when 64 requests share one long system prompt, 64 thread blocks each read that prefix’s KV from memory again. Cascade attention rests on the <strong>attention state</strong> of FlashInfer’s <code>docs/tutorials/recursive_attention.rst</code>: one query’s attention over a set <em>I</em> of KV indices is fully described by two things, the output <code>v(I)</code> and the log-sum-exp <code>s(I) = log Σ exp(s<sub>i</sub>)</code>. The states of two disjoint index sets merge:</p>
+<pre data-lang="py">v(I ∪ J) = (v(I)·exp(s(I)) + v(J)·exp(s(J))) / (exp(s(I)) + exp(s(J)))
+s(I ∪ J) = log(exp(s(I)) + exp(s(J)))
+# 实际实现先减去最大值，保证数值稳定（文档原注）</pre>
+  <p lang="zh-CN">这个合并满足交换律和结合律，所以可以把 KV 切成「共享前缀」和「各自的后缀」两段分别算，再合并。<code>flashinfer/cascade.py</code> 的 <code>MultiLevelCascadeAttentionWrapper</code>（第 226 行）就是这样：每一级有自己的 <code>qo_indptr</code>、<code>kv_indptr</code>、<code>kv_indices</code>、<code>kv_last_page_len</code>，所有级共用同一个分页 KV 张量（<code>kv_layout.rst</code> 的 Multi-level Cascade 一节）。它文档字符串里的例子，顶层的 <code>qo_indptr</code> 是 <code>[0, batch_size]</code>：整批查询被当成一个「请求」，一起对共享前缀做一次类似预填充的注意力，这段 KV 只读一次，并且能用上 Tensor Core；底层每个查询对自己的后缀做解码。<code>run</code>（第 537–571 行）先算最后一级，再用 <code>merge_state_in_place</code> 把其余各级合并进来。</p><p lang="en">The merge is commutative and associative, so the KV can be cut into a shared prefix and per-request suffixes, computed separately and merged. <code>MultiLevelCascadeAttentionWrapper</code> in <code>flashinfer/cascade.py</code> (line 226) does exactly this: each level has its own <code>qo_indptr</code>, <code>kv_indptr</code>, <code>kv_indices</code> and <code>kv_last_page_len</code>, and all levels share one paged KV tensor (the Multi-level Cascade section of <code>kv_layout.rst</code>). In the example of its docstring, the top level’s <code>qo_indptr</code> is <code>[0, batch_size]</code>: the whole batch of queries is treated as one request that attends to the shared prefix once, prefill-style, so that KV is read once and Tensor Cores can be used; the bottom level has each query decode over its own suffix. <code>run</code> (lines 537–571) computes the last level, then merges the other levels in with <code>merge_state_in_place</code>.</p>
+  <p lang="zh-CN">收益不是无条件的。文档字符串原话是层数越多不一定越好，因为合并本身有开销；<code>recursive_attention.rst</code> 声称在长上下文、大批次下共享前缀的批量解码可以快 30 倍，这是 FlashInfer 自己的数字，本页没有复现。v0.5.22 的 <code>flashinfer_backend.py</code> 里<strong>没有</strong>出现 <code>MultiLevelCascadeAttentionWrapper</code>（2026-11-01 在这个文件里检索）；但同样的合并在预填充里每次都在用：带已缓存前缀的 extend 批次先用 ragged 包装器算新 token 对新 token，再用分页包装器算新 token 对已缓存前缀，最后 <code>merge_state</code> 合并（第 1442–1463 行）。</p><p lang="en">The gain is not unconditional. The docstring itself says more levels are not always better because merging has a cost; <code>recursive_attention.rst</code> claims shared-prefix batch decoding can be 30 times faster with long contexts and large batches, which is FlashInfer’s own number and is not reproduced on this page. At v0.5.22, <code>MultiLevelCascadeAttentionWrapper</code> does <strong>not</strong> appear in <code>flashinfer_backend.py</code> (searched in that file on 2026-11-01); the same merge is used on every prefill, though: an extend batch with a cached prefix first runs the ragged wrapper for new tokens against new tokens, then the paged wrapper for new tokens against the cached prefix, and merges the two with <code>merge_state</code> (lines 1442–1463).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有讲注意力状态合并的书章。这一概念的依据是 FlashInfer v0.7.1 的 <code>recursive_attention.rst</code> 和 <code>kv_layout.rst</code>，以及 FlashInfer 论文里讲组合格式（composable formats）的一节，见资料。</p><p lang="en">Further reading: no chapter of a book in the bibliography covers the merge of attention states. This concept rests on <code>recursive_attention.rst</code> and <code>kv_layout.rst</code> of FlashInfer v0.7.1, and on the section on composable formats in the FlashInfer paper; see Resources.</p>
+
+  <h3 lang="zh-CN">5. 后端怎样建这些数组</h3><h3 lang="en">5. How the backend builds the arrays</h3>
+  <p lang="zh-CN">每个前向步开始时，模型执行器调用注意力后端的 <code>init_forward_metadata</code>（<code>flashinfer_backend.py</code> 第 962 行），它按批次的模式分三路：解码、推测解码的验证、以及 extend（预填充）。解码这一路（第 969–984 行）一直走到 <code>FlashInferIndicesUpdaterDecode.call_begin_forward</code>（第 1726 行）：</p><p lang="en">At the start of each forward step, the model executor calls the attention backend’s <code>init_forward_metadata</code> (line 962 of <code>flashinfer_backend.py</code>), which branches three ways on the batch mode: decode, speculative verify, and extend (prefill). The decode branch (lines 969–984) runs down to <code>FlashInferIndicesUpdaterDecode.call_begin_forward</code> (line 1726):</p>
+  <ol>
+    <li lang="zh-CN"><code>kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)</code>（第 1750 行）：每个请求的 KV 长度的前缀和，就是 CSR 的行指针。缓冲区是预先分配好的，首元素一直是 0。</li>
+    <li lang="en"><code>kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)</code> (line 1750): the prefix sum of each request’s KV length, which is the CSR row pointer. The buffer is preallocated, and its first element stays 0.</li>
+    <li lang="zh-CN"><code>kv_indices</code> 是一块 <code>int32</code> 缓冲区（开了 CUDA 图时直接用图的输入缓冲区，第 1753–1755 行），由 <code>kv_index_translator.pack_read_stream</code>（<code>mem_cache/kv_index_translator.py</code> 第 458 行）填满。普通情况下它启动 Triton 内核 <code>create_flashinfer_kv_indices_triton</code>（第 507 行；定义在 <code>kernels/ops/kvcache/kv_indices.py</code> 第 22 行）：每个请求一个程序，按 512 一块把 <code>req_to_token</code> 里这个请求那一行的前 <code>seq_len</code> 个槽位号复制到 <code>kv_indices[kv_indptr[b]:]</code>。所以 <code>indices</code> 是在 GPU 上由一个小内核从槽位表「压平」出来的。</li>
+    <li lang="en"><code>kv_indices</code> is an <code>int32</code> buffer (the graph’s own input buffer when CUDA graphs are on, lines 1753–1755), filled by <code>kv_index_translator.pack_read_stream</code> (line 458 of <code>mem_cache/kv_index_translator.py</code>). In the ordinary case it launches the Triton kernel <code>create_flashinfer_kv_indices_triton</code> (line 507; defined at line 22 of <code>kernels/ops/kvcache/kv_indices.py</code>): one program per request copies, in blocks of 512, the first <code>seq_len</code> slot numbers of that request’s row of <code>req_to_token</code> into <code>kv_indices[kv_indptr[b]:]</code>. So the indices are flattened out of the slot table on the GPU by a small kernel.</li>
+    <li lang="zh-CN"><code>wrapper.begin_forward(kv_indptr, kv_indices, kv_last_page_len, num_qo_heads, num_kv_heads, head_dim, 1, …)</code>（第 1800–1834 行）。在 FlashInfer 里 <code>begin_forward</code> 就是 <code>plan</code>（<code>decode.py</code> 第 2277 行）。开了 CUDA 图时 SGLang 把它换成自己的 <code>fast_decode_plan</code>（第 821 行），这是 Phase 3 的话题。</li>
+    <li lang="en"><code>wrapper.begin_forward(kv_indptr, kv_indices, kv_last_page_len, num_qo_heads, num_kv_heads, head_dim, 1, …)</code> (lines 1800–1834). In FlashInfer, <code>begin_forward</code> is <code>plan</code> (line 2277 of <code>decode.py</code>). With CUDA graphs on, SGLang swaps in its own <code>fast_decode_plan</code> (line 821), which is a Phase 3 topic.</li>
+    <li lang="zh-CN">之后每一层的 <code>forward_decode</code>（第 1481 行）先把新 token 的 K/V 写进池子，再调 <code>decode_wrapper.forward(q, kv_cache, …)</code>（第 1526 行），其中 <code>kv_cache</code> 就是这一层的 <code>(K, V)</code> 池张量。</li>
+    <li lang="en">After that, each layer’s <code>forward_decode</code> (line 1481) first writes the new token’s K/V into the pool, then calls <code>decode_wrapper.forward(q, kv_cache, …)</code> (line 1526), where <code>kv_cache</code> is this layer’s <code>(K, V)</code> pool tensors.</li>
+  </ol>
+  <p lang="zh-CN">extend 这一路多一层判断：确定性推理、分段 CUDA 图和强制分页都会关掉 ragged（第 1018–1022 行）。用 ragged 时，分页那部分的长度取前缀长度 <code>prefix_lens</code>（第 1915–1918 行），<code>qo_indptr</code> 是新 token 数的前缀和（第 2225 行），ragged 包装器的 <code>plan</code> 把它同时当作查询和 KV 的 indptr（第 2257–2264 行），因为新 token 只看新 token 和前缀。</p><p lang="en">The extend branch adds one decision: deterministic inference, piecewise CUDA graphs and forced paging all turn ragged off (lines 1018–1022). With ragged on, the paged part’s lengths are the prefix lengths <code>prefix_lens</code> (lines 1915–1918), <code>qo_indptr</code> is the prefix sum of new-token counts (line 2225), and the ragged wrapper’s <code>plan</code> takes it as both the query and the KV indptr (lines 2257–2264), because new tokens see only new tokens plus the prefix.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版讲前缀和（scan）的一章（<code>indptr</code> 就是一次前缀和）。后端的调用顺序没有对应的书章，依据是上面引用的 <code>flashinfer_backend.py</code> 和 <code>base_attn_backend.py</code>。</p><p lang="en">Further reading: the chapter on prefix sum (scan) of PMPP, 5th ed. (<code>indptr</code> is one prefix sum). No book chapter covers the backend’s call order; it rests on the <code>flashinfer_backend.py</code> and <code>base_attn_backend.py</code> cited above.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：布局 ↔ 索引数组 ↔ 谁来建 ↔ 内核代价</h2><h2 id="compare-en" lang="en">Comparison: layout ↔ index arrays ↔ who builds them ↔ kernel cost</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">布局</span><span lang="en">Layout</span></th><th><span lang="zh-CN">索引数组</span><span lang="en">Index arrays</span></th><th><span lang="zh-CN">谁来建（v0.5.22）</span><span lang="en">Who builds them (v0.5.22)</span></th><th><span lang="zh-CN">内核代价</span><span lang="en">Kernel cost</span></th></tr>
+    <tr><td><span lang="zh-CN">连续（每请求一段定长缓冲）</span><span lang="en">Contiguous (one fixed-length buffer per request)</span></td><td><span lang="zh-CN">无；位置 = 请求号 × 最大长度 + t</span><span lang="en">None; position = request × max length + t</span></td><td><span lang="zh-CN">没人建，按最大长度预留；SGLang 不用这种布局</span><span lang="en">Nobody; space is reserved at the maximum length. SGLang does not use this layout</span></td><td><span lang="zh-CN">读最顺，但按最长请求填充、浪费显存，也不能共享前缀</span><span lang="en">Smoothest reads, but padded to the longest request, wasting memory, and no prefix sharing</span></td></tr>
+    <tr><td><span lang="zh-CN">Ragged</span><span lang="en">Ragged</span></td><td><span lang="zh-CN"><code>indptr</code>（<code>qo_indptr</code> 兼作 KV 的）</span><span lang="en"><code>indptr</code> (<code>qo_indptr</code> doubling as the KV one)</span></td><td><span lang="zh-CN"><code>FlashInferIndicesUpdaterPrefill.call_begin_forward</code>：新 token 数的 <code>cumsum</code></span><span lang="en"><code>FlashInferIndicesUpdaterPrefill.call_begin_forward</code>: a <code>cumsum</code> of new-token counts</span></td><td><span lang="zh-CN">无间接访存；只用于预填充里新算出、还没放回池子的 K/V</span><span lang="en">No indirection; only for the freshly computed prefill K/V not yet in the pool</span></td></tr>
+    <tr><td><span lang="zh-CN">分页（页 = 1 个 token）</span><span lang="en">Paged (page = 1 token)</span></td><td><span lang="zh-CN"><code>kv_indptr</code>、<code>kv_indices</code>、<code>kv_last_page_len</code>（全 1）</span><span lang="en"><code>kv_indptr</code>, <code>kv_indices</code>, <code>kv_last_page_len</code> (all ones)</span></td><td><span lang="zh-CN"><code>cumsum</code> 得 indptr；Triton 内核 <code>create_flashinfer_kv_indices_triton</code> 从 <code>req_to_token</code> 压平得 indices；再 <code>plan()</code></span><span lang="en"><code>cumsum</code> for indptr; the Triton kernel <code>create_flashinfer_kv_indices_triton</code> flattens <code>req_to_token</code> into indices; then <code>plan()</code></span></td><td><span lang="zh-CN">每个 token 多读 4 字节索引，KV 行被分散读取；Lab B 在 M5 上量出比连续慢 2–4%</span><span lang="en">4 extra bytes of index per token, and KV rows read from scattered places; Lab B measures 2–4% slower than contiguous on the M5</span></td></tr>
+    <tr><td><span lang="zh-CN">Cascade（多级）</span><span lang="en">Cascade (multi-level)</span></td><td><span lang="zh-CN">每一级一套 <code>qo_indptr</code>、<code>kv_indptr</code>、<code>kv_indices</code>、<code>kv_last_page_len</code></span><span lang="en">One set of <code>qo_indptr</code>, <code>kv_indptr</code>, <code>kv_indices</code>, <code>kv_last_page_len</code> per level</span></td><td><span lang="zh-CN">引擎按共享结构分级；v0.5.22 的 FlashInfer 后端解码不用它，extend 里用 ragged 加分页再 <code>merge_state</code> 的两段式</span><span lang="en">The engine splits by sharing structure; the v0.5.22 FlashInfer backend does not use it for decode, and extend uses the two-part ragged plus paged with <code>merge_state</code></span></td><td><span lang="zh-CN">共享前缀每组只读一次，外加一次合并；共享越长、批越大越划算，层数多了合并开销会吃掉收益</span><span lang="en">The shared prefix is read once per group, plus one merge; it pays more the longer the prefix and the larger the batch, and too many levels let the merge cost eat the gain</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 三个提示上的 radix 树，以及每个请求的 indices 指向哪些槽位</h3><h3 lang="en">(a) A radix tree over three prompts, and the slots each request’s indices point at</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 460" data-interval="2800"
+         data-captions='["全图：左边是三个提示插入后的 radix 树，每个节点的值是它那段 token 的槽位号；右上是 KV 池的 24 个槽位，右下是三个请求在 req_to_token 里的行，以及交给 FlashInfer 的 CSR 数组。槽位号是示意。按播放逐步看。",
+           "1. 请求 A（系统提示 + 法国的首都是？）先到，树是空的：它的 9 个 token 被分到 9 个散落的空闲槽位，整段作为一个节点插入。",
+           "2. 请求 B 的前 7 个 token 和 A 相同。match_prefix 在 A 那个节点的中间停下，_split_node 把它切开，边界落在节点之间；B 只为 日本？ 这 2 个 token 分配新槽位。",
+           "3. 请求 C 只和前两者共享系统提示的 4 个 token，于是系统提示那一段再被切出来成为公共父节点；C 只为 总结： 分配 2 个新槽位。",
+           "4. 三行 req_to_token 的前 4 个槽位号完全相同：共享前缀在池里只有一份，三个请求的 indices 都指向它。A 和 B 还共享接下来的 3 个。",
+           "5. 交给 FlashInfer 的就是三行首尾相接：kv_indptr = [0, 9, 18, 24]，kv_indices 是 24 个槽位号，页大小 1，所以 kv_last_page_len 全为 1。",
+           "6. A 结束后，从它的末端往上 lock_ref 减一：叶子 法国？ 降到 0，成为可驱逐的叶子，默认按 LRU 排；系统提示和 的首都 仍被 B 和 C 锁着。驱逐时还给分配器的，是节点值里的那些槽位。"]'
+         data-captions-en='["The whole picture: on the left, the radix tree after three prompts are inserted, each node valued by the slot numbers of its tokens; top right, the 24 slots of the KV pool; bottom right, the rows of the three requests in req_to_token and the CSR arrays handed to FlashInfer. The slot numbers are illustrative. Press Play to walk through it.",
+           "1. Request A (system prompt plus What is the capital of France?) arrives first into an empty tree: its 9 tokens get 9 scattered free slots, and the whole run is inserted as one node.",
+           "2. The first 7 tokens of request B match A. match_prefix stops in the middle of the node A made, and _split_node cuts it so that the boundary falls between nodes; B allocates new slots only for its 2 tokens of Japan?",
+           "3. Request C shares only the 4 system-prompt tokens with the other two, so the system-prompt run is split off again as the common parent; C allocates 2 new slots only for Summarize:",
+           "4. The first 4 slot numbers of the three rows of req_to_token are identical: the shared prefix exists once in the pool, and the indices of all three requests point at it. A and B also share the next 3.",
+           "5. What FlashInfer receives is the three rows end to end: kv_indptr = [0, 9, 18, 24], kv_indices holds 24 slot numbers, and with a page size of 1 every kv_last_page_len is 1.",
+           "6. When A finishes, lock_ref drops by one from its last node upward: the leaf France? reaches 0 and becomes an evictable leaf, ordered by LRU by default; the system prompt and capital of stay locked by B and C. Eviction hands the slots in the node value back to the allocator."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="18" class="small" lang="zh-CN">radix 树（节点值 = 槽位号）</text><text x="20" y="18" class="small" lang="en">Radix tree (node value = slot numbers)</text>
+      <line x1="450" y1="8" x2="450" y2="362" class="lane"/>
+
+      <rect class="box" x="170" y="28" width="90" height="30"/>
+      <text x="200" y="48" class="mono">root</text>
+
+      <g data-step="1 3"><path class="arrow" d="M215 58 L215 84"/>
+        <rect class="box" x="100" y="86" width="230" height="52"/>
+        <text x="112" y="106" lang="zh-CN">系统提示 · 4 个 token</text><text x="112" y="106" lang="en">System prompt · 4 tokens</text>
+        <text x="112" y="127" class="mono">slots 17 3 21 8</text></g>
+
+      <g data-step="1 2"><path class="arrow" d="M170 138 L130 174"/>
+        <rect class="box" x="20" y="176" width="200" height="52"/>
+        <text x="32" y="196" lang="zh-CN">的首都是 · 3 个 token</text><text x="32" y="196" lang="en">capital of · 3 tokens</text>
+        <text x="32" y="217" class="mono">slots 12 5 19</text></g>
+
+      <g data-step="1 6"><path class="arrow" d="M90 228 L90 264"/>
+        <rect class="box" x="20" y="266" width="150" height="52"/>
+        <text x="32" y="286" lang="zh-CN">法国？ · 2 个</text><text x="32" y="286" lang="en">France? · 2</text>
+        <text x="32" y="307" class="mono">slots 22 2</text>
+        <text x="32" y="338" class="small" lang="zh-CN">请求 A 的末端</text><text x="32" y="338" class="small" lang="en">end of request A</text></g>
+
+      <g data-step="2"><path class="arrow" d="M170 228 L240 264"/>
+        <rect class="box" x="190" y="266" width="150" height="52"/>
+        <text x="202" y="286" lang="zh-CN">日本？ · 2 个</text><text x="202" y="286" lang="en">Japan? · 2</text>
+        <text x="202" y="307" class="mono">slots 9 14</text>
+        <text x="202" y="338" class="small" lang="zh-CN">请求 B 的末端</text><text x="202" y="338" class="small" lang="en">end of request B</text></g>
+
+      <g data-step="3"><path class="arrow" d="M280 138 L320 174"/>
+        <rect class="box" x="250" y="176" width="180" height="52"/>
+        <text x="262" y="196" lang="zh-CN">总结： · 2 个 token</text><text x="262" y="196" lang="en">Summarize: · 2 tokens</text>
+        <text x="262" y="217" class="mono">slots 11 6</text>
+        <text x="262" y="248" class="small" lang="zh-CN">请求 C 的末端</text><text x="262" y="248" class="small" lang="en">end of request C</text></g>
+
+      <text x="470" y="18" class="small" lang="zh-CN">KV 池：一个槽位 = 一个 token 的 K 和 V（每层各一份）</text><text x="470" y="18" class="small" lang="en">KV pool: one slot = one token of K and V (per layer)</text>
+      <rect class="box" x="470" y="28" width="34" height="30"/><text x="487" y="48" class="mono" text-anchor="middle">0</text>
+      <rect class="box" x="504" y="28" width="34" height="30"/><text x="521" y="48" class="mono" text-anchor="middle">1</text>
+      <g data-step="1 6"><rect class="box" x="538" y="28" width="34" height="30"/><text x="555" y="48" class="mono" text-anchor="middle">2</text></g>
+      <g data-step="1 4"><rect class="box" x="572" y="28" width="34" height="30"/><text x="589" y="48" class="mono" text-anchor="middle">3</text></g>
+      <rect class="box" x="606" y="28" width="34" height="30"/><text x="623" y="48" class="mono" text-anchor="middle">4</text>
+      <g data-step="1"><rect class="box" x="640" y="28" width="34" height="30"/><text x="657" y="48" class="mono" text-anchor="middle">5</text></g>
+      <g data-step="3"><rect class="box" x="674" y="28" width="34" height="30"/><text x="691" y="48" class="mono" text-anchor="middle">6</text></g>
+      <rect class="box" x="708" y="28" width="34" height="30"/><text x="725" y="48" class="mono" text-anchor="middle">7</text>
+      <g data-step="1 4"><rect class="box" x="742" y="28" width="34" height="30"/><text x="759" y="48" class="mono" text-anchor="middle">8</text></g>
+      <g data-step="2"><rect class="box" x="776" y="28" width="34" height="30"/><text x="793" y="48" class="mono" text-anchor="middle">9</text></g>
+      <rect class="box" x="810" y="28" width="34" height="30"/><text x="827" y="48" class="mono" text-anchor="middle">10</text>
+      <g data-step="3"><rect class="box" x="844" y="28" width="34" height="30"/><text x="861" y="48" class="mono" text-anchor="middle">11</text></g>
+      <g data-step="1"><rect class="box" x="470" y="62" width="34" height="30"/><text x="487" y="82" class="mono" text-anchor="middle">12</text></g>
+      <rect class="box" x="504" y="62" width="34" height="30"/><text x="521" y="82" class="mono" text-anchor="middle">13</text>
+      <g data-step="2"><rect class="box" x="538" y="62" width="34" height="30"/><text x="555" y="82" class="mono" text-anchor="middle">14</text></g>
+      <rect class="box" x="572" y="62" width="34" height="30"/><text x="589" y="82" class="mono" text-anchor="middle">15</text>
+      <rect class="box" x="606" y="62" width="34" height="30"/><text x="623" y="82" class="mono" text-anchor="middle">16</text>
+      <g data-step="1 4"><rect class="box" x="640" y="62" width="34" height="30"/><text x="657" y="82" class="mono" text-anchor="middle">17</text></g>
+      <rect class="box" x="674" y="62" width="34" height="30"/><text x="691" y="82" class="mono" text-anchor="middle">18</text>
+      <g data-step="1"><rect class="box" x="708" y="62" width="34" height="30"/><text x="725" y="82" class="mono" text-anchor="middle">19</text></g>
+      <rect class="box" x="742" y="62" width="34" height="30"/><text x="759" y="82" class="mono" text-anchor="middle">20</text>
+      <g data-step="1 4"><rect class="box" x="776" y="62" width="34" height="30"/><text x="793" y="82" class="mono" text-anchor="middle">21</text></g>
+      <g data-step="1 6"><rect class="box" x="810" y="62" width="34" height="30"/><text x="827" y="82" class="mono" text-anchor="middle">22</text></g>
+      <rect class="box" x="844" y="62" width="34" height="30"/><text x="861" y="82" class="mono" text-anchor="middle">23</text>
+      <text x="470" y="116" class="small" lang="zh-CN">槽位 0 是填充页；数字是示意</text><text x="470" y="116" class="small" lang="en">Slot 0 is the padding page; the numbers are illustrative</text>
+
+      <text x="470" y="146" class="small" lang="zh-CN">req_to_token 的三行（每个请求一行）</text><text x="470" y="146" class="small" lang="en">Three rows of req_to_token (one per request)</text>
+      <g data-step="1 4"><text x="470" y="170" class="mono" style="white-space: pre">A  17  3 21  8 | 12  5 19 | 22  2</text></g>
+      <g data-step="2 4"><text x="470" y="194" class="mono" style="white-space: pre">B  17  3 21  8 | 12  5 19 |  9 14</text></g>
+      <g data-step="3 4"><text x="470" y="218" class="mono" style="white-space: pre">C  17  3 21  8 | 11  6</text></g>
+      <g data-step="4"><path d="M491 224 L491 230 L572 230 L572 224" style="fill: none; stroke: var(--ink-3); stroke-width: 1.4"/>
+        <text x="470" y="248" class="small" lang="zh-CN">前 4 个槽位三行相同：共享前缀只存一份</text><text x="470" y="248" class="small" lang="en">First 4 slots identical in all rows: the prefix is stored once</text></g>
+
+      <g data-step="5"><rect class="box" x="470" y="262" width="410" height="100"/>
+        <text x="482" y="282" lang="zh-CN">交给 FlashInfer 的 CSR 数组</text><text x="482" y="282" lang="en">The CSR arrays handed to FlashInfer</text>
+        <text x="482" y="304" class="mono" style="white-space: pre">kv_indptr  = [0, 9, 18, 24]</text>
+        <text x="482" y="324" class="mono">kv_indices = [17 3 21 8 12 5 19 22 2 | 17 3 …]</text>
+        <text x="482" y="344" class="mono">page_size = 1 · kv_last_page_len = [1, 1, 1]</text></g>
+
+      <g data-step="6"><rect class="box" x="20" y="380" width="860" height="66"/>
+        <text x="32" y="405" lang="zh-CN">A 结束：法国？ 的 lock_ref 降到 0，成为可驱逐的叶子（默认 LRU）</text><text x="32" y="405" lang="en">A finishes: lock_ref of France? drops to 0, so it becomes an evictable leaf (LRU by default)</text>
+        <text x="32" y="429" lang="zh-CN">系统提示和 的首都是 仍被 B、C 锁着；驱逐时还给分配器的是节点值里的槽位 22 和 2</text><text x="32" y="429" lang="en">System prompt and capital of stay locked by B and C; eviction hands slots 22 and 2 back to the allocator</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 解码注意力内核通过 indptr/indices 收集 KV</h3><h3 lang="en">(b) A decode attention kernel gathering KV through indptr/indices</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 480" data-interval="2800"
+         data-captions='["全图：上方是 plan() 之后放在显存里的 kv_indptr 和 kv_indices；左下是一个解码注意力线程块的循环，负责请求 B 的一个头；右下是 KV 池。线程块按 indices 去池里收集 K 和 V 的行。按播放逐步看。",
+           "1. plan() 每个批次只做一次，产出的 kv_indptr 和 kv_indices 被所有层复用。这里是动画 (a) 的三个请求：24 个槽位号，三段。",
+           "2. 负责 (请求 B, 头 h) 的线程块先读 indptr[1] 和 indptr[2]：它的那一段是 indices 的第 9 到第 17 个，长 9。",
+           "3. 循环里每个 warp 处理一部分 token：对第 t 个 token 先读 indices[9 + t]，这是唯一的间接访存，每个 token 4 字节。",
+           "4. 用槽位号去池里取这一头的 K 行，在 FP16 和 head_dim 128 下是 256 个连续字节，和 q 做点积得到分数，再更新在线 softmax 的最大值 m 和分母 l。",
+           "5. 同一个槽位的 V 行也是 256 字节，按 softmax 权重累加进 acc。B 的槽位在池里是散的，但每一行本身是连续的。",
+           "6. 几个 warp 各自得到一份 (m, l, acc)，最后在共享内存里合并：这就是概念 4 里注意力状态的合并，只是在一个线程块内部。",
+           "7. 代价：每个 token 每个头读 K 和 V 共 512 字节、索引 4 字节，带宽几乎全花在 KV 上。Lab B 是同一个循环的 Metal 版本，完全打乱的单 token 页比连续缓存只慢约 4%。"]'
+         data-captions-en='["The whole picture: at the top, kv_indptr and kv_indices as they sit in GPU memory after plan(); bottom left, the loop of one decode attention thread block, which owns one head of request B; bottom right, the KV pool. The thread block follows the indices to gather rows of K and V from the pool. Press Play to walk through it.",
+           "1. plan() runs once per batch, and the kv_indptr and kv_indices it leaves behind are reused by every layer. These are the three requests of diagram (a): 24 slot numbers in three segments.",
+           "2. The thread block that owns (request B, head h) first reads indptr[1] and indptr[2]: its segment is entries 9 to 17 of indices, 9 long.",
+           "3. In the loop, each warp takes a share of the tokens: for token t it first reads indices[9 + t], the only indirect access, 4 bytes per token.",
+           "4. The slot number fetches this head of the K row from the pool, 256 contiguous bytes in FP16 with head_dim 128; a dot product with q gives the score, which updates the online-softmax maximum m and denominator l.",
+           "5. The V row of the same slot is also 256 bytes and is added into acc with its softmax weight. The slots of B lie scattered in the pool, but each row is itself contiguous.",
+           "6. Each warp ends with its own (m, l, acc), and they are merged in shared memory at the end: this is the merge of attention states from concept 4, only inside one thread block.",
+           "7. The cost: per token and head, 512 bytes of K and V against 4 bytes of index, so the bandwidth goes almost all to KV. Lab B is the same loop in Metal; fully shuffled one-token pages are only about 4% slower than a contiguous cache."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <g data-step="1"><rect class="box" x="20" y="24" width="330" height="86"/>
+        <text x="32" y="46" lang="zh-CN">1. plan()：每批一次，所有层共用</text><text x="32" y="46" lang="en">1. plan(): once per batch, all layers</text>
+        <text x="32" y="70" class="mono" style="white-space: pre">kv_indptr  = [0, 9, 18, 24]</text>
+        <text x="32" y="92" class="mono">kv_indices : 24 × int32</text></g>
+      <text x="380" y="40" class="small" lang="zh-CN">kv_indices（显存里）</text><text x="380" y="40" class="small" lang="en">kv_indices (in GPU memory)</text>
+      <rect class="box" x="380" y="50" width="20" height="26"/><text x="390" y="68" class="mono" text-anchor="middle">17</text>
+      <rect class="box" x="400" y="50" width="20" height="26"/><text x="410" y="68" class="mono" text-anchor="middle">3</text>
+      <rect class="box" x="420" y="50" width="20" height="26"/><text x="430" y="68" class="mono" text-anchor="middle">21</text>
+      <rect class="box" x="440" y="50" width="20" height="26"/><text x="450" y="68" class="mono" text-anchor="middle">8</text>
+      <rect class="box" x="460" y="50" width="20" height="26"/><text x="470" y="68" class="mono" text-anchor="middle">12</text>
+      <rect class="box" x="480" y="50" width="20" height="26"/><text x="490" y="68" class="mono" text-anchor="middle">5</text>
+      <rect class="box" x="500" y="50" width="20" height="26"/><text x="510" y="68" class="mono" text-anchor="middle">19</text>
+      <rect class="box" x="520" y="50" width="20" height="26"/><text x="530" y="68" class="mono" text-anchor="middle">22</text>
+      <rect class="box" x="540" y="50" width="20" height="26"/><text x="550" y="68" class="mono" text-anchor="middle">2</text>
+      <g data-step="2"><rect class="box" x="560" y="50" width="20" height="26"/><text x="570" y="68" class="mono" text-anchor="middle">17</text></g>
+      <g data-step="2"><rect class="box" x="580" y="50" width="20" height="26"/><text x="590" y="68" class="mono" text-anchor="middle">3</text></g>
+      <g data-step="2"><rect class="box" x="600" y="50" width="20" height="26"/><text x="610" y="68" class="mono" text-anchor="middle">21</text></g>
+      <g data-step="2"><rect class="box" x="620" y="50" width="20" height="26"/><text x="630" y="68" class="mono" text-anchor="middle">8</text></g>
+      <g data-step="2"><rect class="box" x="640" y="50" width="20" height="26"/><text x="650" y="68" class="mono" text-anchor="middle">12</text></g>
+      <g data-step="2"><rect class="box" x="660" y="50" width="20" height="26"/><text x="670" y="68" class="mono" text-anchor="middle">5</text></g>
+      <g data-step="2"><rect class="box" x="680" y="50" width="20" height="26"/><text x="690" y="68" class="mono" text-anchor="middle">19</text></g>
+      <g data-step="2"><rect class="box" x="700" y="50" width="20" height="26"/><text x="710" y="68" class="mono" text-anchor="middle">9</text></g>
+      <g data-step="2"><rect class="box" x="720" y="50" width="20" height="26"/><text x="730" y="68" class="mono" text-anchor="middle">14</text></g>
+      <rect class="box" x="740" y="50" width="20" height="26"/><text x="750" y="68" class="mono" text-anchor="middle">17</text>
+      <rect class="box" x="760" y="50" width="20" height="26"/><text x="770" y="68" class="mono" text-anchor="middle">3</text>
+      <rect class="box" x="780" y="50" width="20" height="26"/><text x="790" y="68" class="mono" text-anchor="middle">21</text>
+      <rect class="box" x="800" y="50" width="20" height="26"/><text x="810" y="68" class="mono" text-anchor="middle">8</text>
+      <rect class="box" x="820" y="50" width="20" height="26"/><text x="830" y="68" class="mono" text-anchor="middle">11</text>
+      <rect class="box" x="840" y="50" width="20" height="26"/><text x="850" y="68" class="mono" text-anchor="middle">6</text>
+      <line x1="380" y1="78" x2="380" y2="86" style="stroke: var(--ink-3); stroke-width: 1.4"/><text x="380" y="100" class="mono" text-anchor="middle">0</text>
+      <line x1="560" y1="78" x2="560" y2="86" style="stroke: var(--ink-3); stroke-width: 1.4"/><text x="560" y="100" class="mono" text-anchor="middle">9</text>
+      <line x1="740" y1="78" x2="740" y2="86" style="stroke: var(--ink-3); stroke-width: 1.4"/><text x="740" y="100" class="mono" text-anchor="middle">18</text>
+      <line x1="860" y1="78" x2="860" y2="86" style="stroke: var(--ink-3); stroke-width: 1.4"/><text x="860" y="100" class="mono" text-anchor="middle">24</text>
+      <text x="470" y="120" class="small" text-anchor="middle">A</text><text x="650" y="120" class="small" text-anchor="middle">B</text><text x="800" y="120" class="small" text-anchor="middle">C</text>
+
+      <g data-step="2"><rect class="box cuda" x="20" y="140" width="440" height="246"/>
+        <text x="32" y="162" lang="zh-CN">解码注意力内核：一个线程块 = (请求 B, 头 h)</text><text x="32" y="162" lang="en">Decode kernel: one thread block = (request B, head h)</text>
+        <text x="32" y="188" class="mono">begin = indptr[1] = 9</text>
+        <text x="32" y="208" class="mono" style="white-space: pre">len   = indptr[2] - begin = 9</text></g>
+      <g data-step="3"><text x="32" y="236" class="mono">for t in this warp's share of 0..len:</text>
+        <text x="32" y="256" class="mono" style="white-space: pre">  slot = indices[begin + t]   // 4 B</text></g>
+      <g data-step="4"><text x="32" y="276" class="mono" style="white-space: pre">  s = q · K[slot, h]          // 256 B</text>
+        <text x="32" y="296" class="mono" style="white-space: pre">  m, l = online softmax update</text></g>
+      <g data-step="5"><text x="32" y="316" class="mono" style="white-space: pre">  acc += p · V[slot, h]       // 256 B</text></g>
+      <g data-step="6"><text x="32" y="344" class="mono">merge warps: (m, l, acc)</text>
+        <text x="32" y="364" class="mono">o[B, h] = acc / l</text></g>
+
+      <rect class="box" x="490" y="140" width="390" height="246"/>
+      <text x="502" y="162" lang="zh-CN">KV 池（每层 K 和 V 各一份）</text><text x="502" y="162" lang="en">KV pool (one K and one V per layer)</text>
+      <rect class="box" x="502" y="176" width="88" height="30"/><text x="546" y="196" class="mono" text-anchor="middle">slot 0</text>
+      <rect class="box" x="594" y="176" width="88" height="30"/><text x="638" y="196" class="mono" text-anchor="middle">slot 1</text>
+      <rect class="box" x="686" y="176" width="88" height="30"/><text x="730" y="196" class="mono" text-anchor="middle">slot 2</text>
+      <g data-step="4 5"><rect class="box" x="778" y="176" width="88" height="30"/><text x="822" y="196" class="mono" text-anchor="middle">slot 3</text></g>
+      <rect class="box" x="502" y="210" width="88" height="30"/><text x="546" y="230" class="mono" text-anchor="middle">slot 4</text>
+      <g data-step="4 5"><rect class="box" x="594" y="210" width="88" height="30"/><text x="638" y="230" class="mono" text-anchor="middle">slot 5</text></g>
+      <rect class="box" x="686" y="210" width="88" height="30"/><text x="730" y="230" class="mono" text-anchor="middle">slot 6</text>
+      <rect class="box" x="778" y="210" width="88" height="30"/><text x="822" y="230" class="mono" text-anchor="middle">slot 7</text>
+      <g data-step="4 5"><rect class="box" x="502" y="244" width="88" height="30"/><text x="546" y="264" class="mono" text-anchor="middle">slot 8</text></g>
+      <g data-step="4 5"><rect class="box" x="594" y="244" width="88" height="30"/><text x="638" y="264" class="mono" text-anchor="middle">slot 9</text></g>
+      <rect class="box" x="686" y="244" width="88" height="30"/><text x="730" y="264" class="mono" text-anchor="middle">slot 10</text>
+      <rect class="box" x="778" y="244" width="88" height="30"/><text x="822" y="264" class="mono" text-anchor="middle">slot 11</text>
+      <g data-step="4 5"><rect class="box" x="502" y="278" width="88" height="30"/><text x="546" y="298" class="mono" text-anchor="middle">slot 12</text></g>
+      <rect class="box" x="594" y="278" width="88" height="30"/><text x="638" y="298" class="mono" text-anchor="middle">slot 13</text>
+      <g data-step="4 5"><rect class="box" x="686" y="278" width="88" height="30"/><text x="730" y="298" class="mono" text-anchor="middle">slot 14</text></g>
+      <rect class="box" x="778" y="278" width="88" height="30"/><text x="822" y="298" class="mono" text-anchor="middle">slot 15</text>
+      <rect class="box" x="502" y="312" width="88" height="30"/><text x="546" y="332" class="mono" text-anchor="middle">slot 16</text>
+      <g data-step="4 5"><rect class="box" x="594" y="312" width="88" height="30"/><text x="638" y="332" class="mono" text-anchor="middle">slot 17</text></g>
+      <rect class="box" x="686" y="312" width="88" height="30"/><text x="730" y="332" class="mono" text-anchor="middle">slot 18</text>
+      <g data-step="4 5"><rect class="box" x="778" y="312" width="88" height="30"/><text x="822" y="332" class="mono" text-anchor="middle">slot 19</text></g>
+      <rect class="box" x="502" y="346" width="88" height="30"/><text x="546" y="366" class="mono" text-anchor="middle">slot 20</text>
+      <g data-step="4 5"><rect class="box" x="594" y="346" width="88" height="30"/><text x="638" y="366" class="mono" text-anchor="middle">slot 21</text></g>
+      <rect class="box" x="686" y="346" width="88" height="30"/><text x="730" y="366" class="mono" text-anchor="middle">slot 22</text>
+      <rect class="box" x="778" y="346" width="88" height="30"/><text x="822" y="366" class="mono" text-anchor="middle">slot 23</text>
+      <g data-step="3 4"><path class="arrow" d="M306 252 L500 259"/><path class="arrow" d="M306 252 L500 293"/></g>
+
+      <g data-step="7"><rect class="box" x="20" y="404" width="860" height="64"/>
+        <text x="32" y="428" lang="zh-CN">每个 token 每个头：K + V 共 512 字节，索引 4 字节，带宽几乎全花在 KV 上</text><text x="32" y="428" lang="en">Per token and head: 512 bytes of K and V, 4 bytes of index; the bandwidth goes almost all to KV</text>
+        <text x="32" y="451" class="small" lang="zh-CN">Lab B：同一个循环的 Metal 版本；打乱的单 token 页比连续缓存慢约 4%（M5，L = 8192）</text><text x="32" y="451" class="small" lang="en">Lab B: the same loop in Metal; shuffled one-token pages about 4% slower than contiguous (M5, L = 8192)</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 读后端的分页解码调用，导出一个批次的 indptr/indices，对比分页和 cascade</h3><h3 lang="en">Lab A · Read the backend’s paged decode call, dump a batch’s indptr/indices, compare paged against cascade</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。根据 SGLang v0.5.22 的源码（<code>flashinfer_backend.py</code>、<code>radix_cache.py</code>、<code>benchmark/one_batch.py</code>、<code>managers/tokenizer_manager.py</code>）和 FlashInfer v0.7.1 的文档与文档字符串（<code>kv_layout.rst</code>、<code>decode.py</code>、<code>cascade.py</code>）整理。还没有租用的 L4，所以这里不给数字，只描述应当看到的形状。环境是实验环境页里的 L4 和 <code>lmsysorg/sglang:v0.5.23</code> 镜像；镜像比本页引用的 v0.5.22 新一个补丁版本，行号可能略有出入，以 <code>grep</code> 的结果为准。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Assembled from the SGLang v0.5.22 source (<code>flashinfer_backend.py</code>, <code>radix_cache.py</code>, <code>benchmark/one_batch.py</code>, <code>managers/tokenizer_manager.py</code>) and the FlashInfer v0.7.1 documentation and docstrings (<code>kv_layout.rst</code>, <code>decode.py</code>, <code>cascade.py</code>). There is no rented L4 yet, so this lab gives no numbers, only the shape you should see. The environment is the L4 with the <code>lmsysorg/sglang:v0.5.23</code> image from the lab environment page; the image is one patch release newer than the v0.5.22 this page cites, so line numbers may shift slightly; trust what <code>grep</code> prints.</div>
+    <ol>
+      <li><span lang="zh-CN">在容器里找到已安装的 SGLang，读概念 5 走过的那几行：</span><span lang="en">Inside the container, find the installed SGLang and read the lines concept 5 walked through:</span><pre data-lang="sh" data-file="in the container"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+SG=$(python3 -c "import sglang, os; print(os.path.dirname(sglang.__file__))")
+grep -n "def init_forward_metadata\b\|def call_begin_forward\|torch.cumsum(paged_kernel_lens\|pack_read_stream(\|wrapper.begin_forward(\|decode_wrapper.forward(" \
+  $SG/srt/layers/attention/flashinfer_backend.py
+grep -n "def match_prefix\|def _split_node\|def insert\|def evict\|def inc_lock_ref" $SG/srt/mem_cache/radix_cache.py
+grep -n "def create_flashinfer_kv_indices_triton" $SG/kernels/ops/kvcache/kv_indices.py
+python3 -c "import flashinfer; print(flashinfer.__version__)"   # SGLang 钉的是 0.7.1</pre></li>
+      <li><span lang="zh-CN">导出一个解码批次的 CSR 数组。下面的脚本在同一个进程里包住 <code>one_batch</code>：<code>tp_size</code> 为 1 时 <code>one_batch</code> 不另起进程（源码第 902 行的注释），所以在 FlashInfer 的类上换掉 <code>begin_forward</code> 就能看到 SGLang 传进去的参数。必须关掉解码的 CUDA 图，否则 SGLang 会把实例上的 <code>begin_forward</code> 换成 <code>fast_decode_plan</code>（<code>flashinfer_backend.py</code> 第 821 行），而且图捕获期间也不能把张量拷回主机：</span><span lang="en">Dump the CSR arrays of one decode batch. The script below wraps <code>one_batch</code> in the same process: with a <code>tp_size</code> of 1, <code>one_batch</code> starts no extra process (the comment at line 902 of its source), so replacing <code>begin_forward</code> on FlashInfer’s class shows the arguments SGLang passes in. CUDA graphs must be off for decode, or SGLang replaces the instance’s <code>begin_forward</code> with <code>fast_decode_plan</code> (line 821 of <code>flashinfer_backend.py</code>), and tensors cannot be copied to the host during graph capture anyway:</span><pre data-lang="py" data-file="dump_csr.py"># dump_csr.py: run sglang.benchmark.one_batch and print the CSR arrays of the first decode plans
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+import runpy, sys
+import flashinfer
+
+W = flashinfer.BatchDecodeWithPagedKVCacheWrapper
+orig = W.begin_forward            # SGLang calls begin_forward; in FlashInfer it is an alias of plan
+seen = {"n": 0}
+
+def traced(self, indptr, indices, last_page_len, *args, **kwargs):
+    if seen["n"] &lt; 2:             # the plan is built once per decode step, then reused by every layer
+        n = int(indptr[-1])
+        print("kv_indptr     =", indptr.tolist())
+        print("kv_indices    =", indices[:n].tolist())
+        print("last_page_len =", last_page_len.tolist(), " page_size =", args[3])
+    seen["n"] += 1
+    return orig(self, indptr, indices, last_page_len, *args, **kwargs)
+
+W.begin_forward = traced
+sys.argv = ["one_batch"] + sys.argv[1:]
+runpy.run_module("sglang.benchmark.one_batch", run_name="__main__")</pre><pre data-lang="sh" data-file="in the container"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+python3 /work/dump_csr.py --model-path Qwen/Qwen3-0.6B --batch-size 3 --input-len 8 --output-len 3 \
+  --attention-backend flashinfer --cuda-graph-backend-decode disabled</pre><span lang="zh-CN">应当看到：<code>kv_indptr</code> 是四个数，从 0 开始，每段长度等于那个请求这一步的 KV 长度（输入 8 个 token 再加上已生成的）；<code>page_size</code> 打印为 1，<code>last_page_len</code> 全为 1；<code>kv_indices</code> 是三段互不相交的槽位号。<code>one_batch</code> 绕过调度器，而 radix 树在调度器那一侧，所以这里看不到共享（推断）。第二次打印比第一次每段多 1：下一步解码多了一个 token。</span><span lang="en">You should see: <code>kv_indptr</code> as four numbers starting at 0, each segment as long as that request’s KV at this step (the 8 input tokens plus those generated so far); <code>page_size</code> printed as 1 and <code>last_page_len</code> all ones; <code>kv_indices</code> as three disjoint runs of slot numbers. <code>one_batch</code> bypasses the scheduler, and the radix tree sits on the scheduler side, so no sharing shows here (inference). The second print has each segment one longer than the first: the next decode step has one more token.</span></li>
+      <li><span lang="zh-CN">从服务器外面看 radix 树命中。按实验环境页启动服务器（只听 <code>127.0.0.1</code>），用原生的 <code>/generate</code> 接口发两个共享长前缀的请求，读响应 <code>meta_info</code> 里的 <code>cached_tokens</code>（v0.5.22 <code>tokenizer_manager.py</code> 第 2555 行写入）：</span><span lang="en">See radix-tree hits from outside the server. Start the server as on the lab environment page (listening only on <code>127.0.0.1</code>), send two requests with a long shared prefix to the native <code>/generate</code> endpoint, and read <code>cached_tokens</code> in the response’s <code>meta_info</code> (written at line 2555 of <code>tokenizer_manager.py</code> at v0.5.22):</span><pre data-lang="sh" data-file="in the container, terminal 2"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+P="You are a careful assistant. Answer in one short sentence. $(printf 'Context line. %.0s' $(seq 1 100))"
+for q in "What is the capital of France?" "What is the capital of Japan?"; do
+  curl -s http://127.0.0.1:30000/generate -H "Content-Type: application/json" \
+    -d "{\"text\": \"$P $q\", \"sampling_params\": {\"temperature\": 0, \"max_new_tokens\": 16}}" \
+  | python3 -c "import json,sys; m=json.load(sys.stdin)['meta_info']; print(m['prompt_tokens'], m['cached_tokens'])"
+done</pre><span lang="zh-CN">应当看到：第一个请求的 <code>cached_tokens</code> 接近 0，第二个接近两者共享前缀的 token 数。再加 <code>--disable-radix-cache</code> 重启服务器跑一次，第二个也应当接近 0（推断）。</span><span lang="en">You should see: the first request’s <code>cached_tokens</code> near 0, and the second’s near the token count of the shared prefix. Restart the server with <code>--disable-radix-cache</code> and run again; the second should then be near 0 as well (inference).</span></li>
+      <li><span lang="zh-CN">停掉服务器，直接用 FlashInfer 比较分页解码和两级 cascade。脚本按 <code>cascade.py</code> 和 <code>decode.py</code> 文档字符串里的例子写，头的形状取 Qwen3-0.6B（16 个查询头、8 个 KV 头、head_dim 128），页大小 1，槽位整体打乱；先检查两者输出一致，再各取 51 次的中位数：</span><span lang="en">Stop the server and compare paged decode against two-level cascade with FlashInfer directly. The script follows the examples in the docstrings of <code>cascade.py</code> and <code>decode.py</code>, with Qwen3-0.6B’s head shape (16 query heads, 8 KV heads, head_dim 128), a page size of 1 and fully shuffled slots; it first checks that the two outputs agree, then takes the median of 51 runs of each:</span><pre data-lang="py" data-file="cascade_vs_paged.py"># cascade_vs_paged.py: one decode step over a shared prefix, flat paged against two-level cascade
+# 未运行 · not run; assembled from the FlashInfer documentation at v0.7.1 on 2026-11-01
+import sys, torch, flashinfer
+
+dev, i32 = "cuda:0", dict(dtype=torch.int32, device="cuda:0")
+num_qo_heads, num_kv_heads, head_dim, page_size = 16, 8, 128, 1   # Qwen3-0.6B heads; SGLang page size
+batch, shared_len, unique_len = int(sys.argv[1]), int(sys.argv[2]), 256
+slots = shared_len + batch * unique_len
+torch.manual_seed(0)
+kv = torch.randn(slots, 2, page_size, num_kv_heads, head_dim, dtype=torch.float16, device=dev)
+q = torch.randn(batch, num_qo_heads, head_dim, dtype=torch.float16, device=dev)
+
+perm = torch.randperm(slots, device=dev).int()         # scattered slots, as after a while of serving
+shared_idx, unique_idx = perm[:shared_len], perm[shared_len:]
+
+# 1. flat paged decode: every request lists the shared prefix again, so it is read batch times
+flat = torch.cat([torch.cat([shared_idx, unique_idx[b * unique_len:(b + 1) * unique_len]]) for b in range(batch)])
+indptr = torch.arange(batch + 1, **i32) * (shared_len + unique_len)
+dec = flashinfer.BatchDecodeWithPagedKVCacheWrapper(torch.empty(128 &lt;&lt; 20, dtype=torch.uint8, device=dev), "NHD")
+dec.plan(indptr, flat, torch.ones(batch, **i32), num_qo_heads, num_kv_heads, head_dim, page_size,
+         data_type=torch.float16)
+
+# 2. two-level cascade: level 0 has all queries as one group over the shared prefix, level 1 the suffixes
+cas = flashinfer.MultiLevelCascadeAttentionWrapper(2, torch.empty(128 &lt;&lt; 20, dtype=torch.uint8, device=dev), "NHD")
+cas.plan([torch.tensor([0, batch], **i32), torch.arange(batch + 1, **i32)],
+         [torch.tensor([0, shared_len], **i32), torch.arange(batch + 1, **i32) * unique_len],
+         [shared_idx, unique_idx],
+         [torch.ones(1, **i32), torch.ones(batch, **i32)],
+         num_qo_heads, num_kv_heads, head_dim, page_size)
+
+def median_ms(fn, n=51):
+    for _ in range(5):
+        fn()
+    ts = []
+    for _ in range(n):
+        s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        s.record(); fn(); e.record(); torch.cuda.synchronize()
+        ts.append(s.elapsed_time(e))
+    return sorted(ts)[n // 2]
+
+o1, o2 = dec.run(q, kv), cas.run(q, kv)
+print(f"batch={batch} shared={shared_len} unique={unique_len}  max|paged-cascade|={(o1 - o2).abs().max().item():.2e}")
+print(f"  paged   {median_ms(lambda: dec.run(q, kv)):.3f} ms")
+print(f"  cascade {median_ms(lambda: cas.run(q, kv)):.3f} ms")</pre><pre data-lang="sh" data-file="in the container"># 未运行 · not run; assembled from the FlashInfer documentation at v0.7.1 on 2026-11-01
+for b in 8 64; do for s in 2048 32768; do python3 /work/cascade_vs_paged.py $b $s; done; done</pre><span lang="zh-CN">应当看到：两者输出之差在 FP16 舍入的量级；批小、前缀短时两者接近，cascade 甚至可能更慢（多了一次合并）；批越大、共享前缀越长，cascade 的优势越明显，因为分页版把前缀读了 <code>batch</code> 遍，而一部分重复读会被 L2 缓存接住，所以差距会小于 <code>batch</code> 倍（推断，以实测为准）。</span><span lang="en">You should see: the two outputs differing at the level of FP16 rounding; close timings for a small batch and a short prefix, where cascade may even be slower (it adds a merge); and a growing lead for cascade as the batch and the shared prefix grow, because the paged version reads the prefix <code>batch</code> times, although part of those repeated reads hit the L2 cache, so the gap stays below a factor of <code>batch</code> (inference; trust the measurement).</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 对照：通过 indptr/indices 取 KV 的解码注意力，对比连续缓存</h3><h3 lang="en">Lab B · The Metal twin: decode attention fetching KV through indptr/indices, against a contiguous cache</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01。下面的输出都来自这台 Mac 上的实际运行（macOS 27.2，Swift 6.4.2）。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01. The outputs below come from actual runs on this Mac (macOS 27.2, Swift 6.4.2).</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>paged_decode.swift</code>。它在运行时编译两个 Metal 内核，共用一个函数体，唯一的差别是槽位从哪来：<code>decode_ragged</code> 是连续缓存（也就是 ragged 布局，<code>slot = indptr[b] + t</code>），<code>decode_paged</code> 走 <code>slot = indices[indptr[b] + t]</code>。一个线程组负责一个 (请求, 头)，4 个 SIMD-group 轮流取 token，每个 lane 管 128 维里的 4 维，<code>simd_sum</code> 求点积，在线 softmax，最后像 <code>merge_state</code> 那样合并 4 份状态。KV 池按 SGLang 的 <code>[槽位, 头, 维度]</code> 排，FP16。B = 64 个请求、8 个头、head_dim 128，每个请求 L = 512、2048、8192 个 token。五种布局：连续；分页但 indices 不打乱（隔离出读索引本身的代价）；16 个 token 一页、页打乱（vLLM 式的块）；1 个 token 一页、全打乱（SGLang 式）；以及全打乱再让每个请求的前一半指向请求 0 的槽位（共享前缀）。每种预热 3 次、跑 21 次取 GPU 时间中位数，并在 CPU 上用 Double 复算两个 (请求, 头) 的输出：</span><span lang="en">Save the program below as <code>paged_decode.swift</code>. It compiles two Metal kernels at run time that share one function body; the only difference is where the slot comes from: <code>decode_ragged</code> is the contiguous cache (the ragged layout, <code>slot = indptr[b] + t</code>), and <code>decode_paged</code> takes <code>slot = indices[indptr[b] + t]</code>. One threadgroup owns one (request, head); 4 SIMD-groups take turns over the tokens, each lane owns 4 of the 128 dimensions, <code>simd_sum</code> finishes the dot product, the softmax is online, and the 4 states are merged at the end the way <code>merge_state</code> does. The KV pool is laid out as SGLang’s <code>[slot, head, dim]</code>, in FP16. B = 64 requests, 8 heads, head_dim 128, and L = 512, 2048 and 8192 tokens per request. Five layouts: contiguous; paged with unshuffled indices (isolating the cost of reading the index itself); 16-token pages, shuffled (vLLM-style blocks); one-token pages, fully shuffled (SGLang-style); and fully shuffled with the first half of every request pointing at request 0’s slots (a shared prefix). Each one gets 3 warm-up runs and the median GPU time of 21 runs, and two (request, head) outputs are recomputed on the CPU in Double:</span><pre data-lang="swift" data-file="paged_decode.swift">// paged_decode.swift: decode attention over a KV cache, contiguous (ragged) against paged (indptr/indices)
+import Metal
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+constant uint D = 128;   // head_dim; each of the 32 lanes owns 4 of the 128 dims
+constant uint NSG = 4;   // SIMD-groups per threadgroup, each walks every 4th token
+
+// One threadgroup per (request b, head h). PAGED: the slot of token t is indices[indptr[b] + t];
+// otherwise the cache is contiguous per request (the ragged layout): slot = indptr[b] + t.
+inline void attend(bool PAGED, device const float* q, device const half* k, device const half* v,
+                   device const int* indptr, device const int* indices, device float* o,
+                   uint H, uint h, uint b, uint lane, uint sg,
+                   threadgroup float* sm, threadgroup float* sl, threadgroup float4* sacc) {
+    uint begin = uint(indptr[b]), len = uint(indptr[b + 1]) - begin;
+    float4 qv = ((device const float4*)(q + (b * H + h) * D))[lane];
+    float scale = rsqrt(float(D)), m = -INFINITY, l = 0.0f;
+    float4 acc = 0.0f;
+    for (uint t = sg; t &lt; len; t += NSG) {
+        uint slot = PAGED ? uint(indices[begin + t]) : begin + t;   // the only difference
+        uint base = (slot * H + h) * D;                             // KV row layout [slot, H, D]
+        float s = simd_sum(dot(qv, float4(((device const half4*)(k + base))[lane]))) * scale;
+        float mNew = max(m, s), c = exp(m - mNew), p = exp(s - mNew);   // online softmax
+        acc = acc * c + p * float4(((device const half4*)(v + base))[lane]);
+        l = l * c + p; m = mNew;
+    }
+    if (lane == 0) { sm[sg] = m; sl[sg] = l; }
+    sacc[sg * 32 + lane] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {                       // merge the NSG partial states, as merge_state does
+        float M = sm[0];
+        for (uint i = 1; i &lt; NSG; i++) M = max(M, sm[i]);
+        float L = 0.0f; float4 A = 0.0f;
+        for (uint i = 0; i &lt; NSG; i++) { float c = exp(sm[i] - M); L += sl[i] * c; A += sacc[i * 32 + lane] * c; }
+        ((device float4*)(o + (b * H + h) * D))[lane] = A / L;
+    }
+}
+#define ARGS device const float* q [[buffer(0)]], device const half* k [[buffer(1)]], \\
+    device const half* v [[buffer(2)]], device const int* indptr [[buffer(3)]], \\
+    device const int* indices [[buffer(4)]], device float* o [[buffer(5)]], \\
+    constant uint&amp; H [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]], \\
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]
+kernel void decode_ragged(ARGS) {
+    threadgroup float sm[NSG], sl[NSG]; threadgroup float4 sacc[NSG * 32];
+    attend(false, q, k, v, indptr, indices, o, H, tg.x, tg.y, lane, sg, sm, sl, sacc);
+}
+kernel void decode_paged(ARGS) {
+    threadgroup float sm[NSG], sl[NSG]; threadgroup float4 sacc[NSG * 32];
+    attend(true, q, k, v, indptr, indices, o, H, tg.x, tg.y, lane, sg, sm, sl, sacc);
+}
+"""
+
+let dev = MTLCreateSystemDefaultDevice()!
+let lib = try dev.makeLibrary(source: src, options: nil)
+let psoRagged = try dev.makeComputePipelineState(function: lib.makeFunction(name: "decode_ragged")!)
+let psoPaged = try dev.makeComputePipelineState(function: lib.makeFunction(name: "decode_paged")!)
+let queue = dev.makeCommandQueue()!
+
+let B = 64, H = 8, D = 128, maxL = 8192, runs = 21
+let slots = B * maxL                                   // the physical KV pool, in token slots
+let kBuf = dev.makeBuffer(length: slots * H * D * 2)!, vBuf = dev.makeBuffer(length: slots * H * D * 2)!
+let qBuf = dev.makeBuffer(length: B * H * D * 4)!, oBuf = dev.makeBuffer(length: B * H * D * 4)!
+let kp = kBuf.contents().bindMemory(to: Float16.self, capacity: slots * H * D)
+let vp = vBuf.contents().bindMemory(to: Float16.self, capacity: slots * H * D)
+let qp = qBuf.contents().bindMemory(to: Float.self, capacity: B * H * D)
+func val(_ i: Int, _ salt: UInt32) -&gt; Float {          // cheap deterministic values in [-0.5, 0.5)
+    let x = (UInt32(truncatingIfNeeded: i) &amp;* 2654435761) ^ salt
+    return Float((x &gt;&gt; 12) &amp; 1023) / 1024 - 0.5
+}
+for i in 0..&lt;(slots * H * D) { kp[i] = Float16(val(i, 0x9e37)); vp[i] = Float16(val(i, 0x7f4a)) }
+for i in 0..&lt;(B * H * D) { qp[i] = val(i, 0x1234) }
+
+// slot of token t of request b under each layout; pages of P tokens shuffled across the pool
+var rng = SystemRandomNumberGenerator()
+func pagedSlots(L: Int, P: Int, shuffle: Bool, sharedPrefix: Bool) -&gt; [Int32] {
+    var pages = Array(0..&lt;(B * L / P)); if shuffle { pages.shuffle(using: &amp;rng) }
+    var idx = [Int32](repeating: 0, count: B * L)
+    for b in 0..&lt;B { for t in 0..&lt;L {
+        let owner = (sharedPrefix &amp;&amp; t &lt; L / 2) ? 0 : b      // first half: every request points at request 0
+        idx[b * L + t] = Int32(pages[owner * (L / P) + t / P] * P + t % P)
+    } }
+    return idx
+}
+func cpuRef(b: Int, h: Int, slotOf: (Int) -&gt; Int, L: Int) -&gt; [Double] {
+    var s = [Double](repeating: 0, count: L)
+    for t in 0..&lt;L { var d = 0.0; let base = (slotOf(t) * H + h) * D
+        for j in 0..&lt;D { d += Double(qp[(b * H + h) * D + j]) * Double(kp[base + j]) }
+        s[t] = d / Double(D).squareRoot() }
+    let m = s.max()!; var l = 0.0; var o = [Double](repeating: 0, count: D)
+    for t in 0..&lt;L { let p = exp(s[t] - m); l += p; let base = (slotOf(t) * H + h) * D
+        for j in 0..&lt;D { o[j] += p * Double(vp[base + j]) } }
+    return o.map { $0 / l }
+}
+func run(_ pso: MTLComputePipelineState, indptr: MTLBuffer, indices: MTLBuffer) -&gt; Double {
+    var times: [Double] = []
+    for r in 0..&lt;(runs + 3) {
+        let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(pso)
+        for (i, buf) in [qBuf, kBuf, vBuf, indptr, indices, oBuf].enumerated() { enc.setBuffer(buf, offset: 0, index: i) }
+        var h32 = UInt32(H); enc.setBytes(&amp;h32, length: 4, index: 6)
+        enc.dispatchThreadgroups(MTLSize(width: H, height: B, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if r &gt;= 3 { times.append(cb.gpuEndTime - cb.gpuStartTime) }   // 3 warm-up runs dropped
+    }
+    return times.sorted()[runs / 2]                    // median, in seconds
+}
+
+print("device=\(dev.name) B=\(B) H=\(H) D=\(D) fp16 KV, median of \(runs) runs, GPU time")
+for L in [512, 2048, 8192] {
+    let indptr = (0...B).map { Int32($0 * L) }
+    let indptrBuf = dev.makeBuffer(bytes: indptr, length: indptr.count * 4)!
+    let kvBytes = Double(B * L * H * D * 2 * 2)        // K and V, each read once
+    print("L=\(L) tokens per request, KV read = \(String(format: "%.1f", kvBytes / 1e6)) MB")
+    let layouts: [(String, [Int32]?)] = [
+        ("contiguous (ragged)", nil),
+        ("paged, identity", pagedSlots(L: L, P: 1, shuffle: false, sharedPrefix: false)),
+        ("paged, page 16, shuffled", pagedSlots(L: L, P: 16, shuffle: true, sharedPrefix: false)),
+        ("paged, page 1, shuffled", pagedSlots(L: L, P: 1, shuffle: true, sharedPrefix: false)),
+        ("paged, page 1, half shared", pagedSlots(L: L, P: 1, shuffle: true, sharedPrefix: true))]
+    var first: [Float] = []
+    for (name, idx) in layouts {
+        let idxArr = idx ?? [0]
+        let idxBuf = dev.makeBuffer(bytes: idxArr, length: idxArr.count * 4)!
+        let t = run(idx == nil ? psoRagged : psoPaged, indptr: indptrBuf, indices: idxBuf)
+        let out = Array(UnsafeBufferPointer(start: oBuf.contents().bindMemory(to: Float.self, capacity: B * H * D), count: B * H * D))
+        var err = 0.0
+        for (b, h) in [(0, 0), (B - 1, H - 1)] {       // check two (request, head) pairs on the CPU
+            let ref = cpuRef(b: b, h: h, slotOf: { t in idx == nil ? b * L + t : Int(idxArr[b * L + t]) }, L: L)
+            for j in 0..&lt;D { err = max(err, abs(ref[j] - Double(out[(b * H + h) * D + j]))) }
+        }
+        let same = name == "paged, identity" ? (out == first ? " bit-equal to contiguous" : " DIFFERS from contiguous") : ""
+        if idx == nil { first = out }
+        let extra = idx == nil ? 0.0 : Double(B * L * 4)
+        print("  " + name.padding(toLength: 28, withPad: " ", startingAt: 0) + String(format: "%8.3f ms  %6.1f GB/s KV  (+%.1f MB indices)  max err %.1e%@",
+                     t * 1e3, kvBytes / t / 1e9, extra / 1e6, err, same as NSString))
+    }
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是连续三次运行里的第三次，原样贴出：</span><span lang="en">Build and run. Below is the third of three consecutive runs, pasted as it came:</span><pre data-lang="sh">$ swiftc -O paged_decode.swift -o paged_decode
+$ ./paged_decode
+device=Apple M5 B=64 H=8 D=128 fp16 KV, median of 21 runs, GPU time
+L=512 tokens per request, KV read = 134.2 MB
+  contiguous (ragged)            1.048 ms   128.1 GB/s KV  (+0.0 MB indices)  max err 4.6e-08
+  paged, identity                1.036 ms   129.5 GB/s KV  (+0.1 MB indices)  max err 4.6e-08 bit-equal to contiguous
+  paged, page 16, shuffled       1.025 ms   130.9 GB/s KV  (+0.1 MB indices)  max err 2.3e-08
+  paged, page 1, shuffled        1.027 ms   130.7 GB/s KV  (+0.1 MB indices)  max err 2.9e-08
+  paged, page 1, half shared     0.554 ms   242.1 GB/s KV  (+0.1 MB indices)  max err 2.8e-08
+L=2048 tokens per request, KV read = 536.9 MB
+  contiguous (ragged)            4.144 ms   129.6 GB/s KV  (+0.0 MB indices)  max err 5.6e-08
+  paged, identity                4.175 ms   128.6 GB/s KV  (+0.5 MB indices)  max err 5.6e-08 bit-equal to contiguous
+  paged, page 16, shuffled       4.118 ms   130.4 GB/s KV  (+0.5 MB indices)  max err 6.7e-08
+  paged, page 1, shuffled        4.247 ms   126.4 GB/s KV  (+0.5 MB indices)  max err 4.8e-08
+  paged, page 1, half shared     2.474 ms   217.0 GB/s KV  (+0.5 MB indices)  max err 5.6e-08
+L=8192 tokens per request, KV read = 2147.5 MB
+  contiguous (ragged)           16.668 ms   128.8 GB/s KV  (+0.0 MB indices)  max err 1.2e-07
+  paged, identity               16.950 ms   126.7 GB/s KV  (+2.1 MB indices)  max err 1.2e-07 bit-equal to contiguous
+  paged, page 16, shuffled      17.016 ms   126.2 GB/s KV  (+2.1 MB indices)  max err 2.1e-07
+  paged, page 1, shuffled       17.326 ms   123.9 GB/s KV  (+2.1 MB indices)  max err 1.9e-07
+  paged, page 1, half shared    11.250 ms   190.9 GB/s KV  (+2.1 MB indices)  max err 9.2e-08
+# 2026-11-01 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2）</pre></li>
+      <li><span lang="zh-CN">先看正确性：所有行的最大误差都在 10<sup>−7</sup> 量级，FP32 累加对 Double 参考值；不打乱的分页和连续缓存逐位相同，因为它们按同样的顺序读同样的槽位。</span><span lang="en">Correctness first: every row’s maximum error is on the order of 10<sup>−7</sup>, FP32 accumulation against the Double reference; unshuffled paging is bit-equal to the contiguous cache, because it reads the same slots in the same order.</span></li>
+      <li><span lang="zh-CN">再看间接访存的代价。L = 8192 时，KV 共 2147.5 MB，连续缓存 16.668 ms（128.8 GB/s）；16 个 token 一页打乱 17.016 ms，慢约 2%；1 个 token 一页全打乱 17.326 ms，慢约 4%。索引数组只有 2.1 MB，8 个头的线程组各读一遍也不到 KV 字节数的 1%。代价小，是因为被打散的单位是一整行：一个头的 K 行是 256 个连续字节，V 行也是，内存看到的仍是整块的突发读取（推断）。这和 FlashInfer 论文选择 <code>B<sub>c</sub> = 1</code> 也不吃亏的结论方向一致，但那是在 NVIDIA GPU 上，这里是 M5。</span><span lang="en">Next, the cost of the indirection. At L = 8192 the KV is 2147.5 MB in total: the contiguous cache takes 16.668 ms (128.8 GB/s); 16-token pages, shuffled, take 17.016 ms, about 2% slower; one-token pages, fully shuffled, take 17.326 ms, about 4% slower. The index array is only 2.1 MB, and even with the threadgroups of all 8 heads each reading it, that stays under 1% of the KV bytes. The cost is small because the unit being scattered is a whole row: one head’s K row is 256 contiguous bytes, and so is its V row, so memory still sees whole-burst reads (inference). This points the same way as the FlashInfer paper’s finding that <code>B<sub>c</sub> = 1</code> costs little, but that was on NVIDIA GPUs, and this is the M5.</span></li>
+      <li><span lang="zh-CN">最后看共享。前一半共享时，L = 512 的时间是连续缓存的 0.53 倍（0.554 对 1.048 ms），L = 2048 是 0.60 倍，L = 8192 是 0.67 倍；打印的「GB/s」按逻辑字节算，所以超过了其他行约 130 GB/s 的上限。如果重复的那一半全被缓存接住，时间应约为一半；L = 512 时共享部分只有约 1 MB，几乎做到了，L = 8192 时共享部分约 16.8 MB，只接住了一部分（推断：GPU 缓存装不下更长的共享前缀）。这正是 cascade 要显式解决的事：不靠缓存碰运气，而是让共享前缀按定义只读一次。</span><span lang="en">Last, sharing. With the first half shared, the time is 0.53 times the contiguous cache at L = 512 (0.554 against 1.048 ms), 0.60 times at L = 2048 and 0.67 times at L = 8192; the printed GB/s counts logical bytes, which is why it exceeds the roughly 130 GB/s ceiling of the other rows. If the repeated half were served entirely from cache, the time would be about half; at L = 512 the shared part is only about 1 MB and nearly gets there, while at L = 8192 it is about 16.8 MB and is served only in part (inference: the GPU caches cannot hold a longer shared prefix). This is exactly what cascade solves explicitly: instead of relying on the cache, it reads the shared prefix once by construction.</span></li>
+      <li><span lang="zh-CN">波动：三次运行里，L = 2048 和 8192 的各行彼此相差不到 2%。只有第一次运行的 L = 512 前两行偏慢（1.445 和 1.251 ms，之后两次都在 1.03–1.07 ms），那是新进程里 GPU 还没升频（推断）；所以布局之间的比较以第二、三次为准。</span><span lang="en">Spread: across the three runs, each row at L = 2048 and 8192 stays within 2% of itself. Only the first two rows at L = 512 in the first run were slow (1.445 and 1.251 ms, against 1.03–1.07 ms in the two later runs), which is the GPU not yet clocked up in a fresh process (inference); so compare layouts using the second and third runs.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>grep</code> 输出、<code>dump_csr.py</code> 打印的两组 CSR 数组、两个请求的 <code>prompt_tokens</code> 和 <code>cached_tokens</code>（开与不开 radix 缓存各一次）、<code>cascade_vs_paged.py</code> 的四组时间；Lab B 的三次完整输出，以及你自己的一张小表：每种布局在 L = 8192 时相对连续缓存的时间比。写进当天日志，并记下你的数字和本页哪里不同。还没有租用账户时，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, the <code>grep</code> output, the two sets of CSR arrays <code>dump_csr.py</code> prints, the <code>prompt_tokens</code> and <code>cached_tokens</code> of the two requests (with and without the radix cache), and the four timings of <code>cascade_vs_paged.py</code>; from Lab B, the three full outputs and a small table of your own: each layout’s time at L = 8192 relative to the contiguous cache. Write them into that day’s log, and note where your numbers differ from this page. Until a rental account exists, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/phase-1">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 在 v0.5.22 的 <code>radix_cache.py</code> 里，一个 <code>TreeNode</code> 的 <code>value</code> 存的是什么？</p><p lang="en">1. In <code>radix_cache.py</code> at v0.5.22, what does the <code>value</code> of a <code>TreeNode</code> hold?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">这段 token 每一层的 K 和 V 张量的副本</span><span lang="en">A copy of the K and V tensors of these tokens at every layer</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">这段 token 在 KV 池里的槽位号</span><span lang="en">The slot numbers of these tokens in the KV pool</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">这段 token 文本的哈希，用来和新请求比对</span><span lang="en">A hash of the text of these tokens, compared against new requests</span></label>
+      <div class="why" hidden><span lang="zh-CN">KV 只存在池里一份，节点只记槽位号，所以分裂节点时切的是槽位号张量，KV 不动，驱逐时把这些槽位还给分配器。比对用的是 <code>key</code> 里的 token id，不是 <code>value</code>；节点上的 <code>hash_value</code> 是按页算的哈希，<code>_match_prefix_helper</code> 匹配时并不用它。</span><span lang="en">The KV exists once in the pool and the node records only slot numbers, so splitting a node cuts the tensor of slot numbers without moving KV, and eviction hands those slots back to the allocator. Matching uses the token ids in <code>key</code>, not <code>value</code>; the node’s <code>hash_value</code> is a per-page hash, and <code>_match_prefix_helper</code> does not use it to match.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">2. 三个请求的 KV 长度是 9、9、6，页大小为 1。交给 FlashInfer 分页 API 的 <code>kv_indptr</code> 是什么？</p><p lang="en">2. Three requests have KV lengths 9, 9 and 6, with a page size of 1. What <code>kv_indptr</code> goes to FlashInfer’s paged API?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN"><code>[9, 18, 24]</code></span><span lang="en"><code>[9, 18, 24]</code></span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN"><code>[0, 9, 18, 24]</code></span><span lang="en"><code>[0, 9, 18, 24]</code></span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN"><code>[0, 9, 9, 6]</code></span><span lang="en"><code>[0, 9, 9, 6]</code></span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>kv_indptr</code> 有 <code>num_requests + 1</code> 个元素，首元素为 0，是页数的前缀和，请求 <em>i</em> 的页在 <code>kv_indices[indptr[i]:indptr[i+1]]</code>。少了开头的 0 就没法表示第一个请求的起点；<code>[0, 9, 9, 6]</code> 是各自的长度，不是前缀和。SGLang 在 <code>flashinfer_backend.py</code> 第 1750 行正是用 <code>cumsum</code> 填它。</span><span lang="en"><code>kv_indptr</code> has <code>num_requests + 1</code> elements starting at 0 and is the prefix sum of page counts; request <em>i</em>’s pages are <code>kv_indices[indptr[i]:indptr[i+1]]</code>. Without the leading 0 the first request has no start; <code>[0, 9, 9, 6]</code> lists the lengths, not their prefix sum. SGLang fills it with exactly a <code>cumsum</code> at line 1750 of <code>flashinfer_backend.py</code>.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 64 个请求共享一段长前缀。两级 cascade 比普通分页解码快，主要原因是什么？</p><p lang="en">3. 64 requests share one long prefix. What mainly makes two-level cascade faster than plain paged decode?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">整批查询一起对共享前缀做一次注意力，这段 KV 只读一次，再和各自后缀的结果按 log-sum-exp 合并</span><span lang="en">The whole batch of queries attends to the shared prefix together, so that KV is read once, and the result is merged with each suffix’s result by log-sum-exp</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">它跳过了共享前缀上的 softmax，因为前缀对所有请求都一样</span><span lang="en">It skips the softmax over the shared prefix, because the prefix is the same for every request</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">它把共享前缀的 KV 压缩成 FP8，读的字节数减半</span><span lang="en">It compresses the shared prefix’s KV to FP8, halving the bytes read</span></label>
+      <div class="why" hidden><span lang="zh-CN">每个请求的查询不同，前缀上的分数和 softmax 也各不相同，一个都不能跳过；cascade 省的是读，不是算。它也不改变数据类型，<code>MultiLevelCascadeAttentionWrapper</code> 的各级共用同一个分页 KV 张量。省下的是 63 遍重复读，代价是一次合并。</span><span lang="en">Each request has its own query, so its scores and softmax over the prefix differ, and none can be skipped; cascade saves reads, not math. Nor does it change the data type: every level of <code>MultiLevelCascadeAttentionWrapper</code> shares one paged KV tensor. What it saves is 63 repeated reads, at the price of one merge.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">4. Lab B 里，1 个 token 一页、全打乱的 KV 只比连续缓存慢约 4%。最好的解释是？</p><p lang="en">4. In Lab B, fully shuffled one-token pages are only about 4% slower than a contiguous cache. What is the best explanation?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">M5 的缓存大到能装下全部 2 GB 的 KV，所以布局无所谓</span><span lang="en">The M5’s caches are large enough to hold all 2 GB of KV, so the layout does not matter</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">Metal 编译器发现了打乱的索引，把它们重新排好了序</span><span lang="en">The Metal compiler noticed the shuffled indices and sorted them back into order</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">被打散的单位是整行：每个头的 K 行和 V 行各是 256 个连续字节，索引每个 token 只有 4 字节，内存仍是整块地读</span><span lang="en">The unit being scattered is a whole row: each head’s K and V rows are 256 contiguous bytes each, the index is only 4 bytes per token, and memory is still read in whole blocks</span></label>
+      <div class="why" hidden><span lang="zh-CN">缓存装不下 2 GB：共享前缀那一行说明了缓存的作用随共享部分变大而减弱。编译器看不到运行时才填的索引内容，不可能重排。剩下的解释是行的粒度：256 字节的连续块对内存来说已经足够大，额外的 4 字节索引不到 KV 字节的 1%。</span><span lang="en">No cache holds 2 GB: the shared-prefix row shows the cache helping less as the shared part grows. The compiler cannot see index contents that are filled at run time, so it cannot reorder them. What remains is row granularity: a 256-byte contiguous block is already large enough for memory, and the extra 4-byte index is under 1% of the KV bytes.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/mem_cache/radix_cache.py">radix_cache.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/mem_cache/memory_pool.py">memory_pool.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/mem_cache/kv_index_translator.py">kv_index_translator.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/memory.py">fields/memory.py</a> <span class="lvl" lang="zh-CN">源码，中级（SGLang v0.5.22，2026-11-01 取回）：radix 树、KV 池和槽位表、索引翻译、驱逐策略的选项；概念 1 和 2</span><span class="lvl" lang="en">Source, intermediate (SGLang v0.5.22, fetched 2026-11-01): the radix tree, the KV pool and slot table, index translation, the eviction-policy options; concepts 1 and 2</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/attention/flashinfer_backend.py">flashinfer_backend.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/kvcache/kv_indices.py">kernels/ops/kvcache/kv_indices.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/benchmark/one_batch.py">one_batch.py</a> <span class="lvl" lang="zh-CN">源码，中级到进阶：<code>init_forward_metadata</code>、两个 indices 更新器、建 indices 的 Triton 内核；概念 5 和 Lab A</span><span class="lvl" lang="en">Source, intermediate to advanced: <code>init_forward_metadata</code>, the two indices updaters, the Triton kernel that builds the indices; concept 5 and Lab A</span></li>
+    <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/docs/tutorials/kv_layout.rst">FlashInfer v0.7.1: KV-Cache Layout</a> · <a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/docs/tutorials/recursive_attention.rst">Attention States and Recursive Attention</a> · <a href="https://docs.flashinfer.ai/tutorials/kv_layout.html">docs.flashinfer.ai</a> <span class="lvl" lang="zh-CN">官方文档，中级：ragged、分页和多级 cascade 的数组定义，注意力状态的合并；概念 3 和 4 的主依据</span><span class="lvl" lang="en">Official docs, intermediate: the array definitions of ragged, paged and multi-level cascade layouts, and the merge of attention states; the main basis of concepts 3 and 4</span></li>
+    <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/flashinfer/decode.py">flashinfer/decode.py</a> · <a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/flashinfer/cascade.py">flashinfer/cascade.py</a> <span class="lvl" lang="zh-CN">源码与文档字符串，中级：<code>BatchDecodeWithPagedKVCacheWrapper</code> 和 <code>MultiLevelCascadeAttentionWrapper</code> 的 <code>plan</code>、<code>run</code> 及其例子；Lab A 第 4 步</span><span class="lvl" lang="en">Source and docstrings, intermediate: <code>plan</code> and <code>run</code> of <code>BatchDecodeWithPagedKVCacheWrapper</code> and <code>MultiLevelCascadeAttentionWrapper</code>, with their examples; step 4 of Lab A</span></li>
+    <li><a href="https://arxiv.org/abs/2312.07104">Zheng et al., SGLang: Efficient Execution of Structured Language Model Programs (arXiv:2312.07104, v2)</a> <span class="lvl" lang="zh-CN">论文，中级（NeurIPS 2024）：RadixAttention、按 token 分页、LRU 驱逐、引用计数和缓存感知调度；概念 1 和 2</span><span class="lvl" lang="en">Paper, intermediate (NeurIPS 2024): RadixAttention, one-token pages, LRU eviction, reference counts and cache-aware scheduling; concepts 1 and 2</span></li>
+    <li><a href="https://arxiv.org/abs/2309.06180">Kwon et al., Efficient Memory Management for Large Language Model Serving with PagedAttention (arXiv:2309.06180, v1)</a> <span class="lvl" lang="zh-CN">论文，中级（SOSP 2023）：按块管理 KV 缓存、块表、写时复制；概念 2 的起点</span><span class="lvl" lang="en">Paper, intermediate (SOSP 2023): managing the KV cache in blocks, block tables, copy on write; the starting point of concept 2</span></li>
+    <li><a href="https://arxiv.org/abs/2501.01005">Ye et al., FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving (arXiv:2501.01005, v2)</a> <span class="lvl" lang="zh-CN">论文，进阶（MLSys 2025）：把 KV 缓存看成块稀疏矩阵、组合格式与共享前缀；概念 3 和 4</span><span class="lvl" lang="en">Paper, advanced (MLSys 2025): the KV cache as a block-sparse matrix, composable formats and shared prefixes; concepts 3 and 4</span></li>
+    <li><a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification</a> <span class="lvl" lang="zh-CN">官方文档，入门：<code>simd_sum</code>、<code>half4</code>、线程组内存和 <code>[[simdgroup_index_in_threadgroup]]</code>；Lab B</span><span class="lvl" lang="en">Official docs, beginner: <code>simd_sum</code>, <code>half4</code>, threadgroup memory and <code>[[simdgroup_index_in_threadgroup]]</code>; Lab B</span></li>
+    <li><a href="https://lmsys.org/blog/2024-01-17-sglang/">LMSYS blog: Fast and Expressive LLM Inference with RadixAttention and SGLang (2024-01-17)</a> <span class="lvl" lang="zh-CN">二手资料，入门：SGLang 团队对 radix 树操作的图解，比论文好读，但比 v0.5.22 早得多</span><span class="lvl" lang="en">Secondary, beginner: the SGLang team’s illustrated walk through the radix-tree operations, easier than the paper but much older than v0.5.22</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Robert Sedgewick &amp; Kevin Wayne, 《Algorithms》, 4th ed., Addison-Wesley, 2011, ISBN 9780321573513. <span class="lvl">5.2 节 Tries 对应概念 1（前缀树、它的压缩形式和最长前缀匹配）</span></li>
+    <li lang="en">Robert Sedgewick &amp; Kevin Wayne, <em>Algorithms</em>, 4th ed., Addison-Wesley, 2011, ISBN 9780321573513. <span class="lvl">Section 5.2, Tries, matches concept 1 (prefix trees, their compressed form and longest-prefix matching)</span></li>
+    <li lang="zh-CN">Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, 《Operating Systems: Three Easy Pieces》, Version 1.10, Arpaci-Dusseau Books, 2023，免费在线：<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a>. <span class="lvl">第 18 章 Introduction to Paging 和第 20 章 Advanced Page Tables 对应概念 2（页表、共享页、页的大小和碎片）</span></li>
+    <li lang="en">Remzi H. Arpaci-Dusseau &amp; Andrea C. Arpaci-Dusseau, <em>Operating Systems: Three Easy Pieces</em>, Version 1.10, Arpaci-Dusseau Books, 2023, free online at <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">pages.cs.wisc.edu/~remzi/OSTEP</a>. <span class="lvl">Chapter 18, Introduction to Paging, and chapter 20, Advanced Page Tables, match concept 2 (page tables, shared pages, page size and fragmentation)</span></li>
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">讲稀疏矩阵计算的一章对应概念 3（CSR 格式和间接访存）；讲前缀和的一章对应概念 5 的 <code>indptr</code>；讲内存架构与数据局部性的一章对应 Lab B 的带宽</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">The chapter on sparse matrix computation matches concept 3 (the CSR format and indirect access); the chapter on prefix sum matches the <code>indptr</code> of concept 5; the chapter on memory architecture and data locality matches the bandwidth of Lab B</span></li>
+    <li lang="zh-CN">Chip Huyen, 《AI Engineering: Building Applications with Foundation Models》, O’Reilly Media, 2024, ISBN 9781098166304. <span class="lvl">讲推理优化的第 9 章里关于 KV 缓存和提示缓存的部分对应概念 1 和 2，服务层面的视角</span></li>
+    <li lang="en">Chip Huyen, <em>AI Engineering: Building Applications with Foundation Models</em>, O’Reilly Media, 2024, ISBN 9781098166304. <span class="lvl">The parts on the KV cache and prompt caching in chapter 9, on inference optimization, match concepts 1 and 2, from the serving side</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-0-the-stack/index.html"><span lang="zh-CN">← Phase 0 · 自顶向下的栈</span><span lang="en">← Phase 0 · The Stack, Top to Bottom</span></a>
+    <a href="../phase-2-prefill-and-decode/index.html"><span lang="zh-CN">Phase 2 · 预填充与解码 →</span><span lang="en">Phase 2 · Prefill and Decode →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
