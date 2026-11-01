@@ -60,8 +60,8 @@
       <text x="20" y="28" class="small" lang="zh-CN">基础</text><text x="20" y="28" class="small" lang="en">Foundations</text>
       <text x="320" y="28" class="small" lang="zh-CN">做对（正确性）</text><text x="320" y="28" class="small" lang="en">Correctness</text>
       <text x="600" y="28" class="small" lang="zh-CN">做快（速度）</text><text x="600" y="28" class="small" lang="en">Speed</text>
-      <line x1="300" y1="15" x2="300" y2="290" class="lane"/>
-      <line x1="580" y1="15" x2="580" y2="290" class="lane"/>
+      <line x1="300" y1="15" x2="300" y2="250" class="lane"/>
+      <line x1="580" y1="15" x2="580" y2="250" class="lane"/>
 
       <g data-step="1"><rect class="box" x="20" y="50" width="120" height="60"/><text x="30" y="74">Phase 0</text><text x="30" y="94" class="small">Foundations</text></g>
       <g data-step="2"><rect class="box" x="160" y="50" width="120" height="60"/><text x="170" y="74">Phase 1</text><text x="170" y="94" class="small">Threads · OS</text></g>
@@ -74,13 +74,13 @@
       <path data-step="5" class="arrow" d="M510 110 L510 140 L380 140 L380 160"/>
       <g data-step="5"><rect class="box" x="320" y="160" width="120" height="60"/><text x="330" y="184">Phase 4</text><text x="330" y="204" class="small">Lock-free</text></g>
 
-      <path data-step="6" class="arrow" d="M440 190 L600 190 L600 110"/>
+      <path data-step="6" class="arrow" d="M440 190 L665 190 L665 110"/>
       <g data-step="6"><rect class="box" x="600" y="50" width="130" height="60"/><text x="610" y="74">Phase 5</text><text x="610" y="94" class="small">OpenMP · GCD</text></g>
       <g data-step="7"><rect class="box" x="750" y="50" width="130" height="60"/><text x="760" y="74">Phase 6</text><text x="760" y="94" class="small">SIMD · NEON</text></g>
       <path data-step="7" class="arrow" d="M730 80 L750 80"/>
-      <path data-step="8" class="arrow" d="M815 110 L815 140 L665 140 L665 160"/>
+      <path data-step="8" class="arrow" d="M815 110 L815 160"/>
       <!-- par: this capstone box takes class="box par" once the --par token lands in assets/style.css -->
-      <g data-step="8"><rect class="box" x="600" y="160" width="130" height="60"/><text x="610" y="184">Phase 7</text><text x="610" y="204" class="small">Measure · Capstone</text></g>
+      <g data-step="8"><rect class="box" x="750" y="160" width="130" height="60"/><text x="760" y="184">Phase 7</text><text x="760" y="204" class="small">Measure · Capstone</text></g>
 
       <text x="20" y="270" class="small" lang="zh-CN">每个阶段：目标 → 核心概念 → 对照表 → 动画 → 实验（在本机跑，附实测数字）→ 自测 → 资料 → 参考书目</text><text x="20" y="270" class="small" lang="en">Each phase: goals → core concepts → comparison → diagrams → labs (run on this Mac, with measured numbers) → quiz → resources → bibliography</text>
     </svg>
