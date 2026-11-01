@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>实验环境 · Lab environment · Parallel Programming</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">Parallel Programming</a>
+    <span class="crumb current" aria-current="page" lang="zh-CN">实验环境</span><span class="crumb current" aria-current="page" lang="en">Lab environment</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">环境准备 · 做任何实验之前</p><p class="meta" lang="en">Environment setup · before any lab</p>
+  <h1><span lang="zh-CN">实验环境</span><span lang="en">Lab environment</span> <span class="en" lang="zh-CN">Lab environment: the Mac itself, measured</span><span class="en" lang="en">The Mac itself, measured</span></h1>
+  <p class="lede" lang="zh-CN">这个专题的实验测量的是硬件本身：核心有几个、cache line 多宽、两个线程抢同一行时慢多少。所以实验机就是你面前这台 Mac，不开虚拟机。本页先把这台机器的真实参数读出来，再把编译器、线程库、OpenMP、观察工具和 sanitizer 逐个验证一遍。页面上每段「预期输出」都是 2026-10-31 在这台 Apple M5 上实际跑出来的；唯一没跑过的是 OpenMP，因为它要先安装，页面上已标明。</p>
+  <p class="lede" lang="en">The labs in this topic measure the hardware itself: how many cores there are, how wide a cache line is, how much slower two threads get when they fight over one line. So the lab machine is the Mac in front of you, with no VM. This page first reads out this machine’s real parameters, then checks the compiler, the thread libraries, OpenMP, the observation tools and the sanitizers one by one. Every "expected output" on this page was actually produced on this Apple M5 on 2026-10-31; the only thing not run is OpenMP, because it has to be installed first, and the page marks it so.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">用 <code>sysctl</code> 读出本机的核心布局（4 个 P 核、6 个 E 核）、cache line 宽度和两个 L2 的大小，并说出它们和 x86 服务器有什么不同。</li>
+      <li lang="en">Read this machine’s core layout (4 P cores, 6 E cores), cache-line width and the sizes of the two L2 caches with <code>sysctl</code>, and say how they differ from an x86 server.</li>
+      <li lang="zh-CN">只用 Command Line Tools 编译并运行 <code>std::jthread</code>、GCD、NEON 三个冒烟测试（smoke test），再装好 <code>libomp</code> 跑通 OpenMP 冒烟测试。</li>
+      <li lang="en">Build and run three smoke tests (<code>std::jthread</code>, GCD, NEON) with the Command Line Tools alone, then install <code>libomp</code> and get the OpenMP smoke test to pass.</li>
+      <li lang="zh-CN">用 <code>steady_clock</code> 加预热、重复、取中位数测一段代码，并分清墙钟时间（wall time）和 CPU 时间。</li>
+      <li lang="en">Time a piece of code with <code>steady_clock</code> plus warm-up, repetition and the median, and tell wall time from CPU time.</li>
+      <li lang="zh-CN">用 <code>sample</code> 看一个正在跑的程序的调用栈，用 <code>-fsanitize=thread</code> 抓到一个故意写的数据竞争。</li>
+      <li lang="en">Look at the call stack of a running program with <code>sample</code>, and catch a deliberate data race with <code>-fsanitize=thread</code>.</li>
+    </ul>
+  </div>
+
+  <h2 id="why" lang="zh-CN">为什么在本机做</h2><h2 id="why-en" lang="en">Why on this Mac</h2>
+  <ul>
+    <li lang="zh-CN"><strong>我们测的就是硬件。</strong>虚拟机给客体的是虚拟 CPU：客体看不到 P 核和 E 核的区别，宿主调度器还会在背后把虚拟 CPU 挪来挪去，计时里混进了别人的噪声。加速比、false sharing、内存带宽这些数字只有在真机上才有意义。</li>
+      <li lang="en"><strong>What we measure is the hardware.</strong> A VM gives its guest virtual CPUs: the guest cannot see the difference between P and E cores, and the host scheduler moves the virtual CPUs around behind its back, so other people’s noise gets into the timings. Numbers such as speedup, false sharing and memory bandwidth only mean something on the real machine.</li>
+    <li lang="zh-CN"><strong>这里没有任何东西进内核。</strong>内核专题要隔离，是因为自写模块和关 SIP 会危及整台机器。本专题全是普通用户态程序：最坏的结果是一个进程卡死，<kbd>Ctrl-c</kbd> 或 <code>kill</code> 就结束。</li>
+    <li lang="en"><strong>Nothing here goes into the kernel.</strong> The kernel topic isolates because self-written modules and turning SIP off endanger the whole machine. This topic is all ordinary user-space programs: the worst case is a hung process, ended with <kbd>Ctrl-c</kbd> or <code>kill</code>.</li>
+    <li lang="zh-CN"><strong>唯一的例外是 Linux <code>perf</code>。</strong>macOS 上没有 <code>perf</code>。需要 <code>perf stat</code>、<code>perf record</code> 时（Phase 7），用<a href="../../kernel-engineering/lab-setup/index.html">内核专题的 QEMU Linux VM</a>。那时测的是虚拟机里的程序，数字只拿来和本机的墙钟时间对照，不当作本机的硬件计数。</li>
+    <li lang="en"><strong>The one exception is Linux <code>perf</code>.</strong> There is no <code>perf</code> on macOS. When you need <code>perf stat</code> or <code>perf record</code> (Phase 7), use <a href="../../kernel-engineering/lab-setup/index.html">the kernel topic’s QEMU Linux VM</a>. What it measures then is a program inside a VM; use those numbers only as a comparison against this Mac’s wall times, not as this Mac’s hardware counts.</li>
+  </ul>
+  <div class="note" lang="zh-CN">本机规则仍然成立：<strong>SIP 一直开着，不为任何实验关掉它。</strong><code>dtrace</code> 在 SIP 下只有部分探针可用，这是本专题接受的限制；需要完整 dtrace 的实验属于内核专题的 macOS 客体机。</div><div class="note" lang="en">The host rule still holds: <strong>SIP stays on and is never turned off for any lab.</strong> Under SIP only some <code>dtrace</code> probes are available; this topic accepts that limit, and any lab that needs full dtrace belongs to the kernel topic’s macOS guest.</div>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 这台实验机</h3><h3 lang="en">1. The lab machine</h3>
+  <p lang="zh-CN">下面是 2026-10-31 在实验机上读出的原始值。<code>perflevel0</code> 是性能核那一档，<code>perflevel1</code> 是能效核那一档：</p><p lang="en">These are the raw values read on the lab machine on 2026-10-31. <code>perflevel0</code> is the performance-core tier and <code>perflevel1</code> the efficiency-core tier:</p>
+<pre data-lang="sh">$ sysctl machdep.cpu.brand_string hw.ncpu hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu \
+         hw.cachelinesize hw.perflevel0.l2cachesize hw.perflevel1.l2cachesize \
+         hw.perflevel0.name hw.perflevel1.name
+machdep.cpu.brand_string: Apple M5
+hw.ncpu: 10
+hw.perflevel0.physicalcpu: 4
+hw.perflevel1.physicalcpu: 6
+hw.cachelinesize: 128
+hw.perflevel0.l2cachesize: 16777216
+hw.perflevel1.l2cachesize: 6291456
+hw.perflevel0.name: Super
+hw.perflevel1.name: Efficiency</pre>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">项目</span><span lang="en">Item</span></th><th><span lang="zh-CN">这台 Mac（2026-10-31 实测）</span><span lang="en">This Mac (measured 2026-10-31)</span></th><th><span lang="zh-CN">常见 x86 服务器</span><span lang="en">Typical x86 server</span></th></tr>
+    <tr><td><span lang="zh-CN">核心</span><span lang="en">Cores</span></td><td><span lang="zh-CN">10 个：4 个 P 核 + 6 个 E 核，两档速度不同</span><span lang="en">10: 4 P cores + 6 E cores, two tiers with different speeds</span></td><td><span lang="zh-CN">通常所有核同一档</span><span lang="en">Usually all cores in one tier</span></td></tr>
+    <tr><td><span lang="zh-CN">SMT（超线程）</span><span lang="en">SMT (hyper-threading)</span></td><td><span lang="zh-CN">没有：<code>hw.logicalcpu</code> = <code>hw.physicalcpu</code> = 10</span><span lang="en">None: <code>hw.logicalcpu</code> = <code>hw.physicalcpu</code> = 10</span></td><td><span lang="zh-CN">常见每核 2 个硬件线程</span><span lang="en">Often 2 hardware threads per core</span></td></tr>
+    <tr><td><span lang="zh-CN">Cache line</span><span lang="en">Cache line</span></td><td><span lang="zh-CN">128 字节（<code>hw.cachelinesize</code>）</span><span lang="en">128 bytes (<code>hw.cachelinesize</code>)</span></td><td><span lang="zh-CN">64 字节</span><span lang="en">64 bytes</span></td></tr>
+    <tr><td><span lang="zh-CN">L2</span><span lang="en">L2</span></td><td><span lang="zh-CN">P 簇共享 16 MB，E 簇共享 6 MB</span><span lang="en">16 MB shared by the P cluster, 6 MB shared by the E cluster</span></td><td><span lang="zh-CN">通常每核私有 L2，外加共享 L3</span><span lang="en">Usually a private L2 per core plus a shared L3</span></td></tr>
+    <tr><td><span lang="zh-CN">内存</span><span lang="en">Memory</span></td><td><span lang="zh-CN">统一内存，所有核看到同一块，没有 NUMA（<code>hw.memsize</code> = 32 GB）</span><span lang="en">Unified memory, the same for every core, no NUMA (<code>hw.memsize</code> = 32 GB)</span></td><td><span lang="zh-CN">多路服务器有 NUMA：访问远端内存更慢</span><span lang="en">Multi-socket servers have NUMA: remote memory is slower</span></td></tr>
+    <tr><td><span lang="zh-CN">内存页</span><span lang="en">Memory page</span></td><td><span lang="zh-CN">16 KB（<code>pagesize</code> 输出 16384）</span><span lang="en">16 KB (<code>pagesize</code> prints 16384)</span></td><td><span lang="zh-CN">4 KB</span><span lang="en">4 KB</span></td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">两点要记住。第一，<code>sysctl</code> 给 <code>perflevel0</code> 起的名字是 <code>Super</code>，不是 Performance；本专题统一叫它 P 核。第二，后面每个 false sharing 实验都按 128 字节对齐和填充；照搬网上 x86 代码里的 64 字节，在这台机器上两个计数器仍会落在同一行。</p><p lang="en">Two things to remember. First, <code>sysctl</code> names <code>perflevel0</code> <code>Super</code>, not Performance; this topic calls these P cores throughout. Second, every later false-sharing lab aligns and pads to 128 bytes; copy the 64 bytes from x86 code on the web and two counters still land in one line on this machine.</p>
+  <p lang="zh-CN">延伸阅读：McKenney《Is Parallel Programming Hard》的 Hardware and its Habits 一章；Bos《Rust Atomics and Locks》第 7 章 Understanding the Processor。</p><p lang="en">Further reading: the chapter Hardware and its Habits in McKenney’s <em>Is Parallel Programming Hard</em>; chapter 7, Understanding the Processor, in Bos’s <em>Rust Atomics and Locks</em>.</p>
+
+  <h3 lang="zh-CN">2. 工具链：开箱即用的和要安装的</h3><h3 lang="en">2. Toolchain: what works out of the box and what to install</h3>
+  <p lang="zh-CN">实验机只装了 Command Line Tools，没有完整的 Xcode：</p><p lang="en">The lab machine has only the Command Line Tools, not the full Xcode:</p>
+<pre data-lang="sh">$ sw_vers -productVersion
+27.2
+$ xcode-select -p
+/Library/Developer/CommandLineTools
+$ clang --version
+Apple clang version 21.0.0 (clang-2100.4.1.1)
+Target: arm64-apple-darwin27.2.0
+Thread model: posix
+InstalledDir: /Library/Developer/CommandLineTools/usr/bin</pre>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">组件</span><span lang="en">Component</span></th><th><span lang="zh-CN">状态</span><span lang="en">Status</span></th><th><span lang="zh-CN">怎么用</span><span lang="en">How to use it</span></th></tr>
+    <tr><td><code>std::jthread</code>, <code>std::atomic</code></td><td><span lang="zh-CN">开箱即用，已在本机编译运行</span><span lang="en">Works out of the box, built and run here</span></td><td><code>clang++ -std=c++20</code></td></tr>
+    <tr><td><span lang="zh-CN">GCD + C11 <code>&lt;stdatomic.h&gt;</code></span><span lang="en">GCD + C11 <code>&lt;stdatomic.h&gt;</code></span></td><td><span lang="zh-CN">开箱即用，已在本机编译运行</span><span lang="en">Works out of the box, built and run here</span></td><td><span lang="zh-CN"><code>clang</code>，block 里要改的变量加 <code>__block</code></span><span lang="en"><code>clang</code>; a variable the block modifies needs <code>__block</code></span></td></tr>
+    <tr><td><span lang="zh-CN">NEON 内建函数</span><span lang="en">NEON intrinsics</span></td><td><span lang="zh-CN">开箱即用，已在本机编译运行</span><span lang="en">Works out of the box, built and run here</span></td><td><code>#include &lt;arm_neon.h&gt;</code></td></tr>
+    <tr><td><span lang="zh-CN">TSan、ASan</span><span lang="en">TSan, ASan</span></td><td><span lang="zh-CN">开箱即用，已在本机抓到故意写的竞争和越界</span><span lang="en">Works out of the box, caught a deliberate race and a deliberate overflow here</span></td><td><code>-fsanitize=thread</code>, <code>-fsanitize=address</code></td></tr>
+    <tr><td>OpenMP</td><td><span lang="zh-CN">Apple clang 不带运行时，要安装；本页写作时未安装，命令未在本机执行</span><span lang="en">Apple clang ships no runtime, so it must be installed; not installed when this page was written, and the commands were not run here</span></td><td><span lang="zh-CN">Homebrew <code>libomp</code>，或 Homebrew <code>llvm</code>，见 Lab B</span><span lang="en">Homebrew <code>libomp</code>, or Homebrew <code>llvm</code>; see Lab B</span></td></tr>
+    <tr><td><span lang="zh-CN">Rust、free-threading Python</span><span lang="en">Rust, free-threading Python</span></td><td><span lang="zh-CN">没有；系统 Python 是 3.9</span><span lang="en">Not present; the system Python is 3.9</span></td><td><span lang="zh-CN">Rust 那本书只读不练；Python 只用来画图</span><span lang="en">The Rust book is for reading, not labs; Python only plots results</span></td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">OpenMP 有两条路，二选一。<strong>路线 1</strong>：<code>brew install libomp</code>，继续用 Apple clang，但要用 <code>-Xclang -fopenmp</code> 把开关直接交给编译器前端，并手动给出头文件和库的路径。<strong>路线 2</strong>：<code>brew install llvm</code>，用 Homebrew 自带的 clang，它认得普通的 <code>-fopenmp</code>。这两组参数来自 Homebrew 公式页和社区说明，2026 年没有找到 Apple 的官方文档，所以以 Lab B 冒烟测试的结果为准。</p><p lang="en">OpenMP has two routes; pick one. <strong>Route 1</strong>: <code>brew install libomp</code> and keep Apple clang, but pass the switch straight to the compiler front end with <code>-Xclang -fopenmp</code> and give the header and library paths by hand. <strong>Route 2</strong>: <code>brew install llvm</code> and use Homebrew’s own clang, which accepts a plain <code>-fopenmp</code>. Both sets of flags come from the Homebrew formula pages and community guides; no 2026 Apple documentation was found, so the result of the Lab B smoke test is what counts.</p>
+  <p lang="zh-CN">延伸阅读：Williams《C++ Concurrency in Action》讲线程管理（managing threads）的一章；McKenney 的 Tools of the Trade 一章，其中 POSIX Multiprocessing 一节。</p><p lang="en">Further reading: the chapter on managing threads in Williams’s <em>C++ Concurrency in Action</em>; the chapter Tools of the Trade in McKenney, especially the section POSIX Multiprocessing.</p>
+
+  <h3 lang="zh-CN">3. 怎么测时间</h3><h3 lang="en">3. How to measure time</h3>
+  <p lang="zh-CN">并行程序的一次运行时间不可信：第一次要把代码和数据拉进 cache，调度器可能把线程放到 E 核，后台进程会插进来。每个实验都按同一套做法：</p><p lang="en">A single run time of a parallel program cannot be trusted: the first run has to pull code and data into the cache, the scheduler may put threads on E cores, and background processes get in the way. Every lab follows the same method:</p>
+  <ul>
+    <li lang="zh-CN"><strong>单调时钟</strong>：C 用 <code>clock_gettime(CLOCK_MONOTONIC, …)</code>，C++ 用 <code>std::chrono::steady_clock</code>。不要用会被 NTP 调整的墙上时间（<code>gettimeofday</code>、<code>system_clock</code>）。</li>
+    <li lang="en"><strong>A monotonic clock</strong>: <code>clock_gettime(CLOCK_MONOTONIC, …)</code> in C, <code>std::chrono::steady_clock</code> in C++. Do not use calendar time that NTP can adjust (<code>gettimeofday</code>, <code>system_clock</code>).</li>
+    <li lang="zh-CN"><strong>预热、重复、取中位数</strong>：先空跑几次，再跑奇数次，报中位数，同时报最小值和最大值，让人看到波动。</li>
+    <li lang="en"><strong>Warm up, repeat, take the median</strong>: run a few times untimed, then an odd number of timed runs; report the median, together with the minimum and maximum so the spread is visible.</li>
+    <li lang="zh-CN"><strong>墙钟时间和 CPU 时间分开报</strong>：<code>std::clock()</code> 统计进程所有线程用掉的 CPU 时间。并行版本的墙钟时间下降而 CPU 时间不变，说明工作被分摊了；CPU 时间暴涨，说明线程在空转或抢锁。</li>
+    <li lang="en"><strong>Report wall time and CPU time separately</strong>: <code>std::clock()</code> counts the CPU time used by all threads of the process. If a parallel version’s wall time falls while its CPU time stays flat, the work was shared out; if CPU time shoots up, threads are spinning or fighting over a lock.</li>
+  </ul>
+<pre data-lang="cpp" data-file="bench.cpp">// bench.cpp: 预热 + 重复 + 取中位数；同时报墙钟时间和 CPU 时间
+#include &lt;algorithm&gt;
+#include &lt;chrono&gt;
+#include &lt;cstdio&gt;
+#include &lt;ctime&gt;
+#include &lt;vector&gt;
+
+static volatile double sink;
+
+static void work() {                       // 被测的代码
+    double s = 0;
+    for (int i = 1; i &lt;= 20'000'000; ++i) s += 1.0 / i;
+    sink = s;
+}
+
+int main() {
+    using clk = std::chrono::steady_clock;
+    for (int i = 0; i &lt; 3; ++i) work();    // 预热 warm-up
+    std::vector&lt;double&gt; ms;
+    std::clock_t c0 = std::clock();
+    for (int i = 0; i &lt; 11; ++i) {         // 重复 11 次
+        auto t0 = clk::now();
+        work();
+        ms.push_back(std::chrono::duration&lt;double, std::milli&gt;(clk::now() - t0).count());
+    }
+    double cpu = 1000.0 * (std::clock() - c0) / CLOCKS_PER_SEC;
+    std::sort(ms.begin(), ms.end());
+    std::printf("wall median %.2f ms  min %.2f  max %.2f\n", ms[5], ms[0], ms[10]);
+    std::printf("cpu total %.1f ms for 11 runs\n", cpu);
+}</pre>
+<pre data-lang="sh">$ clang++ -std=c++20 -O2 -Wall bench.cpp -o bench &amp;&amp; ./bench &amp;&amp; ./bench
+wall median 9.78 ms  min 9.77  max 11.28
+cpu total 110.0 ms for 11 runs
+wall median 9.81 ms  min 9.79  max 10.15
+cpu total 108.3 ms for 11 runs
+# 2026-10-31 实验机输出；你的数字会不同，但中位数应当比最大值稳定得多</pre>
+  <p lang="zh-CN">这个程序是单线程的，所以 11 次的 CPU 时间约等于 11 次墙钟时间之和。两次运行的最大值差了 1 ms，中位数只差 0.03 ms：这就是只报中位数的理由。</p><p lang="en">This program is single-threaded, so the CPU time for 11 runs is about the sum of the 11 wall times. The maximum differs by 1 ms between the two runs while the median differs by only 0.03 ms: that is why the median is what gets reported.</p>
+  <p lang="zh-CN">延伸阅读：McKenney 的 Validation 一章，其中 Performance Estimation 一节（基准测试和统计噪声）。</p><p lang="en">Further reading: the chapter Validation in McKenney, especially the section Performance Estimation (benchmarks and statistical noise).</p>
+
+  <h3 lang="zh-CN">4. 不能绑核：用 QoS 表达意图</h3><h3 lang="en">4. No CPU pinning: express intent with QoS</h3>
+  <p lang="zh-CN">Linux 上可以用 <code>taskset</code> 或 <code>sched_setaffinity</code> 把线程钉在某个核上。macOS 没有对应的办法。Mach 的 affinity 策略在这台机器上直接返回不支持：</p><p lang="en">On Linux you can pin a thread to a core with <code>taskset</code> or <code>sched_setaffinity</code>. macOS has no equivalent. The Mach affinity policy simply returns not supported on this machine:</p>
+<pre data-lang="sh">$ ./aff      # 调用 thread_policy_set(..., THREAD_AFFINITY_POLICY, ...)
+thread_policy_set(THREAD_AFFINITY_POLICY) = 46 ((os/kern) service not supported)
+# 2026-10-31 实验机输出</pre>
+  <p lang="zh-CN">macOS 给的是 QoS（quality of service）类别：你告诉调度器这件工作有多急，由它决定放 P 核还是 E 核。线程用 <code>pthread_set_qos_class_self_np</code>，GCD 队列在创建时带上 QoS：</p><p lang="en">What macOS offers instead is QoS (quality of service) classes: you tell the scheduler how urgent the work is, and it decides between P and E cores. A thread uses <code>pthread_set_qos_class_self_np</code>; a GCD queue carries a QoS when it is created:</p>
+<pre data-lang="c" data-file="qos.c">#include &lt;pthread.h&gt;
+#include &lt;pthread/qos.h&gt;
+#include &lt;stdio.h&gt;
+
+int main(void) {
+    int r = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    qos_class_t q; int rel;
+    pthread_get_qos_class_np(pthread_self(), &amp;q, &amp;rel);
+    printf("set=%d qos=0x%x\n", r, q);
+    return 0;
+}</pre>
+<pre data-lang="sh">$ clang qos.c -o qos &amp;&amp; ./qos
+set=0 qos=0x21
+# 2026-10-31 实验机输出；0x21 就是 QOS_CLASS_USER_INTERACTIVE</pre>
+  <div class="note" lang="zh-CN">QoS 是提示，不是保证。实验里要测「全部在 P 核上」时，线程数不超过 4，QoS 设为 <code>USER_INTERACTIVE</code> 或 <code>USER_INITIATED</code>，并接受偶尔被放到 E 核上的那几次落在最大值里。这正是要报中位数的另一个理由。</div><div class="note" lang="en">QoS is a hint, not a guarantee. When a lab needs to measure "all on P cores", keep the thread count at 4 or fewer, set the QoS to <code>USER_INTERACTIVE</code> or <code>USER_INITIATED</code>, and accept that the occasional run placed on E cores ends up in the maximum. That is one more reason to report the median.</div>
+  <p lang="zh-CN">延伸阅读：Bos 第 8 章 Operating System Primitives（操作系统交给线程的接口）。</p><p lang="en">Further reading: chapter 8 of Bos, Operating System Primitives (the interfaces the operating system gives to threads).</p>
+
+  <h3 lang="zh-CN">5. 这台 Mac 上的观察工具</h3><h3 lang="en">5. Observation tools on this Mac</h3>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">工具</span><span lang="en">Tool</span></th><th><span lang="zh-CN">看到什么</span><span lang="en">What it shows</span></th><th><span lang="zh-CN">本机状态（2026-10-31）</span><span lang="en">Status here (2026-10-31)</span></th></tr>
+    <tr><td><code>sample &lt;pid&gt;</code></td><td><span lang="zh-CN">每个线程的调用栈，按采样次数累计</span><span lang="en">Each thread’s call stack, counted by samples</span></td><td><span lang="zh-CN">可用，不需要 sudo，已在本机运行（Lab B）</span><span lang="en">Available, needs no sudo, run here (Lab B)</span></td></tr>
+    <tr><td><code>spindump</code></td><td><span lang="zh-CN">和 <code>sample</code> 类似，还能看整机所有进程</span><span lang="en">Like <code>sample</code>, and can cover every process on the machine</span></td><td><span lang="zh-CN">存在，但要 sudo：不加 sudo 时报 <code>spindump must be run as root when sampling the live system</code></span><span lang="en">Present but needs sudo: without it, it reports <code>spindump must be run as root when sampling the live system</code></span></td></tr>
+    <tr><td><code>dtrace</code></td><td><span lang="zh-CN">系统调用、函数入口等探针</span><span lang="en">Probes on system calls, function entries and more</span></td><td><span lang="zh-CN">存在，要 sudo，SIP 下部分探针不可用：不加 sudo 时报 <code>system integrity protection is on, some features will not be available</code> 和 <code>DTrace requires additional privileges</code></span><span lang="en">Present, needs sudo, and some probes are unavailable under SIP: without sudo it reports <code>system integrity protection is on, some features will not be available</code> and <code>DTrace requires additional privileges</code></span></td></tr>
+    <tr><td><code>leaks &lt;pid&gt;</code></td><td><span lang="zh-CN">堆上没人引用的内存</span><span lang="en">Heap memory nothing refers to any more</span></td><td><span lang="zh-CN">存在</span><span lang="en">Present</span></td></tr>
+    <tr><td><span lang="zh-CN">Instruments、<code>xctrace</code></span><span lang="en">Instruments, <code>xctrace</code></span></td><td><span lang="zh-CN">时间线、CPU 计数器等图形化分析</span><span lang="en">Timelines, CPU counters and other graphical analysis</span></td><td><span lang="zh-CN">需要完整 Xcode，本专题可选：<code>xctrace</code> 只是个占位命令，报 <code>tool 'xctrace' requires Xcode</code></span><span lang="en">Needs the full Xcode, optional in this topic: <code>xctrace</code> is only a stub that reports <code>tool 'xctrace' requires Xcode</code></span></td></tr>
+    <tr><td><code>perf</code></td><td><span lang="zh-CN">Linux 的计数器统计和采样</span><span lang="en">Linux counter statistics and sampling</span></td><td><span lang="zh-CN">macOS 上没有；在<a href="../../kernel-engineering/lab-setup/index.html">内核专题的 VM</a> 里用。VM 是否把真实的硬件计数器交给客体，取决于 QEMU 的加速方式，Phase 7 用前先确认（不确定）</span><span lang="en">Not on macOS; use it in <a href="../../kernel-engineering/lab-setup/index.html">the kernel topic’s VM</a>. Whether the VM passes real hardware counters to the guest depends on how QEMU accelerates it; check before relying on it in Phase 7 (unverified)</span></td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">延伸阅读：McKenney 的 Validation 一章，其中 Tracing 一节。</p><p lang="en">Further reading: the chapter Validation in McKenney, especially the section Tracing.</p>
+
+  <h3 lang="zh-CN">6. Sanitizer：让编译器帮你抓错</h3><h3 lang="en">6. Sanitizers: let the compiler catch the bugs</h3>
+  <p lang="zh-CN"><code>-fsanitize=thread</code>（TSan）在每次内存访问处插入检查，记录哪个线程在什么同步关系下读写了哪个地址，发现两个没有先后关系的访问且其中一个是写，就报数据竞争。<code>-fsanitize=address</code>（ASan）抓越界和释放后使用。两者不能同时打开，各编一份。TSan 让程序慢很多倍，只用来找错，不用来计时。</p><p lang="en"><code>-fsanitize=thread</code> (TSan) inserts a check at every memory access and records which thread read or wrote which address under which synchronization; when it sees two accesses with no ordering between them, at least one a write, it reports a data race. <code>-fsanitize=address</code> (ASan) catches out-of-bounds accesses and use after free. The two cannot be enabled together, so build one binary for each. TSan makes the program many times slower; use it to find bugs, never to time anything.</p>
+  <p lang="zh-CN">本机上有一个要知道的行为：TSan 报完竞争后，在进程退出时调用 <code>abort()</code>，退出码是 134，系统还会在 <code>~/Library/Logs/DiagnosticReports/</code> 下留一份崩溃报告。只想要普通的非零退出码时，设 <code>TSAN_OPTIONS=abort_on_error=0</code>，退出码变成 66：</p><p lang="en">One behaviour to know on this machine: after TSan reports a race, it calls <code>abort()</code> when the process exits, the exit status is 134, and the system also leaves a crash report under <code>~/Library/Logs/DiagnosticReports/</code>. When you only want an ordinary non-zero exit status, set <code>TSAN_OPTIONS=abort_on_error=0</code> and the status becomes 66:</p>
+<pre data-lang="sh">$ ./race &gt;/dev/null 2&gt;&amp;1; echo $?
+134
+$ TSAN_OPTIONS=abort_on_error=0 ./race &gt;/dev/null 2&gt;&amp;1; echo $?
+66
+# 2026-10-31 实验机输出</pre>
+  <p lang="zh-CN">延伸阅读：Williams 讲测试与调试多线程程序（testing and debugging multithreaded applications）的一章。</p><p lang="en">Further reading: the chapter on testing and debugging multithreaded applications in Williams.</p>
+
+  <h2 id="diagram" lang="zh-CN">动画图解：实验机和观察点</h2><h2 id="diagram-en" lang="en">Animated diagram: the lab machine and where you observe it</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 440" data-interval="2400"
+         data-captions='["全图：上层是你的进程和它的线程，中间是 XNU 调度器，下面是 Apple M5 的两个核心簇和统一内存。右边是在每一层观察它的工具。按播放逐层走。",
+           "1. 你的进程：std::jthread、GCD 或 OpenMP 创建的线程都在这里，都是普通用户态线程。TSan 和 ASan 编译进进程本身，在每次内存访问时检查。",
+           "2. XNU 调度器：决定每个线程什么时候跑、放在哪个核上。macOS 不让你绑核，你只能用 QoS 告诉它这件工作有多急。",
+           "3. P 簇：4 个性能核，共享 16 MB 的 L2。sysctl 把这一档叫 perflevel0，名字是 Super。要测最快的情况，线程数不超过 4。",
+           "4. E 簇：6 个能效核，共享 6 MB 的 L2，单核更慢。线程数超过 4 时，一部分线程必然跑在这里，加速比曲线会在 4 之后变平。",
+           "5. 统一内存：所有核看到同一块内存，没有 NUMA。核与核之间按 128 字节的 cache line 传数据，两个线程写同一行就是 false sharing。",
+           "6. 用户态观察：sample 看每个线程的调用栈，不需要 sudo；spindump 类似但要 sudo；leaks 看堆。Instruments 要完整 Xcode，是可选项。",
+           "7. 内核侧观察：dtrace 要 sudo，而且 SIP 开着时只有部分探针。硬件计数器的 perf 在 macOS 上没有，去内核专题的 Linux VM 里用。"]'
+         data-captions-en='["Overview: at the top is your process and its threads, in the middle the XNU scheduler, below it the two core clusters and the unified memory of the Apple M5. On the right are the tools that observe each layer. Press Play to walk the layers.",
+           "1. Your process: threads created by std::jthread, GCD or OpenMP all live here, and all are ordinary user-space threads. TSan and ASan are compiled into the process itself and check every memory access.",
+           "2. The XNU scheduler decides when each thread runs and on which core. macOS does not let you pin threads; you can only tell it how urgent the work is with QoS.",
+           "3. The P cluster: 4 performance cores sharing a 16 MB L2. sysctl calls this tier perflevel0 and names it Super. To measure the fastest case, use 4 threads or fewer.",
+           "4. The E cluster: 6 efficiency cores sharing a 6 MB L2, each slower. With more than 4 threads some threads must run here, and the speedup curve flattens after 4.",
+           "5. Unified memory: every core sees the same memory, with no NUMA. Cores move data in 128-byte cache lines; two threads writing one line is false sharing.",
+           "6. User-space observation: sample shows each thread call stack and needs no sudo; spindump is similar but needs sudo; leaks looks at the heap. Instruments needs the full Xcode and is optional.",
+           "7. Kernel-side observation: dtrace needs sudo, and with SIP on only some probes work. perf with hardware counters does not exist on macOS; use it in the Linux VM of the kernel topic."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="40" y="20" class="small" lang="zh-CN">用户态</text><text x="40" y="20" class="small" lang="en">User space</text>
+      <line x1="10" y1="118" x2="890" y2="118" class="lane"/>
+      <text x="40" y="134" class="small" lang="zh-CN">内核 XNU</text><text x="40" y="134" class="small" lang="en">Kernel XNU</text>
+      <line x1="10" y1="206" x2="890" y2="206" class="lane"/>
+      <text x="40" y="222" class="small" lang="zh-CN">硬件 Apple M5</text><text x="40" y="222" class="small" lang="en">Hardware Apple M5</text>
+
+      <!-- step 1: your process (par token belongs on this box) -->
+      <g data-step="1"><rect class="box" x="40" y="28" width="520" height="80"/><!-- par -->
+        <text x="56" y="52" lang="zh-CN">你的进程 · 用户态线程</text><text x="56" y="52" lang="en">Your process · user-space threads</text>
+        <text x="56" y="74" class="mono">std::jthread · GCD dispatch_apply · OpenMP (libomp)</text>
+        <text x="56" y="96" class="small" lang="zh-CN">TSan / ASan 编译进进程里</text><text x="56" y="96" class="small" lang="en">TSan / ASan compiled into the process</text></g>
+
+      <!-- step 2: scheduler (kernel side) -->
+      <g data-step="2"><rect class="box linux" x="160" y="140" width="400" height="56"/>
+        <text x="176" y="163" lang="zh-CN">XNU 调度器 · scheduler</text><text x="176" y="163" lang="en">XNU scheduler</text>
+        <text x="176" y="184" class="mono">QoS → P or E · no CPU pinning</text></g>
+      <path class="arrow" d="M300 108 L300 138"/>
+
+      <!-- step 3: P cluster -->
+      <g data-step="3"><rect class="box" x="40" y="232" width="410" height="112"/>
+        <text x="56" y="254" lang="zh-CN">P 簇 · 4 个性能核</text><text x="56" y="254" lang="en">P cluster · 4 performance cores</text>
+        <rect class="box" x="56" y="264" width="86" height="32"/><text x="88" y="285" class="mono">P0</text>
+        <rect class="box" x="152" y="264" width="86" height="32"/><text x="184" y="285" class="mono">P1</text>
+        <rect class="box" x="248" y="264" width="86" height="32"/><text x="280" y="285" class="mono">P2</text>
+        <rect class="box" x="344" y="264" width="86" height="32"/><text x="376" y="285" class="mono">P3</text>
+        <rect class="box" x="56" y="304" width="374" height="30"/><text x="68" y="324" class="mono">L2 16 MB · perflevel0</text></g>
+
+      <!-- step 4: E cluster -->
+      <g data-step="4"><rect class="box" x="470" y="232" width="390" height="112"/>
+        <text x="486" y="254" lang="zh-CN">E 簇 · 6 个能效核</text><text x="486" y="254" lang="en">E cluster · 6 efficiency cores</text>
+        <rect class="box" x="486" y="264" width="52" height="32"/><text x="500" y="285" class="mono">E0</text>
+        <rect class="box" x="548" y="264" width="52" height="32"/><text x="562" y="285" class="mono">E1</text>
+        <rect class="box" x="610" y="264" width="52" height="32"/><text x="624" y="285" class="mono">E2</text>
+        <rect class="box" x="672" y="264" width="52" height="32"/><text x="686" y="285" class="mono">E3</text>
+        <rect class="box" x="734" y="264" width="52" height="32"/><text x="748" y="285" class="mono">E4</text>
+        <rect class="box" x="796" y="264" width="52" height="32"/><text x="810" y="285" class="mono">E5</text>
+        <rect class="box" x="486" y="304" width="362" height="30"/><text x="498" y="324" class="mono">L2 6 MB · perflevel1</text></g>
+      <path class="arrow" d="M250 196 L250 230"/>
+      <path class="arrow" d="M520 196 L520 230"/>
+
+      <!-- step 5: unified memory -->
+      <g data-step="5"><rect class="box" x="40" y="370" width="820" height="56"/>
+        <text x="56" y="393" lang="zh-CN">统一内存 · 所有核共享 · 没有 NUMA</text><text x="56" y="393" lang="en">Unified memory · shared by all cores · no NUMA</text>
+        <text x="56" y="414" class="mono">cache line = 128 B (hw.cachelinesize) · page = 16 KB</text>
+        <path class="arrow flow" d="M245 344 L245 368"/>
+        <path class="arrow flow" d="M665 344 L665 368"/></g>
+
+      <!-- step 6: user-space tools -->
+      <g data-step="6"><rect class="box" x="600" y="28" width="260" height="80"/>
+        <text x="614" y="52" lang="zh-CN">用户态观察</text><text x="614" y="52" lang="en">User-space tools</text>
+        <text x="614" y="74" class="mono">sample · spindump · leaks</text>
+        <text x="614" y="96" class="small" lang="zh-CN">Instruments 需 Xcode，可选</text><text x="614" y="96" class="small" lang="en">Instruments needs Xcode, optional</text>
+        <path class="arrow" d="M598 68 L562 68"/></g>
+
+      <!-- step 7: kernel-side tools -->
+      <g data-step="7"><rect class="box linux" x="600" y="140" width="260" height="56"/>
+        <text x="614" y="163" lang="zh-CN">dtrace（sudo，SIP 限制）</text><text x="614" y="163" lang="en">dtrace (sudo, SIP limits)</text>
+        <text x="614" y="184" class="small" lang="zh-CN">perf 只在内核专题的 Linux VM</text><text x="614" y="184" class="small" lang="en">perf only in the kernel topic Linux VM</text>
+        <path class="arrow" d="M598 168 L562 168"/></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on lab</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 读出核心布局，验证开箱即用的工具链</h3><h3 lang="en">Lab A · Read the core layout and check the out-of-the-box toolchain</h3>
+    <ol>
+      <li><span lang="zh-CN">建一个实验目录，读核心布局（对照概念 1 的预期输出）：</span><span lang="en">Make a lab directory and read the core layout (compare with the expected output in concept 1):</span><pre data-lang="sh">mkdir -p ~/par-lab &amp;&amp; cd ~/par-lab
+sysctl hw.ncpu hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu \
+       hw.cachelinesize hw.perflevel0.l2cachesize hw.perflevel1.l2cachesize
+sysctl hw.physicalcpu hw.logicalcpu     # 两个相等说明没有 SMT
+pagesize</pre></li>
+      <li><span lang="zh-CN">确认工具链（对照概念 2 的预期输出）：</span><span lang="en">Confirm the toolchain (compare with the expected output in concept 2):</span><pre data-lang="sh">sw_vers -productVersion
+xcode-select -p
+clang --version</pre></li>
+      <li><span lang="zh-CN">C++20 线程冒烟测试。每个线程把自己的编号加进一个原子计数器：</span><span lang="en">The C++20 thread smoke test. Each thread adds its own number to an atomic counter:</span><pre data-lang="cpp" data-file="jthread_smoke.cpp">// jthread_smoke.cpp: 每个线程把自己的编号加进一个原子计数器
+#include &lt;atomic&gt;
+#include &lt;cstdio&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+
+int main() {
+    unsigned n = std::thread::hardware_concurrency();
+    std::atomic&lt;long&gt; sum{0};
+    {
+        std::vector&lt;std::jthread&gt; ts;
+        for (unsigned i = 0; i &lt; n; ++i)
+            ts.emplace_back([&amp;sum, i] { sum.fetch_add(i + 1, std::memory_order_relaxed); });
+    }   // jthread 在析构时自动 join
+    std::printf("hardware_concurrency = %u\n", n);
+    std::printf("sum = %ld (expected %u)\n", sum.load(), n * (n + 1) / 2);
+}</pre><pre data-lang="sh">$ clang++ -std=c++20 -O2 -Wall jthread_smoke.cpp -o jthread_smoke &amp;&amp; ./jthread_smoke
+hardware_concurrency = 10
+sum = 55 (expected 55)
+# 2026-10-31 实验机输出</pre></li>
+      <li><span lang="zh-CN">GCD 加 C11 原子。<code>dispatch_apply</code> 把 1000 次迭代分给系统线程池：</span><span lang="en">GCD with C11 atomics. <code>dispatch_apply</code> hands 1000 iterations to the system thread pool:</span><pre data-lang="c" data-file="gcd_smoke.c">// gcd_smoke.c: dispatch_apply 把 1000 次迭代分给系统线程池
+#include &lt;dispatch/dispatch.h&gt;
+#include &lt;stdatomic.h&gt;
+#include &lt;stdio.h&gt;
+
+int main(void) {
+    __block atomic_long sum = 0;   // block 要修改的变量必须带 __block
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    dispatch_apply(1000, q, ^(size_t i) {
+        atomic_fetch_add_explicit(&amp;sum, (long)i, memory_order_relaxed);
+    });
+    printf("sum = %ld (expected 499500)\n", atomic_load(&amp;sum));
+    return 0;
+}</pre><pre data-lang="sh">$ clang -O2 -Wall gcd_smoke.c -o gcd_smoke &amp;&amp; ./gcd_smoke
+sum = 499500 (expected 499500)
+# 2026-10-31 实验机输出</pre><span lang="zh-CN">去掉 <code>__block</code> 再编一次：block 捕获的是变量的只读副本，编译器报 <code>address argument to atomic operation must be a pointer to non-const _Atomic type</code>。</span><span lang="en">Remove <code>__block</code> and build again: the block captures a read-only copy of the variable, and the compiler reports <code>address argument to atomic operation must be a pointer to non-const _Atomic type</code>.</span></li>
+      <li><span lang="zh-CN">NEON 冒烟测试。一条 <code>vaddq_f32</code> 同时加四个 float：</span><span lang="en">The NEON smoke test. One <code>vaddq_f32</code> adds four floats at once:</span><pre data-lang="c" data-file="neon_smoke.c">// neon_smoke.c: 一条 NEON 指令同时加四个 float
+#include &lt;arm_neon.h&gt;
+#include &lt;stdio.h&gt;
+
+int main(void) {
+    float a[4] = {1, 2, 3, 4}, b[4] = {10, 20, 30, 40}, c[4];
+    float32x4_t va = vld1q_f32(a), vb = vld1q_f32(b);
+    vst1q_f32(c, vaddq_f32(va, vb));
+    printf("%.0f %.0f %.0f %.0f\n", c[0], c[1], c[2], c[3]);
+    return 0;
+}</pre><pre data-lang="sh">$ clang -O2 -Wall neon_smoke.c -o neon_smoke &amp;&amp; ./neon_smoke
+11 22 33 44
+# 2026-10-31 实验机输出</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 装 OpenMP，用 sample 看一个忙循环，用 TSan 抓一个竞争</h3><h3 lang="en">Lab B · Install OpenMP, watch a busy loop with sample, catch a race with TSan</h3>
+    <ol>
+      <li><span lang="zh-CN">OpenMP 冒烟测试的源码，两条路线共用：</span><span lang="en">The source of the OpenMP smoke test, shared by both routes:</span><pre data-lang="c" data-file="omp_smoke.c">// omp_smoke.c: 打印 OpenMP 认为能用的线程数，并让每个线程报到一次
+#include &lt;omp.h&gt;
+#include &lt;stdio.h&gt;
+
+int main(void) {
+    printf("omp_get_max_threads() = %d\n", omp_get_max_threads());
+    int count = 0;
+    #pragma omp parallel reduction(+:count)
+    count += 1;
+    printf("threads that ran the region = %d\n", count);
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">路线 1，Homebrew <code>libomp</code> 加 Apple clang。本页写作时未在实验机上执行，结果请用冒烟测试验证：</span><span lang="en">Route 1, Homebrew <code>libomp</code> with Apple clang. Not run on the lab machine when this page was written; verify the result with the smoke test:</span><pre data-lang="sh"># 未在实验机执行 · not run on the lab Mac · verify with the smoke test
+brew install libomp
+clang -O2 -Xclang -fopenmp \
+  -I"$(brew --prefix libomp)/include" \
+  -L"$(brew --prefix libomp)/lib" -lomp \
+  omp_smoke.c -o omp_smoke
+./omp_smoke</pre></li>
+      <li><span lang="zh-CN">路线 2，Homebrew <code>llvm</code> 自带的 clang。同样未执行，同样用冒烟测试验证：</span><span lang="en">Route 2, the clang that comes with Homebrew <code>llvm</code>. Also not run; also verify with the smoke test:</span><pre data-lang="sh"># 未在实验机执行 · not run on the lab Mac · verify with the smoke test
+brew install llvm
+"$(brew --prefix llvm)/bin/clang" -O2 -fopenmp omp_smoke.c -o omp_smoke
+./omp_smoke</pre><span lang="zh-CN">通过的标准：两行数字都是 10（本机 10 个核），而且没有链接错误。如果第二行是 1，说明 <code>-fopenmp</code> 没生效，pragma 被当成了普通注释。</span><span lang="en">The pass criterion: both numbers are 10 (this machine has 10 cores) and there is no link error. If the second number is 1, <code>-fopenmp</code> did not take effect and the pragma was treated as an ordinary comment.</span></li>
+      <li><span lang="zh-CN">用 <code>sample</code> 看一个忙循环。先写一个占满一个核的程序：</span><span lang="en">Watch a busy loop with <code>sample</code>. First, a program that keeps one core busy:</span><pre data-lang="c" data-file="spin.c">// spin.c: 一个占满一个核的循环，给 sample 一个可看的目标
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+static volatile unsigned long counter;
+
+static void spin(void) {
+    for (;;) counter++;
+}
+
+int main(void) {
+    printf("pid %d spinning\n", getpid());
+    fflush(stdout);
+    spin();
+}</pre><span lang="zh-CN">后台运行它，采样 2 秒，再结束它：</span><span lang="en">Run it in the background, sample it for 2 seconds, then end it:</span><pre data-lang="sh">clang -O0 -g spin.c -o spin
+./spin &amp;
+sample $! 2 -file spin.sample.txt
+kill $!
+sed -n '/Call graph:/,/Total number/p' spin.sample.txt</pre><span lang="zh-CN">预期输出（2026-10-31 实验机，节选；地址和次数每次不同）：</span><span lang="en">Expected output (lab Mac, 2026-10-31, excerpt; addresses and counts differ every run):</span><pre data-lang="sh">Sampling process 21159 for 2 seconds with 1 millisecond of run time between samples
+Sampling completed, processing symbols...
+Call graph:
+    1557 Thread_6708442   DispatchQueue_1: com.apple.main-thread  (serial)
+      1557 start  (in dyld) + 6652  [0x1835bcd7c]
+        1557 main  (in spin) + 60  [0x1027a8534]  spin.c:14
+          1557 spin  (in spin) + 4  [0x1027a8548]  spin.c:0
+
+Total number in stack (recursive counted multiple, when &gt;=5):</pre><span lang="zh-CN">读法：每一层缩进是一层调用，前面的数字是这一层出现在多少个样本里。1557 个样本全部落在 <code>spin</code> 里，说明这个程序的时间全花在那个循环上。以后看并行程序时，每个线程会各有一棵这样的树。</span><span lang="en">How to read it: each level of indentation is one level of call, and the number in front is how many samples contained that level. All 1557 samples fall in <code>spin</code>, so all of this program’s time goes into that loop. When you look at parallel programs later, each thread gets its own tree like this.</span></li>
+      <li><span lang="zh-CN">用 TSan 抓一个故意写的数据竞争。两个线程不加锁地 <code>++</code> 同一个 <code>int</code>：</span><span lang="en">Catch a deliberate data race with TSan. Two threads <code>++</code> the same <code>int</code> with no lock:</span><pre data-lang="cpp" data-file="race.cpp">// race.cpp: 两个线程不加锁地 ++ 同一个 int，这是数据竞争（data race）
+#include &lt;cstdio&gt;
+#include &lt;thread&gt;
+
+int counter = 0;
+
+int main() {
+    auto work = [] { for (int i = 0; i &lt; 100000; ++i) ++counter; };
+    std::jthread a(work), b(work);
+    a.join(); b.join();
+    std::printf("counter = %d (expected 200000)\n", counter);
+}</pre><span lang="zh-CN">先不带 TSan 跑三次，再带 TSan 跑一次：</span><span lang="en">Run it three times without TSan, then once with TSan:</span><pre data-lang="sh">$ clang++ -std=c++20 -O0 race.cpp -o race_plain &amp;&amp; for i in 1 2 3; do ./race_plain; done
+counter = 100057 (expected 200000)
+counter = 100984 (expected 200000)
+counter = 100691 (expected 200000)
+$ clang++ -std=c++20 -g -O1 -fsanitize=thread race.cpp -o race &amp;&amp; ./race
+==================
+WARNING: ThreadSanitizer: data race (pid=21209)
+  Write of size 4 at 0x0001005f8000 by thread T2:
+    #0 main::$_0::operator()() const race.cpp:8 (race:arm64+0x10000101c)
+    …
+  Previous write of size 4 at 0x0001005f8000 by thread T1:
+    #0 main::$_0::operator()() const race.cpp:8 (race:arm64+0x10000101c)
+    …
+  Location is global 'counter' at 0x0001005f8000 (race+0x100008000)
+    …
+SUMMARY: ThreadSanitizer: data race race.cpp:8 in main::$_0::operator()() const
+==================
+counter = 200000 (expected 200000)
+ThreadSanitizer: reported 1 warnings
+# 2026-10-31 实验机输出（… 处省略了 libc++ 内部的栈帧）</pre><span lang="zh-CN">注意两件事。不带 TSan 时丢了将近一半的加法。带 TSan 时结果恰好是 200000，但竞争照样被报出来：TSan 看的是有没有同步，不是结果对不对。随后进程以 134 退出，原因见概念 6。最后把 <code>counter</code> 改成 <code>std::atomic&lt;int&gt;</code>（打印时用 <code>counter.load()</code>），再用 TSan 跑一次，应当没有警告、退出码 0。</span><span lang="en">Notice two things. Without TSan, almost half of the increments are lost. With TSan the result happens to be exactly 200000, yet the race is still reported: TSan checks whether there is synchronization, not whether the result is right. The process then exits with 134; concept 6 explains why. Finally change <code>counter</code> to <code>std::atomic&lt;int&gt;</code> (print it with <code>counter.load()</code>) and run under TSan again: there should be no warning and exit status 0.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>sysctl</code> 输出和三个冒烟测试的输出；Lab B 的 OpenMP 冒烟测试输出（注明用了哪条路线）、<code>spin.sample.txt</code> 里的 Call graph 段、TSan 报告的 SUMMARY 行和修好后的干净运行。写进当天日志，并记下你的机器和本页的数字有哪些不同。</div><div class="note" lang="en">Deliverables: from Lab A, the <code>sysctl</code> output and the output of the three smoke tests; from Lab B, the OpenMP smoke-test output (saying which route you used), the Call graph section of <code>spin.sample.txt</code>, the SUMMARY line of the TSan report and the clean run after the fix. Write them into that day’s log, and note where your machine’s numbers differ from this page.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="par/lab-setup">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 你想让一个计算线程尽量跑在 P 核上。在这台 Mac 上应该怎么做？</p><p lang="en">1. You want a compute thread to run on a P core as much as possible. What should you do on this Mac?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">用 <code>THREAD_AFFINITY_POLICY</code> 把它绑到 P0</span><span lang="en">Bind it to P0 with <code>THREAD_AFFINITY_POLICY</code></span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">把它的 QoS 设为 <code>USER_INTERACTIVE</code> 或 <code>USER_INITIATED</code>，由调度器决定</span><span lang="en">Set its QoS to <code>USER_INTERACTIVE</code> or <code>USER_INITIATED</code> and let the scheduler decide</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">用 <code>taskset -c 0</code> 启动程序</span><span lang="en">Start the program with <code>taskset -c 0</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">macOS 只接受 QoS 这种提示。affinity 策略在本机返回 46（service not supported）；<code>taskset</code> 是 Linux 的命令，macOS 上没有。</span><span lang="en">macOS only accepts a hint such as QoS. The affinity policy returns 46 (service not supported) on this machine; <code>taskset</code> is a Linux command and does not exist on macOS.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 为什么本专题的实验不放进虚拟机里做？</p><p lang="en">2. Why are this topic’s labs not done inside a VM?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">虚拟机里编不了 C++20</span><span lang="en">C++20 cannot be compiled inside a VM</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">这些实验会改内核，宿主更安全</span><span lang="en">These labs change the kernel, and the host is safer</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">实验测的是硬件，虚拟 CPU 隐藏了 P 核和 E 核的区别，计时里还混进宿主的调度噪声</span><span lang="en">The labs measure the hardware; virtual CPUs hide the P and E difference, and host scheduling noise gets into the timings</span></label>
+      <div class="why" hidden><span lang="zh-CN">虚拟机里当然能编 C++20；本专题的实验也完全不碰内核，正因为不碰内核才可以在本机做。真正的理由是测量必须在真硬件上。</span><span lang="en">A VM can of course compile C++20; and this topic’s labs never touch the kernel, which is exactly why they can run on the host. The real reason is that the measurements must be made on real hardware.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 为了避免 false sharing，要把两个计数器隔开。在这台 Mac 上至少隔多少字节？</p><p lang="en">3. To avoid false sharing you separate two counters. On this Mac, by at least how many bytes?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">64 字节</span><span lang="en">64 bytes</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">128 字节</span><span lang="en">128 bytes</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">16 KB</span><span lang="en">16 KB</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>hw.cachelinesize</code> 在本机是 128。64 字节是 x86 的 cache line，在这里两个计数器仍会落进同一行。16 KB 是本机的内存页大小，与 cache line 无关，隔这么远只是浪费。</span><span lang="en"><code>hw.cachelinesize</code> is 128 on this machine. 64 bytes is the x86 cache line, and here two counters would still land in one line. 16 KB is this machine’s page size, unrelated to the cache line; separating that far only wastes memory.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. <code>race.cpp</code> 在 TSan 下打印了正确的 200000，但 TSan 报了数据竞争，进程以 134 退出。这说明什么？</p><p lang="en">4. Under TSan, <code>race.cpp</code> prints the correct 200000, but TSan reports a data race and the process exits with 134. What does this mean?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">竞争确实存在，结果对只是碰巧；134 是 TSan 在 macOS 上报错后退出时调用 abort 的结果</span><span lang="en">The race is real and the right result was luck; 134 comes from TSan calling abort at exit on macOS after reporting</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">结果对，所以这是 TSan 的误报</span><span lang="en">The result is right, so this is a TSan false positive</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">134 说明竞争把程序写崩了</span><span lang="en">134 means the race crashed the program</span></label>
+      <div class="why" hidden><span lang="zh-CN">TSan 判断的是两次写之间有没有同步，与结果无关；不带 TSan 的版本丢了将近一半的加法。程序本身没有崩：设 <code>TSAN_OPTIONS=abort_on_error=0</code> 后退出码变成 66，abort 来自 TSan 的退出处理。</span><span lang="en">TSan judges whether there is synchronization between the two writes, regardless of the result; the build without TSan lost almost half of the increments. The program itself did not crash: with <code>TSAN_OPTIONS=abort_on_error=0</code> the exit status becomes 66, and the abort comes from TSan’s exit handling.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://developer.apple.com/documentation/apple-silicon/tuning-your-code-s-performance-for-apple-silicon">Apple — Tuning your code’s performance for Apple silicon</a> <span class="lvl" lang="zh-CN">官方：P 核与 E 核、QoS 与调度的关系</span><span class="lvl" lang="en">Official: P and E cores, how QoS relates to scheduling</span></li>
+    <li><a href="https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/PrioritizeWorkAtTheTaskLevel.html">Apple — Prioritize Work at the Task Level</a> <span class="lvl" lang="zh-CN">官方（归档文档）：QoS 类别各自的含义</span><span class="lvl" lang="en">Official (archived document): what each QoS class means</span></li>
+    <li><a href="https://developer.apple.com/documentation/dispatch">Apple — Dispatch</a> <span class="lvl" lang="zh-CN">查手册：GCD 队列、<code>dispatch_apply</code>、QoS</span><span class="lvl" lang="en">Reference: GCD queues, <code>dispatch_apply</code>, QoS</span></li>
+    <li><a href="https://en.cppreference.com/w/cpp/thread/jthread">cppreference — std::jthread</a> <span class="lvl" lang="zh-CN">查手册：C++20 线程与自动 join</span><span class="lvl" lang="en">Reference: C++20 threads and automatic join</span></li>
+    <li><a href="https://formulae.brew.sh/formula/libomp">Homebrew — libomp</a> · <a href="https://formulae.brew.sh/formula/llvm">Homebrew — llvm</a> <span class="lvl" lang="zh-CN">OpenMP 两条安装路线的公式页</span><span class="lvl" lang="en">The formula pages for the two OpenMP routes</span></li>
+    <li><a href="https://www.openmp.org/specifications/">OpenMP specifications</a> <span class="lvl" lang="zh-CN">规范原文，Phase 5 查 pragma 用</span><span class="lvl" lang="en">The specification itself, for looking up pragmas in Phase 5</span></li>
+    <li><a href="https://clang.llvm.org/docs/ThreadSanitizer.html">Clang — ThreadSanitizer</a> · <a href="https://clang.llvm.org/docs/AddressSanitizer.html">Clang — AddressSanitizer</a> <span class="lvl" lang="zh-CN">两个 sanitizer 的用法、开销与限制</span><span class="lvl" lang="en">Usage, overhead and limits of the two sanitizers</span></li>
+    <li><a href="https://developer.arm.com/architectures/instruction-sets/intrinsics/">Arm — Intrinsics</a> <span class="lvl" lang="zh-CN">查手册：NEON 内建函数，Phase 6 用</span><span class="lvl" lang="en">Reference: NEON intrinsics, for Phase 6</span></li>
+    <li><a href="https://man7.org/linux/man-pages/man1/perf-stat.1.html">perf-stat(1)</a> <span class="lvl" lang="zh-CN">Linux VM 里的 <code>perf stat</code>，Phase 7 用</span><span class="lvl" lang="en"><code>perf stat</code> in the Linux VM, for Phase 7</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, 免费（CC BY-SA），本页读的是 v2026.06.21a，<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">Hardware and its Habits 对应概念 1；Tools of the Trade 对应概念 2；Validation 的 Performance Estimation 与 Tracing 两节对应概念 3 和 5</span></li>
+    <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, free (CC BY-SA); this page read release v2026.06.21a, <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">Hardware and its Habits for concept 1; Tools of the Trade for concept 2; the Performance Estimation and Tracing sections of Validation for concepts 3 and 5</span></li>
+    <li lang="zh-CN">Anthony Williams, 《C++ Concurrency in Action》, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">线程管理一章对应概念 2 与 Lab A；测试与调试多线程程序一章对应概念 6 与 Lab B 的 TSan 步骤</span></li>
+    <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The chapter on managing threads for concept 2 and Lab A; the chapter on testing and debugging multithreaded applications for concept 6 and the TSan step of Lab B</span></li>
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">第 7 章 Understanding the Processor 对应概念 1；第 8 章 Operating System Primitives 对应概念 4。本专题只读不练 Rust</span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://marabos.nl/atomics/">marabos.nl/atomics</a>. <span class="lvl">Chapter 7, Understanding the Processor, for concept 1; chapter 8, Operating System Primitives, for concept 4. This topic reads the Rust, it does not run it</span></li>
+    <li lang="zh-CN">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, 《The Art of Multiprocessor Programming》, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">讲多处理器硬件基础（cache、一致性、cache line）的部分，作为概念 1 的背景；本页之后各 Phase 用得更多</span></li>
+    <li lang="en">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, <em>The Art of Multiprocessor Programming</em>, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">The material on multiprocessor hardware basics (caches, coherence, cache lines) as background for concept 1; the later phases use it much more</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../index.html"><span lang="zh-CN">← 并行编程 · Parallel Programming</span><span lang="en">← Parallel Programming</span></a>
+    <a href="../phase-0-foundations/index.html"><span lang="zh-CN">Phase 0 · 基础 →</span><span lang="en">Phase 0 · Foundations →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
