@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 0 · Foundations · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page">Phase 0 · Foundations</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 0 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 0 / 8 · about 1–2 weeks</p>
+  <h1>Foundations <span class="en" lang="zh-CN">基础：ROS 2 是什么、从 ROS 1 到 ROS 2、分层结构、工作空间与 ros2 命令行</span><span class="en" lang="en">What ROS 2 is, ROS 1 to ROS 2, the layer stack, workspaces and the ros2 CLI</span></h1>
+  <p class="lede" lang="zh-CN">在写第一个节点之前，先看清 ROS 2 到底由什么组成：它不是操作系统，而是一层跑在 Linux 进程里的中间件，加上一套命令行工具和一个软件包生态。这一阶段从「一次 <code>publish()</code> 一路落到内核 UDP socket」的分层讲起，再讲 ROS 1 的 master 为什么被 DDS 发现机制取代、发行版和 LTS 怎么选、工作空间的 overlay / underlay 是怎么靠环境变量叠起来的，最后在容器里用 <code>ss</code> 和 <code>ps -T</code> 看中间件在操作系统层面到底做了什么。</p>
+  <p class="lede" lang="en">Before writing a first node, get clear on what ROS 2 is actually made of: it is not an operating system but a middleware layer running inside Linux processes, plus a set of command-line tools and a package ecosystem. This phase starts with the layer stack, following one <code>publish()</code> all the way down to a kernel UDP socket; then it covers why the ROS 1 master was replaced by DDS discovery, how distributions and LTS releases are chosen, and how workspace overlays and underlays are stacked through environment variables; finally, inside the container, you use <code>ss</code> and <code>ps -T</code> to see what the middleware really does at the OS level.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">用一句话说清 ROS 2 的三部分（中间件、工具、生态），并说出哪些事 ROS 2 <em>不</em>做、由 Linux 内核做。</li>
+      <li lang="en">Say in one sentence what the three parts of ROS 2 are (middleware, tools, ecosystem), and name the things ROS 2 does <em>not</em> do and the Linux kernel does.</li>
+      <li lang="zh-CN">解释 ROS 1 靠 master 做名字查找、ROS 2 靠 DDS 的分布式发现，以及这个改变带来的后果（没有单点、QoS、安全、多机器人隔离）。</li>
+      <li lang="en">Explain that ROS 1 relies on a master for name lookup while ROS 2 relies on distributed DDS discovery, and what follows from the change (no single point of failure, QoS, security, multi-robot isolation).</li>
+      <li lang="zh-CN">按顺序画出 用户节点 → rclcpp / rclpy → rcl → rmw → DDS 或 Zenoh → 内核 这几层，说出每层负责什么、哪一层让你能换中间件。</li>
+      <li lang="en">Draw, in order, the layers user node → rclcpp / rclpy → rcl → rmw → DDS or Zenoh → kernel, say what each one is responsible for, and which layer lets you swap the middleware.</li>
+      <li lang="zh-CN">创建工作空间，用 colcon 构建一个包，解释 <code>source install/setup.bash</code> 之后 <code>AMENT_PREFIX_PATH</code> 为什么让 overlay 遮住 underlay。</li>
+      <li lang="en">Create a workspace, build a package with colcon, and explain why, after <code>source install/setup.bash</code>, <code>AMENT_PREFIX_PATH</code> makes the overlay shadow the underlay.</li>
+      <li lang="zh-CN">由 <code>ROS_DOMAIN_ID</code> 算出发现用的 UDP 端口，并在容器里用 <code>ss -ulpn</code> 验证。</li>
+      <li lang="en">Compute the discovery UDP ports from <code>ROS_DOMAIN_ID</code>, and confirm them inside the container with <code>ss -ulpn</code>.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN">先按 <a href="../lab-setup/index.html">实验环境</a> 建好 arm64 Docker 容器：本页所有命令都在容器里跑，宿主机 macOS 只负责编辑文件和开浏览器。</li>
+    <li lang="en">First build the arm64 Docker container following <a href="../lab-setup/index.html">Lab environment</a>: every command on this page runs inside the container; the macOS host only edits files and opens a browser.</li>
+    <li lang="zh-CN">Linux 命令行：shell 变量与 <code>export</code>、后台任务 <code>&amp;</code> 与 <code>kill %1</code>、管道和 <code>grep</code>。</li>
+    <li lang="en">The Linux command line: shell variables and <code>export</code>, background jobs with <code>&amp;</code> and <code>kill %1</code>, pipes and <code>grep</code>.</li>
+    <li lang="zh-CN">会读 Python 和一点 C++；本阶段不写节点代码，Phase 1 才写。</li>
+    <li lang="en">You can read Python and some C++; this phase writes no node code, Phase 1 does.</li>
+    <li lang="zh-CN">做过或正在做 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Engineering Phase 1</a> 会很有帮助：Lab B 里看到的每个线程都是那一阶段讲的 <code>task_struct</code>。</li>
+    <li lang="en">Having done, or doing, <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Engineering Phase 1</a> helps a lot: every thread you see in Lab B is a <code>task_struct</code> as covered in that phase.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. ROS 2 是什么：中间件 + 工具 + 生态，不是操作系统</h3><h3 lang="en">1. What ROS 2 is: middleware + tools + ecosystem, not an operating system</h3>
+  <p lang="zh-CN">名字里有 OS，但 ROS 2 不管理 CPU、内存和设备。一个运行中的 ROS 2 系统就是若干普通的 Linux 进程，每个进程里有一个或多个<strong>节点</strong>（node）；节点之间通过有名字、有类型的<strong>话题</strong>（topic）、<strong>服务</strong>（service）和<strong>动作</strong>（action）交换消息。这些节点和连接合起来叫 <strong>ROS graph</strong>。ROS 2 提供的是三样东西：</p>
+  <p lang="en">The name contains OS, but ROS 2 does not manage the CPU, memory or devices. A running ROS 2 system is a set of ordinary Linux processes, each holding one or more <strong>nodes</strong>; nodes exchange messages over named, typed <strong>topics</strong>, <strong>services</strong> and <strong>actions</strong>. The nodes and their connections together are called the <strong>ROS graph</strong>. What ROS 2 provides is three things:</p>
+  <ul>
+    <li lang="zh-CN"><strong>中间件</strong>：客户端库（rclcpp、rclpy）和它们下面的通信层，负责发现对方、序列化消息、按 QoS 投递。</li>
+    <li lang="en"><strong>Middleware</strong>: the client libraries (rclcpp, rclpy) and the communication layer beneath them, which find peers, serialize messages and deliver them according to QoS.</li>
+    <li lang="zh-CN"><strong>工具</strong>：<code>ros2</code> 命令行、RViz2（3D 可视化）、rqt（GUI 插件）、<code>ros2 bag</code>（录制与回放）、<code>ros2 launch</code>。</li>
+    <li lang="en"><strong>Tools</strong>: the <code>ros2</code> command line, RViz2 (3D visualisation), rqt (GUI plugins), <code>ros2 bag</code> (record and replay), <code>ros2 launch</code>.</li>
+    <li lang="zh-CN"><strong>生态</strong>：成千上万个按统一约定打包的软件包（Nav2、ros2_control、slam_toolbox……），由构建农场编成 <code>ros-jazzy-*</code> 这样的 apt 包；约定本身写在 REP（ROS Enhancement Proposal）里。</li>
+    <li lang="en"><strong>Ecosystem</strong>: thousands of packages following shared conventions (Nav2, ros2_control, slam_toolbox…), built by the build farm into apt packages named like <code>ros-jazzy-*</code>; the conventions themselves are written down in REPs (ROS Enhancement Proposals).</li>
+  </ul>
+  <p lang="zh-CN">真正让节点跑起来的还是内核：哪个回调线程下一个上 CPU 由 Linux 调度器决定，消息走的是内核的 UDP socket 或共享内存，电机和传感器靠内核驱动。所以这门课会一直把内核放在视野里。</p>
+  <p lang="en">What actually makes the nodes run is still the kernel: the Linux scheduler decides which callback thread gets the CPU next, messages travel through kernel UDP sockets or shared memory, and motors and sensors are reached through kernel drivers. That is why this course keeps the kernel in view throughout.</p>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》开头介绍 ROS 2 与安装的章节；Quigley 等《Programming Robots with ROS》前几章对 ROS graph 的讲解（ROS 1，但 graph 的概念原样适用）。</p>
+  <p lang="en">Further reading: the opening chapters of Renard, <em>ROS 2 From Scratch</em>, that introduce ROS 2 and its installation; the early chapters of Quigley et al., <em>Programming Robots with ROS</em>, on the ROS graph (ROS 1, but the graph concept applies unchanged).</p>
+
+  <h3 lang="zh-CN">2. 从 ROS 1 到 ROS 2：去掉 master，换成 DDS</h3><h3 lang="en">2. From ROS 1 to ROS 2: the master is gone, DDS takes its place</h3>
+  <p lang="zh-CN"><strong>ROS 1 的机制</strong>：先启动 <code>roscore</code>，它运行 <strong>master</strong>（一个 XML-RPC 服务器，默认 <code>http://localhost:11311</code>，由 <code>ROS_MASTER_URI</code> 指定）、参数服务器和 <code>rosout</code>。每个节点启动时向 master 注册「我发布 /chatter」或「我订阅 /chatter」；master 把发布者的地址告诉订阅者，之后两个节点直接建 TCP 连接（TCPROS）传数据。master 只做名字查找，但它是单点：master 不在，新节点就找不到彼此；所有机器还必须指向同一个 master。</p>
+  <p lang="en"><strong>How ROS 1 works</strong>: you start <code>roscore</code> first, which runs the <strong>master</strong> (an XML-RPC server, by default <code>http://localhost:11311</code>, set by <code>ROS_MASTER_URI</code>), the parameter server and <code>rosout</code>. Each node registers with the master on start-up (“I publish /chatter” or “I subscribe to /chatter”); the master tells subscribers the publisher’s address, and the two nodes then open a direct TCP connection (TCPROS) for the data. The master only does name lookup, but it is a single point: without it new nodes cannot find each other, and every machine must point at the same master.</p>
+  <p lang="zh-CN"><strong>ROS 2 的机制</strong>：没有 master。每个 ROS 2 进程创建一个 DDS <strong>participant</strong>，按 RTPS 协议周期性地向多播地址发布「我在这里」（participant 发现，SPDP），然后彼此交换各自有哪些 writer 和 reader、什么类型、什么 QoS（endpoint 发现，SEDP）。话题名和类型对上、QoS 兼容，就直接点对点传数据。发现是分布式的，谁先启动都行，任何一个进程退出都不影响其他进程互相发现。</p>
+  <p lang="en"><strong>How ROS 2 works</strong>: there is no master. Each ROS 2 process creates one DDS <strong>participant</strong>, which, following the RTPS protocol, periodically announces “I am here” to a multicast address (participant discovery, SPDP); participants then exchange which writers and readers they have, with what types and what QoS (endpoint discovery, SEDP). When topic name and type match and the QoS is compatible, data flows directly peer to peer. Discovery is distributed: start order does not matter, and any process exiting does not stop the others from finding each other.</p>
+  <div class="note" lang="zh-CN"><code>ros2 daemon</code> 不是 master。它只是一个常驻后台的进程，替 <code>ros2</code> 命令行保持在 graph 里、缓存发现结果，好让 <code>ros2 node list</code> 立刻返回；节点之间的通信完全不经过它，把它停掉（<code>ros2 daemon stop</code>）节点照样互通。</div>
+  <div class="note" lang="en"><code>ros2 daemon</code> is not a master. It is just a long-running background process that stays in the graph on behalf of the <code>ros2</code> command line and caches discovery results, so that <code>ros2 node list</code> returns immediately; communication between nodes never passes through it, and with it stopped (<code>ros2 daemon stop</code>) nodes still talk to each other.</div>
+  <p lang="zh-CN">换成 DDS 之后顺带得到的东西：</p>
+  <p lang="en">What came along with the switch to DDS:</p>
+  <ul>
+    <li lang="zh-CN"><strong>QoS</strong>：可靠或尽力而为、历史深度、持久性等按每个话题设置（Phase 3）。ROS 1 只有 TCP 一种「可靠」语义。</li>
+    <li lang="en"><strong>QoS</strong>: reliable or best effort, history depth, durability and so on, set per topic (Phase 3). ROS 1 has only the single “reliable” semantics of TCP.</li>
+    <li lang="zh-CN"><strong>安全</strong>：SROS2 建立在 DDS-Security 之上，提供认证、加密和访问控制（Phase 3）。ROS 1 没有内置安全。</li>
+    <li lang="en"><strong>Security</strong>: SROS2 builds on DDS-Security for authentication, encryption and access control (Phase 3). ROS 1 has no built-in security.</li>
+    <li lang="zh-CN"><strong>实时意图</strong>：rclcpp 的设计允许在实时线程里使用（可控的内存分配、执行器），但 ROS 2 本身不让程序变成实时的，还要靠内核的 <code>SCHED_FIFO</code>、<code>PREEMPT_RT</code> 和你自己的写法（Phase 2）。</li>
+    <li lang="en"><strong>Real-time intent</strong>: rclcpp is designed so it can be used from real-time threads (controlled memory allocation, executors), but ROS 2 does not make a program real-time by itself; that still takes the kernel’s <code>SCHED_FIFO</code>, <code>PREEMPT_RT</code> and your own coding discipline (Phase 2).</li>
+    <li lang="zh-CN"><strong>Python 3 与现代 C++</strong>：rclpy 只支持 Python 3（24.04 上是 3.12），rclcpp 用 C++17。ROS 1 直到最后一个发行版 Noetic 才转到 Python 3。</li>
+    <li lang="en"><strong>Python 3 and modern C++</strong>: rclpy supports only Python 3 (3.12 on 24.04), and rclcpp uses C++17. ROS 1 moved to Python 3 only in its last distribution, Noetic.</li>
+  </ul>
+  <p lang="zh-CN">ROS 1 的最后一个发行版 Noetic 已于 2025 年 5 月停止支持，新项目都应该用 ROS 2。</p>
+  <p lang="en">Noetic, the last ROS 1 distribution, reached end of life in May 2025; new projects should all use ROS 2.</p>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ROS 2 基础与 DDS 的章节；官方设计文章 <a href="https://design.ros2.org/articles/why_ros2.html">Why ROS 2?</a> 和 <a href="https://design.ros2.org/articles/changes.html">Changes between ROS 1 and ROS 2</a>。</p>
+  <p lang="en">Further reading: the chapters on ROS 2 fundamentals and DDS in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>; the official design articles <a href="https://design.ros2.org/articles/why_ros2.html">Why ROS 2?</a> and <a href="https://design.ros2.org/articles/changes.html">Changes between ROS 1 and ROS 2</a>.</p>
+
+  <h3 lang="zh-CN">3. 发行版与 LTS</h3><h3 lang="en">3. Distributions and LTS</h3>
+  <p lang="zh-CN">一个<strong>发行版</strong>是一组一起冻结、一起测试、一起发布的软件包版本，绑定到特定的操作系统版本（支持的平台和等级见 REP 2000）。同一发行版里只做兼容的修复，不会突然改 API；跨发行版则可能有破坏性变化。所以「装哪个发行版」决定了包名（<code>ros-jazzy-*</code>）、安装路径（<code>/opt/ros/jazzy</code>）和你能用的 Gazebo 版本。</p>
+  <p lang="en">A <strong>distribution</strong> is a set of package versions frozen, tested and released together, bound to a particular operating-system release (REP 2000 lists the supported platforms and tiers). Within one distribution only compatible fixes land and APIs do not suddenly change; across distributions there may be breaking changes. So “which distribution you install” determines the package names (<code>ros-jazzy-*</code>), the install path (<code>/opt/ros/jazzy</code>) and the Gazebo version you can use.</p>
+  <ul>
+    <li lang="zh-CN">节奏：每年 5 月发布一个，名字按字母顺序；近几个偶数年的是 <strong>LTS</strong>，支持 5 年；奇数年的非 LTS 大致支持 1.5 年。另有一直滚动更新的开发版 <strong>Rolling</strong>。</li>
+    <li lang="en">Cadence: one release each May, named in alphabetical order; the recent even-year releases are <strong>LTS</strong> with 5 years of support; the odd-year non-LTS releases are supported for roughly 1.5 years. There is also <strong>Rolling</strong>, a development distribution that is updated continuously.</li>
+    <li lang="zh-CN">本课固定在 <strong>Jazzy Jalisco</strong>：LTS，2024-05-23 发布，2029 年 5 月停止支持，跑在 Ubuntu 24.04 arm64 上，推荐搭配 Gazebo Harmonic。</li>
+    <li lang="en">This course is pinned to <strong>Jazzy Jalisco</strong>: LTS, released 2024-05-23, end of life May 2029, running on Ubuntu 24.04 arm64, with Gazebo Harmonic as the recommended simulator.</li>
+    <li lang="zh-CN">更新的 LTS 是 <strong>Lyrical Luth</strong>（2026-05-22 发布，2031 年 5 月停止支持，Ubuntu 26.04，搭配 Gazebo Jetty）；Kilted Kaiju（2025-05-23）不是 LTS，2026 年 12 月停止支持。以上于 2026-10-31 按官方 Releases 页核对。</li>
+    <li lang="en">The newest LTS is <strong>Lyrical Luth</strong> (released 2026-05-22, end of life May 2031, Ubuntu 26.04, paired with Gazebo Jetty); Kilted Kaiju (2025-05-23) is not LTS and ends in December 2026. All of this was checked against the official Releases page on 2026-10-31.</li>
+  </ul>
+  <div class="note" lang="zh-CN">选 Jazzy 是因为 Gazebo Harmonic、Nav2 和本页引用的书都以它为准，资料最齐。想改用 Lyrical：把每条命令和包名里的 <code>jazzy</code> 换成 <code>lyrical</code>，系统换成 Ubuntu 26.04，Gazebo 换成 Jetty，课程就整体迁移过去了；个别包名或 API 如有变化，以官方文档为准。</div>
+  <div class="note" lang="en">Jazzy is chosen because Gazebo Harmonic, Nav2 and the books cited on this page all target it, so the material is most complete. To move to Lyrical: replace <code>jazzy</code> with <code>lyrical</code> in every command and package name, use Ubuntu 26.04 and Gazebo Jetty, and the whole course moves across; where an individual package name or API has changed, the official docs win.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲安装与环境配置的章节（基于 Jazzy）；官方 <a href="https://docs.ros.org/en/jazzy/Releases.html">Distributions</a> 页与 <a href="https://www.ros.org/reps/rep-2000.html">REP 2000</a>。</p>
+  <p lang="en">Further reading: the chapter on installation and environment setup in Renard, <em>ROS 2 From Scratch</em> (based on Jazzy); the official <a href="https://docs.ros.org/en/jazzy/Releases.html">Distributions</a> page and <a href="https://www.ros.org/reps/rep-2000.html">REP 2000</a>.</p>
+
+  <h3 lang="zh-CN">4. 分层结构：一次 publish 从节点落到内核</h3><h3 lang="en">4. The layer stack: one publish from the node down to the kernel</h3>
+  <p lang="zh-CN">跟着 talker 的一次 <code>publisher-&gt;publish(msg)</code> 往下走：</p>
+  <p lang="en">Follow one <code>publisher-&gt;publish(msg)</code> in the talker downwards:</p>
+  <ol>
+    <li lang="zh-CN"><strong>用户节点</strong>：你的代码，定时器回调里填好一条 <code>std_msgs/msg/String</code> 然后 publish。</li>
+    <li lang="en"><strong>User node</strong>: your code; a timer callback fills in a <code>std_msgs/msg/String</code> and publishes it.</li>
+    <li lang="zh-CN"><strong>rclcpp / rclpy</strong>：各语言的客户端库，提供 <code>Node</code>、publisher、执行器（executor）和回调这些符合语言习惯的对象。rclpy 通过一个 C 扩展模块调用下一层，所以 Python 和 C++ 节点在线上完全一样。</li>
+    <li lang="en"><strong>rclcpp / rclpy</strong>: the per-language client libraries, offering idiomatic objects such as <code>Node</code>, publishers, executors and callbacks. rclpy calls the next layer through a C extension module, so Python and C++ nodes are identical on the wire.</li>
+    <li lang="zh-CN"><strong>rcl</strong>（C）：各语言共用的那部分逻辑——名字和重映射、graph 查询、参数、时间、日志——这样每种语言不必各写一遍。它不直接碰中间件。</li>
+    <li lang="en"><strong>rcl</strong> (C): the logic shared by every language — names and remapping, graph queries, parameters, time, logging — so each language does not have to rewrite it. It does not touch the middleware directly.</li>
+    <li lang="zh-CN"><strong>rmw</strong>（ROS middleware interface，C API）：ROS 需要中间件做的最小功能集合（创建 publisher、发布、等待、查询 graph）。具体实现是一个可替换的库：Jazzy 默认 <code>rmw_fastrtps_cpp</code>，可选 <code>rmw_cyclonedds_cpp</code>、<code>rmw_zenoh_cpp</code>（Zenoh 在各发行版上的支持等级请查官方文档）。用环境变量 <code>RMW_IMPLEMENTATION</code> 选择，节点代码一行都不用改。</li>
+    <li lang="en"><strong>rmw</strong> (the ROS middleware interface, a C API): the minimum set of things ROS needs from a middleware (create a publisher, publish, wait, query the graph). The implementation is a swappable library: on Jazzy the default is <code>rmw_fastrtps_cpp</code>, with <code>rmw_cyclonedds_cpp</code> and <code>rmw_zenoh_cpp</code> as alternatives (check the docs for Zenoh’s support tier on your distribution). You choose with the <code>RMW_IMPLEMENTATION</code> environment variable without changing a single line of node code.</li>
+    <li lang="zh-CN"><strong>DDS 或 Zenoh</strong>：真正的通信库。<code>rmw_fastrtps_cpp</code> 用消息的 typesupport 代码把它序列化成 CDR 字节，交给 Fast DDS 的 DataWriter，按 RTPS 打包。</li>
+    <li lang="en"><strong>DDS or Zenoh</strong>: the actual communication library. <code>rmw_fastrtps_cpp</code> uses the message’s typesupport code to serialize it into CDR bytes and hands them to a Fast DDS DataWriter, which wraps them in RTPS.</li>
+    <li lang="zh-CN"><strong>操作系统</strong>：RTPS 报文经 <code>sendmsg()</code> 写进 UDP socket（跨机器，或同机时的某些配置），或写进共享内存段（Fast DDS 同机时可用共享内存传输，大致在 <code>/dev/shm</code> 下）。</li>
+    <li lang="en"><strong>Operating system</strong>: the RTPS packet goes into a UDP socket through <code>sendmsg()</code> (across machines, or on one machine in some configurations), or into a shared-memory segment (Fast DDS can use a shared-memory transport between processes on the same host; approximately under <code>/dev/shm</code>).</li>
+  </ol>
+  <p lang="zh-CN">接收方向反过来：DDS 库自己开的<strong>接收线程</strong>阻塞在 <code>recvmsg()</code> 上；数据到达时内核唤醒它，它把数据放进 reader 的队列并通知 rmw；你的执行器线程原本睡在 rcl / rmw 的 wait set 上，被唤醒后才调用你的回调。所以一个只写了单线程代码的节点，进程里也会有好几个线程。</p>
+  <p lang="en">Receiving runs the other way: a <strong>receive thread</strong> started by the DDS library blocks in <code>recvmsg()</code>; when data arrives the kernel wakes it, it puts the data into the reader’s queue and notifies rmw; your executor thread, which was asleep on the rcl / rmw wait set, is woken and only then calls your callback. That is why a node whose code is single-threaded still has several threads in its process.</p>
+  <div class="note" lang="zh-CN">和 Kernel Engineering 的连接：这些线程每一个都是一个 <code>task_struct</code>，阻塞时进入睡眠，被唤醒后由 EEVDF 决定何时上 CPU——机制见 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a> 的概念 2（线程模型）和概念 4（调度）；回调延迟里有一部分就是这段「唤醒到真正运行」的调度延迟，Phase 2 会量它。DDS 内部队列用锁保护、线程之间用 futex 等待和唤醒，共享内存传输也要靠同步原语，这些在 <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a> 讲（那里覆盖锁、futex 和 UNIX domain socket；UDP socket 的内核路径课程没有单独展开）。</div>
+  <div class="note" lang="en">The connection to Kernel Engineering: each of these threads is a <code>task_struct</code> that sleeps while blocked and, once woken, runs when EEVDF decides — the mechanism is in concepts 2 (the thread model) and 4 (scheduling) of <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>; part of callback latency is exactly this wake-up-to-running scheduling delay, which Phase 2 measures. Inside DDS the queues are protected by locks, threads wait and wake through futexes, and the shared-memory transport also depends on synchronisation primitives; these are covered in <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a> (which covers locks, futexes and UNIX domain sockets; the kernel path of UDP sockets is not covered separately in that course).</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ROS 2 架构与中间件的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Advanced/About-Internal-Interfaces.html">Internal ROS 2 interfaces</a>（rcl、rmw、rosidl 的分工）。</p>
+  <p lang="en">Further reading: the chapters on ROS 2 architecture and middleware in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Advanced/About-Internal-Interfaces.html">Internal ROS 2 interfaces</a> (how rcl, rmw and rosidl divide the work).</p>
+
+  <h3 lang="zh-CN">5. 工作空间、overlay 与 underlay、colcon、ament、package.xml</h3><h3 lang="en">5. Workspaces, overlays and underlays, colcon, ament, package.xml</h3>
+  <p lang="zh-CN">一个<strong>包</strong>（package）就是一个带 <code>package.xml</code> 的目录。<code>package.xml</code>（format 3，REP 149）写名字、版本、许可证、依赖，以及 <code>&lt;export&gt;&lt;build_type&gt;</code>：<code>ament_cmake</code>（C++，CMake 加 ament 的宏）或 <code>ament_python</code>（Python，setuptools）。<strong>ament</strong> 是这两种构建类型和它们的约定；<strong>colcon</strong> 是在它们之上的元构建工具：</p>
+  <p lang="en">A <strong>package</strong> is a directory with a <code>package.xml</code>. <code>package.xml</code> (format 3, REP 149) records the name, version, licence, dependencies, and <code>&lt;export&gt;&lt;build_type&gt;</code>: <code>ament_cmake</code> (C++, CMake plus ament macros) or <code>ament_python</code> (Python, setuptools). <strong>ament</strong> is these build types and their conventions; <strong>colcon</strong> is the meta build tool on top of them:</p>
+  <ol>
+    <li lang="zh-CN">在 <code>src/</code> 下找出所有包，读每个 <code>package.xml</code> 的依赖，排成拓扑顺序（被依赖的先构建，互不依赖的并行）。</li>
+    <li lang="en">It finds every package under <code>src/</code>, reads the dependencies in each <code>package.xml</code>, and sorts them topologically (dependencies are built first, independent packages in parallel).</li>
+    <li lang="zh-CN">对每个包调用它自己的构建系统，中间产物放在 <code>build/&lt;pkg&gt;</code>，日志放在 <code>log/</code>。</li>
+    <li lang="en">It invokes each package’s own build system, with intermediate output in <code>build/&lt;pkg&gt;</code> and logs in <code>log/</code>.</li>
+    <li lang="zh-CN">把每个包安装到自己的前缀 <code>install/&lt;pkg&gt;</code>，并生成 <code>install/setup.bash</code> 和 <code>install/local_setup.bash</code>。<code>--symlink-install</code> 用符号链接代替复制，改 Python 文件和 launch 文件不用重新构建。</li>
+    <li lang="en">It installs each package into its own prefix <code>install/&lt;pkg&gt;</code> and generates <code>install/setup.bash</code> and <code>install/local_setup.bash</code>. <code>--symlink-install</code> uses symbolic links instead of copies, so editing Python and launch files needs no rebuild.</li>
+  </ol>
+  <p lang="zh-CN"><strong>overlay 与 underlay 全靠环境变量</strong>。<code>source /opt/ros/jazzy/setup.bash</code> 把这个前缀加进 <code>AMENT_PREFIX_PATH</code>、<code>PATH</code>、<code>PYTHONPATH</code> 等（大致还有 <code>LD_LIBRARY_PATH</code>）；这就是 underlay。<code>source ~/ws/install/setup.bash</code> 先重新 source 构建时所在的 underlay，再把工作空间里每个包的前缀加到<em>前面</em>；这就是 overlay。<code>local_setup.bash</code> 只加工作空间自己，不碰 underlay。</p>
+  <p lang="en"><strong>Overlays and underlays are entirely environment variables</strong>. <code>source /opt/ros/jazzy/setup.bash</code> adds that prefix to <code>AMENT_PREFIX_PATH</code>, <code>PATH</code>, <code>PYTHONPATH</code> and so on (approximately also <code>LD_LIBRARY_PATH</code>); that is the underlay. <code>source ~/ws/install/setup.bash</code> first re-sources the underlay that was active at build time, then adds every package prefix of the workspace in <em>front</em> of it; that is the overlay. <code>local_setup.bash</code> adds only the workspace itself and leaves the underlay alone.</p>
+  <p lang="zh-CN"><code>ros2 pkg list</code> 和 <code>ros2 run</code> 怎么找到包？靠 <strong>ament 资源索引</strong>：每个装好的包在 <code>share/ament_index/resource_index/packages/</code> 下放一个以包名命名的空文件。工具按 <code>AMENT_PREFIX_PATH</code> 的顺序逐个前缀去看这个目录，先找到的算数——所以 overlay 里的同名包会遮住 underlay 里的。没有数据库，只有文件和路径顺序。</p>
+  <p lang="en">How do <code>ros2 pkg list</code> and <code>ros2 run</code> find packages? Through the <strong>ament resource index</strong>: each installed package places an empty file named after itself in <code>share/ament_index/resource_index/packages/</code>. The tools look in that directory under each prefix in <code>AMENT_PREFIX_PATH</code> order, and the first hit wins — so a package of the same name in the overlay shadows the one in the underlay. There is no database, only files and path order.</p>
+  <div class="note" lang="zh-CN">官方教程的规则：在一个<strong>没有</strong> source 过这个 overlay 的终端里构建，在<strong>另开的新终端</strong>里 source overlay。在同一个终端里一边 source overlay 一边构建，可能把 overlay 自己当成 underlay，造成难查的问题。</div>
+  <div class="note" lang="en">The rule from the official tutorial: build in a terminal that has <strong>not</strong> sourced this overlay, and source the overlay in a <strong>new, separate terminal</strong>. Building in a terminal where the overlay is sourced can make the overlay act as its own underlay and cause hard-to-trace problems.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲包与工作空间的章节；Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲 ROS 2 入门与工作空间的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Creating-A-Workspace/Creating-A-Workspace.html">Creating a workspace</a>。</p>
+  <p lang="en">Further reading: the chapter on packages and workspaces in Renard, <em>ROS 2 From Scratch</em>; the chapters introducing ROS 2 and workspaces in Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Creating-A-Workspace/Creating-A-Workspace.html">Creating a workspace</a>.</p>
+
+  <h3 lang="zh-CN">6. <code>ros2</code> 命令行与 <code>ROS_DOMAIN_ID</code></h3><h3 lang="en">6. The <code>ros2</code> CLI and <code>ROS_DOMAIN_ID</code></h3>
+  <p lang="zh-CN"><code>ros2</code> 是一个 Python 程序，子命令（<code>node</code>、<code>topic</code>、<code>service</code>、<code>param</code>、<code>pkg</code>、<code>run</code>、<code>doctor</code>……）都是插件。查询 graph 的命令要么问 <code>ros2 daemon</code>，要么自己临时加入 graph 当一个 participant 等发现结果（多数 list 类命令有 <code>--no-daemon</code> 选项，以 <code>--help</code> 为准）。它们看到的只是发现协议告诉它们的东西：刚启动的节点要过一小会儿才出现，退出的节点也可能晚一点才消失。</p>
+  <p lang="en"><code>ros2</code> is a Python program whose subcommands (<code>node</code>, <code>topic</code>, <code>service</code>, <code>param</code>, <code>pkg</code>, <code>run</code>, <code>doctor</code>…) are all plugins. Commands that query the graph either ask <code>ros2 daemon</code> or briefly join the graph as a participant themselves and wait for discovery results (most list commands accept <code>--no-daemon</code>; check <code>--help</code>). They only see what the discovery protocol tells them: a node that just started takes a moment to appear, and one that exited may linger a little.</p>
+  <p lang="zh-CN"><code>ROS_DOMAIN_ID</code>（默认 0）就是 DDS 的 domain 编号。不同 domain 的 participant 用不同的 UDP 端口，所以根本看不到彼此。端口按 <strong>RTPS port formula</strong>（DDS-RTPS 规范的默认端口公式，常数 PB = 7400、DG = 250、PG = 2，偏移 d0 = 0、d1 = 10、d2 = 1、d3 = 11）计算，d 是 domain ID，p 是这台机器上该 domain 的第几个 participant（从 0 开始）：</p>
+  <p lang="en"><code>ROS_DOMAIN_ID</code> (default 0) is the DDS domain number. Participants in different domains use different UDP ports, so they simply cannot see each other. Ports follow the <strong>RTPS port formula</strong> (the default port mapping in the DDS-RTPS specification, with constants PB = 7400, DG = 250, PG = 2 and offsets d0 = 0, d1 = 10, d2 = 1, d3 = 11), where d is the domain ID and p is the index of the participant in that domain on this machine (from 0):</p>
+  <ul>
+    <li lang="zh-CN">发现多播端口 = 7400 + 250 × d；用户数据多播端口 = 7400 + 250 × d + 1。</li>
+    <li lang="en">Discovery multicast port = 7400 + 250 × d; user-data multicast port = 7400 + 250 × d + 1.</li>
+    <li lang="zh-CN">发现单播端口 = 7400 + 250 × d + 10 + 2 × p；用户数据单播端口 = 7400 + 250 × d + 11 + 2 × p。</li>
+    <li lang="en">Discovery unicast port = 7400 + 250 × d + 10 + 2 × p; user-data unicast port = 7400 + 250 × d + 11 + 2 × p.</li>
+    <li lang="zh-CN">例：domain 0 的第一个进程用 7400、7401 和 7410、7411；domain 1 用 7650、7651，第一个进程的单播是 7660、7661（与 Jazzy 文档的例子一致）。</li>
+    <li lang="en">Example: the first process in domain 0 uses 7400 and 7401 plus 7410 and 7411; domain 1 uses 7650 and 7651, with 7660 and 7661 as the first process’s unicast ports (matching the example in the Jazzy docs).</li>
+  </ul>
+  <p lang="zh-CN">后果都能从公式推出来：端口是 16 位，所以 domain ID 最大 232；Linux 的临时端口范围默认是 32768–60999，官方建议在 Linux 上取 0–101，避开它；每个进程一个 participant、各占两个单播端口，一台机器上同一 domain 超过大约 120 个 ROS 2 进程，就会溢出到下一个 domain 的端口。来源：Jazzy 文档 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Domain-ID.html">The ROS_DOMAIN_ID</a>（2026-10-31 核对）。实际打开哪些端口还取决于 rmw 和配置，例如 Fast DDS 同机通信可能走共享内存，Lab B 以实际输出为准。</p>
+  <p lang="en">The consequences all follow from the formula: ports are 16-bit, so the largest domain ID is 232; the default Linux ephemeral port range is 32768–60999, and the docs recommend 0–101 on Linux to stay clear of it; each process is one participant taking two unicast ports, so more than about 120 ROS 2 processes in one domain on one machine spill into the next domain’s ports. Source: the Jazzy docs page <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Domain-ID.html">The ROS_DOMAIN_ID</a> (checked 2026-10-31). Which ports are actually opened also depends on the rmw and its configuration — for example Fast DDS may use shared memory on one host — so in Lab B the real output wins.</p>
+  <div class="note" lang="zh-CN">domain 只是隔离，不是安全：同一局域网、同一 domain ID 的任何机器都能看到并订阅你的话题。要防的是别人而不是误撞，就要用 SROS2（Phase 3）；只想限制在本机，Jazzy 有 <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code>（实验环境已默认设为 LOCALHOST，Phase 3 详讲）。</div>
+  <div class="note" lang="en">A domain is isolation, not security: any machine on the same LAN with the same domain ID can see and subscribe to your topics. To guard against other people rather than accidents you need SROS2 (Phase 3); to stay on the local host only, Jazzy has <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> (the lab environment already sets LOCALHOST; Phase 3 covers it).</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲 ROS 2 命令行工具的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Configuring-ROS2-Environment.html">Configuring environment</a>。</p>
+  <p lang="en">Further reading: the chapter on the ROS 2 command-line tools in Renard, <em>ROS 2 From Scratch</em>; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Configuring-ROS2-Environment.html">Configuring environment</a>.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：ROS 1 ↔ ROS 2</h2><h2 id="compare-en" lang="en">Comparison: ROS 1 ↔ ROS 2</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th><span lang="zh-CN">ROS 1（到 Noetic）</span><span lang="en">ROS 1 (up to Noetic)</span></th><th><span lang="zh-CN">ROS 2（Jazzy）</span><span lang="en">ROS 2 (Jazzy)</span></th></tr>
+    <tr><td><span lang="zh-CN">节点怎么找到彼此</span><span lang="en">How nodes find each other</span></td><td><span lang="zh-CN">向 master 注册和查询（XML-RPC，<code>ROS_MASTER_URI</code>，默认端口 11311）</span><span lang="en">register with and query the master (XML-RPC, <code>ROS_MASTER_URI</code>, default port 11311)</span></td><td><span lang="zh-CN">DDS 分布式发现（SPDP 多播 + SEDP），没有中心进程</span><span lang="en">distributed DDS discovery (SPDP multicast + SEDP), no central process</span></td></tr>
+    <tr><td><span lang="zh-CN">数据传输</span><span lang="en">Data transport</span></td><td><span lang="zh-CN">TCPROS（少量 UDPROS），节点间直连</span><span lang="en">TCPROS (some UDPROS), direct between nodes</span></td><td><span lang="zh-CN">RTPS over UDP；同机可走共享内存（取决于 rmw）</span><span lang="en">RTPS over UDP; shared memory on one host (depends on the rmw)</span></td></tr>
+    <tr><td><span lang="zh-CN">中间件可替换</span><span lang="en">Swappable middleware</span></td><td><span lang="zh-CN">否，通信层是 ROS 自己写的</span><span lang="en">no; the communication layer is ROS’s own</span></td><td><span lang="zh-CN">是，经 rmw：Fast DDS（默认）、Cyclone DDS、Zenoh</span><span lang="en">yes, through rmw: Fast DDS (default), Cyclone DDS, Zenoh</span></td></tr>
+    <tr><td>QoS</td><td><span lang="zh-CN">基本没有（队列长度、TCP 可靠）</span><span lang="en">essentially none (queue size, TCP reliability)</span></td><td><span lang="zh-CN">每个话题可设可靠性、持久性、历史深度、deadline 等</span><span lang="en">per-topic reliability, durability, history depth, deadline and more</span></td></tr>
+    <tr><td><span lang="zh-CN">安全</span><span lang="en">Security</span></td><td><span lang="zh-CN">没有内置</span><span lang="en">none built in</span></td><td><span lang="zh-CN">SROS2，基于 DDS-Security</span><span lang="en">SROS2, based on DDS-Security</span></td></tr>
+    <tr><td><span lang="zh-CN">一个进程几个节点</span><span lang="en">Nodes per process</span></td><td><span lang="zh-CN">一个（共享进程要用 nodelet）</span><span lang="en">one (sharing a process needs nodelets)</span></td><td><span lang="zh-CN">任意多个；component 组合，进程内通信</span><span lang="en">any number; composition with components, intra-process communication</span></td></tr>
+    <tr><td><span lang="zh-CN">参数</span><span lang="en">Parameters</span></td><td><span lang="zh-CN">master 上的全局参数服务器</span><span lang="en">a global parameter server on the master</span></td><td><span lang="zh-CN">每个节点自己持有，通过服务读写</span><span lang="en">held by each node, read and written through services</span></td></tr>
+    <tr><td><span lang="zh-CN">节点生命周期</span><span lang="en">Node lifecycle</span></td><td><span lang="zh-CN">没有标准状态机</span><span lang="en">no standard state machine</span></td><td><span lang="zh-CN">managed（lifecycle）节点：unconfigured、inactive、active、finalized</span><span lang="en">managed (lifecycle) nodes: unconfigured, inactive, active, finalized</span></td></tr>
+    <tr><td><span lang="zh-CN">启动文件</span><span lang="en">Launch files</span></td><td><span lang="zh-CN">XML（roslaunch）</span><span lang="en">XML (roslaunch)</span></td><td><span lang="zh-CN">Python、XML 或 YAML</span><span lang="en">Python, XML or YAML</span></td></tr>
+    <tr><td><span lang="zh-CN">构建</span><span lang="en">Build</span></td><td><span lang="zh-CN">catkin，有 devel 空间</span><span lang="en">catkin, with a devel space</span></td><td><span lang="zh-CN">colcon + ament_cmake / ament_python，只有 install 空间</span><span lang="en">colcon + ament_cmake / ament_python, install space only</span></td></tr>
+    <tr><td><span lang="zh-CN">语言</span><span lang="en">Languages</span></td><td><span lang="zh-CN">Python 2（Noetic 改为 Python 3），C++03 / C++11 起</span><span lang="en">Python 2 (Python 3 from Noetic), C++03 / C++11 onwards</span></td><td><span lang="zh-CN">Python 3（24.04 上 3.12），C++17</span><span lang="en">Python 3 (3.12 on 24.04), C++17</span></td></tr>
+    <tr><td><span lang="zh-CN">多机器人隔离</span><span lang="en">Multi-robot isolation</span></td><td><span lang="zh-CN">每组一个 master，或命名空间</span><span lang="en">one master per group, or namespaces</span></td><td><span lang="zh-CN"><code>ROS_DOMAIN_ID</code>、命名空间、发现范围</span><span lang="en"><code>ROS_DOMAIN_ID</code>, namespaces, discovery range</span></td></tr>
+    <tr><td><span lang="zh-CN">现状</span><span lang="en">Status</span></td><td><span lang="zh-CN">最后一个发行版 Noetic，2025 年 5 月停止支持</span><span lang="en">last distribution Noetic, end of life May 2025</span></td><td><span lang="zh-CN">Jazzy LTS 到 2029 年 5 月；Lyrical LTS 到 2031 年 5 月</span><span lang="en">Jazzy LTS until May 2029; Lyrical LTS until May 2031</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 分层结构：从一个节点到内核</h3><h3 lang="en">(a) The layer stack: from a node down to the kernel</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2400"
+         data-captions='["全图：talker 的一次 publish 自上而下穿过六层，最后落到 Linux 内核。左边是层，右边是这一层在本例中具体是什么。按「播放」一层一层看。",
+           "第 1 层，用户节点：你写的代码。定时器回调填好一条 std_msgs/msg/String，调用 publish。这一层只知道话题名和消息类型，不知道网络。",
+           "第 2 层，rclcpp / rclpy：语言绑定，提供 Node、publisher、executor 和回调。rclpy 通过 C 扩展调用下一层，所以 Python 节点和 C++ 节点在线上没有区别。",
+           "第 3 层，rcl：用 C 写的公共逻辑，包括名字与重映射、graph 查询、参数、时间和日志，各种语言共用一份。它不直接碰中间件，而是调用 rmw。",
+           "第 4 层，rmw：ROS 对中间件的最小要求，一套 C API。具体实现是可替换的库，Jazzy 默认 rmw_fastrtps_cpp，用 RMW_IMPLEMENTATION 环境变量切换，节点代码不用改。",
+           "第 5 层，DDS 或 Zenoh：真正的通信库。消息经 typesupport 序列化为 CDR 字节，由 Fast DDS 的 DataWriter 按 RTPS 打包；发现、QoS 匹配也在这一层完成。",
+           "第 6 层，Linux 内核：RTPS 报文经 sendmsg 写进 UDP socket，发现报文发到多播组 239.255.0.1；同机时可能改走 /dev/shm 共享内存。接收线程阻塞在 recvmsg 上，被唤醒后何时运行由调度器决定，见 Kernel Phase 1 和 Phase 3。"]'
+         data-captions-en='["The whole picture: one publish from the talker passes down through six layers and lands in the Linux kernel. Layers on the left; on the right, what that layer is concretely in this example. Press Play to go one layer at a time.",
+           "Layer 1, the user node: your code. A timer callback fills in a std_msgs/msg/String and calls publish. This layer knows only the topic name and the message type, nothing about the network.",
+           "Layer 2, rclcpp / rclpy: the language bindings, offering Node, publishers, executors and callbacks. rclpy calls the next layer through a C extension, so Python and C++ nodes look the same on the wire.",
+           "Layer 3, rcl: shared logic written in C (names and remapping, graph queries, parameters, time, logging), one copy for every language. It does not touch the middleware directly; it calls rmw.",
+           "Layer 4, rmw: the minimum ROS needs from a middleware, as a C API. The implementation is a swappable library, rmw_fastrtps_cpp by default on Jazzy, selected with the RMW_IMPLEMENTATION environment variable without changing node code.",
+           "Layer 5, DDS or Zenoh: the actual communication library. The message is serialized into CDR bytes through typesupport, and a Fast DDS DataWriter wraps it in RTPS; discovery and QoS matching also happen in this layer.",
+           "Layer 6, the Linux kernel: the RTPS packet goes into a UDP socket through sendmsg, and discovery packets go to the multicast group 239.255.0.1; on one host the data may use shared memory under /dev/shm instead. Receive threads block in recvmsg, and when they run after waking is up to the scheduler, see Kernel Phase 1 and Phase 3."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="60" y="24" class="small" lang="zh-CN">层</text><text x="60" y="24" class="small" lang="en">Layer</text>
+      <text x="600" y="24" class="small" lang="zh-CN">本例中是什么</text><text x="600" y="24" class="small" lang="en">In this example</text>
+      <line x1="575" y1="30" x2="575" y2="410" class="lane"/>
+      <path class="arrow" d="M28 46 L28 392"/>
+      <text x="10" y="410" class="small">publish ↓</text>
+
+      <g data-step="1"><rect class="box" x="45" y="35" width="510" height="52"/>
+        <text x="58" y="56" class="mono" lang="zh-CN">1. 用户节点</text><text x="58" y="56" class="mono" lang="en">1. User node</text>
+        <text x="58" y="76" class="small" lang="zh-CN">你的回调、定时器和逻辑；只认话题名和消息类型</text><text x="58" y="76" class="small" lang="en">your callbacks, timers and logic; knows only topic names and types</text>
+        <text x="600" y="56" class="mono">talker: publish(String)</text>
+        <text x="600" y="76" class="small">topic /chatter</text></g>
+
+      <g data-step="2"><rect class="box ros" x="45" y="97" width="510" height="52"/>
+        <text x="58" y="118" class="mono">2. rclcpp / rclpy</text>
+        <text x="58" y="138" class="small" lang="zh-CN">语言绑定：Node、publisher、executor、回调</text><text x="58" y="138" class="small" lang="en">language bindings: Node, publisher, executor, callbacks</text>
+        <text x="600" y="118" class="mono">rclcpp::Publisher</text>
+        <text x="600" y="138" class="small" lang="zh-CN">rclpy 经 C 扩展调用 rcl</text><text x="600" y="138" class="small" lang="en">rclpy calls rcl via a C extension</text></g>
+
+      <g data-step="3"><rect class="box ros" x="45" y="159" width="510" height="52"/>
+        <text x="58" y="180" class="mono">3. rcl (C)</text>
+        <text x="58" y="200" class="small" lang="zh-CN">名字与重映射、graph、参数、时间、日志：各语言共用</text><text x="58" y="200" class="small" lang="en">names and remapping, graph, parameters, time, logging: shared</text>
+        <text x="600" y="180" class="mono">rcl_publish()</text>
+        <text x="600" y="200" class="small">librcl</text></g>
+
+      <g data-step="4"><rect class="box ros" x="45" y="221" width="510" height="52"/>
+        <text x="58" y="242" class="mono">4. rmw (C API)</text>
+        <text x="58" y="262" class="small" lang="zh-CN">最小中间件接口；实现可替换，节点代码不变</text><text x="58" y="262" class="small" lang="en">minimal middleware interface; swappable, node code unchanged</text>
+        <text x="600" y="242" class="mono">rmw_fastrtps_cpp</text>
+        <text x="600" y="262" class="small" lang="zh-CN">RMW_IMPLEMENTATION 选择</text><text x="600" y="262" class="small" lang="en">chosen by RMW_IMPLEMENTATION</text></g>
+
+      <g data-step="5"><rect class="box" x="45" y="283" width="510" height="52"/>
+        <text x="58" y="304" class="mono" lang="zh-CN">5. DDS 或 Zenoh</text><text x="58" y="304" class="mono" lang="en">5. DDS or Zenoh</text>
+        <text x="58" y="324" class="small" lang="zh-CN">序列化为 CDR、RTPS 打包、发现与 QoS 匹配</text><text x="58" y="324" class="small" lang="en">CDR serialization, RTPS packets, discovery and QoS matching</text>
+        <text x="600" y="304" class="mono">Fast DDS DataWriter</text>
+        <text x="600" y="324" class="small" lang="zh-CN">另有 Cyclone DDS、Zenoh</text><text x="600" y="324" class="small" lang="en">alternatives: Cyclone DDS, Zenoh</text></g>
+
+      <g data-step="6"><rect class="box linux" x="45" y="345" width="510" height="52"/>
+        <text x="58" y="366" class="mono" lang="zh-CN">6. Linux 内核</text><text x="58" y="366" class="mono" lang="en">6. Linux kernel</text>
+        <text x="58" y="386" class="small" lang="zh-CN">UDP socket、IP 多播、/dev/shm、线程与调度器</text><text x="58" y="386" class="small" lang="en">UDP sockets, IP multicast, /dev/shm, threads and the scheduler</text>
+        <text x="600" y="366" class="mono">sendmsg / recvmsg</text>
+        <text x="600" y="386" class="small" lang="zh-CN">多播 239.255.0.1；Kernel Phase 1、3</text><text x="600" y="386" class="small" lang="en">multicast 239.255.0.1; Kernel Phase 1, 3</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 工作空间的构建与 source：underlay → overlay</h3><h3 lang="en">(b) Building and sourcing a workspace: underlay → overlay</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：左上是 apt 装好的 underlay，中间一列是工作空间 ~/ws 从源码到安装，右边是新终端里的环境变量和查找结果。按「播放」从 underlay 走到 ros2 run。",
+           "第 1 步，underlay：/opt/ros/jazzy 是 apt 安装的 ROS 2。source /opt/ros/jazzy/setup.bash 把这个前缀写进 AMENT_PREFIX_PATH、PATH、PYTHONPATH 等。之后 ros2 命令才可用。",
+           "第 2 步，源码：~/ws/src 下有两个包。每个包是一个带 package.xml 的目录；pkg_b 的 package.xml 声明依赖 pkg_a。",
+           "第 3 步，colcon build --symlink-install：读所有 package.xml，排出拓扑顺序，先 pkg_a 后 pkg_b（互不依赖的会并行），对每个包调用它自己的 CMake 或 setuptools，中间产物在 build/，日志在 log/。",
+           "第 4 步，安装：每个包装进自己的前缀 install/pkg_a 和 install/pkg_b，并生成 setup.bash 与 local_setup.bash。symlink 安装意味着改 Python 文件不必重新构建。",
+           "第 5 步，在新终端里 source ~/ws/install/setup.bash：它先重新 source 构建时的 underlay，再把工作空间的前缀加到最前面。AMENT_PREFIX_PATH 现在是 overlay 在前、underlay 在后。",
+           "第 6 步，ros2 run pkg_b node：按 AMENT_PREFIX_PATH 的顺序在各前缀的 ament 资源索引里找包，先找到的算数。所以 overlay 里与 underlay 同名的包会遮住 underlay 的版本。"]'
+         data-captions-en='["The whole picture: top left is the underlay installed with apt; the middle column is the workspace ~/ws from source to install; on the right are the environment variables and lookup in a new terminal. Press Play to walk from the underlay to ros2 run.",
+           "Step 1, the underlay: /opt/ros/jazzy is ROS 2 installed by apt. source /opt/ros/jazzy/setup.bash writes this prefix into AMENT_PREFIX_PATH, PATH, PYTHONPATH and so on. Only then does the ros2 command work.",
+           "Step 2, the source: ~/ws/src holds two packages. Each package is a directory with a package.xml; the package.xml of pkg_b declares a dependency on pkg_a.",
+           "Step 3, colcon build --symlink-install: it reads every package.xml, sorts them topologically, builds pkg_a before pkg_b (independent packages in parallel), and runs each package through its own CMake or setuptools, with intermediate output in build/ and logs in log/.",
+           "Step 4, install: each package is installed into its own prefix, install/pkg_a and install/pkg_b, and setup.bash and local_setup.bash are generated. A symlink install means editing Python files needs no rebuild.",
+           "Step 5, in a new terminal, source ~/ws/install/setup.bash: it first re-sources the underlay used at build time, then puts the workspace prefixes in front. AMENT_PREFIX_PATH now lists the overlay first and the underlay after it.",
+           "Step 6, ros2 run pkg_b node: packages are looked up in the ament resource index of each prefix, in AMENT_PREFIX_PATH order, and the first hit wins. So a package in the overlay with the same name as one in the underlay shadows the underlay version."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="40" y="24" class="small">underlay</text>
+      <text x="340" y="24" class="small" lang="zh-CN">工作空间 ~/ws</text><text x="340" y="24" class="small" lang="en">workspace ~/ws</text>
+      <text x="630" y="24" class="small" lang="zh-CN">新终端</text><text x="630" y="24" class="small" lang="en">new terminal</text>
+      <line x1="305" y1="30" x2="305" y2="410" class="lane"/>
+      <line x1="600" y1="30" x2="600" y2="410" class="lane"/>
+
+      <g data-step="1"><rect class="box" x="25" y="40" width="265" height="96"/>
+        <text x="38" y="62" class="mono">/opt/ros/jazzy</text>
+        <text x="38" y="82" class="small" lang="zh-CN">apt 安装的 ROS 2（underlay）</text><text x="38" y="82" class="small" lang="en">ROS 2 installed by apt (underlay)</text>
+        <text x="38" y="104" class="mono">source …/setup.bash</text>
+        <text x="38" y="124" class="small">AMENT_PREFIX_PATH=/opt/ros/jazzy</text></g>
+
+      <g data-step="2"><rect class="box" x="320" y="40" width="265" height="110"/>
+        <text x="333" y="60" class="mono">~/ws/src</text>
+        <rect class="box" x="333" y="72" width="115" height="66"/>
+        <text x="343" y="92" class="mono">pkg_a</text>
+        <text x="343" y="112" class="small">package.xml</text>
+        <rect class="box" x="458" y="72" width="115" height="66"/>
+        <text x="468" y="92" class="mono">pkg_b</text>
+        <text x="468" y="112" class="small">package.xml</text>
+        <text x="468" y="128" class="small">depend: pkg_a</text></g>
+
+      <g data-step="3"><path class="arrow flow" d="M452 152 L452 180"/>
+        <rect class="box" x="320" y="184" width="265" height="88"/>
+        <text x="333" y="205" class="mono">colcon build</text>
+        <text x="333" y="222" class="mono">  --symlink-install</text>
+        <text x="333" y="242" class="small" lang="zh-CN">读 package.xml → 依赖图 → pkg_a 先于 pkg_b</text><text x="333" y="242" class="small" lang="en">package.xml → graph → pkg_a, then pkg_b</text>
+        <text x="333" y="261" class="small">build/  log/</text></g>
+
+      <g data-step="4"><path class="arrow flow" d="M452 274 L452 302"/>
+        <rect class="box" x="320" y="306" width="265" height="94"/>
+        <text x="333" y="327" class="mono">~/ws/install</text>
+        <text x="333" y="347" class="small" lang="zh-CN">pkg_a/、pkg_b/：每个包一个前缀</text><text x="333" y="347" class="small" lang="en">pkg_a/, pkg_b/: one prefix per package</text>
+        <text x="333" y="367" class="small">setup.bash · local_setup.bash</text>
+        <text x="333" y="387" class="small" lang="zh-CN">symlink：Python 文件链回 src</text><text x="333" y="387" class="small" lang="en">symlink: Python files link back to src</text></g>
+
+      <g data-step="5"><path class="arrow flow" d="M589 302 L612 202"/>
+        <rect class="box" x="615" y="40" width="265" height="160"/>
+        <text x="628" y="62" class="mono">source ~/ws/install/</text>
+        <text x="628" y="78" class="mono">       setup.bash</text>
+        <text x="628" y="100" class="small">AMENT_PREFIX_PATH =</text>
+        <text x="640" y="122" class="mono">~/ws/install/pkg_b</text>
+        <text x="640" y="142" class="mono">~/ws/install/pkg_a</text>
+        <text x="640" y="162" class="mono">/opt/ros/jazzy</text>
+        <text x="628" y="188" class="small" lang="zh-CN">overlay 在前，underlay 在后</text><text x="628" y="188" class="small" lang="en">overlay first, underlay after</text></g>
+
+      <g data-step="6"><rect class="box" x="615" y="230" width="265" height="170"/>
+        <text x="628" y="252" class="mono">ros2 run pkg_b node</text>
+        <text x="628" y="274" class="small" lang="zh-CN">按顺序查各前缀的 ament 资源索引：</text><text x="628" y="274" class="small" lang="en">checks each prefix’s ament index in order:</text>
+        <text x="628" y="294" class="small">share/ament_index/resource_index/</text>
+        <text x="628" y="310" class="small">  packages/pkg_b</text>
+        <text x="628" y="334" class="small" lang="zh-CN">先找到的算数：overlay 遮住 underlay</text><text x="628" y="334" class="small" lang="en">first hit wins: overlay shadows underlay</text>
+        <text x="628" y="358" class="small" lang="zh-CN">改 C++ 或 package.xml 要重新构建</text><text x="628" y="358" class="small" lang="en">C++ or package.xml edits need a rebuild</text>
+        <text x="628" y="382" class="small" lang="zh-CN">在没 source overlay 的终端里构建</text><text x="628" y="382" class="small" lang="en">build where the overlay is not sourced</text>
+        <rect class="box" x="25" y="250" width="265" height="50"/>
+        <text x="38" y="280" class="mono">overlay: ~/ws/install</text>
+        <rect class="box" x="25" y="310" width="265" height="50"/>
+        <text x="38" y="340" class="mono">underlay: /opt/ros/jazzy</text>
+        <text x="38" y="384" class="small" lang="zh-CN">查找自上而下：先 overlay，后 underlay</text><text x="38" y="384" class="small" lang="en">lookup: overlay first, then underlay</text>
+        <path class="arrow" d="M300 275 L300 335"/></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 第一个 graph 与第一个工作空间</h3><h3 lang="en">Lab A · A first graph and a first workspace</h3>
+    <ol>
+      <li><span lang="zh-CN">在宿主机上按实验环境页启动容器并进入 shell，然后确认发行版。如果提示 <code>ros2: command not found</code>，说明这个 shell 还没 source underlay：</span><span lang="en">On the host, start the container and open a shell as described on the lab environment page, then confirm the distribution. If you get <code>ros2: command not found</code>, this shell has not sourced the underlay yet:</span><pre data-lang="sh">./lab.sh up                        # 宿主机：启动容器
+./lab.sh shell                     # 宿主机：进入容器
+source /opt/ros/jazzy/setup.bash   # 容器里
+printenv ROS_DISTRO                # 应输出 jazzy
+printenv RMW_IMPLEMENTATION        # 没设置时为空，表示用默认的 rmw_fastrtps_cpp</pre></li>
+      <li><span lang="zh-CN">终端 1 运行 talker；在宿主机另开一个终端，再 <code>./lab.sh shell</code> 进同一个容器，运行 listener。listener 应该打印 <code>I heard: [Hello World: N]</code>：</span><span lang="en">In terminal 1 run the talker; open another terminal on the host, run <code>./lab.sh shell</code> again to enter the same container, and run the listener. The listener should print <code>I heard: [Hello World: N]</code>:</span><pre data-lang="sh"># 终端 1
+ros2 run demo_nodes_cpp talker
+# 终端 2
+source /opt/ros/jazzy/setup.bash
+ros2 run demo_nodes_cpp listener</pre></li>
+      <li><span lang="zh-CN">在第三个终端里检查 graph。注意 <code>/talker</code> 除了 <code>/chatter</code> 还发布了 <code>/rosout</code>（日志）和 <code>/parameter_events</code>，并提供一组参数服务——这些是每个 rclcpp 节点自带的：</span><span lang="en">Inspect the graph from a third terminal. Notice that besides <code>/chatter</code>, <code>/talker</code> also publishes <code>/rosout</code> (logging) and <code>/parameter_events</code>, and offers a set of parameter services — every rclcpp node comes with these:</span><pre data-lang="sh">ros2 node list
+ros2 node info /talker
+ros2 topic list
+ros2 topic info /chatter     # 发布者数量和订阅者数量
+ros2 topic echo /chatter     # Ctrl+C 停止
+ros2 daemon status           # CLI 用的缓存进程，不是 master</pre></li>
+      <li><span lang="zh-CN">运行 <code>ros2 doctor</code>，在报告里找出平台、rmw 中间件名和网络接口那几段。报告的分段名称以实际输出为准：</span><span lang="en">Run <code>ros2 doctor</code> and find the sections for the platform, the rmw middleware name and the network interfaces. Go by the section names in the actual output:</span><pre data-lang="sh">ros2 doctor --report | less</pre></li>
+      <li><span lang="zh-CN">建一个工作空间和一个空的 Python 包并构建。<code>ros2 pkg create</code> 会生成 <code>package.xml</code>、<code>setup.py</code>、<code>setup.cfg</code>、<code>resource/my_pkg</code>（资源索引的标记文件）和同名 Python 包目录：</span><span lang="en">Create a workspace and an empty Python package, then build it. <code>ros2 pkg create</code> generates <code>package.xml</code>, <code>setup.py</code>, <code>setup.cfg</code>, <code>resource/my_pkg</code> (the marker file for the resource index) and a Python package directory of the same name:</span><pre data-lang="sh">mkdir -p ~/ws/src
+cd ~/ws/src
+ros2 pkg create --build-type ament_python my_pkg
+cd ~/ws
+colcon build --symlink-install
+ls                                 # build  install  log  src</pre></li>
+      <li><span lang="zh-CN">按官方规则<strong>另开一个新终端</strong>进入容器，source underlay 再 source overlay，看包是从哪个前缀找到的、<code>AMENT_PREFIX_PATH</code> 的顺序是什么：</span><span lang="en">Following the official rule, <strong>open a new terminal</strong> into the container, source the underlay and then the overlay, and see which prefix the package is found in and what order <code>AMENT_PREFIX_PATH</code> has:</span><pre data-lang="sh">source /opt/ros/jazzy/setup.bash
+source ~/ws/install/setup.bash
+ros2 pkg list | grep my_pkg
+ros2 pkg prefix my_pkg                       # 应指向 ~/ws/install/my_pkg
+printenv AMENT_PREFIX_PATH | tr ':' '\n'     # overlay 在前，/opt/ros/jazzy 在后
+ls ~/ws/install/my_pkg/share/ament_index/resource_index/packages/</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 中间件在操作系统层面做了什么（与内核课程的交叉）</h3><h3 lang="en">Lab B · What the middleware does at the OS level (crossover with the kernel course)</h3>
+    <ol>
+      <li><span lang="zh-CN">装上需要的工具（镜像里可能已有其中一部分；容器里默认是 root）：</span><span lang="en">Install the tools you need (the image may already have some of them; the container runs as root by default):</span><pre data-lang="sh">apt-get update
+apt-get install -y iproute2 procps tcpdump</pre></li>
+      <li><span lang="zh-CN">先把这个 shell 切回 domain 0 和子网发现：实验环境默认是 <code>ROS_DOMAIN_ID=42</code> 和 <code>LOCALHOST</code>，而下面的端口按 domain 0 计算，第 3 步还要观察多播；在 LOCALHOST 下 Fast DDS 会清空多播发现 locator，7400 和 239.255.0.1 都不会出现。做完 Lab B 关掉这个 shell。</span><span lang="en">First switch this shell back to domain 0 and subnet discovery: the lab environment defaults to <code>ROS_DOMAIN_ID=42</code> and <code>LOCALHOST</code>, but the ports below are computed for domain 0 and step 3 observes multicast; under LOCALHOST Fast DDS clears its multicast discovery locators, which is why 7400 and 239.255.0.1 would not appear. Close this shell when Lab B is done.</span><pre data-lang="sh">export ROS_DOMAIN_ID=0 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET   # 本实验按 domain 0 计算端口并观察多播；实验环境默认是 42 和 LOCALHOST，做完关掉这个 shell</pre>
+        <span lang="zh-CN">后台启动 talker，看它打开的 UDP socket。按 RTPS port formula，domain 0 的第一个 participant 应该出现 7400 附近的发现端口和 7410、7411 附近的单播端口；Fast DDS 实际打开哪些以输出为准：</span><span lang="en">Start the talker in the background and look at the UDP sockets it opens. By the RTPS port formula, the first participant in domain 0 should show the discovery port around 7400 and unicast ports around 7410 and 7411; go by the output for which ports Fast DDS actually opens:</span><pre data-lang="sh">ros2 run demo_nodes_cpp talker &gt; /dev/null &amp;
+sleep 2
+ss -ulpn | grep talker</pre></li>
+      <li><span lang="zh-CN">看多播组成员关系。DDS 用 <code>setsockopt(IP_ADD_MEMBERSHIP)</code> 加入默认的发现多播组 239.255.0.1，内核为这个接口记下组成员：</span><span lang="en">Look at multicast group membership. DDS joins the default discovery multicast group 239.255.0.1 with <code>setsockopt(IP_ADD_MEMBERSHIP)</code>, and the kernel records the membership for the interface:</span><pre data-lang="sh">ip maddr show | grep -B2 239.255.0.1
+cat /proc/net/igmp</pre></li>
+      <li><span lang="zh-CN">数一数 talker 进程里的线程。你没写多线程代码，但 DDS 的接收线程、事件线程和 rclcpp 自己的线程都在这里（数量随 rmw 和版本不同，大致几个到十几个）。<code>wchan</code> 显示每个线程睡在哪个内核函数里，在容器里可能被限制而只显示 0：</span><span lang="en">Count the threads in the talker process. You wrote no multithreaded code, yet the DDS receive threads, event threads and rclcpp’s own threads are all here (the number varies with the rmw and version, roughly a few to a dozen or so). <code>wchan</code> shows which kernel function each thread sleeps in; inside a container it may be restricted and show only 0:</span><pre data-lang="sh">PID=$(pgrep -x talker)
+ps -T -p "$PID" -o spid,comm,stat,pri,ni
+grep Threads /proc/$PID/status
+for t in /proc/$PID/task/*; do echo "$(cat $t/comm) $(cat $t/wchan)"; done</pre>
+        <span lang="zh-CN">对照 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>：每一行是一个 <code>task_struct</code>，共享同一个 <code>mm</code>，状态 <code>S</code> 表示正在睡眠等待（多半在 <code>recvmsg</code> 或 futex 上）。</span><span lang="en">Compare with <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>: each line is a <code>task_struct</code> sharing the same <code>mm</code>, and state <code>S</code> means it is asleep waiting (most likely in <code>recvmsg</code> or on a futex).</span></li>
+      <li><span lang="zh-CN">再启动一个 listener，看第二个 participant 是不是用了 p = 1 的单播端口（7412、7413 附近）；再看 <code>/dev/shm</code> 里有没有 Fast DDS 的共享内存文件（文件名大致带 <code>fastrtps</code> 前缀）：</span><span lang="en">Start a listener as well, and check whether the second participant uses the unicast ports for p = 1 (around 7412 and 7413); then look in <code>/dev/shm</code> for Fast DDS shared-memory files (the names approximately start with <code>fastrtps</code>):</span><pre data-lang="sh">ros2 run demo_nodes_cpp listener &gt; /dev/null &amp;
+sleep 2
+ss -ulpn | grep -E 'talker|listener'
+ls -l /dev/shm</pre></li>
+      <li><span lang="zh-CN">换 domain：停掉两个进程，在 domain 7 启动 talker，先算端口再验证：7400 + 250 × 7 = 9150，单播 9160、9161。domain 0 的 listener 收不到，domain 7 的 listener 能收到：</span><span lang="en">Change the domain: stop both processes, start the talker in domain 7, and compute the ports before you check them: 7400 + 250 × 7 = 9150, with unicast 9160 and 9161. A listener in domain 0 hears nothing; a listener in domain 7 does:</span><pre data-lang="sh">kill %1 %2
+ROS_DOMAIN_ID=7 ros2 run demo_nodes_cpp talker &gt; /dev/null &amp;
+sleep 2
+ss -ulpn | grep talker                          # 期望 9150、9160、9161 附近
+ROS_DOMAIN_ID=0 ros2 run demo_nodes_cpp listener  # domain 0：没有输出，Ctrl+C
+ROS_DOMAIN_ID=7 ros2 run demo_nodes_cpp listener  # domain 7：I heard ...</pre></li>
+      <li><span lang="zh-CN">可选：抓几个发现报文，看到的就是第 6 层的 RTPS 流量：</span><span lang="en">Optional: capture a few discovery packets; this is the layer 6 RTPS traffic:</span><pre data-lang="sh">tcpdump -ni any udp port 9150 -c 5</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 里 <code>printenv AMENT_PREFIX_PATH | tr ':' '\n'</code> 的输出 + Lab B 里（第 2 步设好 <code>ROS_DOMAIN_ID=0</code> 和 <code>SUBNET</code> 的那个 shell）domain 0 和 domain 7 的 <code>ss -ulpn</code> 输出（标出哪个端口是公式里的哪一项）+ talker 的线程数，以及你用自己的话写的「一次 publish 经过哪几层、在哪一层第一次碰到内核」（10 行以内）。</div>
+    <div class="note" lang="en">Deliverables: the output of <code>printenv AMENT_PREFIX_PATH | tr ':' '\n'</code> from Lab A + the <code>ss -ulpn</code> output for domain 0 and domain 7 from Lab B, in the shell set up in step 2 with <code>ROS_DOMAIN_ID=0</code> and <code>SUBNET</code> (mark which port is which term of the formula) + the talker’s thread count, and your own explanation of “which layers one publish passes through and at which layer it first touches the kernel” (10 lines or fewer).</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/phase-0">
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">1. 在 ROS 2 里，listener 是怎么找到 talker 的？</p>
+      <p lang="en">1. In ROS 2, how does the listener find the talker?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">两者都向 master 注册，master 把 talker 的地址告诉 listener</span><span lang="en">Both register with the master, which tells the listener the talker’s address</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">通过 <code>ros2 daemon</code>，它必须先启动，节点之间的消息都经它转发</span><span lang="en">Through <code>ros2 daemon</code>, which must start first and relays all messages between nodes</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">两个进程各是一个 DDS participant，通过多播发现彼此，交换 writer / reader 信息后点对点传数据</span><span lang="en">Each process is a DDS participant; they discover each other over multicast, exchange writer / reader information, then send data peer to peer</span></label>
+      <div class="why" hidden><span lang="zh-CN">ROS 2 没有 master，发现是分布式的（SPDP 再 SEDP）。a 是 ROS 1 的机制。<code>ros2 daemon</code> 只替命令行缓存发现结果，节点通信从不经过它，停掉它节点照样互通。</span><span lang="en">ROS 2 has no master; discovery is distributed (SPDP, then SEDP). a is how ROS 1 works. <code>ros2 daemon</code> only caches discovery results for the CLI; node traffic never passes through it, and nodes still talk with it stopped.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">2. <code>ROS_DOMAIN_ID=3</code> 时，按 RTPS port formula，participant 发现用的多播端口是多少？</p>
+      <p lang="en">2. With <code>ROS_DOMAIN_ID=3</code>, what is the multicast port used for participant discovery under the RTPS port formula?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">8150</span><span lang="en">8150</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">7403</span><span lang="en">7403</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">7400，domain 只改变多播地址，不改变端口</span><span lang="en">7400; the domain changes only the multicast address, not the port</span></label>
+      <div class="why" hidden><span lang="zh-CN">发现多播端口 = 7400 + 250 × d = 7400 + 750 = 8150。b 把 domain 当成了直接加在 7400 上的偏移；c 错在 domain 正是通过端口隔离的，多播地址默认都是 239.255.0.1。</span><span lang="en">Discovery multicast port = 7400 + 250 × d = 7400 + 750 = 8150. b treats the domain as an offset added straight to 7400; c is wrong because domains are separated precisely by port, while the multicast address is 239.255.0.1 by default for all of them.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 你在 <code>~/ws</code> 里构建好了 <code>my_pkg</code>，打开一个新终端只 source 了 <code>/opt/ros/jazzy/setup.bash</code>，<code>ros2 run my_pkg …</code> 报找不到包。原因是？</p>
+      <p lang="en">3. You built <code>my_pkg</code> in <code>~/ws</code>, opened a new terminal and sourced only <code>/opt/ros/jazzy/setup.bash</code>, and <code>ros2 run my_pkg …</code> says the package is not found. Why?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">构建结果丢了，需要重新 <code>colcon build</code></span><span lang="en">The build output is lost and <code>colcon build</code> must be run again</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">这个终端没 source <code>~/ws/install/setup.bash</code>，<code>AMENT_PREFIX_PATH</code> 里没有 overlay 的前缀，资源索引里找不到它</span><span lang="en">This terminal has not sourced <code>~/ws/install/setup.bash</code>, so <code>AMENT_PREFIX_PATH</code> has no overlay prefix and the resource index lookup misses it</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">自己的包必须复制到 <code>/opt/ros/jazzy</code> 下才能被找到</span><span lang="en">Your own packages must be copied under <code>/opt/ros/jazzy</code> to be found</span></label>
+      <div class="why" hidden><span lang="zh-CN">overlay 完全靠环境变量起作用：每个新 shell 都要 source 一次。构建产物还在 <code>install/</code> 里，不用重编（a 错）；也不该往 underlay 里塞东西（c 错），overlay 的意义就是不碰它。</span><span lang="en">An overlay works entirely through environment variables: every new shell must source it once. The build output is still in <code>install/</code>, so no rebuild is needed (a is wrong); nor should you put things into the underlay (c is wrong) — the point of an overlay is to leave it alone.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">4. 哪一层让你能用 <code>RMW_IMPLEMENTATION=rmw_cyclonedds_cpp</code> 把 Fast DDS 换成 Cyclone DDS，而不改节点代码？</p>
+      <p lang="en">4. Which layer lets you replace Fast DDS with Cyclone DDS through <code>RMW_IMPLEMENTATION=rmw_cyclonedds_cpp</code> without changing node code?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">rclcpp，因为它是你直接调用的库</span><span lang="en">rclcpp, because it is the library you call directly</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">rcl，因为它实现了 graph 和参数</span><span lang="en">rcl, because it implements the graph and parameters</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">rmw，它是一套固定的 C 接口，每种中间件提供一个实现库</span><span lang="en">rmw, a fixed C interface for which each middleware provides an implementation library</span></label>
+      <div class="why" hidden><span lang="zh-CN">rmw 是中间件抽象层：上面的 rcl 只调用 rmw API，具体是 <code>rmw_fastrtps_cpp</code> 还是 <code>rmw_cyclonedds_cpp</code> 由环境变量选。rclcpp 是语言绑定，rcl 是各语言共用的逻辑，两者都不直接接触中间件。</span><span lang="en">rmw is the middleware abstraction: rcl above it calls only the rmw API, and whether that is <code>rmw_fastrtps_cpp</code> or <code>rmw_cyclonedds_cpp</code> is chosen by the environment variable. rclcpp is a language binding and rcl is logic shared across languages; neither touches the middleware directly.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.ros.org/en/jazzy/Releases.html">ROS 2 Docs (Jazzy) — Distributions</a> · <a href="https://www.ros.org/reps/rep-2000.html">REP 2000</a> <span class="lvl" lang="zh-CN">官方，概念 3：发行版、LTS、支持的平台与等级</span><span class="lvl" lang="en">Official, concept 3: distributions, LTS, supported platforms and tiers</span></li>
+    <li><a href="https://design.ros2.org/articles/why_ros2.html">Why ROS 2?</a> · <a href="https://design.ros2.org/articles/changes.html">Changes between ROS 1 and ROS 2</a> · <a href="https://design.ros2.org/articles/ros_on_dds.html">ROS on DDS</a> <span class="lvl" lang="zh-CN">设计文章，概念 2：为什么去掉 master、为什么选 DDS</span><span class="lvl" lang="en">Design articles, concept 2: why the master went and why DDS was chosen</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Advanced/About-Internal-Interfaces.html">Internal ROS 2 interfaces</a> · <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Different-Middleware-Vendors.html">Different ROS 2 middleware vendors</a> · <a href="https://docs.ros.org/en/jazzy/Installation/RMW-Implementations.html">RMW implementations</a> <span class="lvl" lang="zh-CN">官方，概念 4 与动画 (a)：rcl、rmw 的分工与可选中间件</span><span class="lvl" lang="en">Official, concept 4 and diagram (a): how rcl and rmw divide the work, and the available middlewares</span></li>
+    <li><a href="https://github.com/ros2/rcl">github.com/ros2/rcl</a> · <a href="https://github.com/ros2/rmw">github.com/ros2/rmw</a> <span class="lvl" lang="zh-CN">源码，进阶：rcl 与 rmw 的头文件就是这两层的接口定义</span><span class="lvl" lang="en">Source, advanced: the rcl and rmw headers are the interface definitions of these two layers</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Creating-A-Workspace/Creating-A-Workspace.html">Creating a workspace</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Colcon-Tutorial.html">Using colcon to build packages</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Creating-Your-First-ROS2-Package.html">Creating a package</a> · <a href="https://docs.ros.org/en/jazzy/Concepts/Advanced/About-Build-System.html">The build system</a> <span class="lvl" lang="zh-CN">官方教程，概念 5、动画 (b) 与 Lab A：工作空间、overlay、colcon、ament</span><span class="lvl" lang="en">Official tutorials, concept 5, diagram (b) and Lab A: workspaces, overlays, colcon, ament</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Configuring-ROS2-Environment.html">Configuring environment</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Understanding-ROS2-Nodes/Understanding-ROS2-Nodes.html">Understanding nodes</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Getting-Started-With-Ros2doctor.html">Using ros2doctor</a> <span class="lvl" lang="zh-CN">官方教程，概念 6 与 Lab A：source、ros2 命令行、ros2 doctor</span><span class="lvl" lang="en">Official tutorials, concept 6 and Lab A: sourcing, the ros2 CLI, ros2 doctor</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Domain-ID.html">The ROS_DOMAIN_ID</a> <span class="lvl" lang="zh-CN">官方，概念 6 与 Lab B：端口公式的例子、安全的 domain 范围、每台机器的 participant 上限</span><span class="lvl" lang="en">Official, concept 6 and Lab B: worked port examples, the safe domain range, the per-machine participant limit</span></li>
+    <li>Edouard Renard, <em>ROS 2 From Scratch</em> <span class="lvl" lang="zh-CN">入门，基于 Jazzy，Python 与 C++ 并行，适合配合本阶段和 Phase 1</span><span class="lvl" lang="en">Beginner, based on Jazzy, Python and C++ side by side; a good companion for this phase and Phase 1</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024（11 月）, ISBN 9781835881408. <span class="lvl">介绍 ROS 2 与安装、包与工作空间、命令行工具的章节，对应概念 1、3、5、6；基于 Jazzy</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024 (November), ISBN 9781835881408. <span class="lvl">The chapters introducing ROS 2 and its installation, packages and workspaces, and the command-line tools; match concepts 1, 3, 5 and 6; based on Jazzy</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025（6 月）, ISBN 9781032851501（第 1 版 2022, ISBN 9781032267203）. <span class="lvl">开头介绍 ROS 2 概念与第一步（工作空间、包、第一个节点）的章节，对应概念 1、5</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025 (June), ISBN 9781032851501 (1st ed. 2022, ISBN 9781032267203). <span class="lvl">The opening chapters on ROS 2 concepts and first steps (workspace, packages, a first node); match concepts 1 and 5</span></li>
+    <li lang="zh-CN">Lentin Joseph &amp; Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025（7 月）. <span class="lvl">讲 ROS 2 基础、架构与 DDS 中间件的章节，对应概念 2、4；基于 Jazzy</span></li>
+    <li lang="en">Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025 (July). <span class="lvl">The chapters on ROS 2 fundamentals, architecture and the DDS middleware; match concepts 2 and 4; based on Jazzy</span></li>
+    <li lang="zh-CN">Morgan Quigley, Brian Gerkey &amp; William D. Smart, 《Programming Robots with ROS》, O'Reilly, 2015. <span class="lvl">前几章对 ROS graph、话题与 master 的讲解，对应概念 1、2 里 ROS 1 的一侧；全书基于 ROS 1，graph 的概念在 ROS 2 中仍然适用</span></li>
+    <li lang="en">Morgan Quigley, Brian Gerkey &amp; William D. Smart, <em>Programming Robots with ROS</em>, O'Reilly, 2015. <span class="lvl">The early chapters on the ROS graph, topics and the master; match the ROS 1 side of concepts 1 and 2; the whole book is ROS 1, but the graph concepts still apply in ROS 2</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../lab-setup/index.html"><span lang="zh-CN">← 实验环境</span><span lang="en">← Lab environment</span></a>
+    <a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1 · Nodes, Topics, Services &amp; Actions →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
