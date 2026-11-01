@@ -1,0 +1,865 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 3 · 内存模型与原子 · Memory Models and Atomics · Parallel Programming</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">Parallel Programming</a>
+    <span class="crumb current" aria-current="page" lang="zh-CN">Phase 3 · 内存模型与原子</span><span class="crumb current" aria-current="page" lang="en">Phase 3 · Memory Models and Atomics</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 3 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 3 / 8 · about 1–2 weeks</p>
+  <h1><span lang="zh-CN">内存模型与原子</span><span lang="en">Memory Models and Atomics</span> <span class="en" lang="zh-CN">Memory Models and Atomics：happens-before、五种内存序，以及 M5 上它们变成的指令</span><span class="en" lang="en">happens-before, the five memory orders, and the instructions they become on the M5</span></h1>
+  <p class="lede" lang="zh-CN">Phase 2 用锁和原子操作消除了数据竞争，但没有回答一个更底层的问题：一个线程写下的值，另一个线程什么时候、以什么顺序看见？答案不是「立刻、按程序顺序」。这台 M5 是 ARM64，内存序是弱的；编译器也会重排。本阶段先在实验机上把重排抓出来：两个线程各写一个变量再读对方的，在 relaxed 下 1 亿次里有 2683 次两边都读到 0；然后讲 C++20 内存模型怎样用 happens-before 和 synchronizes-with 给出精确的保证，每种内存序在 M5 上编译成哪条指令，和 x86 的 TSO 差在哪里。页面上的计数和汇编都是 2026-10-31 在实验机上跑出来、用 Apple clang 21 生成的。</p>
+  <p class="lede" lang="en">Phase 2 removed data races with locks and atomics, but left a lower-level question open: when, and in what order, does one thread see the values another thread wrote? The answer is not “at once, in program order”. This M5 is ARM64, whose memory ordering is weak, and the compiler reorders too. This phase first catches reordering in the act on the lab machine: two threads each write one variable and then read the other’s, and under relaxed order both read 0 in 2683 of 100 million trials. Then it covers how the C++20 memory model gives exact guarantees through happens-before and synchronizes-with, which instruction each memory order compiles to on the M5, and how that differs from x86 TSO. Every count and every line of assembly on this page was produced on the lab machine on 2026-10-31 with Apple clang 21.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出顺序一致性（sequential consistency）的定义，以及 store buffer 为什么让硬件不提供它；说出 x86 TSO 只允许哪一种重排，ARM64 允许哪些。</li>
+      <li lang="en">State the definition of sequential consistency and why store buffers keep hardware from providing it; say which single reordering x86 TSO allows and which ones ARM64 allows.</li>
+      <li lang="zh-CN">用 C++20 标准的术语准确说出 sequenced-before、synchronizes-with、release sequence、happens-before 和数据竞争，以及 seq_cst 在 acquire/release 之上多加了什么。</li>
+      <li lang="en">State sequenced-before, synchronizes-with, the release sequence, happens-before and the data race exactly in the terms of the C++20 standard, and what seq_cst adds on top of acquire and release.</li>
+      <li lang="zh-CN">在 M5 上跑 store-buffering 和 Dekker 互斥两个实验，数出 relaxed、acquire/release、seq_cst 和栅栏各自失败多少次，并用汇编证明失败来自硬件而不是编译器。</li>
+      <li lang="en">Run the store-buffering and Dekker mutual-exclusion experiments on the M5, count how often relaxed, acquire/release, seq_cst and a fence each fail, and use the assembly to prove the failures come from the hardware, not the compiler.</li>
+      <li lang="zh-CN">读懂 <code>clang++ -O2 -S</code> 的输出：认出 <code>ldar</code>、<code>ldapr</code>、<code>stlr</code>、<code>dmb ish</code>、LSE 的 <code>ldaddal</code>/<code>casal</code>/<code>swpab</code>，以及 ARMv8.0 的 <code>ldaxr</code>/<code>stlxr</code> 循环和 x86 的 <code>xchg</code>、<code>lock xadd</code>。</li>
+      <li lang="en">Read the output of <code>clang++ -O2 -S</code>: recognise <code>ldar</code>, <code>ldapr</code>, <code>stlr</code>, <code>dmb ish</code>, the LSE <code>ldaddal</code>/<code>casal</code>/<code>swpab</code>, the ARMv8.0 <code>ldaxr</code>/<code>stlxr</code> loop, and x86’s <code>xchg</code> and <code>lock xadd</code>.</li>
+      <li lang="zh-CN">写一个无锁计数器和一个基于 <code>std::atomic_flag</code> 的自旋锁，测出它们在 1、4、10 个线程下的代价，并解释 compare-exchange 的 ABA 问题。</li>
+      <li lang="en">Write a lock-free counter and a spin lock built on <code>std::atomic_flag</code>, measure their cost at 1, 4 and 10 threads, and explain the ABA problem of compare-exchange.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-2-synchronization/index.html">Phase 2 · 共享内存与同步</a>：数据竞争是什么，mutex 和 atomic 怎样消除它，TSan 怎么用。</li>
+    <li lang="en"><a href="../phase-2-synchronization/index.html">Phase 2 · Shared Memory &amp; Synchronization</a>: what a data race is, how a mutex and an atomic remove it, how to use TSan.</li>
+    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0 · 基础</a>：cache line（本机 128 字节）和 cache 一致性；<a href="../phase-1-threads-and-the-os/index.html">Phase 1</a> 的自旋锁和持锁者被抢占。</li>
+    <li lang="en"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>: cache lines (128 bytes here) and cache coherence; the spin lock and lock-holder preemption of <a href="../phase-1-threads-and-the-os/index.html">Phase 1</a>.</li>
+    <li lang="zh-CN">内核一侧：<a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Engineering Phase 3 · Concurrency &amp; IPC</a> 的「原子操作与内存序」（<code>smp_mb()</code> = <code>dmb ish</code>，<code>smp_store_release</code> = <code>stlr</code>）和「RCU」。本页讲用户态 C++ 的那一层，内核宏与它的对应关系链接过去。</li>
+    <li lang="en">The kernel side: the concepts atomic operations and memory ordering (<code>smp_mb()</code> = <code>dmb ish</code>, <code>smp_store_release</code> = <code>stlr</code>) and RCU in <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Engineering Phase 3 · Concurrency &amp; IPC</a>. This page covers the user-space C++ layer and links there for how the kernel macros map onto it.</li>
+    <li lang="zh-CN">能读一点 ARM64 汇编：<code>ldr</code>/<code>str</code>、寄存器 <code>w</code>/<code>x</code>、条件跳转。</li>
+    <li lang="en">Some ARM64 assembly reading: <code>ldr</code>/<code>str</code>, the <code>w</code>/<code>x</code> registers, conditional branches.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 顺序一致性，以及硬件为什么不给你</h3><h3 lang="en">1. Sequential consistency, and why hardware does not give it to you</h3>
+  <p lang="zh-CN"><strong>顺序一致性</strong>（sequential consistency，Lamport 1979）的意思是：所有线程的所有内存操作，可以排成一个全局的先后顺序，这个顺序里每个线程自己的操作保持程序顺序，每次读都读到这个顺序里它之前最后一次写。这是人脑默认的模型：把两个线程的语句交错起来，任何一种交错都可能，交错之外的结果都不可能。</p>
+  <p lang="en"><strong>Sequential consistency</strong> (Lamport, 1979) means that all memory operations of all threads can be arranged in one global order in which each thread’s own operations keep their program order and every read returns the last write before it in that order. It is the model the human mind assumes: interleave the two threads’ statements, any interleaving is possible, and no result outside the interleavings is.</p>
+  <p lang="zh-CN">看最小的反例，store buffering（SB），也是 Dekker 互斥算法的核心。<code>x</code>、<code>y</code> 初始为 0；线程 A 执行 <code>x = 1; r1 = y;</code>，线程 B 执行 <code>y = 1; r2 = x;</code>。按顺序一致性，无论怎么交错，总有一个写先发生，所以 <code>r1 == 0 &amp;&amp; r2 == 0</code> 不可能。Lab A 在这台 M5 上数到了它：relaxed 原子操作下，1 亿次试验里出现 2683 次。</p>
+  <p lang="en">Take the smallest counterexample, store buffering (SB), which is also the heart of Dekker’s mutual-exclusion algorithm. <code>x</code> and <code>y</code> start at 0; thread A runs <code>x = 1; r1 = y;</code> and thread B runs <code>y = 1; r2 = x;</code>. Under sequential consistency one of the writes always comes first, whatever the interleaving, so <code>r1 == 0 &amp;&amp; r2 == 0</code> is impossible. Lab A counts it on this M5: with relaxed atomics it happened 2683 times in 100 million trials.</p>
+  <ul>
+    <li lang="zh-CN"><strong>原因是 store buffer。</strong>一次写如果要等 cache line 被拿到独占状态才能继续，核就会停很多个周期。所以每个核把写先放进自己的 store buffer，接着执行后面的读；本核的读能从自己的 buffer 里拿到刚写的值（store forwarding），别的核却要等 buffer 排空到 cache 才看得见。于是 A 的读 <code>y</code> 可以在 A 的写 <code>x</code> 对 B 可见之前完成，B 也一样，两边都读到 0。这是解释用的模型；M5 的微架构细节 Apple 没有公开。</li>
+    <li lang="en"><strong>The cause is the store buffer.</strong> If a write had to wait until its cache line was held exclusively, the core would stall for many cycles. So each core puts writes into its own store buffer and goes on executing the reads that follow; the core’s own reads can pick up the value it just wrote from its buffer (store forwarding), but other cores see it only once the buffer drains into the cache. So A’s read of <code>y</code> can complete before A’s write of <code>x</code> is visible to B, and the same holds for B, and both read 0. This is an explanatory model; Apple has not published the M5 microarchitecture.</li>
+    <li lang="zh-CN"><strong>cache 本身是一致的。</strong>重排不是因为「cache 不一致」：同一个地址上，所有核对写的先后看法一致（coherence）。重排说的是<em>不同地址</em>之间的先后：A 写 <code>x</code>、读 <code>y</code>，两个地址，两件事的顺序被别的核看反了。</li>
+    <li lang="en"><strong>The caches themselves are coherent.</strong> Reordering does not mean the caches disagree: for any single address, all cores agree on the order of its writes (coherence). Reordering is about order between <em>different addresses</em>: A writes <code>x</code> and reads <code>y</code>, two addresses, and another core sees those two events in the opposite order.</li>
+    <li lang="zh-CN"><strong>x86 是 TSO。</strong>x86-64 的内存序叫 Total Store Order：读不和读重排，写不和写重排，写不和更早的读重排；唯一允许的是「较晚的读越过较早的、写到不同地址的写」，也就是 store buffer 造成的那一种（Intel SDM 第 3 卷 Memory Ordering 一节；Sewell 等人的 x86-TSO 论文）。所以 SB 在 x86 上也会失败，但下面的 message passing 不会。</li>
+    <li lang="en"><strong>x86 is TSO.</strong> The x86-64 memory order is called Total Store Order: reads are not reordered with reads, writes are not reordered with writes, and writes are not reordered with earlier reads; the one reordering allowed is a later read passing an earlier write to a different address, exactly the store-buffer case (the Memory Ordering section of Intel SDM volume 3; the x86-TSO paper by Sewell et al.). So SB fails on x86 too, but the message passing below does not.</li>
+    <li lang="zh-CN"><strong>ARM64 是弱序的。</strong>对不同地址的普通读写，在没有依赖、没有屏障的情况下，读读、读写、写读、写写四种重排都允许（Arm ARM 的 AArch64 内存模型一章）。Lab A 的 message passing 实验在 M5 上抓到了写写或读读重排：读者看见了旗子，却读到了旧数据，2000 万次里 10 到 58 次。ARMv8 自 2017 年的修订起是 other-multi-copy-atomic 的：一个写一旦被另一个核看见，就被所有其他核看见。</li>
+    <li lang="en"><strong>ARM64 is weakly ordered.</strong> For plain reads and writes to different addresses, with no dependency and no barrier, all four reorderings are allowed: read-read, read-write, write-read and write-write (the AArch64 memory model chapter of the Arm ARM). The message-passing experiment in Lab A catches a write-write or read-read reordering on the M5: the reader saw the flag but read stale data, 10 to 58 times in 20 million trials. Since its 2017 revision ARMv8 is other-multi-copy atomic: once one other core sees a write, all other cores see it.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：McKenney《Is Parallel Programming Hard》附录 Why Memory Barriers? 的 Store Buffers、Store Forwarding、Invalidate Queues 三节；Bos《Rust Atomics and Locks》第 7 章 Understanding the Processor 的 Reordering 和 Memory Ordering 两节。</p>
+  <p lang="en">Further reading: the sections Store Buffers, Store Forwarding and Invalidate Queues in McKenney’s appendix Why Memory Barriers? in <em>Is Parallel Programming Hard</em>; the sections Reordering and Memory Ordering of chapter 7 of Bos’s <em>Rust Atomics and Locks</em>, Understanding the Processor.</p>
+
+  <h3 lang="zh-CN">2. 编译器也会重排</h3><h3 lang="en">2. The compiler reorders too</h3>
+  <p lang="zh-CN">硬件之前还有一层。C++ 编译器只承诺单线程下「看起来一样」（as-if 规则），而且假定程序没有数据竞争：两个线程不加同步地访问同一个普通变量、其中一个是写，就是未定义行为。在这个前提下，编译器可以把普通变量的读写重排、合并、提到循环外，或者干脆删掉。经典的例子是 <code>while (!done) {}</code>：<code>done</code> 是普通 <code>bool</code> 时，编译器可以只读一次，循环永不结束。</p>
+  <p lang="en">There is one more layer before the hardware. A C++ compiler promises only that a single thread behaves “as if” it ran as written (the as-if rule), and it assumes the program has no data race: two threads accessing the same ordinary variable without synchronization, at least one of them writing, is undefined behaviour. Under that assumption the compiler may reorder, merge, hoist out of a loop or simply delete reads and writes of ordinary variables. The classic example is <code>while (!done) {}</code>: with <code>done</code> an ordinary <code>bool</code>, the compiler may read it once and loop forever.</p>
+  <ul>
+    <li lang="zh-CN"><strong>原子变量的访问不会被删掉或合并成「只读一次」</strong>，内存序还约束了它周围的普通访问能往哪边移：acquire 之后的访问不能移到它前面，release 之前的访问不能移到它后面。relaxed 只保证原子性，不约束周围。</li>
+    <li lang="en"><strong>Accesses to atomics are not deleted or merged into a single read</strong>, and the memory order also limits which way the ordinary accesses around them may move: accesses after an acquire may not move before it, and accesses before a release may not move after it. Relaxed guarantees only atomicity and constrains nothing around it.</li>
+    <li lang="zh-CN"><strong>同一条 C++ 语句，在不同机器上要的指令不同，但对编译器的约束一样。</strong>Lab B 里 <code>atomic_thread_fence(acquire)</code> 和 <code>(release)</code> 在 x86-64 上不生成任何指令（TSO 已经给了这两种顺序），可它们仍然禁止编译器跨过它们重排。只想约束编译器、不要硬件屏障时，标准写法是 <code>std::atomic_signal_fence</code>；GCC 和 clang 的老写法是 <code>asm volatile("" ::: "memory")</code>，Linux 内核的 <code>barrier()</code> 就是它。</li>
+    <li lang="en"><strong>One C++ statement needs different instructions on different machines but constrains the compiler identically.</strong> In Lab B, <code>atomic_thread_fence(acquire)</code> and <code>(release)</code> generate no instruction at all on x86-64 (TSO already gives those orders), yet they still forbid the compiler from reordering across them. To constrain only the compiler, without a hardware barrier, the standard way is <code>std::atomic_signal_fence</code>; the older GCC and clang way is <code>asm volatile("" ::: "memory")</code>, which is what the Linux kernel’s <code>barrier()</code> is.</li>
+    <li lang="zh-CN"><strong>怎样分清是编译器还是硬件。</strong>看汇编。Lab A 里 relaxed 版本编出来是 <code>str</code> 在前、<code>ldr</code> 在后，程序顺序原样保留，所以那 2683 次失败只能是硬件重排的。</li>
+    <li lang="en"><strong>How to tell the compiler from the hardware.</strong> Read the assembly. In Lab A the relaxed version compiles to <code>str</code> first and <code>ldr</code> second, program order intact, so the 2683 failures can only be the hardware reordering.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：McKenney Advanced Synchronization: Memory Ordering 一章的 Compile-Time Consternation 一节，和 Tools of the Trade 一章的 Accessing Shared Variables 一节；Bos 第 3 章 Memory Ordering 的 Reordering and Optimizations 一节。</p>
+  <p lang="en">Further reading: the section Compile-Time Consternation of McKenney’s chapter Advanced Synchronization: Memory Ordering, and the section Accessing Shared Variables of the chapter Tools of the Trade; the section Reordering and Optimizations of chapter 3 of Bos, Memory Ordering.</p>
+
+  <h3 lang="zh-CN">3. C++20 内存模型：happens-before 与 synchronizes-with</h3><h3 lang="en">3. The C++20 memory model: happens-before and synchronizes-with</h3>
+  <p lang="zh-CN">C++11 起，标准不再说「哪条指令先执行」，而是定义几种关系，再用它们规定每次读可以读到哪些写。下面的说法照标准的 [intro.races] 和 [atomics.order] 两节（C++20；2026-10-31 对照了 eel.is 上的当前草案，下列条文与 C++20 一致，草案已经删掉了 <code>memory_order::consume</code>）：</p>
+  <p lang="en">Since C++11 the standard no longer says which instruction executes first; it defines a few relations and uses them to state which writes each read may see. What follows follows the standard’s sections [intro.races] and [atomics.order] (C++20; checked on 2026-10-31 against the current draft at eel.is, where the clauses below match C++20 and <code>memory_order::consume</code> has been removed):</p>
+  <ul>
+    <li lang="zh-CN"><strong>sequenced-before</strong>：同一个线程里，按语言的求值顺序规则，一个求值在另一个之前。粗略地说就是程序顺序。</li>
+    <li lang="en"><strong>sequenced-before</strong>: within one thread, one evaluation comes before another by the language’s evaluation-order rules. Roughly, program order.</li>
+    <li lang="zh-CN"><strong>modification order</strong>：每个原子对象上所有的修改排成一个全序，所有线程都同意这个顺序。四条 coherence 规则（读读、读写、写读、写写）保证一个线程不会在同一个对象上先看见新值、再看见旧值。这是 relaxed 也有的保证。</li>
+    <li lang="en"><strong>Modification order</strong>: all modifications of each atomic object form one total order that every thread agrees on. Four coherence rules (read-read, read-write, write-read, write-write) make sure a thread never sees a newer value of one object and then an older one. Relaxed has this guarantee too.</li>
+    <li lang="zh-CN"><strong>release sequence</strong>（C++20 的定义）：以原子对象 M 上的一次 release 操作 A 为首，在 M 的 modification order 里紧接着 A 的、最长的一段连续修改，其中 A 之后的每一个都是原子的读-改-写（RMW）操作。C++20 去掉了 C++11 里「同一线程的后续普通写也算」的那一条（P0982R1）。</li>
+    <li lang="en"><strong>Release sequence</strong> (the C++20 definition): headed by a release operation A on atomic object M, it is the maximal contiguous run of modifications in M’s modification order that starts with A and in which every modification after A is an atomic read-modify-write (RMW) operation. C++20 dropped the C++11 clause that also counted later plain stores by the same thread (P0982R1).</li>
+    <li lang="zh-CN"><strong>synchronizes-with</strong>：对 M 做 release 操作的原子操作 A，与对 M 做 acquire 操作、并且读到「以 A 为首的 release sequence 中任一修改」所写的值的原子操作 B 同步。要点是 B 必须<em>读到</em>那个值；acquire 读到更早的值，就什么也不同步。</li>
+    <li lang="en"><strong>synchronizes-with</strong>: an atomic operation A that performs a release on M synchronizes with an atomic operation B that performs an acquire on M and takes its value from any modification in the release sequence headed by A. The point is that B must <em>read</em> that value; an acquire that reads an earlier value synchronizes with nothing.</li>
+    <li lang="zh-CN"><strong>happens-before</strong>：A 在 B 之前发生，当且仅当 A sequenced-before B，或 A synchronizes-with B，或存在 X 使 A happens-before X 且 X happens-before B。也就是这两种关系的传递闭包（不用 consume 时，C++20 的定义化简到这里；当前草案就是这样写的）。另外 <code>std::thread</code> 的创建、<code>join</code>，mutex 的 unlock 和下一次 lock，标准都规定为 synchronizes-with。</li>
+    <li lang="en"><strong>happens-before</strong>: A happens before B if and only if A is sequenced before B, or A synchronizes with B, or there is an X such that A happens before X and X happens before B. In other words, the transitive closure of those two relations (with no consume operations, C++20’s definition reduces to this, and the current draft states it this way). The standard also makes thread creation, <code>join</code>, and a mutex unlock followed by the next lock synchronizes-with edges.</li>
+    <li lang="zh-CN"><strong>数据竞争</strong>：两个线程里的两个冲突访问（同一位置，至少一个是写），至少一个不是原子的，并且谁也不 happens-before 谁。有数据竞争的程序是未定义行为。反过来，没有数据竞争时，普通变量的读一定读到 happens-before 它的最后一次写。</li>
+    <li lang="en"><strong>Data race</strong>: two conflicting accesses (same location, at least one a write) in different threads, at least one not atomic, and neither happens before the other. A program with a data race has undefined behaviour. Conversely, without data races, a read of an ordinary variable always sees the last write that happens before it.</li>
+  </ul>
+  <p lang="zh-CN">release sequence 的实际用处是引用计数。线程 T1 用 release 写入 <code>count = 2</code>，之后 T2、T3 各做一次 <code>fetch_sub</code>（RMW）。T3 的 acquire 读到的是 T2 写的值，但因为 T2 的 RMW 在以 T1 的写为首的 release sequence 里，T3 仍然与 T1 同步，T1 在写之前做的初始化对 T3 可见。</p>
+  <p lang="en">The practical use of the release sequence is reference counting. Thread T1 writes <code>count = 2</code> with release, after which T2 and T3 each do one <code>fetch_sub</code> (an RMW). T3’s acquire reads the value T2 wrote, but since T2’s RMW lies in the release sequence headed by T1’s write, T3 still synchronizes with T1, and the initialization T1 did before its write is visible to T3.</p>
+  <p lang="zh-CN">延伸阅读：Bos 第 3 章 Memory Ordering 的 The Memory Model、Happens-Before Relationship、Spawning and Joining 三节；Williams《C++ Concurrency in Action》讲 C++ 内存模型与原子类型操作（the C++ memory model and operations on atomic types）的一章。</p>
+  <p lang="en">Further reading: the sections The Memory Model, Happens-Before Relationship and Spawning and Joining of chapter 3 of Bos, Memory Ordering; the chapter on the C++ memory model and operations on atomic types in Williams’s <em>C++ Concurrency in Action</em>.</p>
+
+  <h3 lang="zh-CN">4. 五种内存序：relaxed、acquire、release、acq_rel、seq_cst</h3><h3 lang="en">4. The five memory orders: relaxed, acquire, release, acq_rel, seq_cst</h3>
+  <ul>
+    <li lang="zh-CN"><strong><code>relaxed</code></strong>：只有原子性和每个对象自己的 modification order，不建立任何 synchronizes-with。适合只关心最终值的计数器（Lab B 的 <code>fetch_add</code>）和统计量。</li>
+    <li lang="en"><strong><code>relaxed</code></strong>: atomicity and each object’s own modification order, nothing more; it creates no synchronizes-with. Right for counters where only the final value matters (the <code>fetch_add</code> of Lab B) and for statistics.</li>
+    <li lang="zh-CN"><strong><code>release</code></strong>（用于写）：本线程在它之前的所有读写，不会被挪到它之后。配对的 acquire 读到它写的值时，这些读写对读者可见。</li>
+    <li lang="en"><strong><code>release</code></strong> (for stores): none of this thread’s reads and writes before it are moved after it. When a paired acquire reads the value it wrote, those reads and writes become visible to the reader.</li>
+    <li lang="zh-CN"><strong><code>acquire</code></strong>（用于读）：本线程在它之后的所有读写，不会被挪到它之前。和 release 配成 message passing：写者先写数据再 release 写旗子，读者 acquire 读到旗子后，一定能读到数据（图解 (b)）。</li>
+    <li lang="en"><strong><code>acquire</code></strong> (for loads): none of this thread’s reads and writes after it are moved before it. Paired with release it gives message passing: the writer writes the data and then the flag with release, and once the reader’s acquire reads the flag it is guaranteed to read the data (diagram (b)).</li>
+    <li lang="zh-CN"><strong><code>acq_rel</code></strong>（用于 RMW）：同时是 acquire 和 release。一次 <code>fetch_add</code> 或 compare-exchange 既接收前一个 release 发布的内容，又把自己之前的写发布出去。</li>
+    <li lang="en"><strong><code>acq_rel</code></strong> (for RMWs): both acquire and release. One <code>fetch_add</code> or compare-exchange both receives what the previous release published and publishes its own earlier writes.</li>
+    <li lang="zh-CN"><strong><code>seq_cst</code></strong>（默认）：在 acquire/release 之上，所有 seq_cst 操作（包括 seq_cst 栅栏）还处在一个单一全序 S 里，S 与 strongly happens-before 一致、与每个对象的 modification order 一致（[atomics.order]）。正是这个 S 禁止了 SB 的结果：A 的写和 B 的写在 S 里总有先后，排在后面的那个线程的读一定看见前一个写。标准的推论是：只用 mutex 和 seq_cst 原子、没有数据竞争的程序，行为就像顺序一致的交错。</li>
+    <li lang="en"><strong><code>seq_cst</code></strong> (the default): on top of acquire and release, all seq_cst operations (seq_cst fences included) also lie in one single total order S that is consistent with strongly happens-before and with each object’s modification order ([atomics.order]). That S is exactly what forbids the SB outcome: A’s write and B’s write always come in some order in S, and the read of whichever thread comes later must see the earlier write. The standard’s corollary: a program free of data races that uses only mutexes and seq_cst atomics behaves like a sequentially consistent interleaving.</li>
+  </ul>
+  <p lang="zh-CN">为什么 acquire/release 修不好 SB 和 Dekker？release 只管「我之前的不往后挪」，acquire 只管「我之后的不往前挪」，两者都不禁止「一次 release 写之后的一次 acquire 读」被提到写前面，因为它们是不同的变量，谁也没读到谁写的值，没有 synchronizes-with。Lab A 实测：acquire/release 的 SB 在 1 亿次里失败 354 次，Dekker 在 5 次运行里有 2 次丢了计数。<code>memory_order_consume</code> 原本想用数据依赖代替 acquire，没有编译器按设计实现它（clang 把它当 acquire），C++17 起不鼓励使用，本页不讲。</p>
+  <p lang="en">Why can acquire and release not fix SB and Dekker? Release only says nothing before me moves after me, and acquire only says nothing after me moves before me; neither forbids an acquire load that follows a release store from being hoisted above it, because they are different variables, neither read the other’s value, and there is no synchronizes-with. Measured in Lab A: acquire/release SB failed 354 times in 100 million trials, and Dekker lost counts in 2 of 5 runs. <code>memory_order_consume</code> was meant to replace acquire with data dependencies; no compiler implemented it as designed (clang treats it as acquire), its use has been discouraged since C++17, and this page leaves it out.</p>
+  <p lang="zh-CN">延伸阅读：Bos 第 3 章的 Relaxed Ordering、Release and Acquire Ordering、Sequentially Consistent Ordering、Common Misconceptions 四节；Williams 讲 C++ 内存模型的那一章中关于内存序的部分。</p>
+  <p lang="en">Further reading: the sections Relaxed Ordering, Release and Acquire Ordering, Sequentially Consistent Ordering and Common Misconceptions of chapter 3 of Bos; the memory-ordering part of the chapter on the C++ memory model in Williams.</p>
+
+  <h3 lang="zh-CN">5. 栅栏</h3><h3 lang="en">5. Fences</h3>
+  <p lang="zh-CN"><code>std::atomic_thread_fence(order)</code> 不是对某个变量的操作，而是把内存序挂在一个程序点上，和它前后的 relaxed 操作配合（[atomics.fences]）：</p>
+  <p lang="en"><code>std::atomic_thread_fence(order)</code> is not an operation on any variable; it attaches a memory order to a point in the program and works together with the relaxed operations around it ([atomics.fences]):</p>
+  <ul>
+    <li lang="zh-CN"><strong>release 栅栏 F，后接一次原子写 X</strong>：如果某个 acquire 操作读到了 X（或 X 所在 release sequence 里的值），F 就与那个 acquire 同步。效果像把 X 换成 release 写，但一个栅栏可以覆盖之后的多次写。</li>
+    <li lang="en"><strong>A release fence F followed by an atomic store X</strong>: if some acquire operation reads X (or a value in the release sequence X heads), F synchronizes with that acquire. The effect is like making X a release store, but one fence can cover several later stores.</li>
+    <li lang="zh-CN"><strong>一次原子读 Y，后接 acquire 栅栏 F</strong>：如果 Y 读到了某个 release 写的值，那个 release 就与 F 同步。常见写法是循环里用 relaxed 读旗子，跳出循环后放一个 acquire 栅栏，只在最后付一次代价。</li>
+    <li lang="en"><strong>An atomic load Y followed by an acquire fence F</strong>: if Y reads the value of some release store, that release synchronizes with F. The common pattern is to read a flag with relaxed inside a loop and put one acquire fence after the loop, paying the cost only once.</li>
+    <li lang="zh-CN"><strong>seq_cst 栅栏</strong>加入全序 S。Lab A 的 SB 和 Dekker 在写和读之间各放一个 <code>atomic_thread_fence(seq_cst)</code>，变量仍用 relaxed（Dekker 用 acquire/release），失败都归零。在 M5 上它编成一条 <code>dmb ish</code>，在 x86-64 上是 <code>lock orl $0, -64(%rsp)</code>（Apple clang 21 的选择，不是 <code>mfence</code>）。</li>
+    <li lang="en"><strong>A seq_cst fence</strong> joins the total order S. The SB and Dekker experiments of Lab A place one <code>atomic_thread_fence(seq_cst)</code> between the write and the read while keeping the variables relaxed (acquire/release for Dekker), and the failures drop to zero. On the M5 it compiles to one <code>dmb ish</code>; on x86-64 it is <code>lock orl $0, -64(%rsp)</code> (Apple clang 21’s choice, not <code>mfence</code>).</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Bos 第 3 章的 Fences 一节和第 7 章的 Memory Fences 一节；McKenney Advanced Synchronization: Memory Ordering 一章的 Ordering: Why and How? 一节。</p>
+  <p lang="en">Further reading: the section Fences of chapter 3 of Bos and the section Memory Fences of chapter 7; the section Ordering: Why and How? of McKenney’s chapter Advanced Synchronization: Memory Ordering.</p>
+
+  <h3 lang="zh-CN">6. 同一行 C++，两种机器：ARM64 与 x86-64</h3><h3 lang="en">6. One line of C++, two machines: ARM64 and x86-64</h3>
+  <p lang="zh-CN">Lab B 把每种内存序单独编成一个函数，用 Apple clang 21 分别为本机（默认目标）、ARMv8.0（<code>-mcpu=cyclone</code>，Apple A7，没有 LSE）和 x86-64（<code>-arch x86_64</code>）生成汇编。读出来的规律：</p>
+  <p lang="en">Lab B compiles each memory order into a function of its own and generates assembly with Apple clang 21 for this machine (the default target), for ARMv8.0 (<code>-mcpu=cyclone</code>, the Apple A7, no LSE) and for x86-64 (<code>-arch x86_64</code>). The pattern that comes out:</p>
+  <ul>
+    <li lang="zh-CN"><strong>ARM64 的 acquire/release 是指令本身的属性，不是额外的屏障。</strong><code>stlr</code>（store-release）和 <code>ldar</code>（load-acquire）自带顺序。<code>ldar</code> 是 RCsc 的：它不会越过程序顺序更早的 <code>stlr</code>，所以 seq_cst 的读和写只要 <code>ldar</code> + <code>stlr</code>，不需要 <code>dmb</code>。</li>
+    <li lang="en"><strong>On ARM64, acquire and release are properties of the instructions themselves, not extra barriers.</strong> <code>stlr</code> (store-release) and <code>ldar</code> (load-acquire) carry their ordering. <code>ldar</code> is RCsc: it does not pass an earlier <code>stlr</code> in program order, so seq_cst loads and stores need only <code>ldar</code> + <code>stlr</code>, with no <code>dmb</code>.</li>
+    <li lang="zh-CN"><strong>本机的 acquire 读是 <code>ldapr</code>，不是 <code>ldar</code>。</strong><code>ldapr</code>（ARMv8.3 的 RCpc load-acquire）去掉了「不越过更早的 <code>stlr</code>」这一条，更便宜，而 C++ 的 acquire 本来也不要求这一条。这正是 Lab A 里 acquire/release 的 SB 能失败的硬件原因：<code>stlr x</code> 之后的 <code>ldapr y</code> 可以先完成。为 ARMv8.0 编译时没有 <code>ldapr</code>，acquire 也用 <code>ldar</code>。</li>
+    <li lang="en"><strong>An acquire load on this machine is <code>ldapr</code>, not <code>ldar</code>.</strong> <code>ldapr</code> (the RCpc load-acquire of ARMv8.3) drops the do-not-pass-an-earlier-<code>stlr</code> rule, which makes it cheaper, and C++ acquire never required that rule. That is the hardware reason the acquire/release SB can fail in Lab A: an <code>ldapr y</code> after an <code>stlr x</code> may complete first. When compiling for ARMv8.0 there is no <code>ldapr</code>, and acquire uses <code>ldar</code> too.</li>
+    <li lang="zh-CN"><strong>RMW：本机用 LSE 单条指令，ARMv8.0 用 LL/SC 循环。</strong>本机 <code>fetch_add</code> 是 <code>ldadd</code>（relaxed）或 <code>ldaddal</code>（acq_rel、seq_cst），compare-exchange 是 <code>casal</code>，<code>atomic_flag::test_and_set</code> 是 <code>swpab</code>。<code>-mcpu=cyclone</code> 时同样的代码变成 <code>ldaxr</code> … <code>stlxr</code> 加 <code>cbnz</code> 重试的循环：独占地读，再条件地写，期间别人碰过这条 cache line 就重来。</li>
+    <li lang="en"><strong>RMWs: single LSE instructions here, LL/SC loops on ARMv8.0.</strong> Here <code>fetch_add</code> is <code>ldadd</code> (relaxed) or <code>ldaddal</code> (acq_rel and seq_cst), compare-exchange is <code>casal</code>, and <code>atomic_flag::test_and_set</code> is <code>swpab</code>. With <code>-mcpu=cyclone</code> the same code becomes an <code>ldaxr</code> … <code>stlxr</code> loop with a <code>cbnz</code> retry: load exclusively, store conditionally, and start over if anyone touched the cache line in between.</li>
+    <li lang="zh-CN"><strong>x86-64 上几乎都是 <code>mov</code>。</strong>relaxed、acquire、seq_cst 的读，relaxed 和 release 的写，全是一条普通 <code>movl</code>：TSO 已经给了这些顺序。只有 seq_cst 写要 <code>xchgl</code>（隐含 lock，是全屏障，堵住 TSO 唯一允许的 store→load 重排），所有 RMW 都是带 <code>lock</code> 前缀的指令。所以「x86 上 relaxed 和 seq_cst 一样快」的直觉只对读成立。</li>
+    <li lang="en"><strong>On x86-64 nearly everything is a <code>mov</code>.</strong> Relaxed, acquire and seq_cst loads, and relaxed and release stores, are all one plain <code>movl</code>: TSO already provides those orders. Only a seq_cst store needs <code>xchgl</code> (implicitly locked, a full barrier that closes the one store-to-load reordering TSO allows), and every RMW is a <code>lock</code>-prefixed instruction. So the intuition that relaxed and seq_cst are equally fast on x86 holds only for loads.</li>
+    <li lang="zh-CN"><strong>内核里是同一套指令。</strong>Linux arm64 的 <code>smp_load_acquire</code>/<code>smp_store_release</code> 编成 <code>ldar</code>/<code>stlr</code>，<code>smp_mb()</code> 是 <code>dmb ish</code>，并在启动时检测 LSE 后把 <code>atomic_*</code> 打补丁成 LSE 版本（<a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">内核专题 Phase 3</a> 的「原子操作与内存序」）。</li>
+    <li lang="en"><strong>The kernel uses the same instructions.</strong> Linux arm64’s <code>smp_load_acquire</code>/<code>smp_store_release</code> compile to <code>ldar</code>/<code>stlr</code>, <code>smp_mb()</code> is <code>dmb ish</code>, and at boot the kernel detects LSE and patches <code>atomic_*</code> into the LSE versions (the concept atomic operations and memory ordering in <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">kernel topic Phase 3</a>).</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Bos 第 7 章 Understanding the Processor 的 x86 lock prefix、ARM load-exclusive and store-exclusive、Compare-and-exchange on ARM、x86-64: Strongly Ordered、ARM64: Weakly Ordered 五节；McKenney Advanced Synchronization: Memory Ordering 一章 Hardware Specifics 一节的 ARMv8 和 x86 两部分。</p>
+  <p lang="en">Further reading: the sections x86 lock prefix, ARM load-exclusive and store-exclusive, Compare-and-exchange on ARM, x86-64: Strongly Ordered and ARM64: Weakly Ordered of chapter 7 of Bos, Understanding the Processor; the ARMv8 and x86 parts of the section Hardware Specifics in McKenney’s chapter Advanced Synchronization: Memory Ordering.</p>
+
+  <h3 lang="zh-CN">7. compare-exchange 与 ABA 问题</h3><h3 lang="en">7. Compare-exchange and the ABA problem</h3>
+  <p lang="zh-CN"><code>compare_exchange_strong(expected, desired)</code> 原子地做一件事：如果当前值等于 <code>expected</code>，就写入 <code>desired</code> 并返回 true；否则把当前值写回 <code>expected</code> 并返回 false。几乎所有无锁算法都是一个「读旧值、算新值、CAS 提交、失败就重试」的循环。<code>compare_exchange_weak</code> 允许在值相等时也失败（spurious failure），因为在 LL/SC 机器上 <code>stlxr</code> 可能因为别的原因失败；它本来就放在重试循环里时，用 weak 可以省掉内层循环。本机有 <code>casal</code>，strong 版本就是一条指令加比较。</p>
+  <p lang="en"><code>compare_exchange_strong(expected, desired)</code> does one thing atomically: if the current value equals <code>expected</code>, it writes <code>desired</code> and returns true; otherwise it writes the current value back into <code>expected</code> and returns false. Almost every lock-free algorithm is a loop of read the old value, compute the new one, commit with CAS, retry on failure. <code>compare_exchange_weak</code> may fail even when the values are equal (a spurious failure), because on an LL/SC machine <code>stlxr</code> can fail for other reasons; when the call already sits in a retry loop, weak saves an inner loop. This machine has <code>casal</code>, so the strong version is one instruction plus a compare.</p>
+  <p lang="zh-CN"><strong>ABA</strong>：CAS 只比较值，不知道值在中间变过。无锁栈的 pop 读到栈顶 A 和 A 的 next 为 B，准备 CAS(top, A → B)；这时另一个线程 pop 了 A、pop 了 B、又把 A push 回去（同一个地址被重用）。top 又是 A，CAS 成功，top 被设成已经不在栈里的 B。修法是让「值」包含版本：带计数的指针（tagged pointer，用 128 位的 CAS 或指针的空闲高位），或者保证 A 在还有人可能持有它时不被重用（hazard pointer、epoch、RCU）。这些是 Phase 4 的内容，Lab A 会在那里让 ABA 真的发生一次。</p>
+  <p lang="en"><strong>ABA</strong>: CAS compares only the value and cannot tell that it changed in between. A lock-free stack’s pop reads the top A and A’s next, B, and prepares CAS(top, A → B); meanwhile another thread pops A, pops B and pushes A back (the same address reused). top is A again, the CAS succeeds, and top is set to B, which is no longer on the stack. The fixes give the value a version: a tagged pointer (with a 128-bit CAS or the spare high bits of a pointer), or a guarantee that A is not reused while anyone might still hold it (hazard pointers, epochs, RCU). Those are Phase 4, whose Lab A makes ABA actually happen once.</p>
+  <p lang="zh-CN">延伸阅读：Bos 第 2 章 Atomics 的 Compare-and-Exchange Operations 一节；Herlihy 等《The Art of Multiprocessor Programming》讲队列、内存管理与 ABA 问题的一章；McKenney Advanced Synchronization 一章的 Non-Blocking Synchronization 一节。</p>
+  <p lang="en">Further reading: the section Compare-and-Exchange Operations of chapter 2 of Bos, Atomics; the chapter on queues, memory management and the ABA problem in Herlihy et al., <em>The Art of Multiprocessor Programming</em>; the section Non-Blocking Synchronization of McKenney’s chapter Advanced Synchronization.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：内存序 ↔ 承诺 ↔ 指令</h2><h2 id="compare-en" lang="en">Comparison: memory order ↔ promise ↔ instruction</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">操作与内存序</span><span lang="en">Operation and order</span></th><th><span lang="zh-CN">承诺</span><span lang="en">What it promises</span></th><th><span lang="zh-CN">本机 M5（Apple clang 21 默认目标）</span><span lang="en">This M5 (Apple clang 21 default target)</span></th><th><span lang="zh-CN">ARMv8.0（<code>-mcpu=cyclone</code>）</span><span lang="en">ARMv8.0 (<code>-mcpu=cyclone</code>)</span></th><th><span lang="zh-CN">x86-64（对照）</span><span lang="en">x86-64 (contrast)</span></th></tr>
+    <tr><td><span lang="zh-CN">relaxed 读 / 写</span><span lang="en">relaxed load / store</span></td><td><span lang="zh-CN">原子性和单对象的 modification order，不同步任何东西</span><span lang="en">Atomicity and the per-object modification order; synchronizes nothing</span></td><td><code>ldr</code> / <code>str</code></td><td><code>ldr</code> / <code>str</code></td><td><code>movl</code> / <code>movl</code></td></tr>
+    <tr><td><span lang="zh-CN">acquire 读</span><span lang="en">acquire load</span></td><td><span lang="zh-CN">之后的读写不提到它之前；读到 release 写的值时与之同步</span><span lang="en">Later reads and writes do not move before it; synchronizes with the release whose value it reads</span></td><td><code>ldapr</code></td><td><code>ldar</code></td><td><code>movl</code></td></tr>
+    <tr><td><span lang="zh-CN">release 写</span><span lang="en">release store</span></td><td><span lang="zh-CN">之前的读写不挪到它之后</span><span lang="en">Earlier reads and writes do not move after it</span></td><td><code>stlr</code></td><td><code>stlr</code></td><td><code>movl</code></td></tr>
+    <tr><td><span lang="zh-CN">seq_cst 读 / 写</span><span lang="en">seq_cst load / store</span></td><td><span lang="zh-CN">acquire / release，加上所有 seq_cst 操作的单一全序 S</span><span lang="en">acquire / release, plus the single total order S over all seq_cst operations</span></td><td><code>ldar</code> / <code>stlr</code></td><td><code>ldar</code> / <code>stlr</code></td><td><code>movl</code> / <code>xchgl</code></td></tr>
+    <tr><td><span lang="zh-CN"><code>fetch_add</code>：relaxed</span><span lang="en"><code>fetch_add</code>: relaxed</span></td><td><span lang="zh-CN">原子的读-改-写，不丢更新</span><span lang="en">An atomic read-modify-write, no lost updates</span></td><td><code>ldadd</code></td><td><span lang="zh-CN"><code>ldxr</code>…<code>stxr</code> 循环</span><span lang="en"><code>ldxr</code>…<code>stxr</code> loop</span></td><td><code>lock xaddl</code></td></tr>
+    <tr><td><span lang="zh-CN"><code>fetch_add</code>：acq_rel、seq_cst</span><span lang="en"><code>fetch_add</code>: acq_rel, seq_cst</span></td><td><span lang="zh-CN">既 acquire 又 release；seq_cst 再加入 S</span><span lang="en">Both acquire and release; seq_cst also joins S</span></td><td><code>ldaddal</code></td><td><span lang="zh-CN"><code>ldaxr</code>…<code>stlxr</code> 循环</span><span lang="en"><code>ldaxr</code>…<code>stlxr</code> loop</span></td><td><code>lock xaddl</code></td></tr>
+    <tr><td><span lang="zh-CN"><code>compare_exchange_strong</code>（seq_cst）</span><span lang="en"><code>compare_exchange_strong</code> (seq_cst)</span></td><td><span lang="zh-CN">值相等才写，失败时带回当前值</span><span lang="en">Writes only if equal; on failure returns the current value</span></td><td><code>casal</code></td><td><span lang="zh-CN"><code>ldaxr</code>…<code>stlxr</code> 循环，失败时 <code>clrex</code></span><span lang="en"><code>ldaxr</code>…<code>stlxr</code> loop, <code>clrex</code> on failure</span></td><td><code>lock cmpxchgl</code></td></tr>
+    <tr><td><span lang="zh-CN"><code>atomic_flag</code>：<code>test_and_set(acquire)</code> / <code>clear(release)</code></span><span lang="en"><code>atomic_flag</code>: <code>test_and_set(acquire)</code> / <code>clear(release)</code></span></td><td><span lang="zh-CN">自旋锁的加锁与解锁</span><span lang="en">Lock and unlock of a spin lock</span></td><td><code>swpab</code> / <code>stlrb</code></td><td><span lang="zh-CN"><code>ldaxrb</code>…<code>stxrb</code> 循环 / <code>stlrb</code></span><span lang="en"><code>ldaxrb</code>…<code>stxrb</code> loop / <code>stlrb</code></span></td><td><code>xchgb</code> / <code>movb</code></td></tr>
+    <tr><td><span lang="zh-CN">栅栏：acquire / release / seq_cst</span><span lang="en">Fence: acquire / release / seq_cst</span></td><td><span lang="zh-CN">把内存序挂在程序点上，与前后的 relaxed 操作配合</span><span lang="en">Attaches an order to a program point, working with the relaxed operations around it</span></td><td><code>dmb ishld</code> / <code>dmb ish</code> / <code>dmb ish</code></td><td><code>dmb ishld</code> / <code>dmb ish</code> / <code>dmb ish</code></td><td><span lang="zh-CN">无指令 / 无指令 / <code>lock orl $0, -64(%rsp)</code></span><span lang="en">no instruction / no instruction / <code>lock orl $0, -64(%rsp)</code></span></td></tr>
+  </table>
+  </div>
+  <p lang="zh-CN">表中每个指令都来自 Lab B 的 <code>orders.cpp</code> 在 2026-10-31 的实际输出，没有一条是查资料补的。</p>
+  <p lang="en">Every instruction in the table comes from the actual output of Lab B’s <code>orders.cpp</code> on 2026-10-31; none was filled in from documentation.</p>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) store buffering：relaxed 下两边都读到 0，seq_cst 下不会</h3><h3 lang="en">(a) Store buffering: both read 0 under relaxed, never under seq_cst</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 440" data-interval="2600"
+         data-captions='["全图：上面是两个核上的线程 A 和 B，各自有一个 store buffer；下面是 cache 一致的共享内存，x 和 y 初始为 0。按播放，看 relaxed 下两个线程怎样都读到 0。",
+           "1. 线程 A 执行 x.store(1, relaxed)，编成一条 str。写进了 A 的 store buffer，A 继续往下执行，B 还看不见 x = 1。",
+           "2. 线程 B 同时执行 y.store(1, relaxed)。y = 1 进了 B 自己的 store buffer，A 也还看不见。",
+           "3. A 执行 r1 = y.load(relaxed)，一条 ldr。y = 1 还在 B 的缓冲里，A 从内存读到 y = 0。",
+           "4. B 执行 r2 = x.load(relaxed)，同样从内存读到 x = 0。",
+           "5. 两个缓冲排空，内存最终是 x = 1、y = 1，可两次读都已经拿到了 0。r1 = r2 = 0 在任何交错下都不可能，这台 M5 上 relaxed 实测 1 亿次中 2683 次。汇编里 str 在 ldr 前面，所以是硬件重排。",
+           "6. 换成 seq_cst：写编成 stlr，读编成 ldar。ldar 不会越过程序顺序更早的 stlr，所以至少一个线程看见对方的 1。实测 1 亿次中 0 次；在中间放一个 seq_cst 栅栏（dmb ish）也是 0 次。"]'
+         data-captions-en='["Overview: at the top, threads A and B on two cores, each with its own store buffer; at the bottom, the coherent shared memory, with x and y starting at 0. Press Play to see how both threads read 0 under relaxed order.",
+           "1. Thread A runs x.store(1, relaxed), one str. The write goes into the store buffer of A and A keeps executing; B cannot see x = 1 yet.",
+           "2. At the same time thread B runs y.store(1, relaxed). y = 1 goes into the own store buffer of B, and A cannot see it yet either.",
+           "3. A runs r1 = y.load(relaxed), one ldr. y = 1 is still in the buffer of B, so A reads y = 0 from memory.",
+           "4. B runs r2 = x.load(relaxed) and likewise reads x = 0 from memory.",
+           "5. Both buffers drain and memory ends with x = 1 and y = 1, but both reads have already returned 0. r1 = r2 = 0 is impossible under any interleaving; on this M5 relaxed showed it 2683 times in 100 million trials. In the assembly str comes before ldr, so this is hardware reordering.",
+           "6. Switch to seq_cst: the store becomes stlr and the load becomes ldar. ldar does not pass an earlier stlr in program order, so at least one thread sees the 1 of the other. Measured: 0 in 100 million; a seq_cst fence (dmb ish) in between also gave 0."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <line x1="10" y1="262" x2="890" y2="262" class="lane"/>
+      <text x="30" y="282" class="small" lang="zh-CN">cache 一致的共享内存</text><text x="30" y="282" class="small" lang="en">Coherent shared memory</text>
+
+      <!-- step 1: core A and its store buffer (par token belongs on the thread box) -->
+      <g data-step="1"><rect class="box" x="30" y="24" width="290" height="96"/><!-- par -->
+        <text x="44" y="48" lang="zh-CN">线程 A · 一个核</text><text x="44" y="48" lang="en">Thread A · one core</text>
+        <text x="44" y="72" class="mono">x.store(1, relaxed);</text>
+        <text x="44" y="94" class="mono">r1 = y.load(relaxed);</text>
+        <rect class="box" x="30" y="160" width="270" height="50"/>
+        <text x="44" y="190" class="mono">store buffer A: x = 1</text>
+        <path class="arrow" d="M120 120 L120 158"/>
+        <text x="130" y="144" class="small" lang="zh-CN">1. str x</text><text x="130" y="144" class="small" lang="en">1. str x</text></g>
+
+      <!-- step 2: core B and its store buffer (par token belongs on the thread box) -->
+      <g data-step="2"><rect class="box" x="580" y="24" width="290" height="96"/><!-- par -->
+        <text x="594" y="48" lang="zh-CN">线程 B · 另一个核</text><text x="594" y="48" lang="en">Thread B · another core</text>
+        <text x="594" y="72" class="mono">y.store(1, relaxed);</text>
+        <text x="594" y="94" class="mono">r2 = x.load(relaxed);</text>
+        <rect class="box" x="600" y="160" width="270" height="50"/>
+        <text x="614" y="190" class="mono">store buffer B: y = 1</text>
+        <path class="arrow" d="M780 120 L780 158"/>
+        <text x="700" y="144" class="small" lang="zh-CN">2. str y</text><text x="700" y="144" class="small" lang="en">2. str y</text></g>
+
+      <!-- shared memory, always visible -->
+      <rect class="box" x="250" y="296" width="400" height="56"/>
+      <text x="264" y="318" class="small" lang="zh-CN">内存里此刻的值</text><text x="264" y="318" class="small" lang="en">values in memory right now</text>
+      <text x="264" y="340" class="mono">x = 0    y = 0</text>
+
+      <!-- step 3: A loads y from memory -->
+      <g data-step="3"><path class="arrow" d="M330 296 L300 122"/>
+        <text x="340" y="236" class="small" lang="zh-CN">3. A: ldr y → 0</text><text x="340" y="236" class="small" lang="en">3. A: ldr y → 0</text></g>
+
+      <!-- step 4: B loads x from memory -->
+      <g data-step="4"><path class="arrow" d="M570 296 L600 122"/>
+        <text x="458" y="236" class="small" lang="zh-CN">4. B: ldr x → 0</text><text x="458" y="236" class="small" lang="en">4. B: ldr x → 0</text></g>
+
+      <!-- step 5: buffers drain; the impossible result -->
+      <g data-step="5"><path class="arrow flow" d="M175 210 L260 294"/>
+        <path class="arrow flow" d="M725 210 L640 294"/>
+        <text x="226" y="246" class="small" lang="zh-CN">5. 排空</text><text x="226" y="246" class="small" lang="en">5. drain</text>
+        <text x="520" y="340" class="mono">→ x = 1  y = 1</text>
+        <text x="30" y="384" style="fill: var(--ink-2)" lang="zh-CN">✗ r1 = 0 且 r2 = 0：任何交错下都不可能</text><text x="30" y="384" style="fill: var(--ink-2)" lang="en">✗ r1 = 0 and r2 = 0: impossible in any interleaving</text>
+        <text x="30" y="406" class="small" lang="zh-CN">relaxed 实测：1 亿次中 2683 次（5 次运行 51 到 1863）</text><text x="30" y="406" class="small" lang="en">relaxed, measured: 2683 in 100 million (5 runs, 51 to 1863 each)</text></g>
+
+      <!-- step 6: seq_cst -->
+      <g data-step="6"><rect class="box" x="350" y="24" width="200" height="186"/>
+        <text x="364" y="48" lang="zh-CN">6. 换成 seq_cst</text><text x="364" y="48" lang="en">6. Switch to seq_cst</text>
+        <text x="364" y="74" class="mono">stlr  x</text>
+        <text x="364" y="96" class="mono">ldar  y</text>
+        <text x="364" y="122" class="small" lang="zh-CN">ldar 不越过前面的 stlr</text><text x="364" y="122" class="small" lang="en">ldar waits for the stlr</text>
+        <text x="364" y="146" class="small" lang="zh-CN">实测 0 / 1 亿</text><text x="364" y="146" class="small" lang="en">measured 0 / 100 M</text>
+        <text x="364" y="170" class="small" lang="zh-CN">栅栏 dmb ish：0 / 1 亿</text><text x="364" y="170" class="small" lang="en">fence dmb ish: 0 / 100 M</text>
+        <text x="364" y="194" class="small" lang="zh-CN">acq_rel：354 / 1 亿</text><text x="364" y="194" class="small" lang="en">acq_rel: 354 / 100 M</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) message passing：用 release 和 acquire 发布数据</h3><h3 lang="en">(b) Message passing: publishing data with release and acquire</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 430" data-interval="2600"
+         data-captions='["全图：左边写者线程先写数据再立旗子，右边读者线程等旗子再读数据。中间的箭头是两种关系：synchronizes-with 和由它推出的 happens-before。按播放走一遍。",
+           "1. 写者写普通变量 data = 42，编成一条 str。单看这一步，没有任何东西保证别的线程什么时候看见它。",
+           "2. 写者用 release 写旗子 ready = 1，编成 stlr。release 的承诺是：本线程在它之前的读写，不会被挪到它之后。",
+           "3. 读者用 acquire 读旗子，本机编成 ldapr。它读到了 release 写的 1，于是这次 release 与这次 acquire 同步（synchronizes-with）。",
+           "4. 由 sequenced-before 和 synchronizes-with 传递得到：写 data 先于（happens-before）读 data。所以读者一定读到 42，而且 data 是普通变量也没有数据竞争。",
+           "5. 如果两边都用 relaxed，没有同步：读者可能看见 ready = 1 却读到 data = 0。汇编里写者是 str data 再 str ready，读者是 ldr ready 再 ldr data，顺序没变，所以这是 M5 的重排。实测 2000 万次中 10 到 58 次，release/acquire 下 0 次。"]'
+         data-captions-en='["Overview: on the left the writer thread writes the data and then raises a flag; on the right the reader thread waits for the flag and then reads the data. The arrows in the middle are two relations: synchronizes-with and the happens-before that follows from it. Press Play to walk through it.",
+           "1. The writer writes the ordinary variable data = 42, one str. On its own, nothing says when any other thread will see it.",
+           "2. The writer writes the flag ready = 1 with release, one stlr. The promise of release: no read or write of this thread before it is moved after it.",
+           "3. The reader reads the flag with acquire, an ldapr on this machine. It reads the 1 that the release wrote, so this release synchronizes with this acquire.",
+           "4. By sequenced-before and synchronizes-with, transitively: the write of data happens before the read of data. So the reader must read 42, and data being an ordinary variable is no data race.",
+           "5. With relaxed on both sides there is no synchronization: the reader may see ready = 1 and still read data = 0. In the assembly the writer does str data then str ready and the reader ldr ready then ldr data, order unchanged, so this is the M5 reordering. Measured: 10 to 58 in 20 million trials, and 0 under release and acquire."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <!-- the two threads (par token belongs on these boxes) -->
+      <rect class="box" x="30" y="24" width="370" height="130"/><!-- par -->
+      <text x="44" y="48" lang="zh-CN">写者线程 W</text><text x="44" y="48" lang="en">Writer thread W</text>
+      <text x="44" y="76" class="mono">data = 42;</text>
+      <text x="44" y="100" class="mono">ready.store(1, release);</text>
+      <text x="44" y="132" class="small" lang="zh-CN">本机：str data，stlr ready</text><text x="44" y="132" class="small" lang="en">here: str data, stlr ready</text>
+      <rect class="box" x="500" y="24" width="370" height="130"/><!-- par -->
+      <text x="514" y="48" lang="zh-CN">读者线程 R</text><text x="514" y="48" lang="en">Reader thread R</text>
+      <text x="514" y="76" class="mono">while (!ready.load(acquire)) {}</text>
+      <text x="514" y="100" class="mono">use(data);   // 42</text>
+      <text x="514" y="132" class="small" lang="zh-CN">本机：ldapr ready，ldr data</text><text x="514" y="132" class="small" lang="en">here: ldapr ready, ldr data</text>
+
+      <!-- step 1 -->
+      <g data-step="1"><rect class="box" x="30" y="190" width="170" height="48"/>
+        <text x="44" y="219" class="mono">1. str data=42</text></g>
+      <!-- step 2 -->
+      <g data-step="2"><rect class="box" x="230" y="190" width="170" height="48"/>
+        <text x="244" y="219" class="mono">2. stlr ready=1</text>
+        <path class="arrow" d="M200 214 L228 214"/>
+        <text x="230" y="258" class="small" lang="zh-CN">之前的写不挪到后面</text><text x="230" y="258" class="small" lang="en">earlier writes stay before</text></g>
+      <!-- step 3 -->
+      <g data-step="3"><rect class="box" x="500" y="190" width="170" height="48"/>
+        <text x="514" y="219" class="mono">3. ldapr → 1</text>
+        <path class="arrow" d="M400 214 L498 214"/>
+        <text x="404" y="184" class="small">synchronizes-with</text></g>
+      <!-- step 4 -->
+      <g data-step="4"><rect class="box" x="700" y="190" width="170" height="48"/>
+        <text x="714" y="219" class="mono">4. ldr → 42</text>
+        <path class="arrow" d="M670 214 L698 214"/>
+        <path class="arrow" d="M115 238 C115 318 785 318 785 240"/>
+        <text x="300" y="326" class="small" lang="zh-CN">happens-before：写 data 先于读 data，所以读到 42</text><text x="300" y="326" class="small" lang="en">happens-before: the write of data precedes its read, so 42</text></g>
+      <!-- step 5: the relaxed failure -->
+      <g data-step="5"><rect class="box" x="30" y="336" width="840" height="74"/>
+        <text x="44" y="362" style="fill: var(--ink-2)" lang="zh-CN">✗ 两边都用 relaxed：可能看见 ready = 1 却读到 data = 0</text><text x="44" y="362" style="fill: var(--ink-2)" lang="en">✗ relaxed on both sides: may see ready = 1 and still read data = 0</text>
+        <text x="44" y="390" class="small" lang="zh-CN">实测（M5，5 次 × 2000 万）：relaxed 10 到 58 次，release/acquire 0 次</text><text x="44" y="390" class="small" lang="en">measured (M5, 5 runs × 20 million): relaxed 10 to 58 each, release/acquire 0</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 M5 上抓住重排：store buffering 与 Dekker 算法</h3><h3 lang="en">Lab A · Catching reordering on the M5: store buffering and Dekker’s algorithm</h3>
+    <ol>
+      <li><span lang="zh-CN">建目录。本 Lab 的三个程序都用 C++20 和 <code>std::atomic</code>，用 <code>clang++ -std=c++20 -O2</code> 编译。</span><span lang="en">Make a directory. All three programs in this lab use C++20 and <code>std::atomic</code> and build with <code>clang++ -std=c++20 -O2</code>.</span><pre data-lang="sh">mkdir -p ~/par-lab/phase-3 &amp;&amp; cd ~/par-lab/phase-3</pre></li>
+      <li><span lang="zh-CN">store buffering。主线程当裁判：每一轮把旗子 <code>go</code> 设成轮号，两个工作线程都在等同一个旗子，所以几乎同时出发；各写一个变量、读另一个，再报告。第一版用了每轮一道两线程 barrier，结果 relaxed 下 100 万次 0 次：barrier 放行的两个线程相差一次 cache miss，先出发的那个的写早就排空了。改成共用一个旗子后才抓得到。每个变量独占一条 128 字节的 cache line。</span><span lang="en">Store buffering. The main thread is the referee: each round it sets the flag <code>go</code> to the round number, and both workers wait on that one flag, so they start almost together; each writes one variable, reads the other, and reports. The first version used a two-thread barrier per round and saw 0 in a million trials under relaxed: the barrier releases the two threads a cache miss apart, and the first one’s write has long drained by then. Only after switching to one shared flag did reordering show up. Each variable has a 128-byte cache line of its own.</span><pre data-lang="cpp" data-file="sb.cpp">// sb.cpp: store buffering（Dekker 算法的核心）。线程 A：x = 1; r1 = y。线程 B：y = 1; r2 = x。
+// 主线程当裁判：放行一轮，等两边都做完，检查 r1、r2，清零，再放行下一轮。
+#include &lt;atomic&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;cstring&gt;
+#include &lt;thread&gt;
+
+struct alignas(128) Slot { std::atomic&lt;int&gt; v{0}; };   // 每个变量独占一条 128 字节 cache line
+Slot x, y, go, done;
+int r1, r2;
+
+enum Mode { RELAXED, ACQ_REL, SEQ_CST, FENCE };
+
+template &lt;Mode M&gt;
+static int side(std::atomic&lt;int&gt; &amp;mine, std::atomic&lt;int&gt; &amp;other) {
+    if constexpr (M == RELAXED) {
+        mine.store(1, std::memory_order_relaxed);
+        return other.load(std::memory_order_relaxed);
+    } else if constexpr (M == ACQ_REL) {
+        mine.store(1, std::memory_order_release);
+        return other.load(std::memory_order_acquire);
+    } else if constexpr (M == SEQ_CST) {
+        mine.store(1, std::memory_order_seq_cst);
+        return other.load(std::memory_order_seq_cst);
+    } else {
+        mine.store(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return other.load(std::memory_order_relaxed);
+    }
+}
+
+template &lt;Mode M&gt;
+static long run(long n) {
+    auto worker = [n](std::atomic&lt;int&gt; &amp;mine, std::atomic&lt;int&gt; &amp;other, int &amp;r) {
+        for (int i = 1; i &lt;= n; ++i) {
+            while (go.v.load(std::memory_order_acquire) != i) { }   // 两个线程等同一个旗子，几乎同时出发
+            r = side&lt;M&gt;(mine, other);
+            done.v.fetch_add(1, std::memory_order_release);
+        }
+    };
+    long both_zero = 0;
+    std::jthread a(worker, std::ref(x.v), std::ref(y.v), std::ref(r1));
+    std::jthread b(worker, std::ref(y.v), std::ref(x.v), std::ref(r2));
+    for (int i = 1; i &lt;= n; ++i) {
+        go.v.store(i, std::memory_order_release);                  // 放行第 i 轮
+        while (done.v.load(std::memory_order_acquire) != 2) { }    // 等两边都做完
+        if (r1 == 0 &amp;&amp; r2 == 0) ++both_zero;                       // 顺序一致性下不可能
+        done.v.store(0, std::memory_order_relaxed);
+        x.v.store(0, std::memory_order_relaxed);
+        y.v.store(0, std::memory_order_relaxed);
+    }
+    return both_zero;
+}
+
+int main(int argc, char **argv) {
+    const char *m = argc &gt; 1 ? argv[1] : "relaxed";
+    long n = argc &gt; 2 ? atol(argv[2]) : 1000000;
+    long z = !strcmp(m, "relaxed") ? run&lt;RELAXED&gt;(n)
+           : !strcmp(m, "acq_rel") ? run&lt;ACQ_REL&gt;(n)
+           : !strcmp(m, "seq_cst") ? run&lt;SEQ_CST&gt;(n)
+           :                         run&lt;FENCE&gt;(n);
+    std::printf("%-8s trials %ld  both read 0: %ld\n", m, n, z);
+}</pre></li>
+      <li><span lang="zh-CN">每种模式跑 5 次，每次 2000 万轮：</span><span lang="en">Run each mode 5 times, 20 million rounds each:</span><pre data-lang="sh">$ clang++ -std=c++20 -O2 -Wall sb.cpp -o sb
+$ for m in relaxed acq_rel seq_cst fence; do for r in 1 2 3 4 5; do ./sb $m 20000000; done; done
+relaxed  trials 20000000  both read 0: 51
+relaxed  trials 20000000  both read 0: 1863
+relaxed  trials 20000000  both read 0: 310
+relaxed  trials 20000000  both read 0: 257
+relaxed  trials 20000000  both read 0: 202
+acq_rel  trials 20000000  both read 0: 18
+acq_rel  trials 20000000  both read 0: 65
+acq_rel  trials 20000000  both read 0: 134
+acq_rel  trials 20000000  both read 0: 71
+acq_rel  trials 20000000  both read 0: 66
+seq_cst  trials 20000000  both read 0: 0
+seq_cst  trials 20000000  both read 0: 0
+seq_cst  trials 20000000  both read 0: 0
+seq_cst  trials 20000000  both read 0: 0
+seq_cst  trials 20000000  both read 0: 0
+fence    trials 20000000  both read 0: 0
+fence    trials 20000000  both read 0: 0
+fence    trials 20000000  both read 0: 0
+fence    trials 20000000  both read 0: 0
+fence    trials 20000000  both read 0: 0
+# 2026-10-31 18:55 实验机输出，uptime 负载约 3.9；次数每次运行差别很大</pre><span lang="zh-CN">合计：relaxed 1 亿次中 2683 次，acq_rel 354 次，seq_cst 和栅栏都是 0 次。0 次只说明这 1 亿次里没看见，保证来自标准和 <code>ldar</code> 的定义，不来自这个测试。同一个 acq_rel 测试在一次更早的 3000 万轮运行里是 0 次，另两次是 75 和 1080 次，所以少跑几次很容易得出「acquire/release 就够了」的错误结论。</span><span lang="en">Totals: relaxed 2683 in 100 million, acq_rel 354, seq_cst and the fence both 0. A zero means only that none showed up in these 100 million; the guarantee comes from the standard and the definition of <code>ldar</code>, not from this test. In an earlier set of 30-million-round runs the same acq_rel test gave 0 once and 75 and 1080 the other two times, so a few short runs easily lead to the wrong conclusion that acquire and release are enough.</span></li>
+      <li><span lang="zh-CN">证明是硬件而不是编译器。生成汇编，看每个工作线程在 <code>done</code> 的 <code>ldaddl</code> 之前做了什么（四段依次是 relaxed、acq_rel、seq_cst、fence）：</span><span lang="en">Prove it is the hardware, not the compiler. Generate the assembly and look at what each worker does before the <code>ldaddl</code> on <code>done</code> (the four blocks are relaxed, acq_rel, seq_cst and fence, in that order):</span><pre data-lang="sh">$ clang++ -std=c++20 -O2 -S sb.cpp -o sb.s
+$ grep -B4 'ldaddl' sb.s
+; %bb.5:                                ;   in Loop: Header=BB3_4 Depth=1
+	str	w10, [x8]
+	ldr	w15, [x9]
+	str	w15, [x13]
+	ldaddl	w10, w15, [x12]
+--
+; %bb.5:                                ;   in Loop: Header=BB14_4 Depth=1
+	stlr	w10, [x8]
+	ldapr	w15, [x9]
+	str	w15, [x13]
+	ldaddl	w10, w15, [x12]
+--
+; %bb.5:                                ;   in Loop: Header=BB17_4 Depth=1
+	stlr	w10, [x8]
+	ldar	w15, [x9]
+	str	w15, [x13]
+	ldaddl	w10, w15, [x12]
+--
+	str	w10, [x8]
+	dmb	ish
+	ldr	w15, [x9]
+	str	w15, [x13]
+	ldaddl	w10, w15, [x12]
+# 2026-10-31 实验机输出</pre><span lang="zh-CN">relaxed 是 <code>str</code> 再 <code>ldr</code>，程序顺序没变，所以 2683 次是硬件重排。acq_rel 是 <code>stlr</code> 再 <code>ldapr</code>，seq_cst 是 <code>stlr</code> 再 <code>ldar</code>：两者只差一个字母，差别正是概念 6 讲的 RCpc 和 RCsc。栅栏版本在 <code>str</code> 和 <code>ldr</code> 之间多一条 <code>dmb ish</code>。</span><span lang="en">Relaxed is <code>str</code> then <code>ldr</code>, program order intact, so the 2683 are hardware reordering. acq_rel is <code>stlr</code> then <code>ldapr</code>, and seq_cst is <code>stlr</code> then <code>ldar</code>: one letter apart, and that letter is exactly the RCpc versus RCsc difference of concept 6. The fence version has one extra <code>dmb ish</code> between <code>str</code> and <code>ldr</code>.</span></li>
+      <li><span lang="zh-CN">Dekker 互斥算法。它靠「先立自己的旗、再看对方的旗」保证两个线程不同时进临界区，正是 SB 的形状。临界区里故意用 relaxed 的读、加一、写，而不用 <code>fetch_add</code>，这样互斥一旦失效就会丢计数：</span><span lang="en">Dekker’s mutual-exclusion algorithm. It keeps two threads out of the critical section together by raising one’s own flag and then checking the other’s, exactly the SB shape. The critical section deliberately does a relaxed read, add one and write instead of <code>fetch_add</code>, so any failure of mutual exclusion loses counts:</span><pre data-lang="cpp" data-file="dekker.cpp">// dekker.cpp: Dekker 互斥算法保护一个计数器。两个线程各进临界区 N 次，每次把计数器读出、加 1、写回。
+// 互斥成立时结果是 2N；少了多少，就是两个线程同时进过临界区多少次（至少）。
+#include &lt;atomic&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;cstring&gt;
+#include &lt;thread&gt;
+
+struct alignas(128) Slot { std::atomic&lt;int&gt; v{0}; };
+Slot flag[2], turn, counter;
+
+enum Mode { RELAXED, ACQ_REL, ACQ_REL_FENCE, SEQ_CST };
+
+template &lt;Mode M&gt; constexpr std::memory_order LD =
+    M == RELAXED ? std::memory_order_relaxed : M == SEQ_CST ? std::memory_order_seq_cst : std::memory_order_acquire;
+template &lt;Mode M&gt; constexpr std::memory_order ST =
+    M == RELAXED ? std::memory_order_relaxed : M == SEQ_CST ? std::memory_order_seq_cst : std::memory_order_release;
+
+template &lt;Mode M&gt;
+static void lock(int i) {
+    int j = 1 - i;
+    flag[i].v.store(1, ST&lt;M&gt;);                          // 我想进
+    if constexpr (M == ACQ_REL_FENCE) std::atomic_thread_fence(std::memory_order_seq_cst);
+    while (flag[j].v.load(LD&lt;M&gt;)) {                     // 对方也想进？
+        if (turn.v.load(LD&lt;M&gt;) != i) {                  // 不该我：先退让
+            flag[i].v.store(0, ST&lt;M&gt;);
+            while (turn.v.load(LD&lt;M&gt;) != i) { }
+            flag[i].v.store(1, ST&lt;M&gt;);
+            if constexpr (M == ACQ_REL_FENCE) std::atomic_thread_fence(std::memory_order_seq_cst);
+        }
+    }
+}
+
+template &lt;Mode M&gt;
+static void unlock(int i) {
+    turn.v.store(1 - i, ST&lt;M&gt;);
+    flag[i].v.store(0, ST&lt;M&gt;);
+}
+
+template &lt;Mode M&gt;
+static long run(int n) {
+    auto body = [n](int i) {
+        for (int k = 0; k &lt; n; ++k) {
+            lock&lt;M&gt;(i);
+            int c = counter.v.load(std::memory_order_relaxed);   // 临界区：故意不用 fetch_add
+            counter.v.store(c + 1, std::memory_order_relaxed);
+            unlock&lt;M&gt;(i);
+        }
+    };
+    { std::jthread a(body, 0), b(body, 1); }
+    return 2L * n - counter.v.load();
+}
+
+int main(int argc, char **argv) {
+    const char *m = argc &gt; 1 ? argv[1] : "relaxed";
+    int n = argc &gt; 2 ? atoi(argv[2]) : 1000000;
+    long lost = !strcmp(m, "relaxed") ? run&lt;RELAXED&gt;(n)
+              : !strcmp(m, "acq_rel") ? run&lt;ACQ_REL&gt;(n)
+              : !strcmp(m, "fence")   ? run&lt;ACQ_REL_FENCE&gt;(n)
+              :                         run&lt;SEQ_CST&gt;(n);
+    std::printf("%-8s 2 x %d entries  lost increments: %ld\n", m, n, lost);
+}</pre><pre data-lang="sh">$ clang++ -std=c++20 -O2 -Wall dekker.cpp -o dekker
+$ for m in relaxed acq_rel fence seq_cst; do for r in 1 2 3 4 5; do ./dekker $m 10000000; done; done
+relaxed  2 x 10000000 entries  lost increments: 267335
+relaxed  2 x 10000000 entries  lost increments: 263984
+relaxed  2 x 10000000 entries  lost increments: 437243
+relaxed  2 x 10000000 entries  lost increments: 871488
+relaxed  2 x 10000000 entries  lost increments: 443777
+acq_rel  2 x 10000000 entries  lost increments: 27
+acq_rel  2 x 10000000 entries  lost increments: 0
+acq_rel  2 x 10000000 entries  lost increments: 0
+acq_rel  2 x 10000000 entries  lost increments: 0
+acq_rel  2 x 10000000 entries  lost increments: 1
+fence    2 x 10000000 entries  lost increments: 0
+fence    2 x 10000000 entries  lost increments: 0
+fence    2 x 10000000 entries  lost increments: 0
+fence    2 x 10000000 entries  lost increments: 0
+fence    2 x 10000000 entries  lost increments: 0
+seq_cst  2 x 10000000 entries  lost increments: 0
+seq_cst  2 x 10000000 entries  lost increments: 0
+seq_cst  2 x 10000000 entries  lost increments: 0
+seq_cst  2 x 10000000 entries  lost increments: 0
+seq_cst  2 x 10000000 entries  lost increments: 0
+# 2026-10-31 实验机输出</pre>
+        <ul>
+          <li lang="zh-CN"><strong>relaxed：每次运行丢 26 万到 87 万次。</strong>汇编里 <code>lock</code> 是 <code>str</code> 自己的旗再 <code>ldr</code> 对方的旗，顺序没变；而且临界区的读写和旗子之间没有任何 acquire/release，临界区本身也能漏到锁外面。两种原因都是硬件的。</li>
+          <li lang="en"><strong>relaxed: 260 thousand to 870 thousand lost per run.</strong> In the assembly <code>lock</code> does <code>str</code> of its own flag and then <code>ldr</code> of the other’s, order unchanged; and with no acquire or release between the flags and the critical section, the critical section itself can leak outside the lock too. Both causes are the hardware.</li>
+          <li lang="zh-CN"><strong>acquire/release：5 次里 2 次丢计数（27 次和 1 次）。</strong>临界区不再漏出去，但「立旗」的 <code>stlr</code> 和「看对方旗」的 <code>ldapr</code> 仍可重排，两个线程偶尔同时进去。</li>
+          <li lang="en"><strong>acquire/release: counts lost in 2 of 5 runs (27 and 1).</strong> The critical section no longer leaks, but the <code>stlr</code> that raises the flag and the <code>ldapr</code> that checks the other flag can still reorder, so occasionally both threads get in.</li>
+          <li lang="zh-CN"><strong>修法：全部 seq_cst，或者在 acquire/release 之上、立旗之后加一个 seq_cst 栅栏。</strong>两种都是 5 次 0 丢失。实际代码里别自己写 Dekker，用 Phase 2 的锁；这里写它只是因为它最直接地依赖 store→load 顺序。</li>
+          <li lang="en"><strong>The fix: make everything seq_cst, or keep acquire and release and add a seq_cst fence after raising the flag.</strong> Both lost nothing in 5 runs. In real code do not write Dekker yourself; use the locks of Phase 2. It is here only because it depends on store-to-load order more directly than anything else.</li>
+        </ul></li>
+      <li><span lang="zh-CN">（可选）message passing，图解 (b) 的数字来自这里。写者写 <code>data</code> 再写 <code>ready</code>，读者读 <code>ready</code> 再读 <code>data</code>，数「看见旗子却没看见数据」：</span><span lang="en">(Optional) Message passing; the numbers in diagram (b) come from here. The writer writes <code>data</code> then <code>ready</code>, the reader reads <code>ready</code> then <code>data</code>, and the program counts “saw the flag but not the data”:</span><pre data-lang="cpp" data-file="mp.cpp">// mp.cpp: message passing。写者：data = 1; ready = 1。读者：r1 = ready; r2 = data。
+// 「r1 == 1 且 r2 == 0」= 看见了旗子却没看见数据。
+#include &lt;atomic&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;cstring&gt;
+#include &lt;thread&gt;
+
+struct alignas(128) Slot { std::atomic&lt;int&gt; v{0}; };
+Slot data, ready, go, done;
+int r1, r2;
+
+template &lt;bool RA&gt;
+static long run(long n) {
+    constexpr auto st = RA ? std::memory_order_release : std::memory_order_relaxed;
+    constexpr auto ld = RA ? std::memory_order_acquire : std::memory_order_relaxed;
+    std::jthread w([n] {
+        for (int i = 1; i &lt;= n; ++i) {
+            while (go.v.load(std::memory_order_acquire) != i) { }
+            data.v.store(1, std::memory_order_relaxed);
+            ready.v.store(1, st);                       // 发布
+            done.v.fetch_add(1, std::memory_order_release);
+        }
+    });
+    std::jthread r([n] {
+        for (int i = 1; i &lt;= n; ++i) {
+            while (go.v.load(std::memory_order_acquire) != i) { }
+            r1 = ready.v.load(ld);                      // 先看旗子
+            r2 = data.v.load(std::memory_order_relaxed);// 再读数据
+            done.v.fetch_add(1, std::memory_order_release);
+        }
+    });
+    long bad = 0;
+    for (int i = 1; i &lt;= n; ++i) {
+        go.v.store(i, std::memory_order_release);
+        while (done.v.load(std::memory_order_acquire) != 2) { }
+        if (r1 == 1 &amp;&amp; r2 == 0) ++bad;
+        done.v.store(0, std::memory_order_relaxed);
+        data.v.store(0, std::memory_order_relaxed);
+        ready.v.store(0, std::memory_order_relaxed);
+    }
+    return bad;
+}
+
+int main(int argc, char **argv) {
+    bool ra = argc &gt; 1 &amp;&amp; !strcmp(argv[1], "acq_rel");
+    long n = argc &gt; 2 ? atol(argv[2]) : 1000000;
+    long bad = ra ? run&lt;true&gt;(n) : run&lt;false&gt;(n);
+    std::printf("%-8s trials %ld  ready=1 but data=0: %ld\n", ra ? "acq_rel" : "relaxed", n, bad);
+}</pre><pre data-lang="sh">$ clang++ -std=c++20 -O2 -Wall mp.cpp -o mp
+$ for m in relaxed acq_rel; do for r in 1 2 3 4 5; do ./mp $m 20000000; done; done
+relaxed  trials 20000000  ready=1 but data=0: 27
+relaxed  trials 20000000  ready=1 but data=0: 34
+relaxed  trials 20000000  ready=1 but data=0: 18
+relaxed  trials 20000000  ready=1 but data=0: 10
+relaxed  trials 20000000  ready=1 but data=0: 58
+acq_rel  trials 20000000  ready=1 but data=0: 0
+acq_rel  trials 20000000  ready=1 but data=0: 0
+acq_rel  trials 20000000  ready=1 but data=0: 0
+acq_rel  trials 20000000  ready=1 but data=0: 0
+acq_rel  trials 20000000  ready=1 but data=0: 0
+# 2026-10-31 实验机输出；relaxed 版本的汇编是 str data、str ready 和 ldr ready、ldr data，顺序未变</pre><span lang="zh-CN">这个结果在 x86 上不会出现：TSO 不允许写写重排，也不允许读读重排。它是 ARM64 弱序的直接证据。</span><span lang="en">This result cannot appear on x86: TSO allows neither write-write nor read-read reordering. It is direct evidence of ARM64’s weak ordering.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 无锁计数器和 atomic_flag 自旋锁，读懂它们的汇编</h3><h3 lang="en">Lab B · A lock-free counter and an atomic_flag spin lock, with their assembly read</h3>
+    <ol>
+      <li><span lang="zh-CN">每种内存序单独一个函数，生成本机的汇编。下面的 awk 把每条指令前面加上函数名，再去掉取地址和返回这类无关的行：</span><span lang="en">One function per memory order; generate this machine’s assembly. The awk below prefixes each instruction with its function name, and the filters drop unrelated lines such as address formation and returns:</span><pre data-lang="cpp" data-file="orders.cpp">// orders.cpp: 每个函数只做一次原子操作，看 clang 为每种内存序生成什么指令
+#include &lt;atomic&gt;
+
+std::atomic&lt;int&gt; a;
+std::atomic_flag f;
+
+int  load_relaxed()  { return a.load(std::memory_order_relaxed); }
+int  load_acquire()  { return a.load(std::memory_order_acquire); }
+int  load_seq_cst()  { return a.load(std::memory_order_seq_cst); }
+void store_relaxed() { a.store(1, std::memory_order_relaxed); }
+void store_release() { a.store(1, std::memory_order_release); }
+void store_seq_cst() { a.store(1, std::memory_order_seq_cst); }
+int  add_relaxed()   { return a.fetch_add(1, std::memory_order_relaxed); }
+int  add_acq_rel()   { return a.fetch_add(1, std::memory_order_acq_rel); }
+int  add_seq_cst()   { return a.fetch_add(1, std::memory_order_seq_cst); }
+bool cas_seq_cst(int &amp;expected) { return a.compare_exchange_strong(expected, 1); }
+void fence_acquire() { std::atomic_thread_fence(std::memory_order_acquire); }
+void fence_release() { std::atomic_thread_fence(std::memory_order_release); }
+void fence_seq_cst() { std::atomic_thread_fence(std::memory_order_seq_cst); }
+bool flag_tas()      { return f.test_and_set(std::memory_order_acquire); }
+void flag_clear()    { f.clear(std::memory_order_release); }</pre><pre data-lang="sh">$ clang++ -std=c++20 -O2 -S orders.cpp -o orders.s
+$ awk '/^__Z[^:]*:/{name=$1} /^\t[a-z]/{ if (name!="" &amp;&amp; $1!~/^\./) print name, $0} /^\t\.cfi_endproc/{name=""}' orders.s \
+    | grep -v 'cfi\|adrp\|add\tx8\|ret\|nop\|Lloh' | sed 's/__Z[0-9]*//'
+load_relaxedv: 	ldr	w0, [x8, _a@PAGEOFF]
+load_acquirev: 	ldapr	w0, [x8]
+load_seq_cstv: 	ldar	w0, [x8]
+store_relaxedv: 	mov	w8, #1                          ; =0x1
+store_relaxedv: 	str	w8, [x9, _a@PAGEOFF]
+store_releasev: 	mov	w9, #1                          ; =0x1
+store_releasev: 	stlr	w9, [x8]
+store_seq_cstv: 	mov	w9, #1                          ; =0x1
+store_seq_cstv: 	stlr	w9, [x8]
+add_relaxedv: 	mov	w9, #1                          ; =0x1
+add_relaxedv: 	ldadd	w9, w0, [x8]
+add_acq_relv: 	mov	w9, #1                          ; =0x1
+add_acq_relv: 	ldaddal	w9, w0, [x8]
+add_seq_cstv: 	mov	w9, #1                          ; =0x1
+add_seq_cstv: 	ldaddal	w9, w0, [x8]
+cas_seq_cstRi: 	ldr	w10, [x0]
+cas_seq_cstRi: 	mov	w11, #1                         ; =0x1
+cas_seq_cstRi: 	mov	x9, x10
+cas_seq_cstRi: 	casal	w9, w11, [x8]
+cas_seq_cstRi: 	cmp	w9, w10
+cas_seq_cstRi: 	cset	w8, eq
+cas_seq_cstRi: 	b.eq	LBB9_2
+cas_seq_cstRi: 	str	w9, [x0]
+cas_seq_cstRi: 	mov	x0, x8
+fence_acquirev: 	dmb	ishld
+fence_releasev: 	dmb	ish
+fence_seq_cstv: 	dmb	ish
+flag_tasv: 	mov	w9, #1                          ; =0x1
+flag_tasv: 	swpab	w9, w8, [x8]
+flag_tasv: 	and	w0, w8, #0x1
+flag_clearv: 	stlrb	wzr, [x8]
+# 2026-10-31 实验机输出，Apple clang 21.0.0 (clang-2100.4.1.1)，目标 arm64-apple-darwin27.2.0</pre><span lang="zh-CN">本机的回答：acquire 读是 <code>ldapr</code>，seq_cst 读是 <code>ldar</code>；release 写和 seq_cst 写都是 <code>stlr</code>；RMW 全是 LSE 单指令，<code>ldadd</code>/<code>ldaddal</code>、<code>casal</code>、<code>swpab</code>；本机默认目标下没有出现 <code>ldaxr</code>/<code>stlxr</code>；release 栅栏和 seq_cst 栅栏同为 <code>dmb ish</code>。</span><span lang="en">This machine’s answer: an acquire load is <code>ldapr</code> and a seq_cst load is <code>ldar</code>; release and seq_cst stores are both <code>stlr</code>; every RMW is a single LSE instruction, <code>ldadd</code>/<code>ldaddal</code>, <code>casal</code>, <code>swpab</code>; no <code>ldaxr</code>/<code>stlxr</code> appears under the default target; release and seq_cst fences are both <code>dmb ish</code>.</span></li>
+      <li><span lang="zh-CN">同一个文件换两个目标，用同样的 awk 过滤（以下为节选，只留关键指令）：</span><span lang="en">The same file for two other targets, filtered with the same awk (excerpts, key instructions only):</span><pre data-lang="sh">$ clang++ -std=c++20 -O2 -S -arch arm64 -mcpu=cyclone orders.cpp -o orders-v80.s   # ARMv8.0，没有 LSE
+load_acquirev: 	ldar	w0, [x8]
+add_relaxedv: 	ldxr	w0, [x8]
+add_relaxedv: 	stxr	w10, w9, [x8]
+add_seq_cstv: 	ldaxr	w0, [x8]
+add_seq_cstv: 	add	w9, w0, #1
+add_seq_cstv: 	stlxr	w10, w9, [x8]
+add_seq_cstv: 	cbnz	w10, LBB8_1
+cas_seq_cstRi: 	ldaxr	w9, [x11]
+cas_seq_cstRi: 	stlxr	w12, w8, [x11]
+cas_seq_cstRi: 	clrex
+flag_tasv: 	ldaxrb	w10, [x8]
+flag_tasv: 	stxrb	w11, w9, [x8]
+$ clang++ -std=c++20 -O2 -S -arch x86_64 orders.cpp -o orders-x86.s
+load_relaxedv: 	movl	_a(%rip), %eax
+load_acquirev: 	movl	_a(%rip), %eax
+load_seq_cstv: 	movl	_a(%rip), %eax
+store_relaxedv: 	movl	$1, _a(%rip)
+store_releasev: 	movl	$1, _a(%rip)
+store_seq_cstv: 	xchgl	%eax, _a(%rip)
+add_relaxedv: 	lock		xaddl	%eax, _a(%rip)
+cas_seq_cstRi: 	lock		cmpxchgl	%ecx, _a(%rip)
+fence_seq_cstv: 	lock		orl	$0, -64(%rsp)
+flag_tasv: 	xchgb	%al, _f(%rip)
+flag_clearv: 	movb	$0, _f(%rip)
+# 2026-10-31 实验机输出；x86 的 fence_acquire 和 fence_release 没有任何指令</pre><span lang="zh-CN">ARMv8.0 上 RMW 变成 <code>ldaxr</code>/<code>stlxr</code> 循环：<code>stlxr</code> 把成功与否写进 <code>w10</code>，<code>cbnz</code> 失败就回到循环开头。x86 上只有 seq_cst 写和 RMW 有代价。</span><span lang="en">On ARMv8.0 the RMWs become <code>ldaxr</code>/<code>stlxr</code> loops: <code>stlxr</code> writes success or failure into <code>w10</code>, and <code>cbnz</code> branches back to the top on failure. On x86 only the seq_cst store and the RMWs cost anything.</span></li>
+      <li><span lang="zh-CN">无锁计数器和两种自旋锁。T 个线程各加 100 万次；每个配置先预热 2 次，再测 7 次取中位数。计时用 <code>std::chrono::steady_clock</code>（Phase 1 Lab A 第 5 步：它有纳秒分辨率，不受 <code>CLOCK_MONOTONIC</code> 1 µs 分辨率的影响）。报的是墙钟时间除以总次数，也就是共享计数器每加一次平均要多久。C++20 起 <code>atomic_flag</code> 默认构造就是清除状态，并多了只读的 <code>test()</code>：</span><span lang="en">The lock-free counter and two spin locks. T threads add one million times each; each configuration warms up twice and is then measured 7 times, reporting the median. Timing uses <code>std::chrono::steady_clock</code> (Phase 1 Lab A step 5: it has nanosecond resolution and is not limited by the 1 µs resolution of <code>CLOCK_MONOTONIC</code>). The figure is wall time divided by the total count, the average time per increment of the shared counter. Since C++20 a default-constructed <code>atomic_flag</code> is clear, and it gained the read-only <code>test()</code>:</span><pre data-lang="cpp" data-file="counter.cpp">// counter.cpp: 无锁计数器（fetch_add）和用 atomic_flag 做的自旋锁，T 个线程各加 1M 次。
+// 每个配置先预热 2 次，再测 7 次，报每次加 1 的中位数耗时。
+#include &lt;algorithm&gt;
+#include &lt;atomic&gt;
+#include &lt;chrono&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstring&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+
+constexpr long N = 1'000'000;
+struct alignas(128) { std::atomic&lt;long&gt; v{0}; } counter;
+struct alignas(128) { long v = 0; } plain;          // 只在自旋锁里面读写
+struct alignas(128) { std::atomic_flag f; } spin;
+
+void lock_tas()  { while (spin.f.test_and_set(std::memory_order_acquire)) { } }
+void lock_ttas() {
+    while (spin.f.test_and_set(std::memory_order_acquire))
+        while (spin.f.test(std::memory_order_relaxed)) { }   // 先只读地等，锁放开了再抢
+}
+void unlock()    { spin.f.clear(std::memory_order_release); }
+
+template &lt;class F&gt;
+double ns_per_op(int T, F body) {
+    auto t0 = std::chrono::steady_clock::now();
+    { std::vector&lt;std::jthread&gt; ts; for (int t = 0; t &lt; T; ++t) ts.emplace_back(body); }
+    double ns = std::chrono::duration&lt;double, std::nano&gt;(std::chrono::steady_clock::now() - t0).count();
+    return ns / (double(T) * N);
+}
+
+int main(int argc, char **argv) {
+    const char *m = argc &gt; 1 ? argv[1] : "relaxed";
+    for (int T : {1, 4, 10}) {
+        std::vector&lt;double&gt; r;
+        long expect = 0, got = 0;
+        for (int rep = 0; rep &lt; 9; ++rep) {
+            counter.v.store(0); plain.v = 0;
+            double ns;
+            if (!strcmp(m, "relaxed"))
+                ns = ns_per_op(T, [] { for (long i = 0; i &lt; N; ++i) counter.v.fetch_add(1, std::memory_order_relaxed); });
+            else if (!strcmp(m, "seq_cst"))
+                ns = ns_per_op(T, [] { for (long i = 0; i &lt; N; ++i) counter.v.fetch_add(1); });
+            else if (!strcmp(m, "tas"))
+                ns = ns_per_op(T, [] { for (long i = 0; i &lt; N; ++i) { lock_tas(); ++plain.v; unlock(); } });
+            else
+                ns = ns_per_op(T, [] { for (long i = 0; i &lt; N; ++i) { lock_ttas(); ++plain.v; unlock(); } });
+            got = counter.v.load() + plain.v; expect = T * N;
+            if (rep &gt;= 2) r.push_back(ns);                    // 前 2 次是预热
+        }
+        std::sort(r.begin(), r.end());
+        std::printf("%-7s T=%2d  ns per increment: median %6.2f  min %6.2f  max %6.2f  total %ld/%ld\n",
+                    m, T, r[3], r[0], r[6], got, expect);
+    }
+}</pre><pre data-lang="sh">$ clang++ -std=c++20 -O2 -Wall counter.cpp -o counter
+$ for m in relaxed seq_cst tas ttas; do ./counter $m; done
+relaxed T= 1  ns per increment: median   1.67  min   1.66  max   1.67  total 1000000/1000000
+relaxed T= 4  ns per increment: median  10.89  min   7.47  max  13.26  total 4000000/4000000
+relaxed T=10  ns per increment: median  32.42  min  14.36  max  33.48  total 10000000/10000000
+seq_cst T= 1  ns per increment: median   2.00  min   1.99  max   2.00  total 1000000/1000000
+seq_cst T= 4  ns per increment: median   9.30  min   6.52  max  10.85  total 4000000/4000000
+seq_cst T=10  ns per increment: median  19.23  min  11.74  max  22.04  total 10000000/10000000
+tas     T= 1  ns per increment: median   6.10  min   4.60  max   6.11  total 1000000/1000000
+tas     T= 4  ns per increment: median  72.12  min  57.83  max  76.88  total 4000000/4000000
+tas     T=10  ns per increment: median 245.54  min 139.53  max 305.22  total 10000000/10000000
+ttas    T= 1  ns per increment: median   6.10  min   6.09  max   6.10  total 1000000/1000000
+ttas    T= 4  ns per increment: median  31.60  min  30.19  max  39.34  total 4000000/4000000
+ttas    T=10  ns per increment: median 115.39  min  61.22  max 127.89  total 10000000/10000000
+# 2026-10-31 实验机输出。第二次运行（结束时 uptime 负载升到 28）的中位数：
+# relaxed 1.67 / 8.21 / 13.64，seq_cst 2.05 / 7.44 / 14.05，tas 6.10 / 67.94 / 295.09，ttas 6.11 / 31.33 / 69.73</pre>
+        <ul>
+          <li lang="zh-CN"><strong>结果都对。</strong>每一行的 total 都等于 T × 100 万：<code>fetch_add</code> 不丢更新，自旋锁保护的普通变量也没有丢。</li>
+          <li lang="en"><strong>Every result is correct.</strong> Each line’s total equals T × one million: <code>fetch_add</code> loses no update, and the ordinary variable under the spin lock loses none either.</li>
+          <li lang="zh-CN"><strong>不争用时，内存序有一点代价。</strong>1 个线程时 relaxed 的 <code>ldadd</code> 约 1.67 ns，seq_cst 的 <code>ldaddal</code> 约 2.0 ns，两次运行一致。</li>
+          <li lang="en"><strong>Uncontended, the memory order costs a little.</strong> With 1 thread, relaxed <code>ldadd</code> takes about 1.67 ns and seq_cst <code>ldaddal</code> about 2.0 ns, the same in both runs.</li>
+          <li lang="zh-CN"><strong>争用时，代价是 cache line 在核之间搬家，内存序差别淹没在噪声里。</strong>4 和 10 个线程时 relaxed 和 seq_cst 两次运行互有快慢（10 线程 relaxed 13.6–32.4 ns，seq_cst 14.1–19.2 ns）。10 个线程里有 6 个在 E 核上，数字也更散。</li>
+          <li lang="en"><strong>Under contention the cost is the cache line moving between cores, and the memory-order difference drowns in the noise.</strong> At 4 and 10 threads, relaxed and seq_cst each win one of the two runs (10 threads: relaxed 13.6–32.4 ns, seq_cst 14.1–19.2 ns). Of the 10 threads, 6 run on E cores, and the numbers scatter more.</li>
+          <li lang="zh-CN"><strong>TTAS 比 TAS 快两到四倍。</strong>TAS 的每个等待者不停地 <code>swpab</code>，每次都要把 cache line 抢成独占，持锁者解锁时还得把它抢回来。TTAS 的等待者先用普通的 <code>ldrb</code> 读，大家共享这条 line，只在锁放开后才去 <code>swpab</code>。10 个线程时 TAS 245–295 ns，TTAS 70–115 ns。</li>
+          <li lang="en"><strong>TTAS is two to four times faster than TAS.</strong> In TAS every waiter keeps issuing <code>swpab</code>, each time pulling the cache line into exclusive state, and the holder must pull it back to unlock. TTAS waiters read with a plain <code>ldrb</code>, sharing the line, and only attempt <code>swpab</code> once the lock is free. At 10 threads TAS takes 245–295 ns and TTAS 70–115 ns.</li>
+        </ul></li>
+      <li><span lang="zh-CN">读自旋锁本身的汇编：</span><span lang="en">Read the spin lock’s own assembly:</span><pre data-lang="sh">$ clang++ -std=c++20 -O2 -S counter.cpp -o counter.s
+$ for fn in __Z8lock_tasv __Z9lock_ttasv __Z6unlockv; do
+    awk -v f="$fn:" '$1==f{p=1} p&amp;&amp;/\.cfi_endproc/{p=0} p' counter.s | grep -v 'cfi\|Lloh\|^;'; done
+__Z8lock_tasv:                          ; @_Z8lock_tasv
+	adrp	x8, _spin@PAGE
+	add	x8, x8, _spin@PAGEOFF
+	mov	w9, #1                          ; =0x1
+LBB0_1:                                 ; =>This Inner Loop Header: Depth=1
+	swpab	w9, w10, [x8]
+	tbnz	w10, #0, LBB0_1
+	ret
+__Z9lock_ttasv:                         ; @_Z9lock_ttasv
+	adrp	x8, _spin@PAGE
+	add	x8, x8, _spin@PAGEOFF
+	mov	w9, #1                          ; =0x1
+	swpab	w9, w10, [x8]
+	tbz	w10, #0, LBB1_4
+	adrp	x10, _spin@PAGE
+LBB1_2:                                 ; =>This Inner Loop Header: Depth=1
+	ldrb	w11, [x10, _spin@PAGEOFF]
+	tbnz	w11, #0, LBB1_2
+	swpab	w9, w11, [x8]
+	tbnz	w11, #0, LBB1_2
+LBB1_4:
+	ret
+__Z6unlockv:                            ; @_Z6unlockv
+	adrp	x8, _spin@PAGE
+	add	x8, x8, _spin@PAGEOFF
+	stlrb	wzr, [x8]
+	ret
+# 2026-10-31 实验机输出</pre><span lang="zh-CN">加锁是一条 <code>swpab</code>（字节交换，<code>a</code> = acquire）加 <code>tbnz</code> 判断旧值；TTAS 的内层循环是 <code>ldrb</code>，正是 relaxed 的 <code>test()</code>；解锁是一条 <code>stlrb</code> 把 0 写进去（<code>wzr</code> 是零寄存器）。这三条加上 acquire 和 release 的承诺，就是一把锁的全部正确性。</span><span lang="en">Locking is one <code>swpab</code> (a byte swap; <code>a</code> = acquire) plus a <code>tbnz</code> on the old value; the inner TTAS loop is <code>ldrb</code>, which is exactly the relaxed <code>test()</code>; unlocking is one <code>stlrb</code> of 0 (<code>wzr</code> is the zero register). Those three instructions plus the promises of acquire and release are the whole correctness of a lock.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>sb</code>、<code>dekker</code> 各四种模式 5 次运行的计数，和你机器上 <code>grep -B4 ldaddl sb.s</code> 的四段；<code>mp</code> 两种模式的计数（可选）。Lab B 的 <code>orders.s</code> 过滤结果、<code>-mcpu=cyclone</code> 和 <code>-arch x86_64</code> 的对照，<code>counter</code> 两次运行的输出和自旋锁的三段汇编。写进当天日志，并用一句话回答：为什么 acquire/release 足以修好 message passing，却修不好 Dekker？</div><div class="note" lang="en">Deliverables: from Lab A, the 5-run counts of all four modes of <code>sb</code> and <code>dekker</code>, and the four blocks of <code>grep -B4 ldaddl sb.s</code> on your machine; the counts of both <code>mp</code> modes (optional). From Lab B, the filtered <code>orders.s</code>, the <code>-mcpu=cyclone</code> and <code>-arch x86_64</code> contrasts, the output of two <code>counter</code> runs and the three spin-lock functions. Write them into that day’s log and answer in one sentence: why are acquire and release enough to fix message passing but not Dekker?</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="par/phase-3">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. Lab A 的 relaxed SB 在 M5 上出现了 r1 = r2 = 0。最准确的解释是什么？</p><p lang="en">1. Lab A’s relaxed SB produced r1 = r2 = 0 on the M5. What is the most accurate explanation?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">编译器把读提到了写前面</span><span lang="en">The compiler hoisted the load above the store</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">写还在本核的 store buffer 里、对另一个核不可见时，后面的读已经完成了</span><span lang="en">The load completed while the store was still in the core’s store buffer, invisible to the other core</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">两个核的 cache 不一致，各自保留了旧的 x 和 y</span><span lang="en">The two cores’ caches were incoherent and each kept an old x and y</span></label>
+      <div class="why" hidden><span lang="zh-CN">汇编里 relaxed 版本是 <code>str</code> 在前、<code>ldr</code> 在后，编译器没有重排。cache 一致性只保证同一地址上写的顺序一致，它一直成立；SB 是两个不同地址之间的先后被看反了，原因是 store buffer 让后面的读先于前面的写完成。</span><span lang="en">In the assembly the relaxed version is <code>str</code> first and <code>ldr</code> second, so the compiler did not reorder. Cache coherence only guarantees an agreed order of writes to one address, and it held throughout; SB is the order between two different addresses being seen reversed, because the store buffer lets the later load complete before the earlier store.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. Dekker 用 acquire 读、release 写，5 次运行里仍有 2 次丢计数。为什么？</p><p lang="en">2. Dekker with acquire loads and release stores still lost counts in 2 of 5 runs. Why?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">acquire/release 不保证原子性，计数器的写被撕裂了</span><span lang="en">Acquire and release do not guarantee atomicity, so the counter writes were torn</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">M5 的 <code>stlr</code> 有硬件缺陷，seq_cst 用了另一条指令绕开</span><span lang="en">The M5’s <code>stlr</code> has a hardware defect, which seq_cst avoids with another instruction</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">release 写之后对另一个变量的 acquire 读可以先完成；只有 seq_cst 的全序 S（或 seq_cst 栅栏）禁止这种 store→load 重排</span><span lang="en">An acquire load of another variable after a release store may complete first; only seq_cst’s total order S (or a seq_cst fence) forbids this store-to-load reordering</span></label>
+      <div class="why" hidden><span lang="zh-CN">任何内存序的原子访问都不会撕裂。seq_cst 写用的是同一条 <code>stlr</code>，变的是读：<code>ldar</code> 不越过更早的 <code>stlr</code>，<code>ldapr</code> 可以，这正是 C++ 允许 acquire 做的事。立旗和看对方旗是不同变量，谁也没读到谁的值，没有 synchronizes-with。</span><span lang="en">Atomic accesses never tear, whatever the order. A seq_cst store uses the same <code>stlr</code>; what changes is the load: <code>ldar</code> does not pass an earlier <code>stlr</code>, while <code>ldapr</code> may, which is exactly what C++ allows acquire to do. Raising one’s flag and checking the other’s are different variables, neither reads the other’s value, and there is no synchronizes-with.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. Apple clang 21 为一次 seq_cst 原子写分别在本机 M5 和 x86-64 上生成什么？</p><p lang="en">3. What does Apple clang 21 generate for one seq_cst atomic store on this M5 and on x86-64?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">M5 上 <code>stlr</code>，x86-64 上 <code>xchgl</code></span><span lang="en"><code>stlr</code> on the M5, <code>xchgl</code> on x86-64</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">M5 上 <code>str</code> 加 <code>dmb ish</code>，x86-64 上 <code>movl</code> 加 <code>mfence</code></span><span lang="en"><code>str</code> plus <code>dmb ish</code> on the M5, <code>movl</code> plus <code>mfence</code> on x86-64</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">两边都是普通写：<code>str</code> 和 <code>movl</code></span><span lang="en">A plain store on both: <code>str</code> and <code>movl</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">Lab B 的 <code>store_seq_cst</code> 在本机是 <code>stlr</code>，配合 seq_cst 读的 <code>ldar</code> 就够，不需要 <code>dmb</code>。x86 上普通 <code>movl</code> 只够 release；seq_cst 要堵住 store→load 重排，clang 用隐含 lock 的 <code>xchgl</code>，不是 <code>mov</code> 加 <code>mfence</code>。</span><span lang="en">Lab B’s <code>store_seq_cst</code> is <code>stlr</code> here, which together with the <code>ldar</code> of seq_cst loads is enough, with no <code>dmb</code>. On x86 a plain <code>movl</code> is only enough for release; seq_cst must close the store-to-load reordering, and clang uses the implicitly locked <code>xchgl</code>, not <code>mov</code> plus <code>mfence</code>.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 10 个线程时 TTAS 自旋锁比 TAS 快两到四倍。主要原因是什么？</p><p lang="en">4. At 10 threads the TTAS spin lock is two to four times faster than TAS. What is the main reason?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">TTAS 每次加锁执行的指令更少</span><span lang="en">TTAS executes fewer instructions per lock</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">等待者用普通读共享 cache line，只在锁放开后才用 <code>swpab</code> 抢独占，line 不会被来回抢</span><span lang="en">Waiters share the cache line with plain reads and only take it exclusive with <code>swpab</code> once the lock is free, so the line is not fought over</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">TTAS 的内层读是 relaxed，跳过了 acquire 的硬件屏障，屏障才是主要代价</span><span lang="en">TTAS’s inner read is relaxed and skips the acquire barrier, and barriers are the main cost</span></label>
+      <div class="why" hidden><span lang="zh-CN">汇编里 TTAS 不争用时和 TAS 一样是一条 <code>swpab</code>，指令数不是原因（1 个线程时两者都是 6.1 ns）。ARM64 的 acquire 是 <code>swpab</code> 自带的属性，不是单独的屏障，两种锁的成功加锁都同样带 acquire。差别在争用时 cache line 的状态：TAS 每次 <code>swpab</code> 都要独占，TTAS 的 <code>ldrb</code> 只要共享。</span><span lang="en">In the assembly, uncontended TTAS is one <code>swpab</code> just like TAS, so instruction count is not the reason (both take 6.1 ns with 1 thread). On ARM64 acquire is a property of <code>swpab</code> itself, not a separate barrier, and the successful lock in both carries acquire. The difference is the cache line’s state under contention: every TAS <code>swpab</code> needs it exclusive, while TTAS’s <code>ldrb</code> needs it only shared.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://eel.is/c++draft/intro.races">C++ draft — [intro.races]</a> · <a href="https://eel.is/c++draft/atomics.order">[atomics.order]</a> · <a href="https://eel.is/c++draft/atomics.fences">[atomics.fences]</a> <span class="lvl" lang="zh-CN">标准原文：release sequence、synchronizes-with、happens-before、数据竞争、全序 S、栅栏（概念 3 到 5 的依据，2026-10-31 读的当前草案）</span><span class="lvl" lang="en">The standard’s text: release sequence, synchronizes-with, happens-before, data race, the total order S, fences (the basis of concepts 3 to 5; the current draft, read 2026-10-31)</span></li>
+    <li><a href="https://en.cppreference.com/w/cpp/atomic/memory_order">cppreference — std::memory_order</a> · <a href="https://en.cppreference.com/w/cpp/atomic/atomic_flag">std::atomic_flag</a> <span class="lvl" lang="zh-CN">查手册：每种内存序的含义和例子，<code>atomic_flag</code> 的 C++20 变化</span><span class="lvl" lang="en">Reference: each memory order with examples, the C++20 changes to <code>atomic_flag</code></span></li>
+    <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual — The AArch64 Application Level Memory Model</a> <span class="lvl" lang="zh-CN">权威：ARM64 内存序、<code>LDAR</code>/<code>LDAPR</code>/<code>STLR</code>、<code>DMB</code>（脚本访问被拒，链接未在本页验证）</span><span class="lvl" lang="en">Authoritative: ARM64 memory ordering, <code>LDAR</code>/<code>LDAPR</code>/<code>STLR</code>, <code>DMB</code> (scripted access was refused; the link was not verified for this page)</span></li>
+    <li><a href="https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html">Intel 64 and IA-32 Architectures Software Developer Manuals</a> · <a href="https://www.cl.cam.ac.uk/~pes20/weakmemory/cacm.pdf">Sewell et al., x86-TSO (CACM 2010)</a> <span class="lvl" lang="zh-CN">x86 一侧：SDM 第 3 卷的 Memory Ordering 一节；论文把 TSO 写成一个带 store buffer 的精确模型（Intel 页面同样拒绝脚本访问）</span><span class="lvl" lang="en">The x86 side: the Memory Ordering section of SDM volume 3; the paper states TSO as an exact model with store buffers (the Intel page also refused scripted access)</span></li>
+    <li><a href="https://www.kernel.org/doc/Documentation/memory-barriers.txt">Linux kernel — memory-barriers.txt</a> <span class="lvl" lang="zh-CN">进阶：内核的屏障与 acquire/release 文档</span><span class="lvl" lang="en">Advanced: the kernel’s document on barriers and acquire/release</span></li>
+    <li><a href="https://preshing.com/20120515/memory-reordering-caught-in-the-act/">Preshing — Memory Reordering Caught in the Act</a> <span class="lvl" lang="zh-CN">入门（二手资料）：在 x86 上抓 SB 重排的经典文章，Lab A 的思路相同</span><span class="lvl" lang="en">Introductory (secondary): the classic article catching SB reordering on x86; Lab A uses the same idea</span></li>
+    <li><a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Engineering Phase 3 · Concurrency &amp; IPC</a> <span class="lvl" lang="zh-CN">本站：内核的原子操作与内存序、<code>smp_mb()</code> 与 <code>dmb ish</code>、LSE 打补丁、RCU</span><span class="lvl" lang="en">This site: atomics and memory ordering in the kernel, <code>smp_mb()</code> and <code>dmb ish</code>, LSE patching, RCU</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447, 免费在线 <a href="https://mara.nl/atomics/">mara.nl/atomics</a>（原 marabos.nl/atomics，2026-10-31 已跳转）. <span class="lvl">与本页最贴近：第 3 章 Memory Ordering（Reordering and Optimizations、The Memory Model、Happens-Before Relationship、Relaxed、Release and Acquire、Sequentially Consistent、Fences、Common Misconceptions）对应概念 2 到 5；第 7 章 Understanding the Processor（x86 lock prefix、ARM load-exclusive and store-exclusive、Reordering、x86-64: Strongly Ordered、ARM64: Weakly Ordered、Memory Fences）对应概念 1 和 6、Lab B；第 2 章 Atomics 的 Compare-and-Exchange Operations 对应概念 7；第 4 章 Building Our Own Spin Lock 对应 Lab B。本专题只读不练 Rust</span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447, free online at <a href="https://mara.nl/atomics/">mara.nl/atomics</a> (formerly marabos.nl/atomics, which redirected there on 2026-10-31). <span class="lvl">The closest match to this page: chapter 3, Memory Ordering (Reordering and Optimizations, The Memory Model, Happens-Before Relationship, Relaxed, Release and Acquire, Sequentially Consistent, Fences, Common Misconceptions), for concepts 2 to 5; chapter 7, Understanding the Processor (x86 lock prefix, ARM load-exclusive and store-exclusive, Reordering, x86-64: Strongly Ordered, ARM64: Weakly Ordered, Memory Fences), for concepts 1 and 6 and Lab B; Compare-and-Exchange Operations in chapter 2, Atomics, for concept 7; chapter 4, Building Our Own Spin Lock, for Lab B. This topic reads the Rust, it does not run it</span></li>
+    <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, 免费（CC BY-SA），本页读的是 2026-10-31 的 git 树的章节结构（当前发布版 v2026.06.21a），<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">附录 Why Memory Barriers? 的 Store Buffers、Store Forwarding、Invalidate Queues 对应概念 1；Advanced Synchronization: Memory Ordering 一章的 Ordering: Why and How?、Compile-Time Consternation、Hardware Specifics（ARMv8、x86）对应概念 2、5、6；Tools of the Trade 一章的 Atomic Operations (C11) 与 Accessing Shared Variables 对应概念 2 和 4；Advanced Synchronization 一章的 Non-Blocking Synchronization 对应概念 7</span></li>
+    <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, free (CC BY-SA); this page used the chapter structure of the git tree as of 2026-10-31 (current release v2026.06.21a), <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html">kernel.org</a>. <span class="lvl">Store Buffers, Store Forwarding and Invalidate Queues in the appendix Why Memory Barriers? for concept 1; Ordering: Why and How?, Compile-Time Consternation and Hardware Specifics (ARMv8, x86) in the chapter Advanced Synchronization: Memory Ordering for concepts 2, 5 and 6; Atomic Operations (C11) and Accessing Shared Variables in the chapter Tools of the Trade for concepts 2 and 4; Non-Blocking Synchronization in the chapter Advanced Synchronization for concept 7</span></li>
+    <li lang="zh-CN">Anthony Williams, 《C++ Concurrency in Action》, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">讲 C++ 内存模型与原子类型操作（the C++ memory model and operations on atomic types）的一章对应概念 3 到 5 和 Lab B 的 <code>atomic_flag</code></span></li>
+    <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The chapter on the C++ memory model and operations on atomic types for concepts 3 to 5 and the <code>atomic_flag</code> of Lab B</span></li>
+    <li lang="zh-CN">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, 《The Art of Multiprocessor Programming》, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">讲互斥（mutual exclusion）的一章对应 Lab A 的 Dekker 一类算法；讲自旋锁与争用（spin locks and contention）的一章对应 Lab B 的 TAS 与 TTAS；讲队列、内存管理与 ABA 问题的一章对应概念 7</span></li>
+    <li lang="en">Maurice Herlihy, Nir Shavit, Victor Luchangco, Michael Spear, <em>The Art of Multiprocessor Programming</em>, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">The chapter on mutual exclusion for Dekker-style algorithms in Lab A; the chapter on spin locks and contention for TAS and TTAS in Lab B; the chapter on queues, memory management and the ABA problem for concept 7</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-2-synchronization/index.html"><span lang="zh-CN">← Phase 2 · 共享内存与同步</span><span lang="en">← Phase 2 · Shared Memory &amp; Synchronization</span></a>
+    <a href="../phase-4-lock-free-structures/index.html"><span lang="zh-CN">Phase 4 · 无锁结构 →</span><span lang="en">Phase 4 · Lock-free Structures →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
