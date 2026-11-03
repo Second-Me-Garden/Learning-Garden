@@ -335,8 +335,8 @@
         <rect class="box linux" x="460" y="304" width="420" height="50"/>
         <text x="472" y="324" lang="zh-CN">Linux 内核 RCU：读区关抢占</text><text x="472" y="324" lang="en">Linux kernel RCU: read sections disable preemption</text>
         <text x="472" y="344" class="small" lang="zh-CN">QS = 上下文切换、进入 idle 或回到用户态</text><text x="472" y="344" class="small" lang="en">QS = a context switch, idle entry or return to user mode</text>
-        <!-- par -->
-        <rect class="box" x="460" y="362" width="420" height="50"/>
+        
+        <rect class="box par" x="460" y="362" width="420" height="50"/>
         <text x="472" y="382" lang="zh-CN">用户态 RCU 与 epoch：读者自己报告</text><text x="472" y="382" lang="en">User-space RCU and epochs: readers report it</text>
         <text x="472" y="402" class="small" lang="zh-CN">liburcu-qsbr 的 rcu_quiescent_state()，或进出时记 epoch</text><text x="472" y="402" class="small" lang="en">rcu_quiescent_state() in liburcu-qsbr, or an epoch on entry and exit</text></g>
       <!-- step 5: grace period ends, free A -->

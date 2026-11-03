@@ -234,7 +234,7 @@ $ TSAN_OPTIONS=abort_on_error=0 ./race &gt;/dev/null 2&gt;&amp;1; echo $?
       <text x="40" y="222" class="small" lang="zh-CN">硬件 Apple M5</text><text x="40" y="222" class="small" lang="en">Hardware Apple M5</text>
 
       <!-- step 1: your process (par token belongs on this box) -->
-      <g data-step="1"><rect class="box" x="40" y="28" width="520" height="80"/><!-- par -->
+      <g data-step="1"><rect class="box par" x="40" y="28" width="520" height="80"/>
         <text x="56" y="52" lang="zh-CN">你的进程 · 用户态线程</text><text x="56" y="52" lang="en">Your process · user-space threads</text>
         <text x="56" y="74" class="mono">std::jthread · GCD dispatch_apply · OpenMP (libomp)</text>
         <text x="56" y="96" class="small" lang="zh-CN">TSan / ASan 编译进进程里</text><text x="56" y="96" class="small" lang="en">TSan / ASan compiled into the process</text></g>
@@ -275,7 +275,7 @@ $ TSAN_OPTIONS=abort_on_error=0 ./race &gt;/dev/null 2&gt;&amp;1; echo $?
         <path class="arrow flow" d="M665 344 L665 368"/></g>
 
       <!-- step 6: user-space tools -->
-      <g data-step="6"><rect class="box" x="600" y="28" width="260" height="80"/><!-- par -->
+      <g data-step="6"><rect class="box par" x="600" y="28" width="260" height="80"/>
         <text x="614" y="52" lang="zh-CN">用户态观察</text><text x="614" y="52" lang="en">User-space tools</text>
         <text x="614" y="74" class="mono">sample · spindump · leaks</text>
         <text x="614" y="96" class="small" lang="zh-CN">Instruments 需 Xcode，可选</text><text x="614" y="96" class="small" lang="en">Instruments needs Xcode, optional</text>

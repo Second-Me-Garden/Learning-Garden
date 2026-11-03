@@ -202,15 +202,15 @@
       <text x="30" y="154" class="mono">T2</text>
       <path class="lane" d="M130 105 L600 105"/>
 
-      <!-- step 1: T1 reads 5 --><!-- par -->
-      <g data-step="1"><rect class="box" x="130" y="44" width="110" height="34"/><text x="142" y="66" class="mono">ldr → 5</text>
+      <!-- step 1: T1 reads 5 -->
+      <g data-step="1"><rect class="box par" x="130" y="44" width="110" height="34"/><text x="142" y="66" class="mono">ldr → 5</text>
         <text x="185" y="98" class="mono" text-anchor="middle">5</text></g>
       <!-- step 2: T2 reads 5 -->
-      <g data-step="2"><rect class="box" x="250" y="132" width="110" height="34"/><text x="262" y="154" class="mono">ldr → 5</text>
+      <g data-step="2"><rect class="box par" x="250" y="132" width="110" height="34"/><text x="262" y="154" class="mono">ldr → 5</text>
         <text x="305" y="98" class="mono" text-anchor="middle">5</text></g>
       <!-- step 3: both store 6 -->
-      <g data-step="3"><rect class="box" x="370" y="44" width="110" height="34"/><text x="382" y="66" class="mono">add, str 6</text>
-        <rect class="box" x="490" y="132" width="110" height="34"/><text x="502" y="154" class="mono">add, str 6</text>
+      <g data-step="3"><rect class="box par" x="370" y="44" width="110" height="34"/><text x="382" y="66" class="mono">add, str 6</text>
+        <rect class="box par" x="490" y="132" width="110" height="34"/><text x="502" y="154" class="mono">add, str 6</text>
         <text x="425" y="98" class="mono" text-anchor="middle">6</text><text x="545" y="98" class="mono" text-anchor="middle">6</text>
         <text x="640" y="92" style="fill: var(--ink-2)" lang="zh-CN">✕ 结果 6，应为 7</text><text x="640" y="92" style="fill: var(--ink-2)" lang="en">✕ result 6, should be 7</text>
         <text x="640" y="114" class="small" lang="zh-CN">一次加法丢了</text><text x="640" y="114" class="small" lang="en">one increment is lost</text>

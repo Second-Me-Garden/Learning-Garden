@@ -420,7 +420,7 @@ exit 0
       <text x="30" y="318" class="small" lang="zh-CN">核心与结束</text><text x="30" y="318" class="small" lang="en">Cores and exit</text>
 
       <!-- step 1: user-space allocation (par token belongs on this box) -->
-      <g data-step="1"><rect class="box" x="30" y="26" width="340" height="100"/><!-- par -->
+      <g data-step="1"><rect class="box par" x="30" y="26" width="340" height="100"/>
         <text x="44" y="48" lang="zh-CN">1. pthread_create：先映射栈</text><text x="44" y="48" lang="en">1. pthread_create maps the stack</text>
         <text x="44" y="68" class="mono">mach_vm_map, one region:</text>
         <rect class="box" x="44" y="80" width="64" height="34"/><text x="54" y="102" class="mono">guard</text>
@@ -461,7 +461,7 @@ exit 0
         <path class="arrow" d="M840 276 L810 324"/></g>
 
       <!-- step 6: user code runs (par token belongs on this box) -->
-      <g data-step="6"><rect class="box" x="410" y="26" width="460" height="100"/><!-- par -->
+      <g data-step="6"><rect class="box par" x="410" y="26" width="460" height="100"/>
         <text x="424" y="48" lang="zh-CN">6. 在用户态运行你的函数</text><text x="424" y="48" lang="en">6. Your function runs in user space</text>
         <text x="424" y="70" class="mono">eret → thread_start → _pthread_start → fn(arg)</text>
         <text x="424" y="92" class="small" lang="zh-CN">Lab B 的 sample 里，每个工作线程的栈底就是这两帧</text><text x="424" y="92" class="small" lang="en">the bottom two frames of every worker in the Lab B sample</text>
