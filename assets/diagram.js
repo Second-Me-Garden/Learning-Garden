@@ -19,6 +19,7 @@
     // each step scrolls its lit parts into view, and the edge classes drive the fades.
     const scroller = document.createElement('div');
     scroller.className = 'diagram-scroll';
+    scroller.tabIndex = -1;   // the frame is the keyboard target; an overflowing scroller would otherwise become an unlabelled tab stop
     svg.parentNode.insertBefore(scroller, svg);
     scroller.appendChild(svg);
     const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
