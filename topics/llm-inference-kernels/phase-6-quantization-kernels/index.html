@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 6 · Quantization Kernels · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page">Phase 6 · Quantization Kernels</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 6 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 6 / 9 · about 1–2 weeks</p>
+  <h1>Quantization Kernels <span class="en" lang="zh-CN">量化内核：FP8（E4M3 / E5M2）的块缩放、Blackwell 上的 NVFP4 与 MXFP4、AWQ 与 GPTQ 的 int4 仅权重内核，为什么没有配套的 GEMM 就只省内存不省时间，以及 CUTLASS、CuTe DSL 和 DeepGEMM 怎样把这些 GEMM 写出来</span><span class="en" lang="en">FP8 (E4M3 / E5M2) with block scales, NVFP4 and MXFP4 on Blackwell, int4 weight-only kernels for AWQ and GPTQ, why quantizing saves memory but not time without a matching GEMM, and how CUTLASS, the CuTe DSL and DeepGEMM build those GEMMs</span></h1>
+  <p class="lede" lang="zh-CN">量化把权重（有时连激活）存成更少的位：FP8 是 1 字节，int4 和 FP4 是半字节，再加上每一小组一个缩放因子。解码时 GEMM 受带宽限制（Phase 0），读的字节少了，时间才会少；但前提是有一个内核在寄存器里边读边解量化，或者直接让 tensor core 吃低精度的数。没有这样的内核，量化只省显存：SGLang v0.5.22 里强制用 <code>--quantization awq</code> 时，走的就是先把整张权重矩阵解成 FP16 写回显存、再调 <code>torch.matmul</code> 的路，字节反而更多。这台 Apple M5 上实测，16384 × 16384 的 GEMV：FP16 4205 µs，边读边解的 int4 1095 µs（快 3.84 倍），先解再算的 int4 9589 µs（只有 FP16 的 0.44 倍），三者的有效带宽都在 127–128 GB/s，约为 Apple 标称 153 GB/s 的 84%。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-11-01 在这台 Apple M5 上实际运行，数字原样贴出；Lab A 在 L4 上比较 FP8 与 int4 检查点的解码速度、跑一个 CuTe DSL 的 GEMM，<strong>未运行</strong>，是 2026-11-01 根据 SGLang v0.5.22 的源码和 CUTLASS、DeepGEMM 的文档整理的；NVFP4 与 MXFP4 的原生内核只在 Blackwell 上有，只作描述。</p>
+  <p class="lede" lang="en">Quantization stores the weights, and sometimes the activations, in fewer bits: FP8 is one byte, int4 and FP4 half a byte, plus one scale per small group. Decode GEMMs are bandwidth-bound (Phase 0), so time drops only when fewer bytes are read; and that needs a kernel that dequantizes in registers as it reads, or tensor cores that take the low-precision numbers directly. Without such a kernel, quantization saves only memory: in SGLang v0.5.22, forcing <code>--quantization awq</code> takes the path that first dequantizes the whole weight matrix to FP16 in memory and then calls <code>torch.matmul</code>, which moves more bytes, not fewer. Measured on this Apple M5 for a 16384 × 16384 GEMV: FP16 takes 4205 µs, int4 dequantized on the fly 1095 µs (3.84 times as fast), and int4 dequantized first 9589 µs (0.44 times FP16), all three at an effective 127–128 GB/s, about 84% of Apple’s quoted 153 GB/s. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-11-01 and its numbers are pasted as they came; Lab A, which compares the decode speed of an FP8 and an int4 checkpoint on an L4 and runs a CuTe DSL GEMM, is <strong>not run</strong>, assembled on 2026-11-01 from the SGLang v0.5.22 source and the CUTLASS and DeepGEMM documentation; the native NVFP4 and MXFP4 kernels exist only on Blackwell and are only described.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出 E4M3、E5M2、int8、int4、NVFP4 和 MXFP4 各用几位、最大能表示多少、缩放因子按多大的组放，并列出 SGLang v0.5.22 注册的 FP8、int4 和 FP4 量化方法。</li>
+      <li lang="en">State how many bits E4M3, E5M2, int8, int4, NVFP4 and MXFP4 use, how large a value each can hold and over what group its scales sit, and list the FP8, int4 and FP4 quantization methods registered in SGLang v0.5.22.</li>
+      <li lang="zh-CN">用字节账解释为什么量化只有配上边读边解量化的 GEMM（或吃低精度输入的 tensor core）才省时间，并在 SGLang 里指出不融合的那条路（<code>awq</code>）和融合的那条路（<code>awq_marlin</code>）。</li>
+      <li lang="en">Explain with byte counts why quantization saves time only with a GEMM that dequantizes as it reads (or tensor cores that take low-precision inputs), and point to the unfused path (<code>awq</code>) and the fused path (<code>awq_marlin</code>) in SGLang.</li>
+      <li lang="zh-CN">读懂一个 FP8 块缩放 GEMM 的一次 K 循环：FP8 点积、按行和按块的两组缩放、FP32 累加，以及 DeepSeek-V3 为什么每 128 个元素把累加提升到 FP32。</li>
+      <li lang="en">Read one K step of an FP8 block-scaled GEMM: the FP8 dot product, the two sets of scales by row and by block, FP32 accumulation, and why DeepSeek-V3 promotes the accumulation to FP32 every 128 elements.</li>
+      <li lang="zh-CN">说清 CUTLASS、CuTe DSL 和 DeepGEMM 各是什么、SGLang 在哪里用它们，以及在给定的 GPU（T4、L4、A100、H100、B200）上一个量化检查点会落到哪个内核。</li>
+      <li lang="en">Say what CUTLASS, the CuTe DSL and DeepGEMM each are, where SGLang uses them, and which kernel a quantized checkpoint lands on for a given GPU (T4, L4, A100, H100, B200).</li>
+      <li lang="zh-CN">在 Metal 里写出 int8 与 int4 的仅权重 GEMV，量出带宽收益，并用测量解释 3.8 倍而不是 4 倍的来历（Lab B）；在 L4 上用同一个 int4 检查点比较融合与不融合两条路的解码速度（Lab A）。</li>
+      <li lang="en">Write int8 and int4 weight-only GEMVs in Metal, measure the bandwidth gain, and use the measurement to explain why it is 3.8 times and not 4 (Lab B); compare the fused and unfused paths for the same int4 checkpoint on an L4 by decode speed (Lab A).</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-the-stack/index.html">Phase 0 · 自顶向下的栈</a>：解码时一个 token 要把每层权重读一遍，运算强度约 1 FLOP/字节，所以受带宽限制。本页的每一个结论都从这笔账出发。</li>
+    <li lang="en"><a href="../phase-0-the-stack/index.html">Phase 0 · The Stack, Top to Bottom</a>: in decode each token reads every layer’s weights once, at an intensity of about 1 FLOP per byte, so it is bandwidth-bound. Every conclusion on this page starts from that sum.</li>
+    <li lang="zh-CN"><a href="../phase-4-moe-kernels/index.html">Phase 4 · MoE 内核</a>：Triton <code>fused_moe_kernel</code> 的 FP8 块缩放分支，以及 DeepGEMM 的 contiguous 与 masked 分组 GEMM。本页讲的是同一种块缩放用在稠密层上。</li>
+    <li lang="en"><a href="../phase-4-moe-kernels/index.html">Phase 4 · MoE Kernels</a>: the FP8 block-scale branch of Triton’s <code>fused_moe_kernel</code>, and DeepGEMM’s contiguous and masked grouped GEMMs. This page applies the same block scaling to dense layers.</li>
+    <li lang="zh-CN"><a href="../phase-5-fusions/index.html">Phase 5 · 融合</a>：每多一个不融合的算子，激活就多读写一遍。把解量化融进 GEMM 是同一个道理，只是这次省下的是权重的字节。</li>
+    <li lang="en"><a href="../phase-5-fusions/index.html">Phase 5 · Fusions</a>: every unfused op reads and writes the activation once more. Fusing dequantization into the GEMM is the same idea, except that this time the bytes saved are the weights.</li>
+    <li lang="zh-CN"><a href="../../gpu-cuda/phase-4-profiling-and-optimization/index.html">GPU Programming with CUDA · Phase 4</a>：tensor core 和它支持的数据类型，以及用 Nsight 看一个内核是受带宽还是受算力限制。</li>
+    <li lang="en"><a href="../../gpu-cuda/phase-4-profiling-and-optimization/index.html">GPU Programming with CUDA · Phase 4</a>: tensor cores and the data types they take, and using Nsight to see whether a kernel is bound by bandwidth or by compute.</li>
+    <li lang="zh-CN">按 <a href="../lab-setup/index.html">实验环境</a> 准备好 L4 上的 <code>sglang-lab</code> 容器（Lab A）和这台 Mac 上的 <code>swiftc</code>（Lab B）。</li>
+    <li lang="en">Prepare the <code>sglang-lab</code> container on the L4 (Lab A) and <code>swiftc</code> on this Mac (Lab B), following <a href="../lab-setup/index.html">Lab environment</a>.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 数字格式与缩放的粒度</h3><h3 lang="en">1. Number formats and the granularity of scales</h3>
+  <p lang="zh-CN">低精度格式只有很少的位，单独一个数表示不了权重的整个范围，所以每种方案都是「低精度的数 × 一个缩放因子」，区别在于每个缩放因子管多少个数。下面的最大值是从编码推出来的；FP8 的两个与 FP8 论文的表 1 一致：</p>
+  <p lang="en">Low-precision formats have so few bits that one number alone cannot cover the range of the weights, so every scheme is “a low-precision number times a scale”, and they differ in how many numbers each scale covers. The largest values below are derived from the encodings; the two FP8 ones match Table 1 of the FP8 paper:</p>
+  <ul>
+    <li lang="zh-CN"><strong>FP8 E4M3 与 E5M2</strong>（Micikevicius 等，arXiv:2209.05433，读的是 v2）：都是 1 字节，4 位指数加 3 位尾数，或 5 位指数加 2 位尾数。摘要说 E5M2 按 IEEE 754 的惯例表示特殊值，E4M3 不表示无穷大、只留一个尾数位型表示 NaN，以此扩大范围。由此推出 E4M3 的最大值是 1.75 × 2<sup>8</sup> = 448，E5M2 是 1.75 × 2<sup>15</sup> = 57344（按偏置 7 和 15 计算，与 arXiv:2209.05433 的表 1 相同）。E4M3 精度高、范围窄，E5M2 反之；DeepSeek-V3 技术报告说他们在所有张量上都用 E4M3，因为细粒度的缩放已经补上了范围。</li>
+    <li lang="en"><strong>FP8 E4M3 and E5M2</strong> (Micikevicius et al., arXiv:2209.05433, read at v2): both one byte, with a 4-bit exponent and 3-bit mantissa or a 5-bit exponent and 2-bit mantissa. The abstract says E5M2 follows IEEE 754 conventions for special values, while E4M3 extends its range by representing no infinities and keeping a single mantissa bit pattern for NaN. From this, the largest E4M3 value is 1.75 × 2<sup>8</sup> = 448 and the largest E5M2 value 1.75 × 2<sup>15</sup> = 57344 (computed with biases 7 and 15, and the same as Table 1 of arXiv:2209.05433). E4M3 has more precision and less range, E5M2 the reverse; the DeepSeek-V3 technical report says it uses E4M3 on all tensors, because fine-grained scaling already makes up the range.</li>
+    <li lang="zh-CN"><strong>int8 与 int4</strong>：整数加缩放（对称），或整数减零点再乘缩放（非对称）。int4 一个字节放两个，AWQ 的检查点把 8 个 int4 打包进一个 32 位整数（SGLang 的 <code>awq_dequantize</code> 的假实现把列数乘 8，<code>hardware_backend/gpu/quantization/awq_kernels.py</code> 第 59–62 行）。</li>
+    <li lang="en"><strong>int8 and int4</strong>: an integer times a scale (symmetric), or an integer minus a zero point, times a scale (asymmetric). int4 packs two to a byte, and AWQ checkpoints pack 8 int4 values into one 32-bit integer (the fake implementation of SGLang’s <code>awq_dequantize</code> multiplies the column count by 8, <code>hardware_backend/gpu/quantization/awq_kernels.py</code>, lines 59–62).</li>
+    <li lang="zh-CN"><strong>NVFP4 与 MXFP4</strong>：元素都是 4 位的 E2M1（1 位符号、2 位指数、1 位尾数，能表示 0、0.5、1、1.5、2、3、4、6 及其负数，推断：按偏置 1 计算），区别在缩放。MXFP4 是 OCP Microscaling 格式之一（Rouhani 等，arXiv:2310.10537，v3，摘要说 MX 把每块一个缩放因子与窄的浮点或整数元素结合），每 32 个元素一个 UE8M0（只有指数的 8 位）缩放；SGLang 的注释写作「packed e2m1 + ue8m0 g32」（<code>quantization/__init__.py</code> 第 93–94 行）。NVFP4 每 16 个元素一个 E4M3 缩放，外加整个张量一个 FP32 缩放：SGLang 的 <code>ModelOptFp4LinearMethod</code> 文档字符串列出 <code>weight</code>（NVFP4）、<code>weight_scale</code>（FP8-E4M3）、<code>weight_scale_2</code>（FP32 标量）（<code>modelopt_quant.py</code> 第 1747–1759 行）。PTX ISA 的块缩放 MMA 表与此一致：<code>.kind::mxf4nvf4</code> 的 E2M1 元素可配 UE8M0 缩放或 UE4M3 缩放（2026-11-01 读取）。</li>
+    <li lang="en"><strong>NVFP4 and MXFP4</strong>: both use 4-bit E2M1 elements (1 sign, 2 exponent and 1 mantissa bit, holding 0, 0.5, 1, 1.5, 2, 3, 4 and 6 and their negatives; an inference, computed with bias 1), and differ in their scales. MXFP4 is one of the OCP Microscaling formats (Rouhani et al., arXiv:2310.10537, v3, whose abstract says MX combines a per-block scale with narrow floating-point or integer elements), with one UE8M0 (exponent-only, 8-bit) scale per 32 elements; SGLang’s comment reads “packed e2m1 + ue8m0 g32” (<code>quantization/__init__.py</code>, lines 93–94). NVFP4 has one E4M3 scale per 16 elements plus one FP32 scale for the whole tensor: the docstring of SGLang’s <code>ModelOptFp4LinearMethod</code> lists <code>weight</code> (NVFP4), <code>weight_scale</code> (FP8-E4M3) and <code>weight_scale_2</code> (an FP32 scalar) (<code>modelopt_quant.py</code>, lines 1747–1759). The block-scaled MMA table of the PTX ISA agrees: E2M1 elements under <code>.kind::mxf4nvf4</code> take either UE8M0 or UE4M3 scales (read 2026-11-01).</li>
+  </ul>
+  <p lang="zh-CN">缩放的粒度从粗到细：整个张量一个（per-tensor）、每个输出通道一个（per-channel）、每个 token 一个（per-token，只用于激活）、沿 K 每 g 个一组（per-group，g 常取 128，int4 的 AWQ 和 GPTQ 用它）、每个二维块一个（per-block，DeepSeek-V3 的权重是 128 × 128）。组越小，离群值影响的范围越小，但缩放因子本身也要读：int4 每 128 个权重配 2 字节的 FP16 缩放和 1 字节的零点，就是每个权重多 3/128 字节，Lab B 的 3.8 倍而不是 4 倍正是这一点（概念 2）。</p>
+  <p lang="en">Scale granularity, from coarse to fine: one per tensor, one per output channel, one per token (activations only), one per group of g along K (per-group, g often 128, as int4 AWQ and GPTQ use), and one per two-dimensional block (per-block; DeepSeek-V3’s weights use 128 × 128). The smaller the group, the less an outlier spoils, but the scales themselves must also be read: int4 with a 2-byte FP16 scale and a 1-byte zero point per 128 weights adds 3/128 of a byte per weight, which is exactly why Lab B gets 3.8 times and not 4 (concept 2).</p>
+  <p lang="zh-CN">SGLang v0.5.22 的注册表 <code>BASE_QUANTIZATION_METHODS</code>（<code>python/sglang/srt/layers/quantization/__init__.py</code> 第 62–90 行，2026-11-01 用 curl 取回）里，与本页有关的有：FP8 系 <code>fp8</code>、<code>mxfp8</code>、<code>w8a8_fp8</code>、<code>modelopt</code> / <code>modelopt_fp8</code>、<code>w4afp8</code>（int4 权重配 FP8 激活）；int4 系 <code>awq</code>、<code>awq_marlin</code>、<code>gptq_marlin</code>、<code>moe_wna16</code>、<code>auto-round</code>，还有 <code>gguf</code>、<code>bitsandbytes</code>；FP4 系 <code>modelopt_fp4</code>、<code>nvfp4_online</code>、<code>petit_nvfp4</code>（ROCm）、<code>quark_mxfp4</code>、<code>mxfp_w4a8</code>（NPU），以及只在 CPU、CUDA、gfx95 和 XPU 上注册的 <code>mxfp4</code>（第 97–102 行）。普通的 <code>gptq</code> 在 NVIDIA 上已经没有了：第 118–121 行的注释说这个内核已经删掉，SGLang 的量化文档也写着在 NVIDIA 和 AMD GPU 上已移除、改用 <code>gptq_marlin</code>（<code>docs/docs/advanced_features/quantization.mdx</code> 第 95–100 行）。</p>
+  <p lang="en">In SGLang v0.5.22’s registry, <code>BASE_QUANTIZATION_METHODS</code> (<code>python/sglang/srt/layers/quantization/__init__.py</code>, lines 62–90, fetched with curl on 2026-11-01), the methods that matter here are: FP8 ones, <code>fp8</code>, <code>mxfp8</code>, <code>w8a8_fp8</code>, <code>modelopt</code> / <code>modelopt_fp8</code> and <code>w4afp8</code> (int4 weights with FP8 activations); int4 ones, <code>awq</code>, <code>awq_marlin</code>, <code>gptq_marlin</code>, <code>moe_wna16</code> and <code>auto-round</code>, plus <code>gguf</code> and <code>bitsandbytes</code>; FP4 ones, <code>modelopt_fp4</code>, <code>nvfp4_online</code>, <code>petit_nvfp4</code> (ROCm), <code>quark_mxfp4</code> and <code>mxfp_w4a8</code> (NPU), and <code>mxfp4</code>, registered only on CPU, CUDA, gfx95 and XPU (lines 97–102). Plain <code>gptq</code> is gone on NVIDIA: the comment on lines 118–121 says its kernel is gone, and SGLang’s quantization docs say it was removed on NVIDIA and AMD GPUs in favour of <code>gptq_marlin</code> (<code>docs/docs/advanced_features/quantization.mdx</code>, lines 95–100).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 FP8、MX 或 NVFP4，这一概念依据 Micikevicius 等的 FP8 论文、Rouhani 等的 MX 论文和 PTX ISA 讲块缩放 MMA 的一节。</p>
+  <p lang="en">Further reading: no book in the bibliography covers FP8, MX or NVFP4; this concept rests on the FP8 paper of Micikevicius et al., the MX paper of Rouhani et al. and the section of the PTX ISA on block-scaled MMA.</p>
+
+  <h3 lang="zh-CN">2. 只省内存不省时间：为什么要有配套的 GEMM 内核</h3><h3 lang="en">2. Memory saved, time not: why a matching GEMM kernel is needed</h3>
+  <p lang="zh-CN">解码一个 token，一层线性层 y = W x 要把 W 读一遍，每个权重只做一次乘加。时间约等于读到的字节数除以带宽。量化省时间的唯一来源，就是让内核实际读到的字节变少。有三种做法，只有后两种省时间：</p>
+  <p lang="en">Decoding one token, a linear layer y = W x reads W once and does one multiply-add per weight. The time is roughly the bytes read divided by the bandwidth. The only way quantization saves time is by making the kernel actually read fewer bytes. There are three ways to run a quantized layer, and only the last two save time:</p>
+  <ol>
+    <li lang="zh-CN"><strong>先解后算。</strong>一个内核把整张 int4 矩阵解成 FP16 写回显存，再用普通的 FP16 GEMM 读回来。读 0.5 字节、写 2 字节、再读 2 字节，每个权重 4.5 字节，比直接存 FP16 的 2 字节还多。SGLang v0.5.22 的 <code>AWQLinearKernel.apply</code> 就是这样：<code>out = awq_dequantize(qweight, scales, qzeros)</code>，然后 <code>out = torch.matmul(reshaped_x, out)</code>（<code>python/sglang/srt/hardware_backend/gpu/quantization/awq_kernels.py</code> 第 97–98 行）。Lab B 的 <code>int4_unfused</code> 行把它量了出来：0.44 倍。</li>
+    <li lang="en"><strong>Dequantize first, then multiply.</strong> One kernel turns the whole int4 matrix into FP16 in memory, and an ordinary FP16 GEMM reads it back. That is 0.5 bytes read, 2 written and 2 read again, 4.5 bytes per weight, more than the 2 bytes of plain FP16. SGLang v0.5.22’s <code>AWQLinearKernel.apply</code> does exactly this: <code>out = awq_dequantize(qweight, scales, qzeros)</code>, then <code>out = torch.matmul(reshaped_x, out)</code> (<code>python/sglang/srt/hardware_backend/gpu/quantization/awq_kernels.py</code>, lines 97–98). The <code>int4_unfused</code> row of Lab B measures it: 0.44 times.</li>
+    <li lang="zh-CN"><strong>边读边解（仅权重，W4A16 / W8A16）。</strong>GEMM 内核从显存读 int4，在寄存器里移位、掩码、减零点、乘缩放，变成 FP16 喂给 FMA 或 tensor core，解出来的值从不写回。显存流量就是 0.5 字节加缩放。这是 Marlin（Frantar 等，arXiv:2408.11743，v1）的做法；摘要说 4 位权重时，批大小到 16–32 都能接近最大的 4 倍加速，到 64–128 时加速逐渐变小但仍然可观。Lab B 的 <code>int4</code> 行：3.84 倍。</li>
+    <li lang="en"><strong>Dequantize as you read (weight-only, W4A16 / W8A16).</strong> The GEMM kernel reads int4 from memory, shifts, masks, subtracts the zero point and multiplies by the scale in registers, and feeds FP16 to the FMAs or tensor cores; the dequantized values are never written back. Memory traffic is 0.5 bytes plus scales. This is what Marlin does (Frantar et al., arXiv:2408.11743, v1); its abstract says that with 4-bit weights, batch sizes up to 16–32 get close to the maximum 4 times speedup, and larger batches of 64–128 a gradually smaller but still significant one. The <code>int4</code> row of Lab B: 3.84 times.</li>
+    <li lang="zh-CN"><strong>低精度直接进 tensor core（W8A8 / W4A4）。</strong>激活也量化，tensor core 直接算 FP8 × FP8 或 FP4 × FP4，缩放在累加时乘上（概念 4）。解码时它省的同样是字节；预填充受算力限制时，它还能用上 tensor core 更高的低精度吞吐。NVIDIA 的 L4 页面列出 FP16 tensor core 242 TFLOPS、FP8 485 TFLOPS，两者都标注为带稀疏的数字（2026-11-01 读取）。</li>
+    <li lang="en"><strong>Low precision straight into the tensor cores (W8A8 / W4A4).</strong> The activations are quantized too, the tensor cores compute FP8 × FP8 or FP4 × FP4 directly, and the scales are applied during accumulation (concept 4). In decode it saves bytes in the same way; in prefill, where the GEMM is compute-bound, it also uses the tensor cores’ higher low-precision throughput. NVIDIA’s L4 page lists 242 TFLOPS for FP16 tensor cores and 485 TFLOPS for FP8, both marked as figures with sparsity (read 2026-11-01).</li>
+  </ol>
+  <p lang="zh-CN">所以同一个检查点在不同的 GPU 上省不省时间，取决于那张卡上有没有匹配的内核。SGLang v0.5.22 里三个例子：AWQ 检查点在 sm_80 以上默认被改走 <code>awq_marlin</code>（<code>awq.py</code> 第 333–354 行的 <code>override_quantization_method</code>），只有用户显式写 <code>--quantization awq</code> 才强制走先解后算，日志会提示改用 <code>awq_marlin</code>；FP8 检查点在 sm_80 到 sm_88 上（A100 这一类没有 FP8 tensor core 的卡）自动改走 Marlin 的 FP8 仅权重内核（<code>fp8.py</code> 第 506–512 行，判断在 <code>fp8_utils.py</code> 第 2540–2546 行，<code>80 &lt;= sm &lt; 89</code>）；NVFP4 检查点在 SM80 到 SM90 上走 Marlin 的 W4A16 后备，原生的 FP4 GEMM 要 SM100 以上，否则报错「ModelOpt NVFP4 native dense GEMM backends require SM100+」（<code>modelopt_quant.py</code> 第 1907–1911 行）。</p>
+  <p lang="en">So whether one checkpoint saves time on a given GPU depends on whether that card has a matching kernel. Three examples in SGLang v0.5.22: an AWQ checkpoint on sm_80 and above is moved onto <code>awq_marlin</code> by default (<code>override_quantization_method</code> in <code>awq.py</code>, lines 333–354), and only an explicit <code>--quantization awq</code> forces the dequantize-first path, with a log message suggesting <code>awq_marlin</code>; an FP8 checkpoint on sm_80 to sm_88 (A100-class cards without FP8 tensor cores) is moved onto Marlin’s FP8 weight-only kernel (<code>fp8.py</code>, lines 506–512, with the test in <code>fp8_utils.py</code>, lines 2540–2546, <code>80 &lt;= sm &lt; 89</code>); and an NVFP4 checkpoint on SM80 to SM90 takes Marlin’s W4A16 fallback, since the native FP4 GEMM needs SM100 or later and otherwise raises “ModelOpt NVFP4 native dense GEMM backends require SM100+” (<code>modelopt_quant.py</code>, lines 1907–1911).</p>
+  <p lang="zh-CN">延伸阅读：Hennessy &amp; Patterson 第 4 章讲 Roofline 的一节（强度约 1 FLOP/字节时，时间只由字节决定）；Marlin 论文的摘要和引言说明了仅权重内核在批大小增大时为什么还能保持受带宽限制。</p>
+  <p lang="en">Further reading: the Roofline section of Hennessy &amp; Patterson, Chapter 4 (at an intensity of about 1 FLOP per byte, bytes alone decide the time); the abstract and introduction of the Marlin paper explain how a weight-only kernel can stay bandwidth-bound as the batch grows.</p>
+
+  <h3 lang="zh-CN">3. int4 仅权重：AWQ、GPTQ 与 Marlin 内核</h3><h3 lang="en">3. int4 weight-only: AWQ, GPTQ and the Marlin kernel</h3>
+  <p lang="zh-CN">AWQ 和 GPTQ 是两种离线把权重压到 4 位的算法，内核只关心它们产出的格式：</p>
+  <p lang="en">AWQ and GPTQ are two offline algorithms for squeezing weights into 4 bits; the kernel cares only about the format they produce:</p>
+  <ul>
+    <li lang="zh-CN"><strong>GPTQ</strong>（Frantar 等，arXiv:2210.17323，v2）：摘要说它是基于近似二阶信息的一次性权重量化，能在约 4 个 GPU 小时内把 1750 亿参数的模型压到每个权重 3 或 4 位，精度损失可以忽略。</li>
+    <li lang="en"><strong>GPTQ</strong> (Frantar et al., arXiv:2210.17323, v2): the abstract describes a one-shot weight quantization based on approximate second-order information that brings a 175-billion-parameter model to 3 or 4 bits per weight in about four GPU hours with negligible accuracy loss.</li>
+    <li lang="zh-CN"><strong>AWQ</strong>（Lin 等，arXiv:2306.00978，v6）：摘要说并非所有权重都同样重要，保护约 1% 的显著权重就能大幅减小量化误差；显著的通道要看激活的分布而不是权重本身，并用一个等价变换放大这些通道来保护它们，缩放由离线收集的激活统计决定。</li>
+    <li lang="en"><strong>AWQ</strong> (Lin et al., arXiv:2306.00978, v6): the abstract says not all weights are equally important, and protecting about 1% of salient weights greatly reduces quantization error; salient channels are found from the activation distribution, not the weights, and are protected by an equivalent transformation that scales them up, with the scales set from activation statistics collected offline.</li>
+  </ul>
+  <p lang="zh-CN">本页 Lab A 用的检查点 <code>Qwen/Qwen3-8B-AWQ</code>（Hugging Face 上的 <code>config.json</code>，2026-11-01 读取）：<code>quant_method</code> 是 <code>awq</code>，<code>bits</code> 4，<code>group_size</code> 128，<code>zero_point</code> true，<code>version</code> 是 <code>gemm</code>；safetensors 文件共 6,098,581,864 字节，而 BF16 的 <code>Qwen/Qwen3-8B</code> 是 16,381,516,776 字节。</p>
+  <p lang="en">The checkpoint Lab A uses, <code>Qwen/Qwen3-8B-AWQ</code> (its <code>config.json</code> on Hugging Face, read 2026-11-01): <code>quant_method</code> <code>awq</code>, <code>bits</code> 4, <code>group_size</code> 128, <code>zero_point</code> true and <code>version</code> <code>gemm</code>; its safetensors files total 6,098,581,864 bytes, against 16,381,516,776 bytes for the BF16 <code>Qwen/Qwen3-8B</code>.</p>
+  <p lang="zh-CN">SGLang 怎样跑它。<code>AWQMarlinConfig.is_awq_marlin_compatible</code>（<code>awq.py</code> 第 402–424 行）检查 <code>quant_method</code>、位数、组大小和零点，再交给 Marlin 的支持检查；通过就改名为 <code>awq_marlin</code>，最低计算能力 80（第 307–308 行）。普通 <code>awq</code> 的最低计算能力是 75（第 109–116 行，注释说 AWQ 内核只支持 Turing 及更新的卡），所以 T4 上只有先解后算这一条路。加载时 <code>AWQMarlinLinearKernel</code> 把权重重排成 Marlin 的布局（<code>awq_marlin_repack</code>、<code>marlin_permute_scales</code>、<code>awq_to_marlin_zero_points</code>，<code>awq_kernels.py</code> 第 109–142 行），之后每次前向调 <code>gptq_marlin_gemm</code>（<code>marlin_utils.py</code> 第 533–560 行），CUDA 源码在 <code>python/sglang/kernels/jit/csrc/gemm/marlin/gptq_marlin.cuh</code>。Marlin 的形状约束写在 <code>marlin_utils.py</code> 第 40–44 行：输出维是 64 的倍数、输入维是 128 的倍数，组大小只能是 −1（整行一组）、32、64 或 128。GPTQ 检查点同样被改走 <code>gptq_marlin</code>（<code>gptq.py</code> 第 414 行起），最低计算能力 80（第 386–387 行）。</p>
+  <p lang="en">How SGLang runs it. <code>AWQMarlinConfig.is_awq_marlin_compatible</code> (<code>awq.py</code>, lines 402–424) checks <code>quant_method</code>, the bit width, the group size and the zero point, then hands over to Marlin’s support check; if it passes, the method becomes <code>awq_marlin</code>, with a minimum compute capability of 80 (lines 307–308). Plain <code>awq</code> has a minimum of 75 (lines 109–116, whose comment says the AWQ kernel supports only Turing or newer), so on a T4 the dequantize-first path is the only one. At load time <code>AWQMarlinLinearKernel</code> repacks the weights into Marlin’s layout (<code>awq_marlin_repack</code>, <code>marlin_permute_scales</code> and <code>awq_to_marlin_zero_points</code>, <code>awq_kernels.py</code>, lines 109–142), and every forward pass then calls <code>gptq_marlin_gemm</code> (<code>marlin_utils.py</code>, lines 533–560), whose CUDA source is <code>python/sglang/kernels/jit/csrc/gemm/marlin/gptq_marlin.cuh</code>. Marlin’s shape constraints are on lines 40–44 of <code>marlin_utils.py</code>: the output dimension a multiple of 64, the input dimension a multiple of 128, and a group size of −1 (one group per row), 32, 64 or 128 only. GPTQ checkpoints are likewise moved onto <code>gptq_marlin</code> (<code>gptq.py</code>, from line 414), with a minimum of 80 (lines 386–387).</p>
+  <p lang="zh-CN">为什么要重排：边读边解的内核希望一个线程一次读 16 字节就拿到它马上要用的 32 个权重，并且解出来的 FP16 正好排成 tensor core 指令要的寄存器布局，不必再在线程之间搬数据。检查点里的打包顺序是为写检查点的工具定的，不是为某一条 MMA 指令定的，所以加载时一次性重排，换来每一步都省事。Marlin 论文第 3 节描述的正是这种重排：权重交错存放，一次 16 字节的读取正好装下 4 个不同的 16×16 tensor core 块各自的 8 个权重。动画 (a) 画的就是这个内核的骨架，Lab B 用 Metal 写了一个。</p>
+  <p lang="en">Why repack: a dequantize-as-you-read kernel wants each thread to get the 32 weights it is about to use from one 16-byte load, and wants the dequantized FP16 values to land in exactly the register layout the tensor-core instruction expects, with no shuffling between threads. The packing order in a checkpoint is set for the tool that wrote it, not for any particular MMA instruction, so the weights are repacked once at load time to make every step cheap. Section 3 of the Marlin paper describes exactly this repacking: the weights are interleaved so that one 16-byte read holds the 8 weights of each of 4 separate 16×16 tensor-core blocks. Diagram (a) draws the skeleton of such a kernel, and Lab B writes one in Metal.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 23 章 Advanced Optimizations for Matrix Multiplication（GEMV 是 M = 1 的情形，每个权重只被用一次，所以没有复用可谈，只剩带宽）。量化算法本身参考书目里没有书讲，依据 GPTQ、AWQ 和 Marlin 三篇论文。</p>
+  <p lang="en">Further reading: chapter 23, Advanced Optimizations for Matrix Multiplication, of PMPP, 5th ed. (a GEMV is the M = 1 case, where each weight is used once, so there is no reuse to speak of and only bandwidth is left). No book in the bibliography covers the quantization algorithms themselves; they rest on the GPTQ, AWQ and Marlin papers.</p>
+
+  <h3 lang="zh-CN">4. FP8 W8A8 与块缩放 GEMM</h3><h3 lang="en">4. FP8 W8A8 and the block-scaled GEMM</h3>
+  <p lang="zh-CN">DeepSeek-V3 技术报告（arXiv:2412.19437，v2）第 3.3.2 节的细粒度量化是今天 FP8 检查点最常见的格式：激活按 1 × 128 的小片缩放（每个 token 每 128 个通道一个缩放因子），权重按 128 × 128 的块缩放，每个小片和每个块的最大绝对值都在线算出，再得出缩放因子。<code>Qwen/Qwen3-8B-FP8</code> 的 <code>config.json</code> 用的就是这个格式：<code>quant_method</code> <code>fp8</code>、<code>fmt</code> <code>e4m3</code>、<code>weight_block_size</code> [128, 128]、<code>activation_scheme</code> <code>dynamic</code>（2026-11-01 读取），文件共 9,436,628,784 字节。</p>
+  <p lang="en">The fine-grained quantization in section 3.3.2 of the DeepSeek-V3 technical report (arXiv:2412.19437, v2) is the most common format of today’s FP8 checkpoints: activations are scaled in 1 × 128 tiles (one scale per token per 128 channels) and weights in 128 × 128 blocks, with the largest absolute value of each tile and block computed online and the scale derived from it. <code>Qwen/Qwen3-8B-FP8</code>’s <code>config.json</code> uses exactly this format: <code>quant_method</code> <code>fp8</code>, <code>fmt</code> <code>e4m3</code>, <code>weight_block_size</code> [128, 128] and <code>activation_scheme</code> <code>dynamic</code> (read 2026-11-01); its files total 9,436,628,784 bytes.</p>
+  <p lang="zh-CN">缩放沿 K 每 128 个就变一次，所以不能等整个点积算完再乘：每走一个 K 块，把 tensor core 算出的部分和乘上这一块的两个缩放，再加进 FP32 累加器。SGLang 的 Triton 实现 <code>_w8a8_block_fp8_matmul</code>（<code>python/sglang/kernels/ops/gemm/fp8_kernel.py</code> 第 55 行）里就是一行：<code>accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]</code>（第 126 行），其中 <code>a_s</code> 是这一块里每行一个，<code>b_s</code> 是每 128 列一个。动画 (b) 一步一步画这个循环。</p>
+  <p lang="en">The scales change every 128 elements along K, so they cannot wait until the whole dot product is done: at every K block, the partial sum from the tensor cores is multiplied by that block’s two scales and added into the FP32 accumulator. In SGLang’s Triton implementation, <code>_w8a8_block_fp8_matmul</code> (<code>python/sglang/kernels/ops/gemm/fp8_kernel.py</code>, line 55), this is a single line: <code>accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]</code> (line 126), where <code>a_s</code> holds one value per row of the block and <code>b_s</code> one per 128 columns. Diagram (b) steps through this loop.</p>
+  <p lang="zh-CN">累加的精度。报告同一节说，他们观察到 H800 上 FP8 GEMM 的累加只保留约 14 位，K = 4096 的两个随机矩阵相乘最大相对误差接近 2%；办法是把部分和每隔 N<sub>C</sub> = 128 个元素（相当于 4 次 WGMMA）拷到 CUDA core 上的 FP32 寄存器里累加，按 K 分组的缩放也在这时一并乘上；一个 warpgroup 做提升时另一个可以继续做 MMA，两者重叠。块缩放和提升恰好对齐：每 128 个元素既换一次缩放，也提升一次。</p>
+  <p lang="en">Accumulation precision. The same section of the report says they observed that FP8 GEMM accumulation on H800s keeps only about 14 bits, giving a maximum relative error of nearly 2% for two random matrices with K = 4096; the fix is to copy the partial sums every N<sub>C</sub> = 128 elements (equivalent to 4 WGMMAs) into FP32 registers on the CUDA cores and accumulate there, applying the per-group scales along K at the same time; while one warpgroup promotes, another keeps issuing MMAs, so the two overlap. The block scales and the promotion line up exactly: every 128 elements, the scale changes and the sum is promoted once.</p>
+  <p lang="zh-CN">SGLang v0.5.22 怎样选 FP8 的 GEMM。块缩放（<code>weight_block_size</code> 存在）走 <code>dispatch_w8a8_block_fp8_linear</code>（<code>fp8_utils.py</code> 第 614 行）；<code>--fp8-gemm-backend</code> 是默认的 <code>auto</code> 时，按 <code>_dispatch_auto_backend</code>（第 1025–1053 行）的顺序：DeepGEMM 可用就用它，否则 Blackwell 加 FlashInfer，否则 SM120 用 CUTLASS，否则 AMD 的 AITER、昇腾、XPU，最后是 Triton。DeepGEMM 只在 sm_90 以上才会打开（<code>srt/layers/deep_gemm_wrapper/configurer.py</code> 第 32–52 行，第 39 行 <code>sm_version &lt; 90</code> 时返回 False），所以 L4 上块缩放 FP8 走的是上面那个 Triton 内核（推断：按这段选择逻辑，没有在 L4 上确认）。按通道或按张量缩放的 FP8 走 <code>apply_fp8_linear</code>（第 2257 行），在 <code>cutlass_fp8_supported()</code> 为真时用 <code>sglang-kernel</code> 里的 CUTLASS <code>fp8_scaled_mm</code>；这个判断对 sm_89 要求 CUDA 12.4 以上，对 sm_90 以上要求 12.0 以上（第 307–316 行）。<code>w8a8_fp8</code> 方法的最低计算能力是 89（<code>w8a8_fp8.py</code> 第 66–67 行）。</p>
+  <p lang="en">How SGLang v0.5.22 picks the FP8 GEMM. Block scaling (when <code>weight_block_size</code> is present) goes through <code>dispatch_w8a8_block_fp8_linear</code> (<code>fp8_utils.py</code>, line 614); with <code>--fp8-gemm-backend</code> at its default <code>auto</code>, the order is that of <code>_dispatch_auto_backend</code> (lines 1025–1053): DeepGEMM if available, otherwise FlashInfer on Blackwell, otherwise CUTLASS on SM120, otherwise AMD’s AITER, Ascend or XPU, and Triton last. DeepGEMM is switched on only from sm_90 (<code>srt/layers/deep_gemm_wrapper/configurer.py</code>, lines 32–52, returning False on line 39 when <code>sm_version &lt; 90</code>), so on an L4 block-scaled FP8 takes the Triton kernel above (an inference from this selection logic, not confirmed on an L4). Per-channel or per-tensor FP8 goes through <code>apply_fp8_linear</code> (line 2257), which uses the CUTLASS <code>fp8_scaled_mm</code> in <code>sglang-kernel</code> when <code>cutlass_fp8_supported()</code> is true; that test asks for CUDA 12.4 or later on sm_89 and 12.0 or later on sm_90 and above (lines 307–316). The <code>w8a8_fp8</code> method has a minimum compute capability of 89 (<code>w8a8_fp8.py</code>, lines 66–67).</p>
+  <p lang="zh-CN">为什么是 sm_89：PTX ISA 的 <code>mma</code> 一节写明 <code>.e4m3</code> 和 <code>.e5m2</code> 类型的 mma 运算要求 sm_89 或更高（2026-11-01 读取）。L4 是 sm_89，所以它有 FP8 tensor core；A100 是 sm_80，没有，FP8 检查点在它上面只能走 Marlin 的仅权重内核（概念 2）。</p>
+  <p lang="en">Why sm_89: the <code>mma</code> section of the PTX ISA states that mma operations on the <code>.e4m3</code> and <code>.e5m2</code> types require sm_89 or higher (read 2026-11-01). The L4 is sm_89, so it has FP8 tensor cores; the A100 is sm_80 and has none, so an FP8 checkpoint can only take Marlin’s weight-only kernel there (concept 2).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 23 章 Advanced Optimizations for Matrix Multiplication（沿 K 的分块循环正是这里缩放每块变一次的地方）。FP8 细粒度量化和累加提升参考书目里没有书讲，依据 DeepSeek-V3 技术报告第 3.3.2 节。</p>
+  <p lang="en">Further reading: chapter 23, Advanced Optimizations for Matrix Multiplication, of PMPP, 5th ed. (the tiled loop along K is exactly where the scales change from block to block). No book in the bibliography covers fine-grained FP8 quantization or accumulation promotion; they rest on section 3.3.2 of the DeepSeek-V3 technical report.</p>
+
+  <h3 lang="zh-CN">5. Blackwell 上的 NVFP4 与 MXFP4</h3><h3 lang="en">5. NVFP4 and MXFP4 on Blackwell</h3>
+  <p lang="zh-CN">FP4 的块缩放 MMA 是 Blackwell 才有的指令。PTX ISA（2026-11-01 读取）：<code>tcgen05.mma</code> 的 <code>.kind::mxf4nvf4</code> 和 <code>.kind::mxf4</code> 支持 sm_100a、sm_103a、sm_107a 和 sm_110a（sm_101a 已改名为 sm_110a）；warp 级 <code>mma</code> 的同样两种 kind 支持 sm_120a 和 sm_121a，E2M1 等更窄类型的 <code>mma</code> 要求 sm_120a。缩放不是由软件在累加之后乘上去的，而是作为操作数和元素一起交给指令：<code>.scale_vec::2X</code> 配 UE8M0（MXFP4，每 32 个元素一个），<code>.scale_vec::4X</code> 配 UE4M3（NVFP4，每 16 个元素一个）。这就是概念 4 那一行 Triton 代码在硬件里的样子。</p>
+  <p lang="en">Block-scaled FP4 MMA is an instruction that only Blackwell has. The PTX ISA (read 2026-11-01): <code>.kind::mxf4nvf4</code> and <code>.kind::mxf4</code> of <code>tcgen05.mma</code> are supported on sm_100a, sm_103a, sm_107a and sm_110a (sm_101a was renamed sm_110a); the same two kinds of warp-level <code>mma</code> are supported on sm_120a and sm_121a, and <code>mma</code> on E2M1 and the other narrower types requires sm_120a. The scales are not multiplied in by software after accumulation; they are handed to the instruction as operands alongside the elements: <code>.scale_vec::2X</code> with UE8M0 (MXFP4, one per 32 elements) and <code>.scale_vec::4X</code> with UE4M3 (NVFP4, one per 16 elements). This is the one Triton line of concept 4, done in hardware.</p>
+  <p lang="zh-CN">SGLang v0.5.22 里，<code>--fp4-gemm-backend</code>（<code>arg_groups/fields/exec_.py</code> 第 232–240 行）默认 <code>auto</code>：帮助文字说它在 SM100 上选 <code>flashinfer_cutedsl</code>，在 SM80 到 SM90 上选 <code>marlin</code>，其余（包括 SM120）选 <code>flashinfer_cutlass</code>；其他取值有 <code>flashinfer_cudnn</code> 和 <code>flashinfer_trtllm</code>，<code>marlin</code> 是 SM80 以上的 W4A16 后备。量化文档的支持表也说 <code>modelopt_fp4</code> 在 Ampere 和 Hopper 上用 Marlin W4A16 后备、在 Blackwell 上用原生 FP4 后端（<code>quantization.mdx</code> 第 162 行）。MXFP4 目前在 SGLang 里主要用于 MoE：<code>Mxfp4Config</code> 的最低计算能力是 80（<code>mxfp4.py</code> 第 338–339 行），目录里有 FlashInfer CUTLASS、FlashInfer TRT-LLM 和 Marlin 三种 MoE 实现（<code>mxfp4_flashinfer_cutlass_moe.py</code>、<code>mxfp4_flashinfer_trtllm_moe.py</code>、<code>mxfp4_marlin_moe.py</code>），<code>mxfp4.py</code> 第 257–272 行按 sm_100、sm_90 和 sm_90 以下分别设置 Triton 内核的参数。</p>
+  <p lang="en">In SGLang v0.5.22, <code>--fp4-gemm-backend</code> (<code>arg_groups/fields/exec_.py</code>, lines 232–240) defaults to <code>auto</code>, whose help text says it picks <code>flashinfer_cutedsl</code> on SM100, <code>marlin</code> on SM80 to SM90 and <code>flashinfer_cutlass</code> otherwise (including SM120); the other choices are <code>flashinfer_cudnn</code> and <code>flashinfer_trtllm</code>, and <code>marlin</code> is the W4A16 fallback for SM80 and later. The support table in the quantization docs likewise says <code>modelopt_fp4</code> uses the Marlin W4A16 fallback on Ampere and Hopper and native FP4 backends on Blackwell (<code>quantization.mdx</code>, line 162). MXFP4 in SGLang is mainly used for MoE for now: <code>Mxfp4Config</code> has a minimum compute capability of 80 (<code>mxfp4.py</code>, lines 338–339), the directory holds three MoE implementations, FlashInfer CUTLASS, FlashInfer TRT-LLM and Marlin (<code>mxfp4_flashinfer_cutlass_moe.py</code>, <code>mxfp4_flashinfer_trtllm_moe.py</code> and <code>mxfp4_marlin_moe.py</code>), and lines 257–272 of <code>mxfp4.py</code> set the Triton kernel’s parameters separately for sm_100, sm_90 and below sm_90.</p>
+  <p lang="zh-CN">本专题的云端只租 L4 和 H100，都不是 Blackwell，所以 FP4 的原生内核只作描述，不给命令。在 L4 和 H100 上加载 NVFP4 检查点能跑，但走的是 Marlin W4A16：省显存和带宽，不用 FP4 tensor core（概念 2 的第 2 种做法）。</p>
+  <p lang="en">This topic’s cloud tiers rent only an L4 and an H100, neither of them Blackwell, so the native FP4 kernels are only described, with no commands. An NVFP4 checkpoint does load on an L4 or an H100, but through Marlin W4A16: it saves memory and bandwidth without using FP4 tensor cores (the second way of concept 2).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 FP4 或 Blackwell 的指令，这一概念依据 PTX ISA 讲 <code>tcgen05.mma</code> 和块缩放 <code>mma</code> 的两节，以及 SGLang 的量化文档。</p>
+  <p lang="en">Further reading: no book in the bibliography covers FP4 or the Blackwell instructions; this concept rests on the two sections of the PTX ISA on <code>tcgen05.mma</code> and block-scaled <code>mma</code>, and on SGLang’s quantization docs.</p>
+
+  <h3 lang="zh-CN">6. CUTLASS、CuTe DSL 与 DeepGEMM</h3><h3 lang="en">6. CUTLASS, the CuTe DSL and DeepGEMM</h3>
+  <p lang="zh-CN">上面每种格式都要一个专门的 GEMM：数据类型、缩放的放法、tile 形状、流水线级数和用哪条 MMA 指令都不同，一一手写不现实。CUTLASS 就是用来拼这些 GEMM 的库。它的 README（标签 v4.8.1，2026-10-21 发布，2026-11-01 读取）说，CUTLASS 自 2017 年起提供高性能线性代数的 CUDA C++ 模板抽象，支持 FP64 到 FP16、BF16，8 位浮点（e5m2 与 e4m3），块缩放类型（NVIDIA NVFP4 和 OCP 标准的 MXFP4、MXFP6、MXFP8），4 位和 8 位整数，覆盖 Volta 到 Blackwell；CUTLASS 4 加入了 CUTLASS DSL，第一个是 CuTe DSL，一个与 CuTe C++ 抽象完全一致、暴露 layout、tensor、硬件 atom 和线程与数据层级的 Python 原生底层编程模型。README 说 CuTe DSL 演示的是面向 Ampere、Hopper 和 Blackwell tensor core 的矩阵乘，目前处于公开 beta，预计 2026 年夏末结束 beta。</p>
+  <p lang="en">Every format above needs its own GEMM: the data types, the scale layout, the tile shape, the pipeline depth and the MMA instruction all differ, and writing each by hand is not realistic. CUTLASS is the library for assembling these GEMMs. Its README (the v4.8.1 tag, released 2026-10-21, read 2026-11-01) says CUTLASS has provided CUDA C++ template abstractions for high-performance linear algebra since 2017, supporting FP64 down to FP16 and BF16, 8-bit floating point (e5m2 and e4m3), block-scaled types (NVIDIA NVFP4 and the OCP-standard MXFP4, MXFP6 and MXFP8), and 4- and 8-bit integers, across Volta to Blackwell; CUTLASS 4 adds the CUTLASS DSLs, the first of them the CuTe DSL, a Python-native low-level programming model fully consistent with the CuTe C++ abstractions that exposes layouts, tensors, hardware atoms and the thread and data hierarchy. The README says the CuTe DSL demonstrates matrix multiplies targeting the tensor cores of Ampere, Hopper and Blackwell, and is currently in public beta, expected to leave beta by the end of summer 2026.</p>
+  <p lang="zh-CN">CuTe DSL 的快速入门（docs.nvidia.com，页面标注 2026-10-16 更新，2026-11-01 读取）说 4.8 版支持 Linux 和 Windows 上的 Python 3.10 到 3.14t，CUDA 13 用 <code>pip install "nvidia-cutlass-dsl[cu13]"</code> 安装。v4.8.1 标签下的示例里有：Ampere 的 <code>cute/ampere/kernel/dense_gemm/tensorop_gemm.py</code>（文档字符串说支持 fp16、bf16 和 fp8 输入，FP8 用 16 × 8 × 32 的 MMA，默认 tile 128 × 128 × 64），Hopper 的 <code>dense_gemm_fp8_2xacc.py</code>，Blackwell 的 <code>blockscaled_gemm/dense_blockscaled_gemm_persistent.py</code>、<code>blockwise_gemm/blockwise_gemm.py</code> 和 <code>tutorial_gemm/nvfp4_gemm_0.py</code>。Lab A 第 4 步在 L4 上跑第一个。SGLang v0.5.22 依赖 <code>nvidia-cutlass-dsl[cu13]==4.8.0</code>（<code>python/pyproject.toml</code> 第 55 行），比本页引用的文档低一个补丁版本；SGLang 里用 CuTe DSL 写的路径有 <code>--fp8-gemm-backend flashinfer_cutedsl</code>（SM100/SM103 上的 MXFP8）和 <code>--bf16-gemm-backend cutedsl</code>（SM10x），见 <code>exec_.py</code> 第 223–248 行的帮助文字。</p>
+  <p lang="en">The CuTe DSL quick start (docs.nvidia.com, marked as updated 2026-10-16, read 2026-11-01) says release 4.8 supports Python 3.10 to 3.14t on Linux and Windows, and installs for CUDA 13 with <code>pip install "nvidia-cutlass-dsl[cu13]"</code>. The examples under the v4.8.1 tag include Ampere’s <code>cute/ampere/kernel/dense_gemm/tensorop_gemm.py</code> (whose docstring says it supports fp16, bf16 and fp8 inputs, with a 16 × 8 × 32 MMA for FP8 and a default tile of 128 × 128 × 64), Hopper’s <code>dense_gemm_fp8_2xacc.py</code>, and Blackwell’s <code>blockscaled_gemm/dense_blockscaled_gemm_persistent.py</code>, <code>blockwise_gemm/blockwise_gemm.py</code> and <code>tutorial_gemm/nvfp4_gemm_0.py</code>. Lab A step 4 runs the first one on an L4. SGLang v0.5.22 depends on <code>nvidia-cutlass-dsl[cu13]==4.8.0</code> (<code>python/pyproject.toml</code>, line 55), one patch release below the documentation cited here; the SGLang paths written in the CuTe DSL include <code>--fp8-gemm-backend flashinfer_cutedsl</code> (MXFP8 on SM100/SM103) and <code>--bf16-gemm-backend cutedsl</code> (SM10x), per the help text on lines 223–248 of <code>exec_.py</code>.</p>
+  <p lang="zh-CN"><strong>DeepGEMM</strong>（README，标签 v2.1.1.post3，2026-11-01 读取）走的是另一条路：README 说它借用了 CUTLASS 和 CuTe 的一些概念，但不重度依赖它们的模板或代数，只有少数几个核心内核函数，所以也适合拿来学习 NVIDIA GPU 的内核优化；所有内核在运行时由一个轻量的 JIT 模块编译，安装时不编译。要求 SM90 或 SM100，SM90 要 CUDA 12.3 以上（推荐 12.9 以上），SM100 要 12.9 以上，以及 CUTLASS 4.0 以上。接口按 <code>D = C + A @ B</code> 命名，NT 布局；左操作数的缩放因子要 TMA 对齐并转置，SM90 要 FP32 缩放，SM100 要把 4 个 UE8M0 打包进一个 <code>torch.int</code>。README 说输入的转置和 FP8 转换要由使用者自己做或融进前面的内核，库只专注于 GEMM 本身。分组 GEMM 的 contiguous 和 masked 两种布局见 Phase 4。README 报告在 H800 上最高 1550 TFLOPS，这是作者的数字，本页没有复现。</p>
+  <p lang="en"><strong>DeepGEMM</strong> (README at the v2.1.1.post3 tag, read 2026-11-01) takes a different road: the README says it leverages some concepts from CUTLASS and CuTe but avoids heavy reliance on their templates or algebras, with only a limited number of core kernel functions, which also makes it a good resource for learning NVIDIA GPU kernel optimization; all kernels are compiled at run time by a lightweight JIT module, with nothing compiled at install time. It requires SM90 or SM100, CUDA 12.3 or later for SM90 (12.9 or later recommended) and 12.9 or later for SM100, and CUTLASS 4.0 or later. The interface is named <code>D = C + A @ B</code>, in NT layout; the left operand’s scales must be TMA-aligned and transposed, in FP32 on SM90, and on SM100 packed four UE8M0 values to one <code>torch.int</code>. The README says transposing inputs and casting to FP8 are left to the user, to be done or fused into earlier kernels, and that the library focuses on the GEMM itself. The contiguous and masked layouts of its grouped GEMMs are covered in Phase 4. The README reports up to 1550 TFLOPS on an H800; that is the authors’ figure, not reproduced here.</p>
+  <p lang="zh-CN">SGLang 依赖的是自己发布的 <code>sgl-deep-gemm==0.2.2</code>（<code>python/pyproject.toml</code> 第 80 行），不是上游的某个标签；本页引用的是上游 v2.1.1.post3 的 README，两者是否逐项一致没有核对。它在 SGLang 里的位置：块缩放 FP8 的 <code>auto</code> 首选（概念 4），只在 sm_90 以上、环境变量 <code>SGLANG_ENABLE_JIT_DEEPGEMM</code> 打开且能 <code>import deep_gemm</code> 时启用（<code>configurer.py</code> 第 32–52 行）；SM100 上缩放用 UE8M0（第 58–60 行，<code>DEEPGEMM_SCALE_UE8M0</code>），与 README 一致。</p>
+  <p lang="en">SGLang depends on its own release, <code>sgl-deep-gemm==0.2.2</code> (<code>python/pyproject.toml</code>, line 80), not on an upstream tag; this page cites the upstream README at v2.1.1.post3, and whether the two match item by item was not checked. Its place in SGLang: the first choice for block-scaled FP8 under <code>auto</code> (concept 4), enabled only on sm_90 and above, when the environment variable <code>SGLANG_ENABLE_JIT_DEEPGEMM</code> is on and <code>import deep_gemm</code> succeeds (<code>configurer.py</code>, lines 32–52); on SM100 its scales are UE8M0 (lines 58–60, <code>DEEPGEMM_SCALE_UE8M0</code>), as the README says.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 23 章 Advanced Optimizations for Matrix Multiplication（CUTLASS 的 tile、warp 和 MMA 三层分块就是矩阵乘法分块在 tensor core 上的推广）。CUTLASS 和 DeepGEMM 本身参考书目里没有书讲，依据它们的 README、CuTe DSL 文档和示例代码。</p>
+  <p lang="en">Further reading: chapter 23, Advanced Optimizations for Matrix Multiplication, of PMPP, 5th ed. (CUTLASS’s three levels of tiling, threadblock tile, warp and MMA, are matrix-multiplication tiling carried over to tensor cores). No book in the bibliography covers CUTLASS or DeepGEMM themselves; they rest on their READMEs, the CuTe DSL documentation and the example code.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：格式 ↔ 量化了什么 ↔ 内核 ↔ 最低硬件</h2><h2 id="compare-en" lang="en">Comparison: format ↔ what is quantized ↔ kernel ↔ minimum hardware</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">格式（SGLang 方法名）</span><span lang="en">Format (SGLang method)</span></th><th><span lang="zh-CN">量化了什么</span><span lang="en">What is quantized</span></th><th><span lang="zh-CN">内核（v0.5.22）</span><span lang="en">Kernel (v0.5.22)</span></th><th><span lang="zh-CN">最低硬件</span><span lang="en">Minimum hardware</span></th></tr>
+    <tr><td><span lang="zh-CN">FP8 E4M3，128 × 128 块缩放（<code>fp8</code>，如 Qwen3-8B-FP8、DeepSeek-V3）</span><span lang="en">FP8 E4M3 with 128 × 128 block scales (<code>fp8</code>, e.g. Qwen3-8B-FP8, DeepSeek-V3)</span></td><td><span lang="zh-CN">权重（每块一个缩放）和激活（每 token 每 128 通道一个，在线算）</span><span lang="en">Weights (one scale per block) and activations (one per token per 128 channels, computed online)</span></td><td><span lang="zh-CN"><code>auto</code> 依次选 DeepGEMM（sm_90 以上）、Blackwell 上的 FlashInfer、SM120 上的 CUTLASS，最后是 Triton 的 <code>_w8a8_block_fp8_matmul</code></span><span lang="en"><code>auto</code> tries DeepGEMM (sm_90 and up), FlashInfer on Blackwell, CUTLASS on SM120, and finally Triton’s <code>_w8a8_block_fp8_matmul</code></span></td><td><span lang="zh-CN">原生 FP8：sm_89（L4）；sm_80–88 自动改走 Marlin 的 FP8 仅权重内核</span><span lang="en">Native FP8: sm_89 (L4); sm_80–88 automatically take Marlin’s FP8 weight-only kernel</span></td></tr>
+    <tr><td><span lang="zh-CN">FP8，按通道或按张量缩放（<code>w8a8_fp8</code>、<code>modelopt_fp8</code>、在线的 <code>--quantization fp8</code>）</span><span lang="en">FP8 with per-channel or per-tensor scales (<code>w8a8_fp8</code>, <code>modelopt_fp8</code>, online <code>--quantization fp8</code>)</span></td><td><span lang="zh-CN">权重和激活</span><span lang="en">Weights and activations</span></td><td><span lang="zh-CN"><code>apply_fp8_linear</code>：CUTLASS <code>fp8_scaled_mm</code>（<code>sglang-kernel</code>），否则 <code>torch._scaled_mm</code></span><span lang="en"><code>apply_fp8_linear</code>: CUTLASS <code>fp8_scaled_mm</code> (<code>sglang-kernel</code>), otherwise <code>torch._scaled_mm</code></span></td><td><span lang="zh-CN">sm_89 且 CUDA 12.4 以上（<code>w8a8_fp8</code> 的最低计算能力 89）</span><span lang="en">sm_89 with CUDA 12.4 or later (<code>w8a8_fp8</code> has a minimum compute capability of 89)</span></td></tr>
+    <tr><td><span lang="zh-CN">int4 AWQ，组 128，带零点（<code>awq</code> 检查点，默认改为 <code>awq_marlin</code>）</span><span lang="en">int4 AWQ, group 128, with zero points (an <code>awq</code> checkpoint, moved to <code>awq_marlin</code> by default)</span></td><td><span lang="zh-CN">只有权重；激活保持 FP16 / BF16（W4A16）</span><span lang="en">Weights only; activations stay FP16 / BF16 (W4A16)</span></td><td><span lang="zh-CN">Marlin 的 <code>gptq_marlin_gemm</code>，边读边解；强制 <code>--quantization awq</code> 时先 <code>awq_dequantize</code> 再 <code>torch.matmul</code></span><span lang="en">Marlin’s <code>gptq_marlin_gemm</code>, dequantizing as it reads; with <code>--quantization awq</code> forced, <code>awq_dequantize</code> and then <code>torch.matmul</code></span></td><td><span lang="zh-CN">Marlin：sm_80；不融合的 <code>awq</code>：sm_75（T4 只能走它）</span><span lang="en">Marlin: sm_80; the unfused <code>awq</code>: sm_75 (the only path on a T4)</span></td></tr>
+    <tr><td><span lang="zh-CN">int4 GPTQ（<code>gptq_marlin</code>）</span><span lang="en">int4 GPTQ (<code>gptq_marlin</code>)</span></td><td><span lang="zh-CN">只有权重（W4A16）</span><span lang="en">Weights only (W4A16)</span></td><td><span lang="zh-CN">同一个 Marlin 内核；普通 <code>gptq</code> 在 NVIDIA 上已移除</span><span lang="en">The same Marlin kernel; plain <code>gptq</code> was removed on NVIDIA</span></td><td><span lang="zh-CN">sm_80</span><span lang="en">sm_80</span></td></tr>
+    <tr><td><span lang="zh-CN">NVFP4：E2M1，每 16 个一个 E4M3 缩放，加一个 FP32 张量缩放（<code>modelopt_fp4</code>）</span><span lang="en">NVFP4: E2M1, one E4M3 scale per 16, plus one FP32 tensor scale (<code>modelopt_fp4</code>)</span></td><td><span lang="zh-CN">Blackwell 上权重和激活（W4A4）；更早的卡上只有权重</span><span lang="en">Weights and activations on Blackwell (W4A4); weights only on earlier cards</span></td><td><span lang="zh-CN"><code>--fp4-gemm-backend auto</code>：SM100 上 <code>flashinfer_cutedsl</code>，SM80–SM90 上 Marlin W4A16，其余 <code>flashinfer_cutlass</code></span><span lang="en"><code>--fp4-gemm-backend auto</code>: <code>flashinfer_cutedsl</code> on SM100, Marlin W4A16 on SM80–SM90, <code>flashinfer_cutlass</code> otherwise</span></td><td><span lang="zh-CN">原生：Blackwell（SM100 以上；FP4 MMA 在 sm_100a 系和 sm_120a 系）；后备：sm_80。本专题不上机</span><span lang="en">Native: Blackwell (SM100 and up; FP4 MMA on the sm_100a and sm_120a families); fallback: sm_80. Never run in this topic</span></td></tr>
+    <tr><td><span lang="zh-CN">MXFP4：E2M1，每 32 个一个 UE8M0 缩放（<code>mxfp4</code>，主要用于 MoE）</span><span lang="en">MXFP4: E2M1, one UE8M0 scale per 32 (<code>mxfp4</code>, mainly for MoE)</span></td><td><span lang="zh-CN">专家权重</span><span lang="en">Expert weights</span></td><td><span lang="zh-CN">FlashInfer CUTLASS、FlashInfer TRT-LLM 或 Marlin 的 MoE 实现，以及按架构调参的 Triton 内核</span><span lang="en">The FlashInfer CUTLASS, FlashInfer TRT-LLM or Marlin MoE implementations, and a Triton kernel tuned per architecture</span></td><td><span lang="zh-CN"><code>Mxfp4Config</code> 最低 sm_80；FP4 tensor core 只在 Blackwell。本专题不上机</span><span lang="en"><code>Mxfp4Config</code> minimum sm_80; FP4 tensor cores only on Blackwell. Never run in this topic</span></td></tr>
+  </table>
+  </div>
+  <p class="small" lang="zh-CN">方法名、内核与计算能力都按 v0.5.22 标签下的源文件（<code>srt/layers/quantization/</code>、<code>srt/hardware_backend/gpu/quantization/awq_kernels.py</code>、<code>kernels/ops/gemm/fp8_kernel.py</code>、<code>srt/arg_groups/fields/exec_.py</code>），2026-11-01 用 curl 取回核对；FP4 指令的目标架构按 PTX ISA，同日读取。L4 上块缩放 FP8 走 Triton 是由选择逻辑推出的，没有上机确认。这张表的两侧不是 NVIDIA 与 Apple，所以表头不着色。</p>
+  <p class="small" lang="en">Method names, kernels and compute capabilities follow the source files at the v0.5.22 tag (<code>srt/layers/quantization/</code>, <code>srt/hardware_backend/gpu/quantization/awq_kernels.py</code>, <code>kernels/ops/gemm/fp8_kernel.py</code>, <code>srt/arg_groups/fields/exec_.py</code>), fetched with curl and checked on 2026-11-01; the target architectures of the FP4 instructions follow the PTX ISA, read the same day. That block-scaled FP8 takes Triton on an L4 is inferred from the selection logic, not confirmed on one. The two sides of this table are not NVIDIA and Apple, so its headers carry no colour.</p>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 仅权重 int4 GEMV：边读边解量化</h3><h3 lang="en">(a) A weight-only int4 GEMV dequantizing on the fly</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="2800"
+         data-captions='["全图：y = W x，x 是一个 token 的 FP16 激活，W 的每一行是打包的 int4。一个 SIMD-group（CUDA 里是一个 warp）算一行，图里是其中一条 lane 的一步。按播放逐步看。",
+           "1. 一次读 16 字节：4 个 32 位字，每个字 8 个 int4 权重，共 32 个。32 条 lane 一起读，就是连续的 512 字节，访存是合并的。",
+           "2. 这 32 个权重属于同一组（128 个一组）。组的缩放 s 是 FP16，零点 z 是 1 字节；每 128 个权重只多读 3 字节。",
+           "3. 在寄存器里解包：第 j 个权重是 (word 右移 4j 位) 与 0xF，再转成浮点。解出来的值只活在寄存器里，从不写回显存。",
+           "4. 两个点积：qx 累加 q 乘 x，sx 累加 x。因为 (q − z) · s · x 的和等于 s · (qx − z · sx)，每 32 个权重只乘一次缩放。",
+           "5. 32 条 lane 各自累加完一整行后，simd_sum 把 32 个部分和加起来，lane 0 写出 y[r]。CUDA 里对应 warp shuffle 归约。",
+           "6. 字节账：每 128 个权重，FP16 要读 256 字节，int4 读 64 + 3 = 67 字节，少约 3.8 倍。Lab B 在 16384 × 16384 上量到快 3.84 倍。",
+           "7. 不融合的做法：先用一个内核把整张 W 解成 FP16 写回显存，再让 FP16 GEMV 读回来，每个权重 4.5 字节。Lab B 量到只有 FP16 的 0.44 倍，SGLang 强制 awq 时就是这样。"]'
+         data-captions-en='["The whole picture: y = W x, where x is one token of FP16 activations and each row of W is packed int4. One SIMD-group (a warp in CUDA) computes one row, and the figure shows one step of one of its lanes. Press Play to step through.",
+           "1. One 16-byte load: 4 words of 32 bits, 8 int4 weights per word, 32 weights in all. With 32 lanes loading together, that is 512 contiguous bytes, a coalesced access.",
+           "2. These 32 weights belong to one group (groups of 128). The group scale s is FP16 and the zero point z one byte, so every 128 weights cost only 3 extra bytes.",
+           "3. Unpack in registers: weight j is (word shifted right by 4j) AND 0xF, converted to float. The unpacked values live only in registers and are never written back to memory.",
+           "4. Two dot products: qx accumulates q times x and sx accumulates x. Since the sum of (q − z) · s · x equals s · (qx − z · sx), the scale is applied once per 32 weights.",
+           "5. Once each of the 32 lanes has accumulated across the whole row, simd_sum adds the 32 partial sums and lane 0 writes y[r]. In CUDA this is a warp-shuffle reduction.",
+           "6. The byte count: per 128 weights, FP16 reads 256 bytes and int4 reads 64 + 3 = 67, about 3.8 times fewer. Lab B measured 3.84 times as fast at 16384 × 16384.",
+           "7. The unfused way: one kernel first writes the whole of W back as FP16, and an FP16 GEMV then reads it again, 4.5 bytes per weight. Lab B measured only 0.44 times FP16; this is what SGLang does when awq is forced."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="22" class="small" lang="zh-CN">x：一个 token 的 FP16 激活，与这 32 个权重对应的一段</text><text x="30" y="22" class="small" lang="en">x: one token of FP16 activations, the stretch matching these 32 weights</text>
+      <rect class="box" x="30" y="30" width="122" height="30"/><rect class="box" x="160" y="30" width="122" height="30"/><rect class="box" x="290" y="30" width="122" height="30"/><rect class="box" x="420" y="30" width="122" height="30"/>
+      <text x="42" y="50" class="mono">x[e+0..7]</text><text x="172" y="50" class="mono">x[e+8..15]</text><text x="302" y="50" class="mono">x[e+16..23]</text><text x="432" y="50" class="mono">x[e+24..31]</text>
+
+      <text x="30" y="88" class="small" lang="zh-CN">1. W 的第 r 行：一条 lane 一次读 16 字节</text><text x="30" y="88" class="small" lang="en">1. Row r of W: one lane loads 16 bytes at a time</text>
+      <rect class="box" x="30" y="96" width="122" height="44"/><rect class="box" x="160" y="96" width="122" height="44"/><rect class="box" x="290" y="96" width="122" height="44"/><rect class="box" x="420" y="96" width="122" height="44"/>
+      <g data-step="1">
+        <rect class="box" x="30" y="96" width="122" height="44"/><rect class="box" x="160" y="96" width="122" height="44"/><rect class="box" x="290" y="96" width="122" height="44"/><rect class="box" x="420" y="96" width="122" height="44"/>
+      </g>
+      <text x="42" y="115" class="mono">word 0</text><text x="172" y="115" class="mono">word 1</text><text x="302" y="115" class="mono">word 2</text><text x="432" y="115" class="mono">word 3</text>
+      <text x="42" y="132" class="small">q0 … q7</text><text x="172" y="132" class="small">q8 … q15</text><text x="302" y="132" class="small">q16 … q23</text><text x="432" y="132" class="small">q24 … q31</text>
+      <rect class="box" x="580" y="96" width="290" height="44"/>
+      <g data-step="2"><rect class="box" x="580" y="96" width="290" height="44"/></g>
+      <text x="592" y="115" lang="zh-CN">2. 组 g：缩放 s（FP16）、零点 z（1 字节）</text><text x="592" y="115" lang="en">2. Group g: scale s (FP16), zero z (1 byte)</text>
+      <text x="592" y="132" class="small" lang="zh-CN">每 128 个权重一组，多读 3 字节</text><text x="592" y="132" class="small" lang="en">one group per 128 weights, 3 extra bytes</text>
+
+      <text x="30" y="168" class="small" lang="zh-CN">3. 在寄存器里解包</text><text x="30" y="168" class="small" lang="en">3. Unpack in registers</text>
+      <rect class="box" x="30" y="176" width="512" height="44"/>
+      <g data-step="3"><rect class="box" x="30" y="176" width="512" height="44"/><path class="arrow" d="M480 140 L480 172"/></g>
+      <text x="42" y="196" class="mono">q_j = (word &gt;&gt; 4j) &amp; 0xF, j = 0 … 7</text>
+      <text x="42" y="212" class="small" lang="zh-CN">转成浮点；不写回显存</text><text x="42" y="212" class="small" lang="en">converted to float; never written back</text>
+
+      <text x="30" y="248" class="small" lang="zh-CN">4. 两个点积，每 32 个权重乘一次缩放</text><text x="30" y="248" class="small" lang="en">4. Two dot products, one scale multiply per 32 weights</text>
+      <rect class="box" x="30" y="256" width="512" height="56"/>
+      <g data-step="4"><rect class="box" x="30" y="256" width="512" height="56"/><path class="arrow" d="M480 220 L480 252"/><path class="arrow" d="M580 118 L561 118 L561 284 L546 284"/></g>
+      <text x="42" y="278" class="mono">qx += Σ q·x</text><text x="230" y="278" class="mono">sx += Σ x</text>
+      <text x="42" y="300" class="mono">acc += s · (qx − z · sx)</text>
+
+      <text x="30" y="340" class="small" lang="zh-CN">5. 一个 SIMD-group 归约出一行</text><text x="30" y="340" class="small" lang="en">5. One SIMD-group reduces one row</text>
+      <rect class="box" x="30" y="348" width="512" height="36"/>
+      <g data-step="5"><rect class="box" x="30" y="348" width="512" height="36"/><path class="arrow" d="M480 312 L480 344"/></g>
+      <text x="42" y="371" class="mono">y[r] = simd_sum(acc) · 32 lanes</text>
+
+      <rect class="box" x="580" y="176" width="290" height="208"/>
+      <g data-step="6"><rect class="box" x="580" y="176" width="290" height="208"/></g>
+      <text x="592" y="198" lang="zh-CN">6. 每 128 个权重读多少字节</text><text x="592" y="198" lang="en">6. Bytes read per 128 weights</text>
+      <text x="592" y="226" class="mono">FP16</text><text x="680" y="226" class="mono">256 B</text>
+      <text x="592" y="250" class="mono">int8</text><text x="680" y="250" class="mono">128 + 2 B</text>
+      <text x="592" y="274" class="mono">int4</text><text x="680" y="274" class="mono">64 + 3 B</text>
+      <text x="592" y="306" class="small" lang="zh-CN"><tspan style="fill: var(--metal)">实验 B · M5 实测，21 次中位数，2026-11-01：</tspan></text><text x="592" y="306" class="small" lang="en"><tspan style="fill: var(--metal)">Lab B · measured on M5, median of 21, 2026-11-01:</tspan></text>
+      <text x="592" y="328" class="mono">FP16 4205 µs · int4 1095 µs</text>
+      <text x="592" y="352" class="small" lang="zh-CN">16384 × 16384，快 3.84 倍，带宽都约 128 GB/s</text><text x="592" y="352" class="small" lang="en">16384 × 16384: 3.84× as fast, both near 128 GB/s</text>
+
+      <path class="lane" d="M30 404 L870 404"/>
+      <g data-step="7">
+        <text x="30" y="428" lang="zh-CN">7. 不融合：先把 W 解成 FP16 写回显存，再由 FP16 GEMV 读回，每个权重 4.5 字节</text><text x="30" y="428" lang="en">7. Unfused: write W back as FP16, then an FP16 GEMV reads it again, 4.5 bytes per weight</text>
+        <text x="30" y="452" class="small" lang="zh-CN"><tspan style="fill: var(--metal)">实验 B · M5 实测，21 次中位数，2026-11-01：</tspan>9589 µs，只有 FP16 的 0.44 倍；SGLang 强制 awq 时就是这样</text><text x="30" y="452" class="small" lang="en"><tspan style="fill: var(--metal)">Lab B · measured on M5, median of 21, 2026-11-01:</tspan> 9589 µs, 0.44 times FP16; SGLang does this when awq is forced</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) FP8 块缩放 GEMM 的一个 tile</h3><h3 lang="en">(b) One tile of an FP8 block-scaled GEMM</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="2800"
+         data-captions='["全图：C = A · Bᵀ 的一个 BM × BN 输出 tile，沿 K 每次走一个 128 宽的块。A 是 FP8 激活，B 是 FP8 权重，两边各有自己的缩放。按播放逐步看。",
+           "1. 激活在线量化：每个 token 每 128 个通道算一次最大绝对值，缩放 = 最大值 / 448（E4M3 的最大值）。这一块里 A 的每一行有一个缩放 a_s。",
+           "2. 权重离线量化，每个 128 × 128 的块一个缩放 b_s，存在检查点里（weight_block_size 为 [128, 128]）。BN = 128 时，这一块的 B 只有一个 b_s。",
+           "3. tensor core 算这一个 K 块的 FP8 × FP8 点积，得到 BM × BN 的 FP32 部分和。在 L4 上是 sm_89 的 FP8 mma 指令。",
+           "4. 部分和逐元素乘上 a_s[:, None] 和 b_s[None, :]，这就是解量化。缩放沿 K 每 128 个就变，所以只能在每个 K 块里乘，不能留到最后。",
+           "5. 乘过缩放的部分和加进 FP32 累加器，然后换下一个 K 块和新的 a_s、b_s。SGLang 的 Triton 内核里就是第 126 行那一句。",
+           "6. DeepSeek-V3 的报告：H800 上 FP8 累加只保留约 14 位。办法是每 N_C = 128 个元素（4 次 WGMMA）把部分和提升到 CUDA core 的 FP32 寄存器，缩放也在这时乘上。",
+           "7. K 走完后转成 BF16 写回 C。同一个想法有三种实现：L4 上是 Triton，H100 和 B200 上是 DeepGEMM，SM120 上是 CUTLASS 的 fp8_blockwise_scaled_mm。"]'
+         data-captions-en='["The whole picture: one BM × BN output tile of C = A · Bᵀ, walking along K one 128-wide block at a time. A holds FP8 activations, B FP8 weights, and each side has its own scales. Press Play to step through.",
+           "1. Activations are quantized online: the largest absolute value of each token over each 128 channels, scale = that value / 448 (the largest E4M3 value). Each row of A in this block has one scale a_s.",
+           "2. Weights are quantized offline, one scale b_s per 128 × 128 block, stored in the checkpoint (weight_block_size is [128, 128]). With BN = 128, this block of B has a single b_s.",
+           "3. The tensor cores compute the FP8 × FP8 dot product for this K block, giving a BM × BN FP32 partial sum. On an L4 that is the FP8 mma instruction of sm_89.",
+           "4. The partial sum is multiplied elementwise by a_s[:, None] and b_s[None, :]; this is the dequantization. The scales change every 128 along K, so they must be applied inside each K block, not at the end.",
+           "5. The scaled partial sum is added into the FP32 accumulator, and the loop moves to the next K block with new a_s and b_s. In the Triton kernel of SGLang this is the single statement on line 126.",
+           "6. The DeepSeek-V3 report: FP8 accumulation on H800s keeps only about 14 bits. The fix promotes the partial sums to FP32 registers on the CUDA cores every N_C = 128 elements (4 WGMMAs), applying the scales at that moment.",
+           "7. When K is done, the tile is converted to BF16 and written to C. The same idea has three implementations: Triton on an L4, DeepGEMM on H100 and B200, and CUTLASS fp8_blockwise_scaled_mm on SM120."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="330" y="22" class="small" lang="zh-CN">2. B：FP8 权重，每 128 × 128 一个缩放</text><text x="330" y="22" class="small" lang="en">2. B: FP8 weights, one scale per 128 × 128</text>
+      <rect class="box" x="330" y="30" width="240" height="74"/>
+      <g data-step="2"><rect class="box" x="330" y="30" width="240" height="74"/></g>
+      <text x="342" y="56" class="mono">b: BK × BN (E4M3)</text>
+      <text x="342" y="80" class="mono">b_s: 1 per block</text>
+      <text x="342" y="96" class="small" lang="zh-CN">离线算好，存在检查点里</text><text x="342" y="96" class="small" lang="en">computed offline, in the checkpoint</text>
+
+      <text x="30" y="132" class="small" lang="zh-CN">1. A：FP8 激活，在线量化</text><text x="30" y="132" class="small" lang="en">1. A: FP8 activations, quantized online</text>
+      <rect class="box" x="30" y="140" width="270" height="92"/>
+      <g data-step="1"><rect class="box" x="30" y="140" width="270" height="92"/></g>
+      <text x="42" y="164" class="mono">a: BM × BK (E4M3)</text>
+      <text x="42" y="188" class="mono">a_s: 1 per row per 128</text>
+      <text x="42" y="212" class="small" lang="zh-CN">a_s = max|x| / 448</text><text x="42" y="212" class="small" lang="en">a_s = max|x| / 448</text>
+
+      <text x="330" y="132" class="small" lang="zh-CN">3. tensor core</text><text x="330" y="132" class="small" lang="en">3. Tensor cores</text>
+      <rect class="box" x="330" y="140" width="240" height="92"/>
+      <g data-step="3"><rect class="box" x="330" y="140" width="240" height="92"/><path class="arrow" d="M450 104 L450 136"/><path class="arrow" d="M300 186 L326 186"/></g>
+      <text x="342" y="164" class="mono">tl.dot(a, b)</text>
+      <text x="342" y="188" class="small" lang="zh-CN">FP8 × FP8 → FP32 部分和</text><text x="342" y="188" class="small" lang="en">FP8 × FP8 → FP32 partial sum</text>
+      <text x="342" y="212" class="small" lang="zh-CN">形状 BM × BN</text><text x="342" y="212" class="small" lang="en">shape BM × BN</text>
+
+      <text x="600" y="132" class="small" lang="zh-CN">4. 解量化</text><text x="600" y="132" class="small" lang="en">4. Dequantize</text>
+      <rect class="box" x="600" y="140" width="270" height="92"/>
+      <g data-step="4"><rect class="box" x="600" y="140" width="270" height="92"/><path class="arrow" d="M570 186 L596 186"/></g>
+      <text x="612" y="164" class="mono">× a_s[:, None]</text>
+      <text x="612" y="188" class="mono">× b_s[None, :]</text>
+      <text x="612" y="212" class="small" lang="zh-CN">每个 K 块乘一次</text><text x="612" y="212" class="small" lang="en">once per K block</text>
+
+      <rect class="box" x="600" y="262" width="270" height="72"/><rect class="box" x="330" y="262" width="240" height="72"/>
+      <g data-step="5">
+        <rect class="box" x="600" y="262" width="270" height="72"/><rect class="box" x="330" y="262" width="240" height="72"/>
+        <path class="arrow" d="M735 232 L735 258"/><path class="arrow" d="M600 298 L574 298"/><path class="arrow" d="M450 262 L450 236"/>
+      </g>
+      <text x="612" y="286" class="mono">accumulator +=</text>
+      <text x="612" y="310" class="small" lang="zh-CN">5. FP32，BM × BN 个寄存器</text><text x="612" y="310" class="small" lang="en">5. FP32, BM × BN registers</text>
+      <text x="612" y="326" class="small">fp8_kernel.py · line 126</text>
+      <text x="342" y="286" lang="zh-CN">下一个 K 块（128 宽）</text><text x="342" y="286" lang="en">Next K block (128 wide)</text>
+      <text x="342" y="310" class="small" lang="zh-CN">换新的 a_s 和 b_s</text><text x="342" y="310" class="small" lang="en">new a_s and b_s</text>
+
+      <rect class="box" x="30" y="262" width="270" height="72"/>
+      <g data-step="6"><rect class="box" x="30" y="262" width="270" height="72"/></g>
+      <text x="42" y="286" lang="zh-CN">6. DeepSeek-V3：提升累加</text><text x="42" y="286" lang="en">6. DeepSeek-V3: promote</text>
+      <text x="42" y="306" class="small" lang="zh-CN">H800 的 FP8 累加约 14 位</text><text x="42" y="306" class="small" lang="en">H800 FP8 accumulation: about 14 bits</text>
+      <text x="42" y="324" class="small" lang="zh-CN">每 N_C = 128 个元素提升到 FP32</text><text x="42" y="324" class="small" lang="en">to FP32 every N_C = 128 elements</text>
+
+      <rect class="box" x="330" y="362" width="540" height="40"/>
+      <g data-step="7"><rect class="box" x="330" y="362" width="540" height="40"/><path class="arrow" d="M735 334 L735 358"/></g>
+      <text x="342" y="387" lang="zh-CN">7. K 走完：FP32 → BF16，写回 C</text><text x="342" y="387" lang="en">7. K done: FP32 → BF16, store C</text>
+
+      <path class="lane" d="M30 420 L870 420"/>
+      <g data-step="7">
+        <text x="30" y="446" class="mono" lang="zh-CN">L4：Triton · H100 / B200：DeepGEMM · SM120：CUTLASS</text><text x="30" y="446" class="mono" lang="en">L4: Triton · H100 / B200: DeepGEMM · SM120: CUTLASS</text>
+      </g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 L4 上比较 FP8 与 int4 检查点的解码速度；用 CuTe DSL 跑一个 GEMM</h3><h3 lang="en">Lab A · Compare the decode speed of an FP8 and an int4 checkpoint on an L4; run a CuTe DSL GEMM</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。根据 SGLang v0.5.22 的源码（<code>python/sglang/benchmark/one_batch.py</code>、<code>srt/layers/quantization/awq/awq.py</code>、<code>srt/layers/quantization/fp8_utils.py</code>、<code>srt/hardware_backend/gpu/quantization/awq_kernels.py</code>）、Hugging Face 上两个检查点的 <code>config.json</code>，以及 CUTLASS v4.8.0 与 v4.8.1 的 CuTe DSL 文档和示例整理。命令都在 <a href="../lab-setup/index.html">实验环境</a> 页的 <code>sglang-lab</code> 容器里执行（用 <code>docker exec -it sglang-lab bash</code> 进去，<code>/work</code> 挂在主机的 <code>$HOME/llm-lab</code>，模型缓存挂在 <code>$HOME/hf-cache</code>）。<code>bench_one_batch</code> 不起服务器、不开网络端口，但第一次会从 Hugging Face 下载三个检查点（FP8、AWQ 和 BF16 原模型，共约 31.9 GB，都不是 gated 模型）。还没有租用的机器，所以这里不给数字，只描述应当看到的形状。租用、计费和停机的规则见实验环境页。</div>
+    <div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Assembled from the SGLang v0.5.22 source (<code>python/sglang/benchmark/one_batch.py</code>, <code>srt/layers/quantization/awq/awq.py</code>, <code>srt/layers/quantization/fp8_utils.py</code>, <code>srt/hardware_backend/gpu/quantization/awq_kernels.py</code>), the <code>config.json</code> of the two checkpoints on Hugging Face, and the CuTe DSL documentation and examples of CUTLASS v4.8.0 and v4.8.1. Every command runs in the <code>sglang-lab</code> container of the <a href="../lab-setup/index.html">Lab environment</a> page (enter it with <code>docker exec -it sglang-lab bash</code>; <code>/work</code> is mounted from the host’s <code>$HOME/llm-lab</code> and the model cache from <code>$HOME/hf-cache</code>). <code>bench_one_batch</code> starts no server and opens no network port, but on first use it downloads three checkpoints from Hugging Face (FP8, AWQ and the original BF16, about 31.9 GB in all, none of them gated). There is no rented machine yet, so this lab gives no numbers, only the shape you should see. The rules for renting, billing and shutting down are on the lab environment page.</div>
+    <ol>
+      <li><span lang="zh-CN">先在 CPU 上算下界。解码一个 token 至少要把每层权重读一遍；L4 的显存带宽是 300 GB/s（NVIDIA 的 L4 页面，2026-11-01 读取）。Qwen3-8B 的词表 151936、隐藏维 4096，输入嵌入和 <code>lm_head</code> 各 6.22 亿个 16 位参数、各约 1.24 GB，两个量化检查点里都没有量化；解码一步只从嵌入表里取一行，却要把 <code>lm_head</code> 读完。于是每步大约要读：FP8 检查点 9.44 − 1.24 ≈ 8.2 GB，下界约 27 ms；AWQ 检查点 6.10 − 1.24 ≈ 4.9 GB，下界约 16 ms；BF16 的 16.38 − 1.24 ≈ 15.1 GB，下界约 50 ms（推断：按文件大小和 <code>config.json</code> 算，忽略 KV 缓存和激活）。</span><span lang="en">First work out the lower bounds on the CPU. Decoding one token reads every layer’s weights at least once, and the L4 has 300 GB/s of memory bandwidth (NVIDIA’s L4 page, read 2026-11-01). Qwen3-8B has a vocabulary of 151936 and a hidden size of 4096, so the input embedding and <code>lm_head</code> hold 622 million 16-bit parameters each, about 1.24 GB each, unquantized in both quantized checkpoints; a decode step takes one row of the embedding table but reads all of <code>lm_head</code>. Each step therefore reads about 9.44 − 1.24 ≈ 8.2 GB for the FP8 checkpoint, a bound of about 27 ms; 6.10 − 1.24 ≈ 4.9 GB for the AWQ checkpoint, about 16 ms; and 16.38 − 1.24 ≈ 15.1 GB for BF16, about 50 ms (an inference from the file sizes and <code>config.json</code>, ignoring the KV cache and activations).</span></li>
+      <li><span lang="zh-CN">L4 层：把下面的脚本存成 <code>/work/quant_decode.sh</code>。它对 FP8 检查点、AWQ 检查点（默认会改走 <code>awq_marlin</code>）、强制走不融合 <code>awq</code> 的同一个 AWQ 检查点，以及 BF16 原模型，各用 <code>bench_one_batch</code> 跑批大小 1、8、32，输入 256 个 token、输出 64 个，结果追加到同一个 jsonl 文件：</span><span lang="en">The L4 tier: save the script below as <code>/work/quant_decode.sh</code>. For the FP8 checkpoint, the AWQ checkpoint (moved onto <code>awq_marlin</code> by default), the same AWQ checkpoint forced onto the unfused <code>awq</code>, and the original BF16 model, it runs <code>bench_one_batch</code> at batch sizes 1, 8 and 32 with 256 input and 64 output tokens, appending the results to one jsonl file:</span><pre data-lang="sh" data-file="quant_decode.sh"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the library documentation on 2026-11-01
+# quant_decode.sh: decode speed of FP8, int4 (fused and unfused) and BF16 checkpoints of Qwen3-8B on one L4
+set -e
+cd /work
+OUT=/work/quant_decode.jsonl
+COMMON="--batch-size 1 8 32 --input-len 256 --output-len 64 --result-filename $OUT"
+
+# FP8 E4M3, 128 x 128 block scales (config.json: quant_method fp8, weight_block_size [128, 128])
+python3 -m sglang.benchmark.one_batch --model-path Qwen/Qwen3-8B-FP8 --run-name fp8_block $COMMON 2&gt;&amp;1 | tee fp8_block.log
+
+# int4 AWQ, group 128 with zero points; SGLang moves it onto awq_marlin (dequantize as it reads)
+python3 -m sglang.benchmark.one_batch --model-path Qwen/Qwen3-8B-AWQ --run-name awq_marlin $COMMON 2&gt;&amp;1 | tee awq_marlin.log
+
+# the same checkpoint forced onto plain awq: awq_dequantize to FP16, then torch.matmul
+python3 -m sglang.benchmark.one_batch --model-path Qwen/Qwen3-8B-AWQ --quantization awq --run-name awq_unfused $COMMON 2&gt;&amp;1 | tee awq_unfused.log
+
+# BF16 baseline: about 16.4 GB of weights on a 24 GB card; if it does not load, drop this row
+python3 -m sglang.benchmark.one_batch --model-path Qwen/Qwen3-8B --run-name bf16 $COMMON 2&gt;&amp;1 | tee bf16.log</pre></li>
+      <li><span lang="zh-CN">运行它，再把中位解码延迟排成一张表：</span><span lang="en">Run it, then lay out the median decode latencies as one table:</span><pre data-lang="sh" data-file="in the container, L4"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the library documentation on 2026-11-01
+bash /work/quant_decode.sh
+grep -h "convertible to\|forcing awq" /work/awq_marlin.log /work/awq_unfused.log
+python3 - &lt;&lt;'PY'
+import json
+for line in open("/work/quant_decode.jsonl"):
+    r = json.loads(line)
+    print(f"{r['run_name']:&gt;12}  bs={r['batch_size']:&gt;2}  decode median {r['median_decode_latency'] * 1e3:7.2f} ms"
+          f"  {r['median_decode_throughput']:8.1f} tok/s")
+PY</pre><span lang="zh-CN">预期结果（定性描述，不是实测）：<code>grep</code> 应当找到两行日志，一行是 <code>awq.py</code> 第 340–342 行的「The model is convertible to awq_marlin during runtime. Using awq_marlin kernel.」，一行是第 347–353 行的「Detected that the model can run with awq_marlin, however you specified quantization=awq explicitly, so forcing awq」。批大小 1 时，<code>awq_marlin</code> 最快、<code>fp8_block</code> 次之、<code>bf16</code> 最慢，三者的排序和相对差距应当接近第 1 步按字节算的下界（推断）；<code>awq_unfused</code> 应当比 <code>bf16</code> 还慢，因为它每一步都把 int4 解成 FP16 写回再读（概念 2）。批大小 32 时 <code>awq_marlin</code> 的优势应当缩小：Marlin 论文说到 64–128 时加速逐渐变小；而 FP8 检查点的激活也是 FP8，用的是 FP8 tensor core，批越大越占便宜（推断）。所有数字都应当在第 1 步的下界之上，相差多少就是这台卡上内核与理想带宽的距离。</span><span lang="en">Expected result (described, not measured): the <code>grep</code> should find two log lines, one from lines 340–342 of <code>awq.py</code>, “The model is convertible to awq_marlin during runtime. Using awq_marlin kernel.”, and one from lines 347–353, “Detected that the model can run with awq_marlin, however you specified quantization=awq explicitly, so forcing awq”. At batch size 1, <code>awq_marlin</code> should be fastest, <code>fp8_block</code> next and <code>bf16</code> slowest, in roughly the order and ratios of the byte-based bounds of step 1 (an inference); <code>awq_unfused</code> should be slower even than <code>bf16</code>, because every step writes the int4 weights back as FP16 and reads them again (concept 2). At batch size 32 the lead of <code>awq_marlin</code> should shrink, as the Marlin paper says its speedup gradually drops towards 64–128, while the FP8 checkpoint quantizes its activations too and uses the FP8 tensor cores, which pays more as the batch grows (an inference). Every number should sit above its bound from step 1, and the gap is the distance between the kernels on this card and the ideal bandwidth.</span></li>
+      <li><span lang="zh-CN"><strong>CuTe DSL 的 GEMM。</strong>SGLang v0.5.22 依赖 <code>nvidia-cutlass-dsl[cu13]==4.8.0</code>，所以镜像里应当已经装好了 CuTe DSL（推断：按 <code>pyproject.toml</code> 第 55 行，没有在镜像里确认）。取同一版本的示例，按 CuTe DSL 文档「示例要与 DSL 的版本对应」的要求克隆 v4.8.0 标签（这个示例文件在 v4.8.0 与 v4.8.1 两个标签下逐字相同，2026-11-01 用 <code>diff</code> 核对），然后用 Ampere 的 tensor core GEMM 示例比较 FP16 与 FP8 E4M3。L4 是 sm_89，PTX ISA 说 FP8 的 <code>mma</code> 要求 sm_89 以上，所以这个示例的 FP8 分支应当能在 L4 上跑（推断：没有上机确认）。A 与 B 都取 K 方向连续（<code>--a_major k --b_major k</code>）：示例对 FP8 只在操作数按行连续时用 8 位的 <code>ldmatrix</code>，否则退回逐字节拷贝（<code>tensorop_gemm.py</code> 第 601–623 行）；两边都沿 K 连续应当就是这条快路径（推断：没有逐行核对参数到布局的映射）：</span><span lang="en"><strong>A CuTe DSL GEMM.</strong> SGLang v0.5.22 depends on <code>nvidia-cutlass-dsl[cu13]==4.8.0</code>, so the image should already have the CuTe DSL installed (an inference from line 55 of <code>pyproject.toml</code>, not confirmed in the image). Take the examples of the same release: the CuTe DSL docs ask that the examples match the DSL version, so clone the v4.8.0 tag (this example file is identical byte for byte under the v4.8.0 and v4.8.1 tags, checked with <code>diff</code> on 2026-11-01), then use the Ampere tensor-core GEMM example to compare FP16 against FP8 E4M3. The L4 is sm_89 and the PTX ISA says FP8 <code>mma</code> needs sm_89 or higher, so the example’s FP8 branch should run on an L4 (an inference, not confirmed on one). Make both A and B contiguous along K (<code>--a_major k --b_major k</code>): for FP8 the example uses the 8-bit <code>ldmatrix</code> only when an operand is row-major and otherwise falls back to byte-by-byte copies (<code>tensorop_gemm.py</code>, lines 601–623); both operands contiguous along K should be that fast path (an inference; the mapping from flags to layouts was not checked line by line):</span><pre data-lang="sh" data-file="in the container, L4"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the library documentation on 2026-11-01
+python3 -c "import importlib.metadata as m; print('nvidia-cutlass-dsl', m.version('nvidia-cutlass-dsl'))"
+git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass.git /work/cutlass
+cd /work/cutlass
+EX=examples/python/CuTeDSL/cute/ampere/kernel/dense_gemm/tensorop_gemm.py
+for DT in Float16 Float8E4M3FN; do
+  for MNK in 4096,4096,4096,1 128,4096,4096,1; do
+    python3 $EX --mnkl $MNK --ab_dtype $DT --c_dtype Float16 --acc_dtype Float32 \
+      --a_major k --b_major k --c_major n --use_cold_l2 2&gt;&amp;1 | grep -E "Execution time|PASS"
+  done
+done</pre><span lang="zh-CN">预期结果（定性描述，不是实测）：每一次先 JIT 编译，再做参考检查（与 PyTorch 的结果比较，默认容差 1e-3），通过后打印「[DSL INFO] Execution time: … microseconds per iteration」和「PASS」。把时间换成 TFLOP/s（2 · M · N · K / 时间）。M = 4096 时受算力限制，FP8 应当明显快于 FP16，上限是 L4 页面上两个数之比，即约 2 倍（推断）；这个教学示例是否接近那个上限，正是 Lab A 要看的。M = 128 时更接近解码的形状，B 矩阵（4096 × 4096）FP8 是 16 MB、FP16 是 32 MB，时间应当主要由读 B 决定，FP8 同样约快 2 倍，但原因换成了字节（推断）。这个示例没有块缩放，它是概念 4 那个内核去掉 <code>a_s</code>、<code>b_s</code> 之后的骨架；Blackwell 上带缩放的版本是 <code>blackwell/kernel/blockwise_gemm/blockwise_gemm.py</code>，本专题不上机。</span><span lang="en">Expected result (described, not measured): each run first JIT-compiles, then checks against PyTorch (default tolerance 1e-3), and on success prints “[DSL INFO] Execution time: … microseconds per iteration” and “PASS”. Turn the times into TFLOP/s (2 · M · N · K / time). At M = 4096 the GEMM is compute-bound and FP8 should be clearly faster than FP16, bounded by the ratio of the two figures on the L4 page, about 2 times (an inference); how close this teaching example comes to that bound is exactly what Lab A looks at. At M = 128, closer to the shape of decode, the B matrix (4096 × 4096) is 16 MB in FP8 and 32 MB in FP16, so the time should be set mostly by reading B, and FP8 should again be about 2 times as fast, but now because of bytes (an inference). This example has no block scales: it is the skeleton of the kernel of concept 4 without <code>a_s</code> and <code>b_s</code>; the scaled version for Blackwell is <code>blackwell/kernel/blockwise_gemm/blockwise_gemm.py</code>, not run in this topic.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 对照：带缩放的 int8 与 int4 仅权重 GEMV，对比 FP16</h3><h3 lang="en">Lab B · The Metal twin: int8 and int4 weight-only GEMVs with scales, against FP16</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01。下面的输出都来自这台 Mac 上的实际运行。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01. The outputs below come from actual runs on this Mac.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>wq_gemv.swift</code>。它在运行时编译四个 Metal 内核，算一个 token 的 y = W x，W 是 N × K，取三种大小：4096 × 4096、8192 × 8192、16384 × 16384。<code>gemv_f16</code> 读 FP16 权重；<code>gemv_i8</code> 读 int8 权重，每 128 个一个 FP16 缩放（对称）；<code>gemv_i4</code> 读打包的 int4，每 32 位字 8 个，每 128 个一个 FP16 缩放和一个 1 字节零点（非对称，与 AWQ 的格式同类），按动画 (a) 在寄存器里解包，用 s · (Σqx − z · Σx) 每 32 个权重只乘一次缩放；<code>dequant_i4</code> 加 <code>gemv_f16</code> 是不融合的做法，先把 int4 解成 FP16 写进一块私有缓冲区，再读回来。四个内核都是一个 SIMD-group 算一行、每个线程组 8 行，FP32 累加。为了不让权重留在缓存里，程序给每种格式复制 C 份权重，让 C 份 FP16 合计至少 512 MB，一个 command buffer 依次算完 C 份；预热一次后跑 21 个 command buffer 取中位数，GPU 时间来自 <code>gpuStartTime</code> 和 <code>gpuEndTime</code>。检查有两项：抽 64 行与 Double 参考比对（每种格式与它自己解量化后的权重比，所以误差只来自浮点运算）；再用全部 N 行算 int8 和 int4 的输出相对 FP16 输出的相对 RMS 误差，这才是量化本身带来的误差：</span><span lang="en">Save the program below as <code>wq_gemv.swift</code>. It compiles four Metal kernels at run time and computes y = W x for one token, with W of N × K at three sizes: 4096 × 4096, 8192 × 8192 and 16384 × 16384. <code>gemv_f16</code> reads FP16 weights; <code>gemv_i8</code> reads int8 weights with one FP16 scale per 128 (symmetric); <code>gemv_i4</code> reads packed int4, 8 per 32-bit word, with one FP16 scale and one 1-byte zero point per 128 (asymmetric, the same family as AWQ’s format), unpacks in registers as in diagram (a), and applies the scale once per 32 weights through s · (Σqx − z · Σx); <code>dequant_i4</code> followed by <code>gemv_f16</code> is the unfused way, writing the int4 weights out as FP16 into a private buffer and reading them back. All four kernels give one row to one SIMD-group, 8 rows per threadgroup, with FP32 accumulation. To keep the weights out of the caches, the program makes C copies of each format’s weights, enough for the C FP16 copies to total at least 512 MB, and one command buffer runs all C in turn; after one warm-up it runs 21 command buffers and takes the median, with GPU time from <code>gpuStartTime</code> and <code>gpuEndTime</code>. There are two checks: 64 sampled rows against a Double reference (each format against its own dequantized weights, so the error comes only from floating-point arithmetic); and, over all N rows, the relative RMS error of the int8 and int4 outputs against the FP16 output, which is the error quantization itself introduces:</span><pre data-lang="swift" data-file="wq_gemv.swift">// wq_gemv.swift: weight-only quantized GEMV in Metal. y = W x, W is N x K, x is one FP16 token.
+// FP16 weights against int8 (symmetric, one FP16 scale per 128 weights) and int4 (asymmetric,
+// one FP16 scale and one zero point per 128 weights, 8 weights packed per 32-bit word), dequantized on the fly.
+// A fourth path dequantizes the int4 matrix to FP16 in memory first and then runs the FP16 GEMV
+// (the shape of a quantized layer without a matching fused kernel).
+// GPU time from the command buffer; each command buffer runs C GEMVs over C copies of the weights
+// (C x FP16 size &gt;= 512 MB, so the copies do not stay in cache); median of 21 after one warm-up.
+// build: swiftc -O wq_gemv.swift -o wq_gemv    run: ./wq_gemv
+import Foundation
+import Metal
+
+let source = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+constant uint G = 128;   // weights per scale group, along K
+
+// One SIMD-group per output row; 8 SIMD-groups (8 rows) per threadgroup.
+// FP16: each lane loads 16 bytes (8 weights) per step.
+kernel void gemv_f16(device const half* W [[buffer(0)]], device const half* x [[buffer(1)]],
+                     device float* y [[buffer(2)]], constant uint&amp; K [[buffer(3)]],
+                     uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+                     uint lane [[thread_index_in_simdgroup]]) {
+    uint row = tg * 8 + sg;
+    device const half4* w = (device const half4*)(W + ulong(row) * K);
+    device const half4* xv = (device const half4*)x;
+    float acc = 0.0f;
+    for (uint i = lane * 2; i &lt; K / 4; i += 64) {
+        acc += dot(float4(w[i]), float4(xv[i])) + dot(float4(w[i + 1]), float4(xv[i + 1]));
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) y[row] = acc;
+}
+
+// int8: each lane loads 16 bytes (16 weights) per step, all inside one group of 128.
+// y = sum over groups of s_g * sum(q * x): the scale is applied once per 16 weights.
+kernel void gemv_i8(device const char* W [[buffer(0)]], device const half* x [[buffer(1)]],
+                    device float* y [[buffer(2)]], constant uint&amp; K [[buffer(3)]],
+                    device const half* S [[buffer(4)]],
+                    uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+                    uint lane [[thread_index_in_simdgroup]]) {
+    uint row = tg * 8 + sg;
+    device const char4* w = (device const char4*)(W + ulong(row) * K);
+    device const half4* xv = (device const half4*)x;
+    device const half* s = S + ulong(row) * (K / G);
+    float acc = 0.0f;
+    for (uint e = lane * 16; e &lt; K; e += 512) {
+        uint i = e / 4;
+        float d = dot(float4(w[i]), float4(xv[i])) + dot(float4(w[i + 1]), float4(xv[i + 1]))
+                + dot(float4(w[i + 2]), float4(xv[i + 2])) + dot(float4(w[i + 3]), float4(xv[i + 3]));
+        acc += d * float(s[e / G]);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) y[row] = acc;
+}
+
+// int4: each lane loads 16 bytes (4 words, 32 weights) per step. Weight = (q - z) * s, so
+// sum((q - z) * s * x) = s * (sum(q * x) - z * sum(x)): unpack nibbles, two dots, one scale per 32 weights.
+kernel void gemv_i4(device const uint* W [[buffer(0)]], device const half* x [[buffer(1)]],
+                    device float* y [[buffer(2)]], constant uint&amp; K [[buffer(3)]],
+                    device const half* S [[buffer(4)]], device const uchar* Z [[buffer(5)]],
+                    uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+                    uint lane [[thread_index_in_simdgroup]]) {
+    uint row = tg * 8 + sg;
+    device const uint4* w = (device const uint4*)(W + ulong(row) * (K / 8));
+    device const half* s = S + ulong(row) * (K / G);
+    device const uchar* z = Z + ulong(row) * (K / G);
+    float acc = 0.0f;
+    for (uint e = lane * 32; e &lt; K; e += 1024) {
+        uint4 p = w[e / 32];
+        float qx = 0.0f, sx = 0.0f;
+        for (uint j = 0; j &lt; 4; j++) {
+            uint word = p[j];
+            device const half4* xv = (device const half4*)(x + e + j * 8);
+            float4 x0 = float4(xv[0]), x1 = float4(xv[1]);
+            float4 q0 = float4(uint4(word, word &gt;&gt; 4, word &gt;&gt; 8, word &gt;&gt; 12) &amp; 0xFu);
+            float4 q1 = float4(uint4(word &gt;&gt; 16, word &gt;&gt; 20, word &gt;&gt; 24, word &gt;&gt; 28) &amp; 0xFu);
+            qx += dot(q0, x0) + dot(q1, x1);
+            sx += dot(x0, float4(1.0f)) + dot(x1, float4(1.0f));
+        }
+        uint g = e / G;
+        acc += float(s[g]) * (qx - float(z[g]) * sx);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) y[row] = acc;
+}
+
+// Unfused path, step 1: one thread per 32-bit word writes its 8 weights back as FP16.
+kernel void dequant_i4(device const uint* W [[buffer(0)]], device const half* S [[buffer(4)]],
+                       device const uchar* Z [[buffer(5)]], device half* Out [[buffer(6)]],
+                       uint i [[thread_position_in_grid]]) {
+    uint word = W[i];
+    uint g = (i * 8) / G;
+    float s = float(S[g]), z = float(Z[g]);
+    device half4* o = (device half4*)(Out + ulong(i) * 8);
+    o[0] = half4((float4(uint4(word, word &gt;&gt; 4, word &gt;&gt; 8, word &gt;&gt; 12) &amp; 0xFu) - z) * s);
+    o[1] = half4((float4(uint4(word &gt;&gt; 16, word &gt;&gt; 20, word &gt;&gt; 24, word &gt;&gt; 28) &amp; 0xFu) - z) * s);
+}
+"""
+
+guard let dev = MTLCreateSystemDefaultDevice() else { print("no Metal device"); exit(1) }
+let lib = try dev.makeLibrary(source: source, options: nil)
+func pso(_ n: String) throws -&gt; MTLComputePipelineState { try dev.makeComputePipelineState(function: lib.makeFunction(name: n)!) }
+let pF16 = try pso("gemv_f16"), pI8 = try pso("gemv_i8"), pI4 = try pso("gemv_i4"), pDq = try pso("dequant_i4")
+let queue = dev.makeCommandQueue()!
+let G = 128
+print("device=\(dev.name) threadExecutionWidth=\(pF16.threadExecutionWidth) maxTotalThreadsPerThreadgroup=\(pF16.maxTotalThreadsPerThreadgroup)")
+print("-- y = W x, one FP16 token; group size 128 along K; FP32 accumulate; median of 21 command buffers")
+
+var rng: UInt64 = 0x9E3779B97F4A7C15
+@inline(__always) func uni() -&gt; Float {            // uniform in [-1, 1)
+    rng = rng &amp;* 6364136223846793005 &amp;+ 1442695040888963407
+    return Float(Int64(bitPattern: rng) &gt;&gt; 40) / Float(1 &lt;&lt; 23)
+}
+
+func median(_ a: [Double]) -&gt; Double { let s = a.sorted(); return s[s.count / 2] }
+
+for (N, K) in [(4096, 4096), (8192, 8192), (16384, 16384)] {
+    let nk = N * K, groups = nk / G
+    let f16Bytes = nk * 2, i8Bytes = nk + groups * 2, i4Bytes = nk / 2 + groups * 3
+    let C = max(1, (512 &lt;&lt; 20) / f16Bytes)          // copies, so C x FP16 size &gt;= 512 MB
+    // weights: roughly Gaussian (sum of 4 uniforms), quantized per group of 128 on the CPU
+    let wF = dev.makeBuffer(length: f16Bytes, options: .storageModeShared)!
+    let wQ8 = dev.makeBuffer(length: nk, options: .storageModeShared)!
+    let s8 = dev.makeBuffer(length: groups * 2, options: .storageModeShared)!
+    let wQ4 = dev.makeBuffer(length: nk / 2, options: .storageModeShared)!
+    let s4 = dev.makeBuffer(length: groups * 2, options: .storageModeShared)!
+    let z4 = dev.makeBuffer(length: groups, options: .storageModeShared)!
+    let pF = wF.contents().bindMemory(to: Float16.self, capacity: nk)
+    let p8 = wQ8.contents().bindMemory(to: Int8.self, capacity: nk)
+    let ps8 = s8.contents().bindMemory(to: Float16.self, capacity: groups)
+    let p4 = wQ4.contents().bindMemory(to: UInt32.self, capacity: nk / 8)
+    let ps4 = s4.contents().bindMemory(to: Float16.self, capacity: groups)
+    let pz4 = z4.contents().bindMemory(to: UInt8.self, capacity: groups)
+    var tmp = [Float](repeating: 0, count: G)
+    for g in 0..&lt;groups {
+        var amax: Float = 0, lo = Float.greatestFiniteMagnitude, hi = -Float.greatestFiniteMagnitude
+        for j in 0..&lt;G {
+            let v = Float(Float16(0.5 * (uni() + uni() + uni() + uni())))   // the FP16 weight is the truth
+            tmp[j] = v; pF[g * G + j] = Float16(v)
+            amax = max(amax, abs(v)); lo = min(lo, v); hi = max(hi, v)
+        }
+        let sc8 = Float16(amax / 127); ps8[g] = sc8
+        let sc4 = Float16((hi - lo) / 15); ps4[g] = sc4
+        let zp = UInt8(max(0, min(15, (-lo / Float(sc4)).rounded()))); pz4[g] = zp
+        for j in 0..&lt;G {
+            p8[g * G + j] = Int8(max(-127, min(127, (tmp[j] / Float(sc8)).rounded())))
+        }
+        for w in 0..&lt;(G / 8) {
+            var word: UInt32 = 0
+            for b in 0..&lt;8 {
+                let q = UInt32(max(0, min(15, (tmp[w * 8 + b] / Float(sc4)).rounded() + Float(zp))))
+                word |= q &lt;&lt; (4 * UInt32(b))
+            }
+            p4[g * (G / 8) + w] = word
+        }
+    }
+    func copies(_ b: MTLBuffer) -&gt; [MTLBuffer] {
+        [b] + (1..&lt;C).map { _ in let c = dev.makeBuffer(length: b.length, options: .storageModeShared)!; memcpy(c.contents(), b.contents(), b.length); return c }
+    }
+    let cF = copies(wF), c8 = copies(wQ8), c4 = copies(wQ4)
+    let xB = dev.makeBuffer(length: K * 2, options: .storageModeShared)!
+    let px = xB.contents().bindMemory(to: Float16.self, capacity: K)
+    for k in 0..&lt;K { px[k] = Float16(uni()) }
+    let yF = dev.makeBuffer(length: N * 4, options: .storageModeShared)!
+    let y8 = dev.makeBuffer(length: N * 4, options: .storageModeShared)!
+    let y4 = dev.makeBuffer(length: N * 4, options: .storageModeShared)!
+    let yU = dev.makeBuffer(length: N * 4, options: .storageModeShared)!
+    let scratch = dev.makeBuffer(length: f16Bytes, options: .storageModePrivate)!   // the dequantized FP16 matrix
+    var kk = UInt32(K)
+
+    func run(_ fmt: Int) -&gt; Double {
+        let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+        for c in 0..&lt;C {
+            switch fmt {
+            case 0: enc.setComputePipelineState(pF16); enc.setBuffer(cF[c], offset: 0, index: 0); enc.setBuffer(yF, offset: 0, index: 2)
+            case 1: enc.setComputePipelineState(pI8); enc.setBuffer(c8[c], offset: 0, index: 0); enc.setBuffer(y8, offset: 0, index: 2); enc.setBuffer(s8, offset: 0, index: 4)
+            case 2: enc.setComputePipelineState(pI4); enc.setBuffer(c4[c], offset: 0, index: 0); enc.setBuffer(y4, offset: 0, index: 2); enc.setBuffer(s4, offset: 0, index: 4); enc.setBuffer(z4, offset: 0, index: 5)
+            default:   // unfused: dequantize to FP16 in memory, then the FP16 GEMV reads it back
+                enc.setComputePipelineState(pDq); enc.setBuffer(c4[c], offset: 0, index: 0); enc.setBuffer(s4, offset: 0, index: 4)
+                enc.setBuffer(z4, offset: 0, index: 5); enc.setBuffer(scratch, offset: 0, index: 6)
+                enc.dispatchThreads(MTLSize(width: nk / 8, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                enc.setComputePipelineState(pF16); enc.setBuffer(scratch, offset: 0, index: 0); enc.setBuffer(yU, offset: 0, index: 2)
+            }
+            enc.setBuffer(xB, offset: 0, index: 1); enc.setBytes(&amp;kk, length: 4, index: 3)
+            enc.dispatchThreadgroups(MTLSize(width: N / 8, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        return (cb.gpuEndTime - cb.gpuStartTime) * 1e6 / Double(C)      // microseconds per GEMV
+    }
+    var us = [Double](repeating: 0, count: 4)
+    for f in 0..&lt;4 { _ = run(f); us[f] = median((0..&lt;21).map { _ in run(f) }) }
+
+    // checks on 64 sampled rows: each GPU result against a Double reference of the same format
+    let gF = yF.contents().bindMemory(to: Float.self, capacity: N)
+    let g8 = y8.contents().bindMemory(to: Float.self, capacity: N)
+    let g4 = y4.contents().bindMemory(to: Float.self, capacity: N)
+    let gU = yU.contents().bindMemory(to: Float.self, capacity: N)
+    var errs = [Double](repeating: 0, count: 4), refMax = 0.0
+    for r in stride(from: 0, to: N, by: N / 64) {
+        var rf = 0.0, r8 = 0.0, r4 = 0.0
+        for k in 0..&lt;K {
+            let i = r * K + k, g = i / G, xv = Double(px[k])
+            rf += Double(pF[i]) * xv
+            r8 += Double(p8[i]) * Double(ps8[g]) * xv
+            let q = Double((p4[i / 8] &gt;&gt; (4 * UInt32(i % 8))) &amp; 0xF)
+            r4 += (q - Double(pz4[g])) * Double(ps4[g]) * xv
+        }
+        refMax = max(refMax, abs(rf))
+        errs[0] = max(errs[0], abs(Double(gF[r]) - rf)); errs[1] = max(errs[1], abs(Double(g8[r]) - r8)); errs[2] = max(errs[2], abs(Double(g4[r]) - r4))
+        errs[3] = max(errs[3], abs(Double(gU[r]) - r4))
+    }
+    // quantization error: int8 / int4 GPU outputs against the FP16 GPU output, all N rows (relative RMS)
+    var d8 = 0.0, d4 = 0.0, nf = 0.0
+    for r in 0..&lt;N { let f = Double(gF[r]); nf += f * f; d8 += pow(Double(g8[r]) - f, 2); d4 += pow(Double(g4[r]) - f, 2) }
+    let names = ["fp16", "int8", "int4", "int4_unfused"]
+    let bytes = [f16Bytes, i8Bytes, i4Bytes, i4Bytes + 2 * f16Bytes]   // unfused: read int4, write FP16, read FP16
+    print(String(format: "N=%d K=%d  copies=%d  fp16 weights %.1f MB", N, K, C, Double(f16Bytes) / 1e6))
+    for f in 0..&lt;4 {
+        let gbs = Double(bytes[f]) / (us[f] * 1e-6) / 1e9
+        let q = f == 0 || f == 3 ? "" : String(format: "  quant_err_vs_fp16=%.2e", sqrt((f == 1 ? d8 : d4) / nf))
+        print(String(format: "  %@  bytes=%7.1f MB  median_us=%8.1f  GB/s=%6.1f  speedup_vs_fp16=%.2fx  max_abs_err_vs_ref=%.1e (ref max %.1f)%@",
+                     names[f].padding(toLength: 12, withPad: " ", startingAt: 0), Double(bytes[f]) / 1e6, us[f], gbs, us[0] / us[f], errs[f], refMax, q))
+    }
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是实验 Mac（Apple M5，32 GB 统一内存，macOS 27.2，Apple Swift 6.4.2）在 2026-11-01（本地时间 01:36，PDT）的实测，不是计算值；这是连续三次运行中的第三次。第一次运行有几项明显偏慢（例如 8192 × 8192 的 FP16 用了 1288.7 µs、16384 × 16384 的 FP16 用了 5078.1 µs），第二次和第三次之间每一项相差不到 2%，所以贴的是第三次；偏慢的原因没有查明，这台 Mac 同时在跑别的程序，可能与它们争用 GPU（推断）：</span><span lang="en">Build and run it. These are measurements on the lab Mac (Apple M5, 32 GB of unified memory, macOS 27.2, Apple Swift 6.4.2) on 2026-11-01 (local time 01:36, PDT), not computed values; this is the third of three consecutive runs. The first run was clearly slower in places (for example 1288.7 µs for FP16 at 8192 × 8192 and 5078.1 µs for FP16 at 16384 × 16384), while the second and third agree to within 2% on every line, so the third is pasted; the cause of the slow lines was not established, and other programs were running on this Mac at the time and may have shared the GPU (an inference):</span><pre>$ swiftc -O wq_gemv.swift -o wq_gemv
+$ ./wq_gemv
+device=Apple M5 threadExecutionWidth=32 maxTotalThreadsPerThreadgroup=1024
+-- y = W x, one FP16 token; group size 128 along K; FP32 accumulate; median of 21 command buffers
+N=4096 K=4096  copies=16  fp16 weights 33.6 MB
+  fp16          bytes=   33.6 MB  median_us=   264.8  GB/s= 126.7  speedup_vs_fp16=1.00x  max_abs_err_vs_ref=6.4e-06 (ref max 61.0)
+  int8          bytes=   17.0 MB  median_us=   134.0  GB/s= 127.1  speedup_vs_fp16=1.98x  max_abs_err_vs_ref=5.0e-06 (ref max 61.0)  quant_err_vs_fp16=5.84e-03
+  int4          bytes=    8.8 MB  median_us=    69.2  GB/s= 126.8  speedup_vs_fp16=3.82x  max_abs_err_vs_ref=3.6e-06 (ref max 61.0)  quant_err_vs_fp16=9.43e-02
+  int4_unfused  bytes=   75.9 MB  median_us=   571.5  GB/s= 132.8  speedup_vs_fp16=0.46x  max_abs_err_vs_ref=8.9e-03 (ref max 61.0)
+N=8192 K=8192  copies=4  fp16 weights 134.2 MB
+  fp16          bytes=  134.2 MB  median_us=  1053.6  GB/s= 127.4  speedup_vs_fp16=1.00x  max_abs_err_vs_ref=1.3e-05 (ref max 85.5)
+  int8          bytes=   68.2 MB  median_us=   533.2  GB/s= 127.8  speedup_vs_fp16=1.98x  max_abs_err_vs_ref=6.3e-06 (ref max 85.5)  quant_err_vs_fp16=6.02e-03
+  int4          bytes=   35.1 MB  median_us=   275.7  GB/s= 127.4  speedup_vs_fp16=3.82x  max_abs_err_vs_ref=6.0e-06 (ref max 85.5)  quant_err_vs_fp16=9.48e-02
+  int4_unfused  bytes=  303.6 MB  median_us=  2369.4  GB/s= 128.1  speedup_vs_fp16=0.44x  max_abs_err_vs_ref=1.4e-02 (ref max 85.5)
+N=16384 K=16384  copies=1  fp16 weights 536.9 MB
+  fp16          bytes=  536.9 MB  median_us=  4205.0  GB/s= 127.7  speedup_vs_fp16=1.00x  max_abs_err_vs_ref=2.2e-05 (ref max 105.6)
+  int8          bytes=  272.6 MB  median_us=  2124.1  GB/s= 128.3  speedup_vs_fp16=1.98x  max_abs_err_vs_ref=1.2e-05 (ref max 105.6)  quant_err_vs_fp16=5.80e-03
+  int4          bytes=  140.5 MB  median_us=  1095.3  GB/s= 128.3  speedup_vs_fp16=3.84x  max_abs_err_vs_ref=1.1e-05 (ref max 105.6)  quant_err_vs_fp16=9.29e-02
+  int4_unfused  bytes= 1214.3 MB  median_us=  9589.2  GB/s= 126.6  speedup_vs_fp16=0.44x  max_abs_err_vs_ref=2.2e-02 (ref max 105.6)</pre></li>
+      <li><span lang="zh-CN">先看检查。<code>max_abs_err_vs_ref</code> 在融合的三个内核上都在 10<sup>-6</sup> 到 10<sup>-5</sup> 量级，而参考值的量级是 61–106：每个内核都按它自己的格式算对了。不融合那一行的误差大约是 10<sup>-2</sup>，因为它把解出来的权重先舍入成 FP16 再算，多了一次舍入，参考值却没有这一步。<code>quant_err_vs_fp16</code> 是量化本身的代价：int8 约 0.6%，int4 约 9.4%。这里的权重是近似高斯的随机数，没有 AWQ 那样按激活挑出的显著通道，所以这只说明「4 位比 8 位粗得多」，不代表真实模型的精度损失。</span><span lang="en">Look at the checks first. <code>max_abs_err_vs_ref</code> for the three fused kernels is of order 10<sup>-6</sup> to 10<sup>-5</sup>, against reference values of order 61–106: each kernel computes its own format correctly. The unfused line is off by about 10<sup>-2</sup>, because it rounds the dequantized weights to FP16 before multiplying, an extra rounding the reference does not make. <code>quant_err_vs_fp16</code> is the cost of quantization itself: about 0.6% for int8 and about 9.4% for int4. These weights are roughly Gaussian random numbers, with none of the salient channels that AWQ picks out from activations, so this shows only that 4 bits are far coarser than 8, not the accuracy loss of a real model.</span></li>
+      <li><span lang="zh-CN">读带宽一列，这是本实验的重点。三个大小、四个内核的 <code>GB/s</code> 都在 126.6–132.8 之间，约为 Apple 给 M5 标称的 153 GB/s 统一内存带宽的 83–87%（Apple 新闻稿，2025-10，2026-11-01 读取）：每一个内核都受带宽限制，时间几乎正比于字节。所以 <code>speedup_vs_fp16</code> 就是字节之比：int8 是 2 / (1 + 2/128) ≈ 1.97，实测 1.98；int4 是 2 / (0.5 + 3/128) ≈ 3.82，实测 3.82–3.84。4 倍里少掉的那一点就是缩放和零点的字节。不融合的 int4 要读写 0.5 + 2 + 2 = 4.5 字节每个权重，理论上是 FP16 的 2 / 4.52 ≈ 0.44 倍，实测 0.44–0.46 倍：同样受带宽限制，只是搬的字节更多。4096 × 4096 的不融合一行带宽略高（132.8 GB/s），可能是 33.6 MB 的 FP16 中间结果部分留在了缓存里（推断）。</span><span lang="en">Read the bandwidth column; this is the point of the lab. At all three sizes, the <code>GB/s</code> of all four kernels lies between 126.6 and 132.8, about 83–87% of the 153 GB/s of unified memory bandwidth that Apple quotes for the M5 (Apple newsroom, October 2025, read 2026-11-01): every kernel is bandwidth-bound and its time is almost proportional to its bytes. So <code>speedup_vs_fp16</code> is simply the ratio of bytes: for int8, 2 / (1 + 2/128) ≈ 1.97, measured 1.98; for int4, 2 / (0.5 + 3/128) ≈ 3.82, measured 3.82–3.84. What is missing from 4 is the bytes of the scales and zero points. The unfused int4 reads and writes 0.5 + 2 + 2 = 4.5 bytes per weight, in theory 2 / 4.52 ≈ 0.44 times FP16, measured 0.44–0.46: just as bandwidth-bound, only moving more bytes. Its bandwidth at 4096 × 4096 is a little higher (132.8 GB/s), perhaps because part of the 33.6 MB FP16 intermediate stayed in a cache (an inference).</span></li>
+      <li><span lang="zh-CN">自己改两处。第一，把组大小从 128 改成 32（改 Metal 源码里的 <code>G</code> 和 Swift 里的 <code>G</code>，int4 内核的一次读取正好是一组），按 2 / (0.5 + 3/32) 预测 int4 的加速会降到约 3.4 倍，再量一次看是否吻合。第二，把 int4 改成对称（去掉零点，q 取 −8 到 7），看 <code>quant_err_vs_fp16</code> 怎样变，以及字节少了 1/128 之后加速是否有可见的变化。</span><span lang="en">Change two things yourself. First, change the group size from 128 to 32 (both <code>G</code> in the Metal source and <code>G</code> in the Swift code; one load of the int4 kernel is then exactly one group), predict from 2 / (0.5 + 3/32) that the int4 speedup drops to about 3.4 times, and measure to see whether it matches. Second, make int4 symmetric (drop the zero point, with q from −8 to 7), and see how <code>quant_err_vs_fp16</code> changes and whether saving 1/128 of a byte per weight makes any visible difference to the speedup.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>quant_decode.jsonl</code> 和整理出的表（每种检查点、每个批大小的中位解码延迟与吞吐），两行 <code>grep</code> 出的日志，CuTe DSL 示例四次运行的时间与 TFLOP/s；Lab B 在你的 Mac 上连续三次运行的输出，以及组大小 32 和对称 int4 两处改动的结果；一段 10 行以内的解释：为什么 int4 快 3.8 倍而不是 4 倍，为什么不融合的 int4 比 FP16 还慢，以及为什么 FP8 检查点在 L4 上能用 FP8 tensor core、在 A100 上却只能走仅权重内核。</div>
+    <div class="note" lang="en">Deliverables: Lab A’s <code>quant_decode.jsonl</code> and the table made from it (median decode latency and throughput for each checkpoint and batch size), the two log lines found by <code>grep</code>, and the times and TFLOP/s of the four runs of the CuTe DSL example; the output of three consecutive Lab B runs on your Mac, and the results of the two changes, group size 32 and symmetric int4; and an explanation in 10 lines or fewer of why int4 is 3.8 times as fast and not 4, why unfused int4 is slower than FP16, and why an FP8 checkpoint can use FP8 tensor cores on an L4 but only a weight-only kernel on an A100.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/phase-6">
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">1. 在 L4 上用 <code>--quantization awq</code> 强制加载 <code>Qwen/Qwen3-8B-AWQ</code>，权重只有 BF16 原模型的约 37%，解码却比 BF16 还慢。主要原因是什么？</p>
+      <p lang="en">1. On an L4, <code>Qwen/Qwen3-8B-AWQ</code> is loaded with <code>--quantization awq</code> forced. Its weights are about 37% of the BF16 model’s, yet it decodes more slowly than BF16. What is the main reason?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">L4 没有 int4 tensor core，所以 int4 乘法要用 CUDA core 模拟</span><span lang="en">The L4 has no int4 tensor cores, so int4 multiplies are emulated on CUDA cores</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">AWQ 的激活也被量化成 int4，需要额外的量化内核</span><span lang="en">AWQ quantizes the activations to int4 as well, which needs extra quantization kernels</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">这条路先把整张权重解成 FP16 写回显存，再由 <code>torch.matmul</code> 读回，每个权重搬的字节比 BF16 还多</span><span lang="en">This path first writes the whole weight matrix back as FP16, then <code>torch.matmul</code> reads it again, so each weight moves more bytes than in BF16</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>AWQLinearKernel.apply</code> 是 <code>awq_dequantize</code> 加 <code>torch.matmul</code>（<code>awq_kernels.py</code> 第 97–98 行）：读 0.5 字节、写 2 字节、再读 2 字节，Lab B 量到这种做法只有 FP16 的 0.44 倍，所以 c 正确。a 不对：W4A16 的内核本来就不用 int4 tensor core，Marlin 在同一张卡上把 int4 解成 FP16 喂给 FP16 tensor core，照样快。b 不对：AWQ 是仅权重量化，激活保持 FP16，<code>AWQConfig</code> 支持的激活类型只有 <code>torch.float16</code>。</span><span lang="en"><code>AWQLinearKernel.apply</code> is <code>awq_dequantize</code> plus <code>torch.matmul</code> (<code>awq_kernels.py</code>, lines 97–98): 0.5 bytes read, 2 written and 2 read again, and Lab B measured this approach at only 0.44 times FP16, so c is right. a is wrong: W4A16 kernels never use int4 tensor cores; on the same card Marlin dequantizes int4 to FP16 for the FP16 tensor cores and is fast. b is wrong: AWQ is weight-only, the activations stay FP16, and the only activation type <code>AWQConfig</code> supports is <code>torch.float16</code>.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">2. 在 FP8 块缩放 GEMM 里，为什么 <code>a_s</code> 和 <code>b_s</code> 要在 K 循环的每一步里乘上，而不是等点积全部算完再乘一次？</p>
+      <p lang="en">2. In an FP8 block-scaled GEMM, why are <code>a_s</code> and <code>b_s</code> applied at every step of the K loop rather than once after the whole dot product?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">缩放沿 K 每 128 个元素就换一个，每一段部分和要乘它自己那一段的缩放</span><span lang="en">The scales change every 128 elements along K, and each stretch of the partial sum must be multiplied by its own stretch’s scales</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">FP32 累加器放不下没乘缩放的大数，会溢出</span><span lang="en">The FP32 accumulator cannot hold the large unscaled values and would overflow</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">tensor core 的指令要求每次调用都带缩放操作数</span><span lang="en">The tensor-core instruction requires scale operands on every call</span></label>
+      <div class="why" hidden><span lang="zh-CN">激活是每 token 每 128 通道一个缩放，权重是每 128 × 128 一个，所以沿 K 的每个 128 宽的块都有不同的 <code>a_s</code> 和 <code>b_s</code>，Σ<sub>k</sub> s<sub>k</sub> · p<sub>k</sub> 不能写成 s · Σ<sub>k</sub> p<sub>k</sub>，a 正确。b 不对：E4M3 的最大值只有 448，128 个乘积之和远在 FP32 的范围之内，问题是缩放不同，不是溢出。c 不对：sm_89 和 Hopper 的 FP8 <code>mma</code> 不带缩放操作数，所以 Triton 才要在软件里乘；把缩放作为操作数交给指令的是 Blackwell 的块缩放 MMA。</span><span lang="en">Activations have one scale per token per 128 channels and weights one per 128 × 128, so every 128-wide block along K has different <code>a_s</code> and <code>b_s</code>, and Σ<sub>k</sub> s<sub>k</sub> · p<sub>k</sub> cannot be written as s · Σ<sub>k</sub> p<sub>k</sub>; a is right. b is wrong: the largest E4M3 value is only 448, and a sum of 128 products is well within FP32’s range; the issue is that the scales differ, not overflow. c is wrong: the FP8 <code>mma</code> of sm_89 and Hopper takes no scale operands, which is exactly why Triton applies them in software; handing scales to the instruction as operands is what Blackwell’s block-scaled MMA does.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 在 A100（sm_80）上用 SGLang v0.5.22 加载 <code>Qwen/Qwen3-8B-FP8</code>，线性层实际怎么算？</p>
+      <p lang="en">3. On an A100 (sm_80), SGLang v0.5.22 loads <code>Qwen/Qwen3-8B-FP8</code>. How are its linear layers actually computed?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">激活也量化成 FP8，用 DeepGEMM 的 FP8 tensor core 内核</span><span lang="en">The activations are quantized to FP8 too, and DeepGEMM’s FP8 tensor-core kernel runs</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">自动改走 Marlin 的 FP8 仅权重内核：权重以 FP8 读入、在寄存器里解成 16 位，激活不量化</span><span lang="en">It is moved onto Marlin’s FP8 weight-only kernel: weights are read as FP8 and dequantized to 16 bits in registers, and the activations are not quantized</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">加载失败，因为 FP8 方法的最低计算能力是 89</span><span lang="en">Loading fails, because the FP8 method has a minimum compute capability of 89</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>Fp8LinearMethod</code> 在 <code>can_auto_enable_marlin_fp8()</code> 为真时打开 Marlin（<code>fp8.py</code> 第 506–512 行），而这个判断就是 <code>80 &lt;= sm &lt; 89</code>（<code>fp8_utils.py</code> 第 2540–2546 行），所以 b 正确。a 不对：DeepGEMM 只在 sm_90 以上启用，而且 PTX ISA 说 FP8 的 <code>mma</code> 要 sm_89，A100 根本没有 FP8 tensor core。c 不对：<code>Fp8Config</code> 的最低计算能力是 80（<code>fp8.py</code> 第 323–333 行），最低 89 的是 <code>w8a8_fp8</code>。</span><span lang="en"><code>Fp8LinearMethod</code> turns on Marlin when <code>can_auto_enable_marlin_fp8()</code> is true (<code>fp8.py</code>, lines 506–512), and that test is exactly <code>80 &lt;= sm &lt; 89</code> (<code>fp8_utils.py</code>, lines 2540–2546), so b is right. a is wrong: DeepGEMM is enabled only from sm_90, and the PTX ISA says FP8 <code>mma</code> needs sm_89, so an A100 has no FP8 tensor cores at all. c is wrong: <code>Fp8Config</code> has a minimum compute capability of 80 (<code>fp8.py</code>, lines 323–333); the method with a minimum of 89 is <code>w8a8_fp8</code>.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">4. Lab B 里 int4 GEMV 比 FP16 快约 3.82–3.84 倍，而不是 4 倍。最主要的原因是什么？</p>
+      <p lang="en">4. In Lab B the int4 GEMV is about 3.82–3.84 times as fast as FP16, not 4 times. What is the main reason?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">解包 nibble 的移位和掩码占用了算力，内核开始受算力限制</span><span lang="en">Shifting and masking the nibbles costs compute, and the kernel starts to be compute-bound</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">int4 的权重太小，有一部分留在了缓存里，测得的带宽偏高</span><span lang="en">The int4 weights are so small that part of them stays in cache, inflating the measured bandwidth</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">每 128 个权重还要读 2 字节的缩放和 1 字节的零点，每个权重是 0.5 + 3/128 字节，2 除以它约等于 3.82</span><span lang="en">Every 128 weights also read a 2-byte scale and a 1-byte zero point, so each weight costs 0.5 + 3/128 bytes, and 2 divided by that is about 3.82</span></label>
+      <div class="why" hidden><span lang="zh-CN">四个内核的有效带宽都在约 127–128 GB/s，int4 与 FP16 几乎相同，说明 int4 仍然受带宽限制，解包的指令藏在访存后面，所以 a 不对。b 不对：程序复制了 C 份权重，使 FP16 合计至少 512 MB，而且如果有缓存效应，int4 的带宽应当明显高于 FP16，测量里没有。c 正确：按字节算 2 / (0.5 + 3/128) ≈ 3.82，与实测吻合。</span><span lang="en">All four kernels run at an effective 127–128 GB/s, int4 almost exactly like FP16, which shows that int4 is still bandwidth-bound and the unpacking instructions hide behind the memory traffic, so a is wrong. b is wrong: the program makes C copies of the weights so that the FP16 copies total at least 512 MB, and a cache effect would show int4 at a clearly higher bandwidth than FP16, which the measurement does not. c is right: by bytes, 2 / (0.5 + 3/128) ≈ 3.82, matching the measurement.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://github.com/sgl-project/sglang/tree/v0.5.22/python/sglang/srt/layers/quantization">srt/layers/quantization/</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/quantization/__init__.py">quantization/__init__.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docs/docs/advanced_features/quantization.mdx">docs/advanced_features/quantization.mdx</a> <span class="lvl" lang="zh-CN">源码与文档，入门到中级（v0.5.22 标签，2026-11-01 用 curl 取回）：所有量化方法的注册表、各平台的支持表，以及离线与在线量化的用法；概念 1、5 和对照表</span><span class="lvl" lang="en">Source and docs, introductory to intermediate (the v0.5.22 tag, fetched with curl on 2026-11-01): the registry of every quantization method, the per-platform support table, and how offline and online quantization are used; concepts 1 and 5 and the comparison table</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/quantization/awq/awq.py">quantization/awq/awq.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/quantization/gptq/gptq.py">quantization/gptq/gptq.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/hardware_backend/gpu/quantization/awq_kernels.py">hardware_backend/gpu/quantization/awq_kernels.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/quantization/marlin_utils.py">quantization/marlin_utils.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/jit/csrc/gemm/marlin/gptq_marlin.cuh">jit/csrc/gemm/marlin/gptq_marlin.cuh</a> <span class="lvl" lang="zh-CN">源码，中级到进阶：AWQ 与 GPTQ 怎样被改走 Marlin，不融合的 <code>awq_dequantize</code> 加 <code>torch.matmul</code>，Marlin 的形状约束和 CUDA 内核；概念 2、3，动画 (a) 和 Lab A</span><span class="lvl" lang="en">Source, intermediate to advanced: how AWQ and GPTQ are moved onto Marlin, the unfused <code>awq_dequantize</code> plus <code>torch.matmul</code>, Marlin’s shape constraints and its CUDA kernel; concepts 2 and 3, diagram (a) and Lab A</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/quantization/fp8.py">quantization/fp8.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/quantization/fp8_utils.py">quantization/fp8_utils.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/gemm/fp8_kernel.py">kernels/ops/gemm/fp8_kernel.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/deep_gemm_wrapper/configurer.py">deep_gemm_wrapper/configurer.py</a> <span class="lvl" lang="zh-CN">源码，进阶：FP8 线性层的 Marlin 后备、块缩放 GEMM 的后端选择顺序、Triton 的 <code>_w8a8_block_fp8_matmul</code>，以及 DeepGEMM 何时启用；概念 4、6 和动画 (b)</span><span class="lvl" lang="en">Source, advanced: the Marlin fallback of the FP8 linear layer, the backend order for block-scaled GEMMs, Triton’s <code>_w8a8_block_fp8_matmul</code>, and when DeepGEMM is enabled; concepts 4 and 6 and diagram (b)</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/quantization/modelopt_quant.py">quantization/modelopt_quant.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/quantization/mxfp4.py">quantization/mxfp4.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/exec_.py">arg_groups/fields/exec_.py</a> <span class="lvl" lang="zh-CN">源码，进阶：NVFP4 的权重布局与原生后端要求，MXFP4 的 MoE 实现，以及 <code>--fp8-gemm-backend</code>、<code>--fp4-gemm-backend</code> 的取值和帮助文字；概念 5</span><span class="lvl" lang="en">Source, advanced: the NVFP4 weight layout and the requirement of its native backends, the MXFP4 MoE implementations, and the choices and help text of <code>--fp8-gemm-backend</code> and <code>--fp4-gemm-backend</code>; concept 5</span></li>
+    <li><a href="https://github.com/deepseek-ai/DeepGEMM/tree/v2.1.1.post3">deepseek-ai/DeepGEMM @ v2.1.1.post3</a> <span class="lvl" lang="zh-CN">README，进阶（2026-11-01 读取）：设计取向、硬件与 CUDA 要求、缩放因子在 SM90 与 SM100 上的格式；SGLang 依赖的是自己的 <code>sgl-deep-gemm</code> 0.2.2；概念 6</span><span class="lvl" lang="en">README, advanced (read 2026-11-01): the design stance, hardware and CUDA requirements, and the scale formats on SM90 and SM100; SGLang depends on its own <code>sgl-deep-gemm</code> 0.2.2; concept 6</span></li>
+    <li><a href="https://github.com/NVIDIA/cutlass/tree/v4.8.1">NVIDIA/cutlass @ v4.8.1</a> · <a href="https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/quick_start.html">CuTe DSL Quick Start Guide</a> · <a href="https://github.com/NVIDIA/cutlass/blob/v4.8.1/examples/python/CuTeDSL/cute/ampere/kernel/dense_gemm/tensorop_gemm.py">cute/ampere/kernel/dense_gemm/tensorop_gemm.py</a> <span class="lvl" lang="zh-CN">README、文档与示例，中级到进阶（2026-11-01 读取）：CUTLASS 支持的数据类型与架构、CuTe DSL 的安装与限制、Lab A 第 4 步用的 GEMM 示例；概念 6</span><span class="lvl" lang="en">README, docs and example, intermediate to advanced (read 2026-11-01): the data types and architectures CUTLASS supports, installing the CuTe DSL and its limitations, and the GEMM example of Lab A step 4; concept 6</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html">PTX ISA</a> <span class="lvl" lang="zh-CN">官方文档，进阶（2026-11-01 读取）：<code>mma</code> 的 FP8 类型要求 sm_89，块缩放 <code>mma</code> 与 <code>tcgen05.mma</code> 的 <code>.kind::mxf4nvf4</code>、缩放类型与目标架构；概念 1、4、5</span><span class="lvl" lang="en">Official docs, advanced (read 2026-11-01): FP8 types of <code>mma</code> requiring sm_89, and the <code>.kind::mxf4nvf4</code>, scale types and target architectures of block-scaled <code>mma</code> and <code>tcgen05.mma</code>; concepts 1, 4 and 5</span></li>
+    <li><a href="https://arxiv.org/abs/2412.19437">DeepSeek-AI, DeepSeek-V3 Technical Report (arXiv:2412.19437, v2)</a> · <a href="https://huggingface.co/Qwen/Qwen3-8B-FP8/blob/main/config.json">Qwen3-8B-FP8 config.json</a> · <a href="https://huggingface.co/Qwen/Qwen3-8B-AWQ/blob/main/config.json">Qwen3-8B-AWQ config.json</a> <span class="lvl" lang="zh-CN">论文与配置，中级到进阶：细粒度 FP8 量化、累加提升和全用 E4M3 的理由（第 3.3.2 节），以及 Lab A 两个检查点的量化参数（2026-11-01 读取）</span><span class="lvl" lang="en">Paper and configurations, intermediate to advanced: fine-grained FP8 quantization, accumulation promotion and the case for E4M3 everywhere (section 3.3.2), and the quantization parameters of Lab A’s two checkpoints (read 2026-11-01)</span></li>
+    <li><a href="https://arxiv.org/abs/2209.05433">Micikevicius et al., FP8 Formats for Deep Learning (arXiv:2209.05433, v2)</a> · <a href="https://arxiv.org/abs/2310.10537">Rouhani et al., Microscaling Data Formats for Deep Learning (arXiv:2310.10537, v3)</a> <span class="lvl" lang="zh-CN">论文，中级：E4M3 与 E5M2 的定义，以及每块一个缩放的 MX 格式；概念 1</span><span class="lvl" lang="en">Papers, intermediate: the definition of E4M3 and E5M2, and the MX formats with one scale per block; concept 1</span></li>
+    <li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ (arXiv:2210.17323, v2)</a> · <a href="https://arxiv.org/abs/2306.00978">Lin et al., AWQ (arXiv:2306.00978, v6)</a> · <a href="https://arxiv.org/abs/2408.11743">Frantar et al., MARLIN (arXiv:2408.11743, v1)</a> <span class="lvl" lang="zh-CN">论文，中级到进阶：两种 int4 仅权重量化算法，以及让它们在批量推理时仍接近 4 倍加速的内核；概念 2、3</span><span class="lvl" lang="en">Papers, intermediate to advanced: the two int4 weight-only quantization algorithms, and the kernel that keeps them close to a 4 times speedup in batched inference; concepts 2 and 3</span></li>
+    <li><a href="https://www.nvidia.com/en-us/data-center/l4/">NVIDIA L4</a> · <a href="https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/">Apple newsroom: M5</a> · <a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification</a> <span class="lvl" lang="zh-CN">厂商页面与官方文档，入门（2026-11-01 读取）：L4 的 300 GB/s 与 tensor core 吞吐，M5 的 153 GB/s 统一内存带宽，以及 Lab B 用到的 <code>simd_sum</code> 和向量类型</span><span class="lvl" lang="en">Vendor pages and official docs, introductory (read 2026-11-01): the L4’s 300 GB/s and tensor-core throughput, the M5’s 153 GB/s of unified memory bandwidth, and the <code>simd_sum</code> and vector types used in Lab B</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 23 章 Advanced Optimizations for Matrix Multiplication 对应概念 3、4、6：GEMV 没有复用只剩带宽，沿 K 的分块循环正是块缩放每块变一次的地方，CUTLASS 的多层分块是它在 tensor core 上的推广</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 23, Advanced Optimizations for Matrix Multiplication, matches concepts 3, 4 and 6: a GEMV has no reuse and only bandwidth is left, the tiled loop along K is where block scales change from block to block, and CUTLASS’s levels of tiling carry it over to tensor cores</span></li>
+    <li lang="zh-CN">John L. Hennessy &amp; David A. Patterson, 《Computer Architecture: A Quantitative Approach》, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">第 4 章「Data-Level Parallelism in Vector, SIMD, and GPU Architectures」中讲 Roofline 可视化性能模型的一节对应概念 2 与 Lab B：强度约 1 FLOP/字节时时间只由字节决定，所以量化的收益就是字节之比</span></li>
+    <li lang="en">John L. Hennessy &amp; David A. Patterson, <em>Computer Architecture: A Quantitative Approach</em>, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">The section on the Roofline visual performance model in Chapter 4, “Data-Level Parallelism in Vector, SIMD, and GPU Architectures”, matches concept 2 and Lab B: at an intensity of about 1 FLOP per byte, bytes alone set the time, so the gain from quantization is the ratio of bytes</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-5-fusions/index.html">← <span lang="zh-CN">Phase 5 · 融合</span><span lang="en">Phase 5 · Fusions</span></a>
+    <a href="../phase-7-speculative-and-structured-output/index.html"><span lang="zh-CN">Phase 7 · 推测解码与结构化输出内核 →</span><span lang="en">Phase 7 · Speculative Decoding and Structured-Output Kernels →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

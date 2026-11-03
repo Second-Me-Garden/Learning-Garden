@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 3 · CUDA Graphs and the plan()/run() Split · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page">Phase 3 · CUDA Graphs and the plan()/run() Split</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 3 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 3 / 9 · about 1–2 weeks</p>
+  <h1>CUDA Graphs and the plan()/run() Split <span class="en" lang="zh-CN">CUDA 图与 plan()/run() 拆分：为什么解码步要被捕获、图里不许做什么、按固定批大小填充，以及 FlashInfer 把 CPU 上的 plan() 和图里的 run() 分开</span><span class="en" lang="en">Why decode steps are captured, what a graph may not contain, padding to fixed batch sizes, and how FlashInfer separates plan() on the CPU from run() inside the graph</span></h1>
+  <p class="lede" lang="zh-CN">解码的每一步要跑完所有层的所有内核，而小批次下每个内核都很短，CPU 一个一个地发射它们的开销可能和内核本身一样长。CUDA 图把一整步的内核连同参数录下来，之后每步只用一次调用重放。代价是图是死的：形状、指针、控制流都在捕获时定下，图里不能同步主机、不能按数据分配内存、不能换批大小。SGLang 的回答是三件事：按一组固定批大小各捕获一张图，把真实批次填充到最近的那个尺寸；把注意力后端的准备工作拆成图外和图内两半；用 FlashInfer 的 <code>plan()</code>/<code>run()</code> 拆分，在 CPU 上算好调度，写进地址固定的缓冲区，让图里的 <code>run()</code> 去读。这台 Apple M5 上的 Metal 对照实测：一步 512 个小内核，每个内核一个命令缓冲区时每步约 7.7–7.8 ms，编码一次、每步重放的间接命令缓冲区约 1.8–1.9 ms，而它的 CPU 编码时间不随内核数增长。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-11-01 在这台 Apple M5 上实际运行，数字原样贴出；Lab A <strong>未运行</strong>，是 2026-11-01 根据 SGLang v0.5.22 的源码整理的。</p>
+  <p class="lede" lang="en">Every decode step runs every kernel of every layer, and at small batch sizes each kernel is short, so the CPU cost of launching them one at a time can be as long as the kernels themselves. A CUDA graph records a whole step’s kernels with their arguments, and each later step replays it with a single call. The price is that a graph is frozen: shapes, pointers and control flow are fixed at capture, so a graph cannot synchronize with the host, allocate memory by data, or change batch size. SGLang answers with three things: it captures one graph per size in a fixed list of batch sizes and pads the real batch up to the nearest one; it splits the attention backend’s preparation into an out-of-graph half and an in-graph half; and it uses FlashInfer’s <code>plan()</code>/<code>run()</code> split, computing the schedule on the CPU and writing it into fixed-address buffers that <code>run()</code> reads inside the graph. Measured with the Metal twin on this Apple M5: a step of 512 small kernels takes about 7.7–7.8 ms with one command buffer per kernel and about 1.8–1.9 ms as an indirect command buffer encoded once and replayed each step, whose CPU encoding time does not grow with the kernel count. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-11-01 and its numbers are pasted as they came; Lab A is <strong>not run</strong>, assembled on 2026-11-01 from the SGLang v0.5.22 source.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说清楚为什么解码步值得捕获而大批次的预填充收益小，并用 Lab B 的数字估出每个内核的提交开销。</li>
+      <li lang="en">Explain why decode steps are worth capturing while large prefills gain little, and estimate the per-kernel submission cost from the numbers of Lab B.</li>
+      <li lang="zh-CN">列出捕获区里禁止的操作（主机同步、按数据分配、动态形状、依赖数据的控制流、CPU 工作），并说出各自的绕法。</li>
+      <li lang="en">List what is forbidden inside a capture (host syncs, data-dependent allocation, dynamic shapes, data-dependent control flow, CPU work) and the workaround for each.</li>
+      <li lang="zh-CN">给定 <code>max_bs</code>，写出 v0.5.22 默认捕获的解码批大小，并算出一个真实批次被填充到多大。</li>
+      <li lang="en">Given <code>max_bs</code>, write down the decode batch sizes v0.5.22 captures by default, and work out what size a real batch is padded to.</li>
+      <li lang="zh-CN">在 <code>base_attn_backend.py</code> 里指出 <code>init_cuda_graph_state</code>、<code>init_forward_metadata_out_graph</code> 和 <code>init_forward_metadata_in_graph</code> 各在捕获和重放的哪一刻被调用。</li>
+      <li lang="en">Point in <code>base_attn_backend.py</code> to <code>init_cuda_graph_state</code>, <code>init_forward_metadata_out_graph</code> and <code>init_forward_metadata_in_graph</code>, and say at which moment of capture and replay each one is called.</li>
+      <li lang="zh-CN">解释 FlashInfer 的 <code>plan()</code> 为什么不能进图、<code>run()</code> 为什么可以，以及 <code>use_cuda_graph=True</code> 的包装器把什么固定下来。</li>
+      <li lang="en">Explain why FlashInfer’s <code>plan()</code> cannot go into a graph while <code>run()</code> can, and what a wrapper with <code>use_cuda_graph=True</code> freezes.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-1-attention-and-kv-layouts/index.html">Phase 1</a>：<code>kv_indptr</code>、<code>kv_indices</code> 和 <code>plan()</code>。本阶段讲的就是这些数组在开了 CUDA 图之后放在哪、谁来写。</li>
+    <li lang="en"><a href="../phase-1-attention-and-kv-layouts/index.html">Phase 1</a>: <code>kv_indptr</code>, <code>kv_indices</code> and <code>plan()</code>. This phase is about where those arrays live once CUDA graphs are on, and who writes them.</li>
+    <li lang="zh-CN"><a href="../phase-2-prefill-and-decode/index.html">Phase 2</a>：解码受带宽限制，单个解码内核很短；split-KV 让一步解码的线程块数随长度变化，这正是进图时要处理的事。</li>
+    <li lang="en"><a href="../phase-2-prefill-and-decode/index.html">Phase 2</a>: decode is bandwidth-bound and each decode kernel is short; split-KV makes the number of thread blocks of a decode step depend on the lengths, which is exactly what a graph has to deal with.</li>
+    <li lang="zh-CN">GPU 专题的 <a href="../../gpu-cuda/phase-5-streams-and-graphs/index.html">Phase 5 · 流与 CUDA 图</a>：流、事件、流捕获和图的实例化与重放。本页不再重复这些 API。</li>
+    <li lang="en">Phase 5 of the GPU topic, <a href="../../gpu-cuda/phase-5-streams-and-graphs/index.html">Streams and CUDA Graphs</a>: streams, events, stream capture, and graph instantiation and replay. This page does not repeat those APIs.</li>
+    <li lang="zh-CN">PyTorch 的张量、<code>torch.cuda.Stream</code> 和 <code>torch.cuda.Event</code> 计时。</li>
+    <li lang="en">PyTorch tensors, <code>torch.cuda.Stream</code>, and timing with <code>torch.cuda.Event</code>.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+  <p lang="zh-CN">下文 SGLang 的源码路径和行号都在 <code>v0.5.22</code> 标签下，FlashInfer 的在 <code>v0.7.1</code> 标签下（SGLang 钉的版本），PyTorch 的说明文档在 <code>v2.14.1</code> 标签下（同样是 SGLang 钉的版本），都是 2026-11-01 从 raw.githubusercontent.com 取回后读的。CUDA 的说法来自 CUDA Programming Guide v13.4.2 的 4.2 节 CUDA Graphs（2026-10-31 读取）。</p><p lang="en">Every SGLang source path and line number below is at the <code>v0.5.22</code> tag, FlashInfer’s at its <code>v0.7.1</code> tag (the version SGLang pins), and the PyTorch notes at <code>v2.14.1</code> (also SGLang’s pin); all were fetched from raw.githubusercontent.com and read on 2026-11-01. Statements about CUDA come from section 4.2, CUDA Graphs, of the CUDA Programming Guide v13.4.2 (read 2026-10-31).</p>
+
+  <h3 lang="zh-CN">1. 为什么要捕获解码步：发射开销对微秒级内核</h3><h3 lang="en">1. Why decode steps are captured: launch overhead against microsecond-class kernels</h3>
+  <p lang="zh-CN">CUDA Programming Guide 的 4.2 节是这样讲的：把内核放进流时，主机驱动要为每个内核做一串准备和发射操作，这笔开销每个内核都要付一次；<strong>对执行时间很短的内核，这笔开销可能占端到端时间的相当一部分</strong>。图把整个工作流事先定义好，这些开销在实例化时付一次，之后每次发射图本身「开销很小」。PyTorch 的 CUDA 语义说明（<code>docs/source/notes/cuda.md</code> 的 CUDA Graphs 一节）说得更具体：重放跳过了参数设置和内核分派的所有层次，包括 Python、C++ 和 CUDA 驱动的开销，底层只用一次 <code>cudaGraphLaunch</code> 提交整张图；图里的内核在 GPU 上也略快一点，但主要收益是省掉 CPU 开销。</p><p lang="en">Section 4.2 of the CUDA Programming Guide puts it this way: when you place a kernel into a stream, the host driver performs a sequence of preparation and launch operations, an overhead paid for every kernel issued; <strong>for a kernel with a short execution time, this overhead can be a significant fraction of the end-to-end time</strong>. A graph defines the whole workflow in advance, so those costs are paid once at instantiation, and launching the graph afterwards has very little overhead. The PyTorch CUDA semantics notes (the CUDA Graphs section of <code>docs/source/notes/cuda.md</code>) are more specific: a replay skips all layers of argument setup and kernel dispatch, including Python, C++ and CUDA driver overheads, and submits the entire graph with a single <code>cudaGraphLaunch</code>; kernels in a replay also run slightly faster on the GPU, but eliding CPU overhead is the main benefit.</p>
+  <p lang="zh-CN">解码正落在这个区间里。一步解码对批里每个请求只算一个 token，每一层都要跑归一化、QKV 投影、RoPE、注意力、输出投影、MLP 这一串内核（Phase 0），而批小时每个 GEMM 只是一次 GEMV、每个注意力内核只读几个请求的 KV，内核很短。实验环境页选的 Qwen3-0.6B 有 28 层，一步就是 28 遍这一串。CPU 在 Python 里逐个发射它们时，GPU 可能在两个内核之间空等（推断，Lab A 第 1 步会量）。预填充则相反：一次算成百上千个 token，内核长，发射开销占比小，所以 v0.5.22 的预填充图默认用 <code>breakable</code> 后端，<code>full</code> 被标为实验性（<code>python/sglang/srt/arg_groups/cuda_graph_hook.py</code> 第 365–369 行的警告）。</p><p lang="en">Decode falls squarely in that range. A decode step computes one token for each request in the batch, and every layer runs the chain of normalization, QKV projection, RoPE, attention, output projection and MLP kernels (Phase 0); at a small batch each GEMM is just a GEMV and each attention kernel reads the KV of a few requests, so the kernels are short. Qwen3-0.6B, the model the lab environment page uses, has 28 layers, so one step is 28 passes of that chain. While the CPU launches them one by one from Python, the GPU may sit idle between kernels (inference; step 1 of Lab A measures it). Prefill is the opposite: hundreds or thousands of tokens at once, long kernels, and a small share for launch overhead, which is why v0.5.22 defaults the prefill graph to the <code>breakable</code> backend and marks <code>full</code> as experimental (the warning at lines 365–369 of <code>python/sglang/srt/arg_groups/cuda_graph_hook.py</code>).</p>
+  <p lang="zh-CN">SGLang 的开关在 <code>python/sglang/srt/arg_groups/fields/exec_.py</code> 第 543–623 行：<code>--cuda-graph-backend-decode</code>（第 551 行，可选 <code>full</code>、<code>breakable</code>、<code>disabled</code>）、<code>--cuda-graph-max-bs-decode</code>（第 567 行）、<code>--cuda-graph-bs-decode</code>（第 578 行，显式列出要捕获的批大小）、便捷开关 <code>--disable-decode-cuda-graph</code>（第 604 行，帮助文字说它等价于 <code>--cuda-graph-backend-decode=disabled</code>）、<code>--disable-cuda-graph-padding</code>（第 609 行）和一个总的 JSON 选项 <code>--cuda-graph-config</code>（第 544 行）。旧的 <code>--disable-cuda-graph</code> 在这个文件里是 <code>no_cli=True</code>（第 608 行），命令行入口只剩 <code>python/sglang/srt/server_args.py</code> 第 407–414 行的弃用登记，帮助文字原文是 <code>Deprecated. Use --cuda-graph-backend-{decode,prefill}=disabled instead.</code>：它同时关掉解码和预填充两张图。只想比较解码，就用 <code>--cuda-graph-backend-decode disabled</code>。</p><p lang="en">SGLang’s switches are at lines 543–623 of <code>python/sglang/srt/arg_groups/fields/exec_.py</code>: <code>--cuda-graph-backend-decode</code> (line 551, values <code>full</code>, <code>breakable</code> and <code>disabled</code>), <code>--cuda-graph-max-bs-decode</code> (line 567), <code>--cuda-graph-bs-decode</code> (line 578, an explicit list of batch sizes to capture), the convenience switch <code>--disable-decode-cuda-graph</code> (line 604, whose help text calls it a convenience for <code>--cuda-graph-backend-decode=disabled</code>), <code>--disable-cuda-graph-padding</code> (line 609), and one JSON option for everything, <code>--cuda-graph-config</code> (line 544). The old <code>--disable-cuda-graph</code> is <code>no_cli=True</code> in that file (line 608); its only command-line entry left is the deprecated registration at lines 407–414 of <code>python/sglang/srt/server_args.py</code>, whose help text reads <code>Deprecated. Use --cuda-graph-backend-{decode,prefill}=disabled instead.</code>: it turns off both the decode and the prefill graph. To compare decode alone, use <code>--cuda-graph-backend-decode disabled</code>.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 CUDA 图（它在 CUDA 10 才出现，晚于《CUDA by Example》，PMPP 第 5 版的目录里也没有专门的一章）。流捕获录下的是流里的工作，流本身可读《CUDA by Example》第 10 章 Streams；图的部分以 CUDA Programming Guide 4.2 节和 PyTorch 的 CUDA Graphs 说明为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers CUDA graphs (they arrived in CUDA 10, after <em>CUDA by Example</em>, and the PMPP 5th-edition table of contents has no chapter on them). Stream capture records the work of a stream, and streams themselves are chapter 10, Streams, of <em>CUDA by Example</em>; for graphs, this concept rests on section 4.2 of the CUDA Programming Guide and the PyTorch CUDA Graphs notes; see Resources.</p>
+
+  <h3 lang="zh-CN">2. 能被捕获的内核不能做什么</h3><h3 lang="en">2. What a capturable kernel may not do</h3>
+  <p lang="zh-CN">流处于捕获模式时，发给它的工作并不执行，只被记进图里；重放时图用同样的内核、同样的参数，对指针参数来说就是同样的内存地址（PyTorch 说明原话）。由此推出一张禁止清单。PyTorch 说明的 Constraints 一节把它分成两类：</p><p lang="en">While a stream is in capture mode, work issued to it does not run; it is only recorded into the graph, and every replay runs the same kernels with the same arguments, which for pointer arguments means the same memory addresses (the PyTorch notes’ own words). A list of prohibitions follows from that. The Constraints section of the PyTorch notes splits it in two:</p>
+  <ul>
+    <li lang="zh-CN"><strong>多半直接报运行时错误</strong>：同步 CPU 和 GPU 的操作（例如 <code>.item()</code>）；基于 CPU 或 GPU 数据的动态控制流（除非用 <code>torch.cond()</code>）；在默认流上捕获。CUDA 指南的 Prohibited and Unhandled Operations 一节给出底层原因：同步或查询一个正在被捕获的流是无效的，因为里面的工作并没有被调度执行。</li>
+    <li lang="en"><strong>Most likely a runtime error</strong>: ops that synchronize the CPU with the GPU (for example <code>.item()</code>); dynamic control flow based on CPU or GPU data (unless written with <code>torch.cond()</code>); capturing on the default stream. The Prohibited and Unhandled Operations section of the CUDA guide gives the underlying reason: synchronizing or querying a stream that is being captured is invalid, because its work has not been scheduled for execution.</li>
+    <li lang="zh-CN"><strong>多半悄悄算错</strong>：捕获区里的 CPU 工作不会被录下，重放时直接没了；每次重放读写同样的虚拟地址；<strong>动态形状被禁止</strong>，图假定每个张量每次重放都是同样的大小和布局；捕获进行中，进程里不能有别的未被捕获的 CUDA 工作。</li>
+    <li lang="en"><strong>Most likely silent wrong results</strong>: CPU work in the captured region is not recorded and simply vanishes at replay; every replay reads and writes the same virtual addresses; <strong>dynamic shapes are prohibited</strong>, since the graph assumes every tensor has the same size and layout in every replay; and no non-captured CUDA work may run in the process while a capture is underway.</li>
+  </ul>
+  <p lang="zh-CN">「动态分配」落在两条之间。在捕获区里新建一个张量本身是可以的：PyTorch 的分配器在捕获时从这张图私有的内存池里拿地址，重放时这块地址固定不变（CUDA 指南的 Graph Memory Nodes 一节也说，图内分配在图的整个生命周期里地址固定）。不可以的是让大小依赖数据：图只录下捕获那一次的大小，下一步数据变大了，图仍然用那块旧内存（推断，依据是上面两条规则）。SGLang 把这条写成了合同：<code>base_attn_backend.py</code> 第 124–127 行规定 <code>init_forward_metadata_in_graph</code> 的函数体<strong>不许</strong>调 <code>.item()</code>、<code>.cpu()</code>、<code>.tolist()</code> 和动态形状的 <code>torch.empty()</code>，这些都属于图外。对内核作者来说，结论是：内核的网格大小、指针和形状参数在捕获时就定了，一切每步会变的量（长度、偏移、真实批大小）都必须从地址固定的显存缓冲区里读。</p><p lang="en">Dynamic allocation sits between the two lists. Creating a tensor inside the captured region is itself allowed: PyTorch’s allocator hands out addresses from the graph’s private memory pool during capture, and those addresses stay fixed for every replay (the Graph Memory Nodes section of the CUDA guide likewise says graph allocations have fixed addresses for the life of the graph). What is not allowed is a size that depends on data: the graph records only the size seen at capture, and when a later step needs more, the graph still uses the old block (inference from the two rules above). SGLang writes this down as a contract: lines 124–127 of <code>base_attn_backend.py</code> say the body of <code>init_forward_metadata_in_graph</code> must <strong>not</strong> call <code>.item()</code>, <code>.cpu()</code>, <code>.tolist()</code> or a dynamic-shape <code>torch.empty()</code>; those belong outside the graph. For a kernel author the conclusion is this: the grid size, pointers and shape arguments of a kernel are fixed at capture, so anything that changes from step to step (lengths, offsets, the real batch size) has to be read from a GPU buffer whose address does not change.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲这些捕获规则。这一概念以 PyTorch v2.14.1 说明的 Constraints 一节和 CUDA 指南 4.2 节的 Prohibited and Unhandled Operations、Graph Memory Nodes 为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers these capture rules. This concept rests on the Constraints section of the PyTorch v2.14.1 notes and on Prohibited and Unhandled Operations and Graph Memory Nodes in section 4.2 of the CUDA guide; see Resources.</p>
+
+  <h3 lang="zh-CN">3. 填充到固定的批大小：SGLang 的捕获尺寸</h3><h3 lang="en">3. Padding to static batch sizes: SGLang’s capture sizes</h3>
+  <p lang="zh-CN">批大小每一步都在变（请求进来、结束），而一张图只认一个形状，所以 SGLang 预先为一组批大小各捕获一张图，运行时把真实批次填充到最近的那个。这组尺寸由 <code>cuda_graph_hook.py</code> 第 462–494 行的 <code>generate_decode_cuda_graph_batch_sizes</code> 产生，普通情况（没有推测解码）是：</p><p lang="en">The batch size changes from step to step (requests arrive and finish), and a graph knows only one shape, so SGLang captures one graph for each size in a list of batch sizes ahead of time and pads the real batch up to the nearest one at run time. The list comes from <code>generate_decode_cuda_graph_batch_sizes</code>, lines 462–494 of <code>cuda_graph_hook.py</code>; in the ordinary case (no speculative decoding) it is:</p>
+<pre data-lang="py" data-file="cuda_graph_hook.py, lines 473–478 (v0.5.22)">capture_bs = (
+    [1, 2, 4, 8, 12]
+    + list(range(16, 257, 8))
+    + list(range(272, 512, 16))
+    + list(range(512, max_bs + 1, 32))
+)
+# 之后去掉大于 max_bs 的，如果 max_bs 不在表里就补上（第 489–492 行）</pre>
+  <p lang="zh-CN">小批次处密、大批次处疏：批大小 13 填到 16，浪费 3 行；批大小 100 填到 104，浪费 4 行。打开 <code>--disable-cuda-graph-padding</code> 时表变成 1 到 <code>max_bs</code> 的每一个整数（第 469–470 行），但正如它的帮助文字所说，遇到需要填充的批次就不用图；推测解码另有一张更密的表（第 479–487 行）。<code>max_bs</code> 的默认值按显卡显存分档，在 <code>arg_groups/memory_hook.py</code> 第 88–180 行：小于 20 GB（注释写的是 T4、4080）为 8；小于 35 GB（A10、4090、5090）在 <code>tp_size</code> 小于 4 时为 48；小于 60 GB（A100 40GB、L40）为 32；小于 90 GB（H100、A100）为 256。按这个分档，24 GB 的 L4 落在第二档，<code>max_bs</code> 为 48，表就是 <code>[1, 2, 4, 8, 12, 16, 24, 32, 40, 48]</code>（推断：取决于 SGLang 读到的显存数，Lab A 第 2 步从启动日志核对）。</p><p lang="en">The list is dense at small batches and sparse at large ones: a batch of 13 pads to 16, wasting 3 rows, and a batch of 100 pads to 104, wasting 4. With <code>--disable-cuda-graph-padding</code> the list becomes every integer from 1 to <code>max_bs</code> (lines 469–470), but, as its help text says, a batch that would need padding then runs without a graph; speculative decoding has its own denser list (lines 479–487). The default <code>max_bs</code> depends on GPU memory, in tiers at lines 88–180 of <code>arg_groups/memory_hook.py</code>: below 20 GB (the comment names T4 and 4080) it is 8; below 35 GB (A10, 4090, 5090) it is 48 when <code>tp_size</code> is under 4; below 60 GB (A100 40GB, L40) 32; below 90 GB (H100, A100) 256. By these tiers the 24 GB L4 falls in the second, so <code>max_bs</code> is 48 and the list is <code>[1, 2, 4, 8, 12, 16, 24, 32, 40, 48]</code> (inference: it depends on the memory figure SGLang reads; step 2 of Lab A checks it in the start-up log).</p>
+  <p lang="zh-CN">运行时的路径在 <code>python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py</code>：</p><p lang="en">The run-time path is in <code>python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py</code>:</p>
+  <ol>
+    <li lang="zh-CN"><strong>捕获</strong>（<code>capture</code>，第 1117 行）：先预热，然后对表里的尺寸从大到小逐个捕获（第 1188–1192 行），注释说这样「小的图能复用大的图分配的内存池」（第 1155–1156 行）。每个尺寸由 <code>capture_one_shape</code>（第 1236 行）录一张图。</li>
+    <li lang="en"><strong>Capture</strong> (<code>capture</code>, line 1117): warm up first, then capture the sizes in the list from largest to smallest (lines 1188–1192); the comment says this lets the smaller graphs reuse the memory pool allocated for the larger ones (lines 1155–1156). <code>capture_one_shape</code> (line 1236) records one graph per size.</li>
+    <li lang="zh-CN"><strong>能不能用图</strong>（<code>can_run_graph</code>，第 715 行）：在默认的填充模式下，条件是批大小不超过 <code>max_bs</code>（第 760 行），否则这一步回到逐个发射。</li>
+    <li lang="en"><strong>Whether a graph can run</strong> (<code>can_run_graph</code>, line 715): in the default padding mode the test is that the batch size does not exceed <code>max_bs</code> (line 760); otherwise the step falls back to launching kernels one by one.</li>
+    <li lang="zh-CN"><strong>填充</strong>（<code>load_batch</code>，第 1377 行）：<code>bs = self._pad_to_bucket(raw_bs, self.capture_bs)</code>（第 1485 行），基类里的实现是 <code>bisect_left</code>，返回不小于 <code>raw_bs</code> 的最小尺寸（<code>base_cuda_graph_runner.py</code> 第 162 行）；<code>buffer_registry.fill_from</code>（第 1491 行）把真实批次拷进图的静态输入缓冲区。填充行的序列长度取后端给的填充值，FlashInfer 后端是 1（<code>flashinfer_backend.py</code> 第 1313–1314 行），所以 <code>seq_lens_sum</code> 加上 <code>(bs − raw_bs) × 1</code>（第 182 行）。</li>
+    <li lang="en"><strong>Padding</strong> (<code>load_batch</code>, line 1377): <code>bs = self._pad_to_bucket(raw_bs, self.capture_bs)</code> (line 1485), implemented in the base class with <code>bisect_left</code> to return the smallest size not less than <code>raw_bs</code> (line 162 of <code>base_cuda_graph_runner.py</code>); <code>buffer_registry.fill_from</code> (line 1491) copies the real batch into the graph’s static input buffers. Padding rows get the backend’s fill value as their sequence length, which is 1 for the FlashInfer backend (lines 1313–1314 of <code>flashinfer_backend.py</code>), so <code>seq_lens_sum</code> grows by <code>(bs − raw_bs) × 1</code> (line 182).</li>
+    <li lang="zh-CN"><strong>重放和裁剪</strong>（<code>execute</code>，第 1598 行）：<code>self.backend.replay(...)</code>（第 1628 行），然后输出只取前 <code>raw_num_token</code> 行（第 1649 行），填充行的结果丢掉。</li>
+    <li lang="en"><strong>Replay and slicing</strong> (<code>execute</code>, line 1598): <code>self.backend.replay(...)</code> (line 1628), after which only the first <code>raw_num_token</code> rows of the output are kept (line 1649), and the results of the padding rows are thrown away.</li>
+  </ol>
+  <p lang="zh-CN">这里有一组取舍：表越密，填充浪费越少，但要捕获的图越多，启动越慢、图占的显存越多。<code>memory_hook.py</code> 第 65–66 行的文档字符串估计，激活和 CUDA 图缓冲区大约占 <code>chunked_prefill_size × 1.5 + max_bs × 2</code>（按 GB 计的粗估，原文如此），所以显存小的卡 <code>max_bs</code> 也小。</p><p lang="en">There is a trade-off here: a denser list wastes less on padding but means more graphs to capture, a slower start and more memory held by graphs. The docstring at lines 65–66 of <code>memory_hook.py</code> estimates the activations and CUDA graph buffers at about <code>chunked_prefill_size × 1.5 + max_bs × 2</code> (a rough estimate in GB, as written there), which is why smaller cards get a smaller <code>max_bs</code>.</p>
+  <p lang="zh-CN">延伸阅读：Chip Huyen《AI Engineering》讲推理优化的第 9 章里关于批处理的部分（为什么服务端要把请求攒成批，以及批大小和延迟的取舍）。按桶填充本身没有对应的书章，依据是上面引用的源码。</p><p lang="en">Further reading: the part on batching in chapter 9, on inference optimization, of Chip Huyen’s <em>AI Engineering</em> (why a server gathers requests into batches, and the trade-off between batch size and latency). Padding to buckets itself has no book chapter; it rests on the source cited above.</p>
+
+  <h3 lang="zh-CN">4. 后端的三个钩子：图外、图内、一次性的状态</h3><h3 lang="en">4. The backend hooks: out of the graph, in the graph, and the one-off state</h3>
+  <p lang="zh-CN">Phase 1 讲过，每个前向步开始时后端的 <code>init_forward_metadata</code> 会建 <code>kv_indptr</code>、<code>kv_indices</code> 并调 <code>plan()</code>。这里面有主机操作（<code>plan()</code> 要把长度拷到 CPU），不能进图，于是 v0.5.22 的 <code>AttentionBackend</code> 把它拆开了。<code>base_attn_backend.py</code> 第 36–57 行的类文档字符串称之为「三方法合同」：</p><p lang="en">Phase 1 showed that at the start of each forward step the backend’s <code>init_forward_metadata</code> builds <code>kv_indptr</code> and <code>kv_indices</code> and calls <code>plan()</code>. That includes host work (<code>plan()</code> copies lengths to the CPU) and cannot go into a graph, so the v0.5.22 <code>AttentionBackend</code> splits it. The class docstring at lines 36–57 of <code>base_attn_backend.py</code> calls it the three-method contract:</p>
+  <ul>
+    <li lang="zh-CN"><strong><code>init_forward_metadata(fb)</code></strong>（第 88–94 行）：不用图时的入口，默认就是先调图外那一半、再调图内那一半。</li>
+    <li lang="en"><strong><code>init_forward_metadata(fb)</code></strong> (lines 88–94): the eager entry point, which by default calls the out-of-graph half and then the in-graph half.</li>
+    <li lang="zh-CN"><strong><code>init_forward_metadata_out_graph(fb, in_capture=False)</code></strong>（第 96–116 行）：每一步的元数据准备，在 <code>with graph.capture():</code> <strong>之外</strong>运行；捕获时调用方传 <code>in_capture=True</code>，重放和不用图时为 <code>False</code>。文档字符串写明：主机操作、动态形状和不能录进图的逻辑都放这里。</li>
+    <li lang="en"><strong><code>init_forward_metadata_out_graph(fb, in_capture=False)</code></strong> (lines 96–116): per-step metadata preparation that runs <strong>outside</strong> <code>with graph.capture():</code>; capture sites pass <code>in_capture=True</code>, and replay and eager runs pass <code>False</code>. The docstring says host ops, dynamic-shape logic and anything that cannot be recorded into a graph live here.</li>
+    <li lang="zh-CN"><strong><code>init_forward_metadata_in_graph(fb)</code></strong>（第 118–130 行）：可以录进图的静态形状 GPU 操作，在捕获时于 <code>with graph.capture():</code> 里面运行，重放时由 <code>graph.replay()</code> 自动重做；默认什么也不做。</li>
+    <li lang="en"><strong><code>init_forward_metadata_in_graph(fb)</code></strong> (lines 118–130): graph-recordable, static-shape GPU ops that run inside <code>with graph.capture():</code> at capture time and are redone automatically by <code>graph.replay()</code>; the default is a no-op.</li>
+    <li lang="zh-CN"><strong><code>init_cuda_graph_state(max_bs, max_num_tokens)</code></strong>（第 205–207 行，文档字符串是「Init the global shared states for cuda graph.」）：在捕获开始前调用一次，按最大尺寸预先分配所有图共享的缓冲区。另有 <code>get_cuda_graph_seq_len_fill_value</code>（第 235–237 行，「通常是 0 或 1」）告诉运行器填充行用什么长度。</li>
+    <li lang="en"><strong><code>init_cuda_graph_state(max_bs, max_num_tokens)</code></strong> (lines 205–207, docstring “Init the global shared states for cuda graph.”): called once before capture to preallocate, at the maximum size, the buffers all graphs share. Alongside it, <code>get_cuda_graph_seq_len_fill_value</code> (lines 235–237, “Typically, it is 0 or 1”) tells the runner what length to give padding rows.</li>
+  </ul>
+  <p lang="zh-CN">把它们放回解码图运行器里看调用时刻：构造时 <code>self.attn_backend.init_cuda_graph_state(self.max_bs, self.max_num_token)</code>（<code>decode_cuda_graph_runner.py</code> 第 381 行）；每个尺寸捕获时，先在图外调 <code>init_forward_metadata_out_graph(forward_batch, in_capture=True)</code>（第 1266 行），再把 <code>init_forward_metadata_in_graph</code> 和模型前向一起放进被捕获的 <code>run_once</code>（第 1268–1273 行）；每次重放前，<code>load_batch</code> 在图外调 <code>init_forward_metadata_out_graph(fb_view)</code>（第 1575 行），这里的 <code>fb_view</code> 是填充后的视图。</p><p lang="en">Put back into the decode graph runner, the call times are these: at construction, <code>self.attn_backend.init_cuda_graph_state(self.max_bs, self.max_num_token)</code> (line 381 of <code>decode_cuda_graph_runner.py</code>); when each size is captured, <code>init_forward_metadata_out_graph(forward_batch, in_capture=True)</code> runs outside the graph first (line 1266), and <code>init_forward_metadata_in_graph</code> goes into the captured <code>run_once</code> together with the model forward (lines 1268–1273); before every replay, <code>load_batch</code> calls <code>init_forward_metadata_out_graph(fb_view)</code> outside the graph (line 1575), where <code>fb_view</code> is the padded view of the batch.</p>
+  <p lang="zh-CN">FlashInfer 后端怎么填这三个钩子（<code>flashinfer_backend.py</code>）：<code>init_cuda_graph_state</code>（第 1060 行）一次分配一块 <code>int32</code> 的 <code>cuda_graph_kv_indices</code>，长 <code>max_num_tokens × max_context_len</code>，足够放最大批次在最长上下文下的全部槽位号（第 1066–1070 行）；<code>init_forward_metadata_out_graph</code>（第 715 行）在捕获时先为这个尺寸建好包装器（第 739–741 行），然后无论捕获还是重放，都走 Phase 1 讲过的 <code>indices_updater_decode.update</code>，传入的是这个尺寸专属的包装器 <code>self.decode_cuda_graph_metadata[bs]</code>（第 743–754 行）。主类 <code>FlashInferAttnBackend</code>（第 294–1549 行）没有覆盖 <code>init_forward_metadata_in_graph</code>，用的是基类的空实现：它的全部准备都在图外，图里只有注意力内核本身（2026-11-01 在该文件里检索 <code>def init_forward_metadata_in_graph</code>，只在第 2531 行的多步草稿后端里出现）。</p><p lang="en">How the FlashInfer backend fills the three hooks (<code>flashinfer_backend.py</code>): <code>init_cuda_graph_state</code> (line 1060) allocates one <code>int32</code> <code>cuda_graph_kv_indices</code> of length <code>max_num_tokens × max_context_len</code>, enough for every slot number of the largest batch at the longest context (lines 1066–1070); <code>init_forward_metadata_out_graph</code> (line 715) builds the wrappers for this size at capture (lines 739–741), and then, at capture and replay alike, runs the <code>indices_updater_decode.update</code> from Phase 1 with this size’s own wrappers, <code>self.decode_cuda_graph_metadata[bs]</code> (lines 743–754). The main class <code>FlashInferAttnBackend</code> (lines 294–1549) does not override <code>init_forward_metadata_in_graph</code> and keeps the base no-op: all of its preparation is outside the graph, and only the attention kernels themselves are inside (searching the file for <code>def init_forward_metadata_in_graph</code> on 2026-11-01 finds it only at line 2531, in the multi-step draft backend).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 SGLang 的后端合同。这一概念以 <code>base_attn_backend.py</code>、<code>decode_cuda_graph_runner.py</code> 和 <code>flashinfer_backend.py</code> 为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers SGLang’s backend contract. This concept rests on <code>base_attn_backend.py</code>, <code>decode_cuda_graph_runner.py</code> and <code>flashinfer_backend.py</code>; see Resources.</p>
+
+  <h3 lang="zh-CN">5. FlashInfer 的 plan() 在 CPU 上，run() 在图里</h3><h3 lang="en">5. FlashInfer: plan() on the CPU, run() in the graph</h3>
+  <p lang="zh-CN">FlashInfer 论文（arXiv:2501.01005 v2）的 3.3 节 Dynamism-Aware Runtime 和 3.4 节 Programming Interface 讲了这个拆分。<code>plan</code> 函数拿到各请求的序列长度，启动负载均衡的调度器，在 CPU 上算出调度计划（每个线程块的工作队列，以及部分结果到最终输出的映射），再<strong>异步拷到 GPU 上工作区缓冲区里固定的一段</strong>；计划可以缓存，一步解码里所有层的注意力共用一份。<code>run</code> 函数用查询、键值和这份缓存的计划算注意力。论文原话：CUDA 图可以捕获对 <code>run</code> 的调用，把整步注意力编进一张图；<strong>但 <code>plan</code> 不会被 CUDA 图捕获，因为它在 CPU 上</strong>。论文说这个拆分受 inspector-executor 模型启发（引 Mirchandaney 等 1988 年的工作）。为了满足图的要求，注意力和合并两个阶段都用持久化内核，网格大小编译后固定，每步都以同样的网格启动；工作区各段的偏移固定，传给内核的指针每步相同。</p><p lang="en">Section 3.3, Dynamism-Aware Runtime, and section 3.4, Programming Interface, of the FlashInfer paper (arXiv:2501.01005 v2) describe the split. The <code>plan</code> function takes each request’s sequence length, runs the load-balanced scheduler, and computes a schedule on the CPU (the work queue of each thread block, and the mapping from partial results to final outputs), then <strong>copies it asynchronously into a fixed region of the workspace buffer on the GPU</strong>; the plan can be cached and shared by the attention of every layer in a decode step. The <code>run</code> function computes attention from the query, the keys and values, and the cached plan. In the paper’s words, a CUDA graph can capture calls to <code>run</code> and compile the whole step of attention into one graph, <strong>but <code>plan</code> is not captured, because it is on the CPU</strong>. The paper says the split is inspired by the inspector-executor model (citing Mirchandaney et al., 1988). To meet the graph’s requirements, both the attention stage and the merge stage use persistent kernels whose grid size is fixed once compiled, so each step launches the same grid, and each section of the workspace has a fixed offset, so the pointers passed to the kernels are the same every step.</p>
+  <p lang="zh-CN">v0.7.1 的 <code>flashinfer/decode.py</code> 把这些写进了 <code>BatchDecodeWithPagedKVCacheWrapper</code>（第 966 行）：</p><p lang="en">At v0.7.1, <code>flashinfer/decode.py</code> builds all this into <code>BatchDecodeWithPagedKVCacheWrapper</code> (line 966):</p>
+  <ul>
+    <li lang="zh-CN"><strong>构造时固定</strong>：<code>use_cuda_graph=True</code> 时，辅助数据结构存放在调用方提供的缓冲区里，并且「开了 CUDAGraph 之后，这个包装器的生命周期内 <code>batch_size</code> 不能变」（第 1058–1061 行）；三个缓冲区 <code>paged_kv_indptr_buffer</code>（长 <code>batch_size + 1</code>）、<code>paged_kv_indices_buffer</code>（要放得下生命周期内最多的页号）、<code>paged_kv_last_page_len_buffer</code> 只在这时需要（第 1068–1081 行）。</li>
+    <li lang="en"><strong>Fixed at construction</strong>: with <code>use_cuda_graph=True</code>, the auxiliary data structures are stored in buffers the caller provides, and “the <code>batch_size</code> cannot change during the lifecycle of this wrapper when CUDAGraph is enabled” (lines 1058–1061); the three buffers <code>paged_kv_indptr_buffer</code> (length <code>batch_size + 1</code>), <code>paged_kv_indices_buffer</code> (large enough for the most page indices of the wrapper’s lifetime) and <code>paged_kv_last_page_len_buffer</code> are needed only then (lines 1068–1081).</li>
+    <li lang="zh-CN"><strong><code>plan()</code>（第 1523 行）在主机上</strong>：图模式下它先检查批大小没变，否则抛出 <code>ValueError</code>（第 1739–1745 行），再把新的 indptr、last_page_len 和 indices <strong>拷进那几块固定的缓冲区</strong>（第 1750–1756 行），然后 <code>indptr.to("cpu")</code>、<code>last_page_len.to("cpu")</code>（第 1775–1776 行）在 CPU 上算长度和调度。拷到 CPU 是一次主机同步，所以它必须在图外。</li>
+    <li lang="en"><strong><code>plan()</code> (line 1523) runs on the host</strong>: in graph mode it first checks that the batch size has not changed and raises <code>ValueError</code> otherwise (lines 1739–1745), then <strong>copies the new indptr, last_page_len and indices into those fixed buffers</strong> (lines 1750–1756), and then calls <code>indptr.to("cpu")</code> and <code>last_page_len.to("cpu")</code> (lines 1775–1776) to compute lengths and the schedule on the CPU. Copying to the CPU is a host sync, which is why it must stay outside the graph.</li>
+    <li lang="zh-CN"><strong><code>run()</code>（第 2305–2349 行的重载）只发射内核</strong>，读的都是 plan 写好的缓冲区；文档字符串的例子是一次 <code>plan</code> 之后对每一层调 <code>run</code>，注释写「所有层复用辅助数据结构」（第 1001–1022 行）。在 cuTile 后端那一支里，代码注释还特别说明：<code>run()</code> 自己不能做从 CPU 到 GPU 的拷贝，因为从非锁页主机内存拷贝在 CUDA 图捕获期间是非法的，所以长度在 plan 时就先放到了显存里（第 1846–1851 行）。</li>
+    <li lang="en"><strong><code>run()</code> (the overloads at lines 2305–2349) only launches kernels</strong>, reading the buffers plan wrote; the docstring example calls <code>plan</code> once and then <code>run</code> for each layer, with the comment “reuse auxiliary data structures for all layers” (lines 1001–1022). In the cuTile backend’s branch, a code comment adds that <code>run()</code> must not copy from the CPU to the GPU itself, because a copy from unpinned host memory is illegal during CUDA graph capture, so the lengths are staged on the GPU at plan time (lines 1846–1851).</li>
+    <li lang="zh-CN"><strong>不保证图安全的选项</strong>：<code>fixed_split_size</code> 的文档写着「与 CUDA 图的兼容性不保证，因为即使批大小固定，KV 长度变化也会让启动的线程块数变化」（第 1602–1603 行）；<code>disable_split_kv</code> 用于「在 CUDA 图里保持确定性」（第 1605 行）。另有一个 <code>CUDAGraphBatchDecodeWithPagedKVCacheWrapper</code>（第 2976 行），它的文档说 <code>plan</code> 方法不能被 CUDAGraph 捕获（第 2988 行）。</li>
+    <li lang="en"><strong>Options that are not guaranteed graph-safe</strong>: the documentation of <code>fixed_split_size</code> says compatibility with CUDA graphs is not guaranteed, because even with a fixed batch size a changing KV length can change the number of thread blocks launched (lines 1602–1603); <code>disable_split_kv</code> exists for determinism in CUDA graphs (line 1605). There is also a <code>CUDAGraphBatchDecodeWithPagedKVCacheWrapper</code> (line 2976), whose documentation says its <code>plan</code> method cannot be captured by CUDAGraph (line 2988).</li>
+  </ul>
+  <p lang="zh-CN">SGLang 这一侧：<code>_create_decode_wrappers</code>（<code>flashinfer_backend.py</code> 第 1102–1115 行）为每个捕获尺寸建一组 <code>use_cuda_graph=True</code> 的包装器，<code>paged_kv_indptr_buffer</code> 是 <code>self.kv_indptr[i][: num_tokens + 1]</code>，<code>paged_kv_indices_buffer</code> 就是 <code>init_cuda_graph_state</code> 分配的那块 <code>cuda_graph_kv_indices</code>。捕获时第一次 <code>plan</code> 跑完之后，SGLang 把这些包装器的 <code>begin_forward</code> 换成 <code>partial(fast_decode_plan, w)</code>（第 817–821 行）；<code>fast_decode_plan</code> 是从 <code>flashinfer</code> 包导入的（第 76–81 行），定义在 FlashInfer <code>decode.py</code> 第 4395 行，文档字符串说它是 <code>plan</code> 的快速版本，去掉了对图缓冲区多余的设备到设备拷贝和元数据多余的主机到设备拷贝（第 4420–4423 行）；文档字符串说它是为多步草稿后端写的，而 v0.5.22 的主解码路径同样装上了它。之所以能省掉拷贝，是因为 SGLang 的 indices 更新器直接把 <code>kv_indices</code> 写进了图的缓冲区（Phase 1 的概念 5），并且自己维护长度的 CPU 副本 <code>seq_lens_cpu</code>，传入 <code>global_override_indptr_cpu</code>（第 1785–1817 行）。</p><p lang="en">On SGLang’s side, <code>_create_decode_wrappers</code> (lines 1102–1115 of <code>flashinfer_backend.py</code>) builds one set of <code>use_cuda_graph=True</code> wrappers per captured size, with <code>self.kv_indptr[i][: num_tokens + 1]</code> as <code>paged_kv_indptr_buffer</code> and the <code>cuda_graph_kv_indices</code> that <code>init_cuda_graph_state</code> allocated as <code>paged_kv_indices_buffer</code>. After the first <code>plan</code> at capture time, SGLang replaces the <code>begin_forward</code> of those wrappers with <code>partial(fast_decode_plan, w)</code> (lines 817–821); <code>fast_decode_plan</code> is imported from the <code>flashinfer</code> package (lines 76–81) and defined at line 4395 of FlashInfer’s <code>decode.py</code>, whose docstring calls it a faster version of <code>plan</code> that removes an unnecessary device-to-device copy for the graph buffers and an unnecessary host-to-device copy for the metadata (lines 4420–4423); the docstring says it was written for the multi-step draft backend, yet the main decode path of v0.5.22 installs it as well. The copies can go because SGLang’s indices updater already writes <code>kv_indices</code> straight into the graph’s buffer (concept 5 of Phase 1), and keeps its own CPU copy of the lengths, <code>seq_lens_cpu</code>, which it passes in as <code>global_override_indptr_cpu</code> (lines 1785–1817).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 plan/run 拆分。这一概念以 FlashInfer 论文 3.3、3.4 节和附录 D.1 CUDAGraph-Compatible Workspace Layout，以及 v0.7.1 的 <code>flashinfer/decode.py</code> 为准，见资料。CSR 数组本身见 PMPP 第 5 版第 15 章 Sparse matrix computation（Phase 1 已引）。</p><p lang="en">Further reading: no book in the bibliography covers the plan/run split. This concept rests on sections 3.3 and 3.4 and appendix D.1, CUDAGraph-Compatible Workspace Layout, of the FlashInfer paper, and on <code>flashinfer/decode.py</code> at v0.7.1; see Resources. For the CSR arrays themselves, see chapter 15, Sparse matrix computation, of PMPP 5th ed. (already cited in Phase 1).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：图里禁止的 ↔ 为什么 ↔ 绕法</h2><h2 id="compare-en" lang="en">Comparison: forbidden in a graph ↔ why ↔ the workaround</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">图里禁止的</span><span lang="en">Forbidden in a graph</span></th><th><span lang="zh-CN">为什么</span><span lang="en">Why</span></th><th><span lang="zh-CN">绕法（SGLang v0.5.22 / FlashInfer v0.7.1）</span><span lang="en">The workaround (SGLang v0.5.22 / FlashInfer v0.7.1)</span></th></tr>
+    <tr><td><span lang="zh-CN">主机同步：<code>.item()</code>、<code>.cpu()</code>、<code>.tolist()</code>、同步流</span><span lang="en">Host syncs: <code>.item()</code>, <code>.cpu()</code>, <code>.tolist()</code>, stream synchronization</span></td><td><span lang="zh-CN">捕获时工作只被记录、没有执行，同步或查询正在捕获的流是无效的（CUDA 指南）；PyTorch 把它列为直接报错的一类</span><span lang="en">During capture work is recorded, not run, and syncing or querying a capturing stream is invalid (CUDA guide); PyTorch lists it among the errors</span></td><td><span lang="zh-CN">放进 <code>init_forward_metadata_out_graph</code>；长度另存一份 CPU 副本 <code>seq_lens_cpu</code>；<code>plan()</code> 在每次重放前于图外运行</span><span lang="en">Put it in <code>init_forward_metadata_out_graph</code>; keep a CPU copy of the lengths, <code>seq_lens_cpu</code>; run <code>plan()</code> outside the graph before each replay</span></td></tr>
+    <tr><td><span lang="zh-CN">大小依赖数据的分配（新的 <code>torch.empty</code> 或 <code>cudaMalloc</code>）</span><span lang="en">Allocations whose size depends on data (a new <code>torch.empty</code> or <code>cudaMalloc</code>)</span></td><td><span lang="zh-CN">每次重放读写同样的地址，图只记得捕获时那块内存的大小</span><span lang="en">Every replay reads and writes the same addresses, and the graph remembers only the size of the block seen at capture</span></td><td><span lang="zh-CN"><code>init_cuda_graph_state</code> 按最大尺寸一次分配（<code>cuda_graph_kv_indices</code> 长 <code>max_num_tokens × max_context_len</code>）；FlashInfer 的 <code>use_cuda_graph</code> 缓冲区和固定偏移的工作区；从大到小捕获，共用一个内存池</span><span lang="en"><code>init_cuda_graph_state</code> allocates once at the maximum size (<code>cuda_graph_kv_indices</code> of length <code>max_num_tokens × max_context_len</code>); FlashInfer’s <code>use_cuda_graph</code> buffers and its fixed-offset workspace; capture largest first and share one memory pool</span></td></tr>
+    <tr><td><span lang="zh-CN">动态形状：批大小每步不同</span><span lang="en">Dynamic shapes: a batch size that differs every step</span></td><td><span lang="zh-CN">图假定每个张量每次重放的大小和布局都一样；FlashInfer 的图模式包装器在批大小变化时抛 <code>ValueError</code></span><span lang="en">The graph assumes the same size and layout for every tensor in every replay; FlashInfer’s graph-mode wrapper raises <code>ValueError</code> when the batch size changes</span></td><td><span lang="zh-CN">每个捕获尺寸一张图、一组包装器；<code>_pad_to_bucket</code> 填充到不小于真实批大小的最小尺寸；填充行长度为 1；输出裁剪到真实行数</span><span lang="en">One graph and one set of wrappers per captured size; <code>_pad_to_bucket</code> pads to the smallest size not below the real one; padding rows get length 1; the output is sliced back to the real rows</span></td></tr>
+    <tr><td><span lang="zh-CN">依赖数据的控制流和网格：按长度选内核、split 数随长度变</span><span lang="en">Data-dependent control flow and grids: picking a kernel by length, a split count that follows the length</span></td><td><span lang="zh-CN">图把内核和网格大小固定下来；<code>fixed_split_size</code> 的文档明说长度变化会改变线程块数，图兼容性不保证</span><span lang="en">The graph fixes the kernels and the grid size; the documentation of <code>fixed_split_size</code> says changing lengths change the number of thread blocks, so graph compatibility is not guaranteed</span></td><td><span lang="zh-CN">持久化内核加固定网格，工作量写在 plan 的调度表里（FlashInfer 论文 3.3 节）；内核从缓冲区读长度，按长度提前退出；需要时 <code>disable_split_kv</code></span><span lang="en">Persistent kernels on a fixed grid, with the work written into the schedule plan builds (section 3.3 of the FlashInfer paper); kernels read lengths from buffers and exit early by length; <code>disable_split_kv</code> where needed</span></td></tr>
+    <tr><td><span lang="zh-CN">捕获区里的 CPU 工作：Python 里的计数、日志、状态更新</span><span lang="en">CPU work inside the captured region: counters, logging, state updates in Python</span></td><td><span lang="zh-CN">CPU 工作不会被录下，重放时被直接省略，不报错，只是悄悄不做（PyTorch 说明）</span><span lang="en">CPU work is not recorded and is simply skipped at replay, with no error, just silently not done (PyTorch notes)</span></td><td><span lang="zh-CN">只在图外做；运行器在 <code>load_batch</code> 里更新 <code>raw_bs</code>、<code>bs</code> 等主机状态，再调 <code>replay</code></span><span lang="en">Do it outside the graph only; the runner updates host state such as <code>raw_bs</code> and <code>bs</code> in <code>load_batch</code>, then calls <code>replay</code></span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 一步解码被捕获，再用填充后的批次重放</h3><h3 lang="en">(a) A decode step captured, then replayed with a padded batch</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="2800"
+         data-captions='["全图：上方是启动时捕获的十张解码图，每个批大小一张；中间左边是图的静态输入缓冲区，右边是一次重放；最下面是输出。以 24 GB 的 L4 为例，max_bs 取 48（推断）。按播放逐步看。",
+           "1. 启动时，运行器按 1、2、4、8、12、16、24、32、40、48 各捕获一张图，从大到小，小图复用大图的内存池。每张图录下一整步：28 层的全部内核和它们的参数。",
+           "2. 这一步有 5 个真实请求。can_run_graph 检查 5 不超过 max_bs 48，可以用图。",
+           "3. _pad_to_bucket 用 bisect_left 找到不小于 5 的最小捕获尺寸：8。",
+           "4. fill_from 把 5 行真实输入拷进图的静态缓冲区；第 5 到 7 行是填充行，FlashInfer 后端给它们的序列长度是 1。",
+           "5. 重放前在图外运行 init_forward_metadata_out_graph：plan() 按这 8 行写好 kv_indptr、kv_indices 等元数据，写进图认得的那几块缓冲区。",
+           "6. 尺寸 8 的那张图重放一次：一次调用发出全部 28 层的内核，参数和指针都是捕获时录下的。",
+           "7. 输出只取前 5 行，填充行的结果丢掉。代价是多算 3 行；表越密浪费越少，但图越多、占的显存越多。"]'
+         data-captions-en='["The whole picture: at the top, the ten decode graphs captured at start-up, one per batch size; in the middle, the static input buffer of the graphs on the left and one replay on the right; at the bottom, the output. The example is a 24 GB L4, where max_bs comes out as 48 (inference). Press Play to walk through it.",
+           "1. At start-up the runner captures one graph each for 1, 2, 4, 8, 12, 16, 24, 32, 40 and 48, largest first, so smaller graphs reuse the memory pool of larger ones. Each graph records a whole step: every kernel of the 28 layers with its arguments.",
+           "2. This step has 5 real requests. can_run_graph checks that 5 does not exceed max_bs 48, so a graph can be used.",
+           "3. _pad_to_bucket uses bisect_left to find the smallest captured size not below 5: 8.",
+           "4. fill_from copies the 5 real input rows into the static buffers of the graph; rows 5 to 7 are padding, and the FlashInfer backend gives them a sequence length of 1.",
+           "5. Before the replay, init_forward_metadata_out_graph runs outside the graph: plan() writes kv_indptr, kv_indices and the other metadata for these 8 rows into the buffers the graph knows.",
+           "6. The graph for size 8 is replayed once: a single call issues the kernels of all 28 layers, with the arguments and pointers recorded at capture.",
+           "7. Only the first 5 output rows are kept, and the results of the padding rows are thrown away. The cost is 3 extra rows of work; a denser list wastes less, but means more graphs and more memory held by them."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="20" class="small" lang="zh-CN">启动时捕获：每个批大小一张图（从大到小）</text><text x="20" y="20" class="small" lang="en">Captured at start-up: one graph per batch size (largest first)</text>
+      <g data-step="1">
+        <rect class="box" x="20" y="32" width="72" height="34"/><text x="56" y="54" class="mono" text-anchor="middle">48</text>
+        <rect class="box" x="106" y="32" width="72" height="34"/><text x="142" y="54" class="mono" text-anchor="middle">40</text>
+        <rect class="box" x="192" y="32" width="72" height="34"/><text x="228" y="54" class="mono" text-anchor="middle">32</text>
+        <rect class="box" x="278" y="32" width="72" height="34"/><text x="314" y="54" class="mono" text-anchor="middle">24</text>
+        <rect class="box" x="364" y="32" width="72" height="34"/><text x="400" y="54" class="mono" text-anchor="middle">16</text>
+        <rect class="box" x="450" y="32" width="72" height="34"/><text x="486" y="54" class="mono" text-anchor="middle">12</text>
+        <rect class="box" x="622" y="32" width="72" height="34"/><text x="658" y="54" class="mono" text-anchor="middle">4</text>
+        <rect class="box" x="708" y="32" width="72" height="34"/><text x="744" y="54" class="mono" text-anchor="middle">2</text>
+        <rect class="box" x="794" y="32" width="72" height="34"/><text x="830" y="54" class="mono" text-anchor="middle">1</text>
+        <path class="arrow" d="M20 80 L866 80"/>
+        <text x="20" y="98" class="small" lang="zh-CN">捕获顺序；小图复用大图的内存池</text><text x="20" y="98" class="small" lang="en">Capture order; smaller graphs reuse the larger graphs’ pool</text>
+      </g>
+      <g data-step="1 3 6"><rect class="box" x="536" y="32" width="72" height="34"/><text x="572" y="54" class="mono" text-anchor="middle">8</text></g>
+      <g data-step="3"><path class="arrow" d="M572 120 L572 70"/>
+        <text x="590" y="104" class="mono">bisect_left(capture_bs, 5) → 8</text></g>
+
+      <line x1="20" y1="112" x2="880" y2="112" class="lane"/>
+      <text x="20" y="136" class="small" lang="zh-CN">图的静态输入缓冲区（这一步）</text><text x="20" y="136" class="small" lang="en">Static input buffer of the graph (this step)</text>
+      <g data-step="2 4">
+        <rect class="box" x="20" y="148" width="260" height="26"/><text x="32" y="166" class="mono">row 0 · request A</text>
+        <rect class="box" x="20" y="176" width="260" height="26"/><text x="32" y="194" class="mono">row 1 · request B</text>
+        <rect class="box" x="20" y="204" width="260" height="26"/><text x="32" y="222" class="mono">row 2 · request C</text>
+        <rect class="box" x="20" y="232" width="260" height="26"/><text x="32" y="250" class="mono">row 3 · request D</text>
+        <rect class="box" x="20" y="260" width="260" height="26"/><text x="32" y="278" class="mono">row 4 · request E</text>
+      </g>
+      <g data-step="2"><text x="292" y="222" class="small" lang="zh-CN">raw_bs = 5</text><text x="292" y="222" class="small" lang="en">raw_bs = 5</text></g>
+      <g data-step="4">
+        <rect class="box" x="20" y="288" width="260" height="26" style="stroke-dasharray: 4 3"/><text x="32" y="306" class="mono">row 5 · pad, seq_len 1</text>
+        <rect class="box" x="20" y="316" width="260" height="26" style="stroke-dasharray: 4 3"/><text x="32" y="334" class="mono">row 6 · pad, seq_len 1</text>
+        <rect class="box" x="20" y="344" width="260" height="26" style="stroke-dasharray: 4 3"/><text x="32" y="362" class="mono">row 7 · pad, seq_len 1</text>
+        <text x="292" y="334" class="small" lang="zh-CN">bs = 8</text><text x="292" y="334" class="small" lang="en">bs = 8</text>
+      </g>
+
+      <g data-step="5"><rect class="box" x="360" y="148" width="250" height="70"/>
+        <text x="372" y="170" lang="zh-CN">图外：out_graph</text><text x="372" y="170" lang="en">Outside: out_graph</text>
+        <text x="372" y="192" class="mono">plan() for 8 rows</text>
+        <text x="372" y="210" class="mono">→ kv_indptr, kv_indices</text>
+        <path class="arrow" d="M285 161 L356 175"/></g>
+
+      <g data-step="6"><rect class="box" x="360" y="236" width="250" height="134"/>
+        <text x="372" y="258" lang="zh-CN">重放尺寸 8 的图：一次调用</text><text x="372" y="258" lang="en">Replay the size-8 graph: one call</text>
+        <text x="372" y="282" class="mono">layer 0: norm qkv rope attn</text>
+        <text x="372" y="302" class="mono" style="white-space: pre">         o_proj mlp</text>
+        <text x="372" y="322" class="mono">layer 1: …</text>
+        <text x="372" y="342" class="mono">…</text>
+        <text x="372" y="362" class="mono">layer 27: …  then logits</text>
+        <path class="arrow" d="M285 300 L356 300"/></g>
+
+      <text x="650" y="136" class="small" lang="zh-CN">输出（下一个 token 的 logits）</text><text x="650" y="136" class="small" lang="en">Output (next-token logits)</text>
+      <g data-step="7">
+        <path class="arrow" d="M614 300 L646 300"/>
+        <rect class="box" x="650" y="148" width="230" height="26"/><text x="662" y="166" class="mono">A  kept</text>
+        <rect class="box" x="650" y="176" width="230" height="26"/><text x="662" y="194" class="mono">B  kept</text>
+        <rect class="box" x="650" y="204" width="230" height="26"/><text x="662" y="222" class="mono">C  kept</text>
+        <rect class="box" x="650" y="232" width="230" height="26"/><text x="662" y="250" class="mono">D  kept</text>
+        <rect class="box" x="650" y="260" width="230" height="26"/><text x="662" y="278" class="mono">E  kept</text>
+        <rect class="box" x="650" y="288" width="230" height="26" style="stroke-dasharray: 4 3"/><text x="662" y="306" class="mono" style="fill: var(--ink-2)">× pad, dropped</text>
+        <rect class="box" x="650" y="316" width="230" height="26" style="stroke-dasharray: 4 3"/><text x="662" y="334" class="mono" style="fill: var(--ink-2)">× pad, dropped</text>
+        <rect class="box" x="650" y="344" width="230" height="26" style="stroke-dasharray: 4 3"/><text x="662" y="362" class="mono" style="fill: var(--ink-2)">× pad, dropped</text>
+      </g>
+
+      <rect class="box" x="20" y="392" width="860" height="64"/>
+      <text x="32" y="416" lang="zh-CN">每步：填充到捕获尺寸 → 图外 plan() → 一次 replay() → 只取前 raw_bs 行</text><text x="32" y="416" lang="en">Each step: pad to a captured size → plan() outside → one replay() → keep the first raw_bs rows</text>
+      <text x="32" y="440" class="small" lang="zh-CN">批大于 max_bs 时这一步不用图，逐个发射内核（can_run_graph 返回 False）</text><text x="32" y="440" class="small" lang="en">A batch above max_bs runs without a graph, launching kernels one by one (can_run_graph is False)</text>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) CPU 上的 plan() 写元数据缓冲区，图里的 run() 去读</h3><h3 lang="en">(b) plan() on the CPU writes the metadata buffers that run() reads inside the graph</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="2800"
+         data-captions='["全图：上半是 CPU，下半是 GPU。中间一排是地址固定的元数据缓冲区，图只认得这些地址。每一步 CPU 上的 plan() 改写缓冲区的内容，图里每一层的 run() 去读。按播放逐步看。",
+           "1. 捕获前：SGLang 用 use_cuda_graph=True 建包装器，把自己分配好的缓冲区交给它；kv_indices 那块由 init_cuda_graph_state 按最大尺寸一次分配。从此地址不再变。",
+           "2. 先做一次占位的 plan，再在 torch.cuda.graph 里调用每一层的 run()：图录下的是内核和这些缓冲区的地址，不是里面的数。",
+           "3. 每一步，CPU 上：请求的长度变了。plan() 把 indptr 和 last_page_len 拷到主机，算出长度和 split-KV 的调度表。这是主机同步，所以只能在图外。",
+           "4. plan() 用 copy_ 把新的 indptr、indices、last_page_len 写进同一批缓冲区，把调度表写进工作区里固定的一段：内容变了，地址没变。",
+           "5. 重放：28 层的 run() 依次读这些缓冲区。一份 plan 给所有层用，所以 CPU 每步只付一次。",
+           "6. 不能做的：换批大小，图模式的包装器抛 ValueError；新建一个 indices 张量，图根本不认得它的地址。所以 SGLang 为每个捕获尺寸各留一组包装器。",
+           "7. SGLang 的细节：捕获时第一次 plan 之后，它把 begin_forward 换成 FlashInfer 的 fast_decode_plan，按其文档字符串，省掉对图缓冲区多余的拷贝；indices 由 SGLang 自己的 Triton 内核直接写进缓冲区。"]'
+         data-captions-en='["The whole picture: the CPU at the top, the GPU at the bottom. The row in the middle is the fixed-address metadata buffers, the only addresses the graph knows. Each step, plan() on the CPU rewrites what the buffers hold, and run() of every layer inside the graph reads them. Press Play to walk through it.",
+           "1. Before capture: SGLang creates the wrapper with use_cuda_graph=True and hands it buffers it has allocated; the kv_indices buffer is allocated once at the maximum size by init_cuda_graph_state. From then on the addresses do not change.",
+           "2. A placeholder plan first, then run() of every layer is called inside torch.cuda.graph: the graph records the kernels and the addresses of these buffers, not the numbers in them.",
+           "3. Each step, on the CPU: the request lengths have changed. plan() copies indptr and last_page_len to the host and computes the lengths and the split-KV schedule. That is a host sync, so it can only happen outside the graph.",
+           "4. plan() uses copy_ to write the new indptr, indices and last_page_len into the same buffers, and the schedule into a fixed region of the workspace: the contents change, the addresses do not.",
+           "5. Replay: run() of each of the 28 layers reads these buffers in turn. One plan serves every layer, so the CPU pays for it once per step.",
+           "6. What breaks it: a different batch size makes the graph-mode wrapper raise ValueError, and a newly created indices tensor has an address the graph has never seen. That is why SGLang keeps one set of wrappers per captured size.",
+           "7. The SGLang detail: after the first plan at capture time it swaps begin_forward for the fast_decode_plan of FlashInfer, which by its docstring skips redundant copies into the graph buffers; a Triton kernel of SGLang itself writes the indices straight into the buffer."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="20" class="small" lang="zh-CN">CPU（主机）</text><text x="20" y="20" class="small" lang="en">CPU (host)</text>
+      <g data-step="3">
+        <rect class="box" x="20" y="32" width="250" height="62"/>
+        <text x="32" y="54" lang="zh-CN">这一步的长度</text><text x="32" y="54" lang="en">This step’s lengths</text>
+        <text x="32" y="78" class="mono">seq_lens_cpu = [9, 17, 4, 1]</text>
+        <path class="arrow" d="M270 63 L306 63"/>
+        <rect class="box" x="310" y="32" width="330" height="62"/>
+        <text x="322" y="54" class="mono">plan(): indptr.to("cpu")</text>
+        <text x="322" y="78" lang="zh-CN">算长度和 split-KV 调度表</text><text x="322" y="78" lang="en">Compute lengths and the split-KV schedule</text>
+      </g>
+      <g data-step="1"><rect class="box" x="660" y="32" width="220" height="62"/>
+        <text x="672" y="54" class="mono">use_cuda_graph=True</text>
+        <text x="672" y="78" lang="zh-CN">缓冲区交给包装器</text><text x="672" y="78" lang="en">Buffers handed over</text></g>
+      <g data-step="4"><path class="arrow" d="M400 96 L180 152"/><path class="arrow" d="M440 96 L400 152"/><path class="arrow" d="M480 96 L620 152"/><path class="arrow" d="M520 96 L800 152"/>
+        <text x="24" y="113" class="mono">copy_(…, non_blocking=True)</text></g>
+      <g data-step="1"><path class="arrow" d="M770 96 L790 152"/></g>
+
+      <line x1="20" y1="140" x2="880" y2="140" class="lane"/>
+      <text x="20" y="134" class="small" lang="zh-CN">GPU（显存，地址固定）</text><text x="20" y="134" class="small" lang="en">GPU (memory, fixed addresses)</text>
+      <g data-step="1 4 5">
+        <rect class="box" x="20" y="156" width="200" height="60"/><text x="32" y="180" class="mono">kv_indptr buf</text><text x="32" y="202" class="mono">[0, 9, 26, 30, 31]</text>
+        <rect class="box" x="240" y="156" width="200" height="60"/><text x="252" y="180" class="mono">kv_indices buf</text><text x="252" y="202" class="mono">max_num_tokens × ctx</text>
+        <rect class="box" x="460" y="156" width="200" height="60"/><text x="472" y="180" class="mono">last_page_len buf</text><text x="472" y="202" class="mono">[1, 1, 1, 1]</text>
+        <rect class="box" x="680" y="156" width="200" height="60"/><text x="692" y="180" class="mono">workspace</text><text x="692" y="202" class="mono">plan info, fixed offset</text>
+      </g>
+
+      <g data-step="2 5"><rect class="box" x="20" y="240" width="860" height="118"/>
+        <text x="32" y="262" lang="zh-CN">捕获下来的图：每一层一次 run()</text><text x="32" y="262" lang="en">The captured graph: one run() per layer</text>
+        <rect class="box" x="40" y="278" width="170" height="36"/><text x="52" y="301" class="mono">layer 0 run()</text>
+        <rect class="box" x="240" y="278" width="170" height="36"/><text x="252" y="301" class="mono">layer 1 run()</text>
+        <rect class="box" x="440" y="278" width="170" height="36"/><text x="452" y="301" class="mono">…</text>
+        <rect class="box" x="640" y="278" width="220" height="36"/><text x="652" y="301" class="mono">layer 27 run()</text>
+        <text x="40" y="342" class="small" lang="zh-CN">录下的是内核和缓冲区地址，不是里面的数</text><text x="40" y="342" class="small" lang="en">What is recorded: kernels and buffer addresses, not the numbers inside</text>
+      </g>
+      <g data-step="5"><path class="arrow flow" d="M120 218 L120 276"/><path class="arrow flow" d="M340 218 L320 276"/><path class="arrow flow" d="M560 218 L530 276"/><path class="arrow flow" d="M780 218 L750 276"/></g>
+
+      <g data-step="6"><rect class="box" x="20" y="374" width="420" height="82"/>
+        <text x="32" y="398" style="fill: var(--ink-2)" lang="zh-CN">× 换批大小：ValueError</text><text x="32" y="398" style="fill: var(--ink-2)" lang="en">× New batch size: ValueError</text>
+        <text x="32" y="422" style="fill: var(--ink-2)" lang="zh-CN">× 新张量：图不认得它的地址</text><text x="32" y="422" style="fill: var(--ink-2)" lang="en">× New tensor: an address unknown to the graph</text>
+        <text x="32" y="444" class="small" lang="zh-CN">所以每个捕获尺寸各一组包装器</text><text x="32" y="444" class="small" lang="en">Hence one set of wrappers per captured size</text></g>
+      <g data-step="7"><rect class="box" x="460" y="374" width="420" height="82"/>
+        <text x="472" y="398" class="mono">begin_forward =</text>
+        <text x="472" y="420" class="mono" style="white-space: pre">  partial(fast_decode_plan, w)</text>
+        <text x="472" y="444" class="small" lang="zh-CN">捕获时第一次 plan 之后换上，少做拷贝</text><text x="472" y="444" class="small" lang="en">Swapped in after the first plan at capture</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 开关解码图各测一次，再手工捕获一个玩具解码步</h3><h3 lang="en">Lab A · Measure decode with graphs on and off, then capture a toy decode step by hand</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。根据 SGLang v0.5.22 的源码（<code>exec_.py</code>、<code>server_args.py</code>、<code>cuda_graph_hook.py</code>、<code>memory_hook.py</code>、<code>decode_cuda_graph_runner.py</code>、<code>benchmark/one_batch.py</code>、<code>environ.py</code>）、FlashInfer v0.7.1 的文档字符串和 PyTorch v2.14.1 的 CUDA 语义说明整理。还没有租用的 L4，所以这里不给数字，只描述应当看到的形状。环境是实验环境页里的 L4 和名为 <code>sglang-lab</code> 的 <code>lmsysorg/sglang:v0.5.23</code> 容器，主机目录 <code>~/llm-lab</code> 挂在容器的 <code>/work</code>；镜像比本页引用的 v0.5.22 新一个补丁版本（它固定 FlashInfer 0.7.2、sglang-kernel 0.4.10 和 sgl-deep-gemm 0.2.3.post2，比这里引用的 v0.5.22 版本各新一步；torch 2.14.1、nvidia-cutlass-dsl 4.8.0 和 sgl-deep-ep 0.1.2.post1 不变），行号可能略有出入。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Assembled from the SGLang v0.5.22 source (<code>exec_.py</code>, <code>server_args.py</code>, <code>cuda_graph_hook.py</code>, <code>memory_hook.py</code>, <code>decode_cuda_graph_runner.py</code>, <code>benchmark/one_batch.py</code>, <code>environ.py</code>), the FlashInfer v0.7.1 docstrings and the PyTorch v2.14.1 CUDA semantics notes. There is no rented L4 yet, so this lab gives no numbers, only the shape you should see. The environment is the L4 from the lab environment page with the <code>lmsysorg/sglang:v0.5.23</code> container named <code>sglang-lab</code>, the host directory <code>~/llm-lab</code> mounted at <code>/work</code>; the image is one patch release newer than the v0.5.22 this page cites (it pins FlashInfer 0.7.2, sglang-kernel 0.4.10 and sgl-deep-gemm 0.2.3.post2, one step past the v0.5.22 pins quoted here; torch 2.14.1, nvidia-cutlass-dsl 4.8.0 and sgl-deep-ep 0.1.2.post1 are unchanged), so line numbers may shift slightly.</div>
+    <ol>
+      <li><span lang="zh-CN">开和关解码图，各用 <code>one_batch</code> 测一次。<code>one_batch</code> 每个批大小打印逐步的 <code>Decode i.</code> 行和一行 <code>Decode.  median latency</code>（<code>one_batch.py</code> 第 870、878 行）。第二次只关解码图，不用已弃用、会连预填充图一起关掉的 <code>--disable-cuda-graph</code>：</span><span lang="en">Measure with <code>one_batch</code> once with decode graphs on and once with them off. For each batch size, <code>one_batch</code> prints per-step <code>Decode i.</code> lines and one <code>Decode.  median latency</code> line (lines 870 and 878 of <code>one_batch.py</code>). The second run turns off only the decode graph, not the deprecated <code>--disable-cuda-graph</code>, which would turn off the prefill graph too:</span><pre data-lang="sh" data-file="in the container">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+M=Qwen/Qwen3-0.6B
+python3 -m sglang.benchmark.one_batch --model-path $M --batch-size 1 8 32 --input-len 256 --output-len 64 \
+  2&gt;&amp;1 | tee /work/graphs-on.txt
+python3 -m sglang.benchmark.one_batch --model-path $M --batch-size 1 8 32 --input-len 256 --output-len 64 \
+  --cuda-graph-backend-decode disabled 2&gt;&amp;1 | tee /work/graphs-off.txt
+grep -H "Decode.  median" /work/graphs-on.txt /work/graphs-off.txt</pre><span lang="zh-CN">应当看到：关掉图之后每一步解码的中位延迟变长；差距在批大小 1 时最显著，批越大、内核越长，差距占比越小（推断，依据是概念 1）。预填充那行两次应当接近，因为第二次只动了解码。</span><span lang="en">You should see: the median decode latency per step grows with graphs off; the gap is most visible at batch size 1, and its share shrinks as the batch grows and the kernels get longer (inference, from concept 1). The prefill line should be close in both runs, because the second run touched only decode.</span></li>
+      <li><span lang="zh-CN">看填充。按实验环境页启动服务器（只听 <code>127.0.0.1</code>），显式给出捕获尺寸，并打开 <code>SGLANG_LOG_DECODE_GRAPH_KEY</code>（<code>environ.py</code> 第 350 行），让运行器每次重放打印 <code>Decode graph replay: … key_size=… raw_bs=…</code>（<code>decode_cuda_graph_runner.py</code> 第 1611–1626 行）。然后同时发 5 个请求：</span><span lang="en">Watch the padding. Start the server as on the lab environment page (listening only on <code>127.0.0.1</code>) with an explicit list of capture sizes, and turn on <code>SGLANG_LOG_DECODE_GRAPH_KEY</code> (line 350 of <code>environ.py</code>), so that every replay logs <code>Decode graph replay: … key_size=… raw_bs=…</code> (lines 1611–1626 of <code>decode_cuda_graph_runner.py</code>). Then send 5 requests at once:</span><pre data-lang="sh" data-file="in the container, terminal 1">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+SGLANG_LOG_DECODE_GRAPH_KEY=1 python3 -m sglang.launch_server --model-path Qwen/Qwen3-0.6B \
+  --host 127.0.0.1 --port 30000 --cuda-graph-bs-decode 1 2 4 8 16 2&gt;&amp;1 | tee /work/server.log</pre><pre data-lang="sh" data-file="in the container, terminal 2">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the FlashInfer documentation on 2026-11-01
+for i in 1 2 3 4 5; do
+  curl -s http://127.0.0.1:30000/generate -H "Content-Type: application/json" \
+    -d '{"text": "Count slowly from one to fifty:", "sampling_params": {"temperature": 0, "max_new_tokens": 64}}' &gt; /dev/null &amp;
+done; wait
+grep -m 3 "Capturing batches" /work/server.log
+grep "Decode graph replay" /work/server.log | tail -n 5</pre><span lang="zh-CN">应当看到：启动日志里的捕获进度从 <code>bs=16</code> 往下数（从大到小）；5 个请求一起解码时，重放日志是 <code>key_size=8 (bs)</code> 和 <code>raw_bs=5</code>，请求陆续结束后 <code>raw_bs</code> 变小、<code>key_size</code> 跟着落到 4、2、1（推断，取决于调度器是否真的把 5 个请求放进同一批）。不带 <code>--cuda-graph-bs-decode</code> 再启动一次，捕获进度的最大值就是这张 L4 上的默认 <code>max_bs</code>，按概念 3 的分档应为 48。</span><span lang="en">You should see: the capture progress in the start-up log counting down from <code>bs=16</code> (largest first); while the 5 requests decode together, replay lines with <code>key_size=8 (bs)</code> and <code>raw_bs=5</code>, and as requests finish, <code>raw_bs</code> shrinking and <code>key_size</code> following down to 4, 2 and 1 (inference; it depends on the scheduler really putting the 5 requests into one batch). Start once more without <code>--cuda-graph-bs-decode</code>: the largest size in the capture progress is the default <code>max_bs</code> on this L4, which by the tiers of concept 3 should be 48.</span></li>
+      <li><span lang="zh-CN">停掉服务器，手工捕获一个玩具解码步。下面的脚本照 PyTorch 说明里的模式写：在侧流上预热，为 1、2、4、8 四个批大小从大到小各捕获一张图，共用一个内存池；运行时用 <code>bisect_left</code> 填充，拷进静态输入，重放，裁剪输出。每层只是一次小矩阵乘加一个激活，层数取 Qwen3-0.6B 的 28：</span><span lang="en">Stop the server and capture a toy decode step by hand. The script below follows the pattern of the PyTorch notes: warm up on a side stream, capture one graph each for batch sizes 1, 2, 4 and 8, largest first, sharing one memory pool; at run time, pad with <code>bisect_left</code>, copy into the static input, replay, and slice the output. Each layer is just one small matmul and an activation, with Qwen3-0.6B’s 28 layers:</span><pre data-lang="py" data-file="toy_graph.py"># toy_graph.py: capture a toy decode step per padded batch size, replay it, and compare with eager
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the PyTorch CUDA notes at v2.14.1 on 2026-11-01
+import bisect, sys, torch
+import torch.nn.functional as F
+
+torch.manual_seed(0)
+dev, dt = "cuda", torch.float16
+LAYERS, HIDDEN, BUCKETS = 28, 1024, [1, 2, 4, 8]       # like SGLang's smallest capture sizes
+W = [torch.randn(HIDDEN, HIDDEN, device=dev, dtype=dt) * 0.02 for _ in range(LAYERS)]
+
+def step(x):                                    # one toy decode step: a small matmul and an activation per layer
+    for w in W:
+        x = x + F.silu(x @ w) * 0.5
+    return x
+
+static_in = torch.zeros(BUCKETS[-1], HIDDEN, device=dev, dtype=dt)   # one address for every replay
+graphs, static_out = {}, {}
+pool = torch.cuda.graph_pool_handle()
+
+s = torch.cuda.Stream()                         # warm up on a side stream, as the PyTorch notes require
+s.wait_stream(torch.cuda.current_stream())
+with torch.cuda.stream(s):
+    for bs in BUCKETS:
+        step(static_in[:bs])
+torch.cuda.current_stream().wait_stream(s)
+
+for bs in reversed(BUCKETS):                    # largest first, so smaller graphs reuse its pool
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g, pool=pool):
+        static_out[bs] = step(static_in[:bs])
+    graphs[bs] = g
+
+def bucket(raw_bs):
+    return BUCKETS[bisect.bisect_left(BUCKETS, raw_bs)]   # smallest captured size &gt;= raw_bs
+
+def replay(x):
+    raw_bs, bs = x.shape[0], bucket(x.shape[0])
+    static_in[:raw_bs].copy_(x)
+    static_in[raw_bs:bs].zero_()                # padding rows: computed, then thrown away
+    graphs[bs].replay()
+    return static_out[bs][:raw_bs]
+
+def median_us(fn, n=51):
+    for _ in range(5):
+        fn()
+    ts = []
+    for _ in range(n):
+        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        a.record(); fn(); b.record(); torch.cuda.synchronize()
+        ts.append(a.elapsed_time(b) * 1000)
+    return sorted(ts)[n // 2]
+
+for raw_bs in [1, 3, 5, 8]:
+    x = torch.randn(raw_bs, HIDDEN, device=dev, dtype=dt)
+    diff = (replay(x) - step(x)).abs().max().item()
+    print(f"raw_bs={raw_bs} graph bs={bucket(raw_bs)}  eager {median_us(lambda: step(x)):8.1f} us"
+          f"  replay {median_us(lambda: replay(x)):8.1f} us  max|diff|={diff:.1e}")
+
+if "--forbidden" in sys.argv:                   # a host sync inside a capture: expected to fail
+    g = torch.cuda.CUDAGraph()
+    try:
+        with torch.cuda.graph(g, pool=pool):
+            y = step(static_in[:1])
+            if y.sum().item() &gt; 0:              # .item() synchronizes the CPU with the GPU
+                y = y * 2
+    except Exception as e:
+        print("capture failed as expected:", type(e).__name__, str(e).splitlines()[0])</pre><pre data-lang="sh" data-file="in the container">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the PyTorch CUDA notes at v2.14.1 on 2026-11-01
+python3 /work/toy_graph.py
+python3 /work/toy_graph.py --forbidden     # 单独一个进程：失败的捕获不污染第一次的结果</pre><span lang="zh-CN">应当看到：每个批大小的 <code>replay</code> 中位时间都明显短于 <code>eager</code>，因为 28 层共 56 次以上的小内核发射被一次 <code>replay()</code> 取代；<code>raw_bs=3</code> 和 <code>raw_bs=5</code> 分别用尺寸 4 和 8 的图；<code>max|diff|</code> 为 0 或在 FP16 舍入的量级（矩阵乘在不同行数下可能选不同的内核）。加 <code>--forbidden</code> 的那次应当在捕获里报错，错误来自 CUDA 拒绝在捕获中的流上同步（推断，具体错误文字以实际打印为准）。</span><span lang="en">You should see: for every batch size the median <code>replay</code> time clearly shorter than <code>eager</code>, because more than 56 small kernel launches across 28 layers are replaced by one <code>replay()</code>; <code>raw_bs=3</code> and <code>raw_bs=5</code> using the graphs for sizes 4 and 8; <code>max|diff|</code> at 0 or at the level of FP16 rounding (the matmul may pick a different kernel for a different row count). The <code>--forbidden</code> run should fail inside the capture, with the error coming from CUDA refusing to synchronize a capturing stream (inference; trust the error text it actually prints).</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 对照：每个内核一个命令缓冲区、一个命令缓冲区，以及编码一次反复执行的间接命令缓冲区</h3><h3 lang="en">Lab B · The Metal twin: one command buffer per kernel, one command buffer, and an indirect command buffer encoded once and executed again and again</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01（00:49–00:50 PDT）。下面的输出都来自这台 Mac 上的实际运行（macOS 27.2，Swift 6.4.2）。Metal 没有从现有代码里「捕获」工作的机制；最接近 CUDA 图的是间接命令缓冲区（<code>MTLIndirectCommandBuffer</code>）：命令预先编码一次，之后可以反复执行。这个对应是近似的。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01 (00:49–00:50 PDT). The outputs below come from actual runs on this Mac (macOS 27.2, Swift 6.4.2). Metal has no way to capture work from existing code; the nearest thing to a CUDA graph is the indirect command buffer (<code>MTLIndirectCommandBuffer</code>), whose commands are encoded once ahead of time and can be executed again and again. The correspondence is approximate.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>replay_step.swift</code>。一个「玩具解码步」是 S 个互相依赖的小内核（S = 32、128、512），每个内核处理一个填充到 8 行的批次，每行 128 个线程，按 <code>meta</code> 缓冲区里该行的长度循环。<code>meta</code> 的地址从不改变，CPU 每步在发射前改写它的内容：真实请求 3、5 或 8 个，长度 1 到 32，填充行长度为 1，和 SGLang 的 FlashInfer 后端一样。四种提交方式：每个内核一个命令缓冲区（像逐个发射）；一个命令缓冲区里 S 个编码器；一个命令缓冲区、一个编码器里 S 次派发；以及一个预先编码好 S 次派发、每次派发后带屏障的间接命令缓冲区，每步只用一次 <code>executeCommandsInBuffer</code>。每种预热 20 步、测 201 步取中位数，最后与 CPU 上的整数参考结果逐位比较：</span><span lang="en">Save the program below as <code>replay_step.swift</code>. A toy decode step is S dependent small kernels (S = 32, 128 and 512); each kernel works on a batch padded to 8 rows, 128 threads per row, looping over the length of its row in the <code>meta</code> buffer. The address of <code>meta</code> never changes, and the CPU rewrites its contents before each step: 3, 5 or 8 real requests of length 1 to 32, with padding rows of length 1, as in SGLang’s FlashInfer backend. Four ways to submit: one command buffer per kernel (like launching one by one); one command buffer holding S encoders; one command buffer and one encoder with S dispatches; and an indirect command buffer with the S dispatches encoded once ahead of time, a barrier after each, executed with a single <code>executeCommandsInBuffer</code> per step. Each gets 20 warm-up steps and the median of 201 measured steps, and the result is compared bit for bit with an integer reference computed on the CPU:</span><pre data-lang="swift" data-file="replay_step.swift">
+// replay_step.swift: a toy decode step of S tiny dependent kernels, submitted four ways
+import Metal
+import Foundation
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+// One "layer" of a toy decode step. Row r is one request of the padded batch; meta[1 + r] is its
+// length, written by the CPU before every step (the plan() twin). Padding rows carry length 1.
+kernel void toy_layer(device uint* x [[buffer(0)]], device const uint* kv [[buffer(1)]],
+                      device const uint* meta [[buffer(2)]], device const uint* layer [[buffer(3)]],
+                      uint r [[threadgroup_position_in_grid]], uint d [[thread_position_in_threadgroup]]) {
+    uint acc = x[r * 128 + d], len = meta[1 + r];
+    for (uint t = 0; t &lt; len; t++) acc = acc * 31u + kv[t * 128 + d] + layer[0];
+    x[r * 128 + d] = acc;
+}
+"""
+
+let dev = MTLCreateSystemDefaultDevice()!
+let lib = try dev.makeLibrary(source: src, options: nil)
+let desc = MTLComputePipelineDescriptor()
+desc.computeFunction = lib.makeFunction(name: "toy_layer")!
+desc.supportIndirectCommandBuffers = true             // required to encode it into an ICB
+let pso = try dev.makeComputePipelineState(descriptor: desc, options: [], reflection: nil)
+let queue = dev.makeCommandQueue()!
+
+let Bpad = 8, D = 128, maxLen = 32, warm = 20, steps = 201, Smax = 512
+let x = dev.makeBuffer(length: Bpad * D * 4, options: .storageModeShared)!
+let kv = dev.makeBuffer(length: maxLen * D * 4, options: .storageModeShared)!
+let meta = dev.makeBuffer(length: (1 + Bpad) * 4, options: .storageModeShared)!   // one fixed address
+let layers = dev.makeBuffer(length: Smax * 4, options: .storageModeShared)!
+let kvp = kv.contents().bindMemory(to: UInt32.self, capacity: maxLen * D)
+for i in 0..&lt;(maxLen * D) { kvp[i] = UInt32(truncatingIfNeeded: i &amp;* 2654435761) }
+let lp = layers.contents().bindMemory(to: UInt32.self, capacity: Smax)
+for l in 0..&lt;Smax { lp[l] = UInt32(l) }
+let xp = x.contents().bindMemory(to: UInt32.self, capacity: Bpad * D)
+let mp = meta.contents().bindMemory(to: UInt32.self, capacity: 1 + Bpad)
+
+// The batch changes every step: 3, 5 or 8 real requests of length 1...maxLen, padded to 8 rows.
+var gen = SystemRandomNumberGenerator()
+let plans: [[UInt32]] = (0..&lt;(warm + steps)).map { _ in
+    let raw = [3, 5, 8].randomElement(using: &amp;gen)!
+    return [UInt32(raw)] + (0..&lt;Bpad).map { $0 &lt; raw ? UInt32.random(in: 1...UInt32(maxLen), using: &amp;gen) : 1 }
+}
+func plan(_ s: Int) { for i in 0..&lt;(1 + Bpad) { mp[i] = plans[s][i] } }   // the CPU rewrites it in place
+
+let grid = MTLSize(width: Bpad, height: 1, depth: 1), tg = MTLSize(width: D, height: 1, depth: 1)
+func bind(_ enc: MTLComputeCommandEncoder, _ l: Int) {
+    enc.setBuffer(x, offset: 0, index: 0); enc.setBuffer(kv, offset: 0, index: 1)
+    enc.setBuffer(meta, offset: 0, index: 2); enc.setBuffer(layers, offset: l * 4, index: 3)
+}
+
+// The ICB: all dispatches encoded once, a barrier after each so layer l + 1 waits for layer l.
+func makeICB(_ S: Int) -&gt; MTLIndirectCommandBuffer {
+    let d = MTLIndirectCommandBufferDescriptor()
+    d.commandTypes = .concurrentDispatch
+    d.inheritBuffers = false; d.inheritPipelineState = false; d.maxKernelBufferBindCount = 4
+    let icb = dev.makeIndirectCommandBuffer(descriptor: d, maxCommandCount: S, options: [])!
+    for l in 0..&lt;S {
+        let c = icb.indirectComputeCommandAt(l)
+        c.setComputePipelineState(pso)
+        c.setKernelBuffer(x, offset: 0, at: 0); c.setKernelBuffer(kv, offset: 0, at: 1)
+        c.setKernelBuffer(meta, offset: 0, at: 2); c.setKernelBuffer(layers, offset: l * 4, at: 3)
+        c.concurrentDispatchThreadgroups(grid, threadsPerThreadgroup: tg)
+        c.setBarrier()
+    }
+    return icb
+}
+
+enum Mode: String, CaseIterable {
+    case perKernelCB = "S command buffers, 1 dispatch each"
+    case encodersInOneCB = "1 command buffer, S encoders"
+    case oneEncoder = "1 command buffer, 1 encoder"
+    case icb = "indirect command buffer, encoded once"
+}
+
+func runStep(_ mode: Mode, _ S: Int, _ icb: MTLIndirectCommandBuffer) -&gt; (encode: Double, wall: Double, gpu: Double) {
+    let t0 = DispatchTime.now().uptimeNanoseconds
+    var cbs: [MTLCommandBuffer] = []
+    switch mode {
+    case .perKernelCB:                                  // like eager launches: one submission per kernel
+        for l in 0..&lt;S {
+            let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(pso); bind(enc, l)
+            enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg); enc.endEncoding()
+            cb.commit(); cbs.append(cb)
+        }
+    case .encodersInOneCB:
+        let cb = queue.makeCommandBuffer()!
+        for l in 0..&lt;S {
+            let enc = cb.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(pso); bind(enc, l)
+            enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg); enc.endEncoding()
+        }
+        cb.commit(); cbs.append(cb)
+    case .oneEncoder:                                   // default (serial) dispatch type keeps the order
+        let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(pso)
+        for l in 0..&lt;S { bind(enc, l); enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg) }
+        enc.endEncoding(); cb.commit(); cbs.append(cb)
+    case .icb:                                          // the replay: one call, whatever S is
+        let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+        enc.useResource(x, usage: [.read, .write])
+        enc.useResources([kv, meta, layers], usage: .read)
+        enc.executeCommandsInBuffer(icb, range: 0..&lt;S)
+        enc.endEncoding(); cb.commit(); cbs.append(cb)
+    }
+    let t1 = DispatchTime.now().uptimeNanoseconds
+    cbs.last!.waitUntilCompleted()
+    let t2 = DispatchTime.now().uptimeNanoseconds
+    return (Double(t1 - t0) * 1e-9, Double(t2 - t0) * 1e-9, cbs.last!.gpuEndTime - cbs.first!.gpuStartTime)
+}
+
+func median(_ a: [Double]) -&gt; Double { a.sorted()[a.count / 2] }
+let stamp = DateFormatter(); stamp.dateFormat = "yyyy-MM-dd HH:mm zzz"
+print("device=\(dev.name) padded batch \(Bpad) x \(D) threads per kernel, median of \(steps) steps after \(warm) warm-up, \(stamp.string(from: Date()))")
+for S in [32, 128, 512] {
+    let icb = makeICB(S)
+    var ref = (0..&lt;(Bpad * D)).map { UInt32($0) }       // CPU reference over the same plans
+    for s in 0..&lt;(warm + steps) { for l in 0..&lt;S { for r in 0..&lt;Bpad { for d in 0..&lt;D {
+        var acc = ref[r * D + d]
+        for t in 0..&lt;Int(plans[s][1 + r]) { acc = acc &amp;* 31 &amp;+ kvp[t * D + d] &amp;+ UInt32(l) }
+        ref[r * D + d] = acc } } } }
+    print("S=\(S) dependent kernels per step        encode us    wall us   GPU span us   wall/kernel us")
+    var walls: [Mode: Double] = [:]
+    for mode in Mode.allCases {
+        for i in 0..&lt;(Bpad * D) { xp[i] = UInt32(i) }
+        var enc: [Double] = [], wall: [Double] = [], gpu: [Double] = []
+        for s in 0..&lt;(warm + steps) {
+            plan(s)                                     // new metadata, same buffer, every step
+            let t = runStep(mode, S, icb)
+            if s &gt;= warm { enc.append(t.encode); wall.append(t.wall); gpu.append(t.gpu) }
+        }
+        let ok = (0..&lt;(Bpad * D)).allSatisfy { xp[$0] == ref[$0] }
+        walls[mode] = median(wall)
+        print("  " + mode.rawValue.padding(toLength: 38, withPad: " ", startingAt: 0)
+              + String(format: "%9.1f %10.1f %13.1f %15.2f   %@", median(enc) * 1e6, median(wall) * 1e6,
+                       median(gpu) * 1e6, median(wall) * 1e6 / Double(S), ok ? "matches CPU" : "MISMATCH"))
+    }
+    print(String(format: "  wall per step: S command buffers / ICB = %.1f x", walls[.perKernelCB]! / walls[.icb]!))
+}
+</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是连续三次运行里的第三次，原样贴出：</span><span lang="en">Build and run. Below is the third of three consecutive runs, pasted as it came:</span><pre data-lang="sh">$ swiftc -O replay_step.swift -o replay_step
+$ ./replay_step
+device=Apple M5 padded batch 8 x 128 threads per kernel, median of 201 steps after 20 warm-up, 2026-11-01 00:50 PDT
+S=32 dependent kernels per step        encode us    wall us   GPU span us   wall/kernel us
+  S command buffers, 1 dispatch each         73.6      579.8         255.8           18.12   matches CPU
+  1 command buffer, S encoders               10.4      289.5         105.6            9.05   matches CPU
+  1 command buffer, 1 encoder                 7.4      295.4         105.9            9.23   matches CPU
+  indirect command buffer, encoded once       3.6      301.0         109.6            9.41   matches CPU
+  wall per step: S command buffers / ICB = 1.9 x
+S=128 dependent kernels per step        encode us    wall us   GPU span us   wall/kernel us
+  S command buffers, 1 dispatch each       1237.3     2041.8        1704.2           15.95   matches CPU
+  1 command buffer, S encoders               42.2      627.1         411.6            4.90   matches CPU
+  1 command buffer, 1 encoder                53.0      633.5         411.5            4.95   matches CPU
+  indirect command buffer, encoded once      10.9      620.8         421.2            4.85   matches CPU
+  wall per step: S command buffers / ICB = 3.3 x
+S=512 dependent kernels per step        encode us    wall us   GPU span us   wall/kernel us
+  S command buffers, 1 dispatch each       6988.9     7793.6        7490.9           15.22   matches CPU
+  1 command buffer, S encoders              150.1     1933.8        1633.8            3.78   matches CPU
+  1 command buffer, 1 encoder                99.9     1916.3        1656.5            3.74   matches CPU
+  indirect command buffer, encoded once      10.2     1844.9        1664.6            3.60   matches CPU
+  wall per step: S command buffers / ICB = 4.2 x
+# 2026-11-01 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2）</pre></li>
+      <li><span lang="zh-CN">先看正确性：12 行全部 <code>matches CPU</code>。四种方式按同样的顺序执行同样的依赖链，每步读的都是 CPU 刚改写的 <code>meta</code>，间接命令缓冲区里的屏障保证了层与层的先后。</span><span lang="en">Correctness first: all 12 rows say <code>matches CPU</code>. All four ways run the same dependency chain in the same order, every step reads the <code>meta</code> the CPU has just rewritten, and the barriers in the indirect command buffer keep the layers in order.</span></li>
+      <li><span lang="zh-CN">逐个提交的代价。每个内核一个命令缓冲区时，每个内核的墙钟时间稳定在约 15–19 µs（S = 512 时 7.70–7.79 ms），而放进一个命令缓冲区后，S = 512 时约 3.6–3.8 µs 一个（1.82–1.95 ms），三次运行里 S = 512 的比值是 4.1–4.3 倍。差出来的部分，一半以上直接看得见是 CPU 编码时间：S = 512 时约 7.0 ms，对一个命令缓冲区的 0.1–0.15 ms。这就是 CUDA 图要省掉的那笔每内核开销在 Metal 上的样子（类比，不是同一个机制）。</span><span lang="en">The cost of submitting one at a time. With one command buffer per kernel, the wall time per kernel holds at about 15–19 µs (7.70–7.79 ms for S = 512); inside one command buffer it is about 3.6–3.8 µs per kernel at S = 512 (1.82–1.95 ms), and across the three runs the ratio at S = 512 is 4.1 to 4.3 times. More than half of the difference is visible directly as CPU encoding time: about 7.0 ms at S = 512, against 0.1–0.15 ms for one command buffer. This is what the per-kernel overhead a CUDA graph removes looks like on Metal (an analogy, not the same mechanism).</span></li>
+      <li><span lang="zh-CN">间接命令缓冲区的 CPU 成本不随 S 增长。它每步的编码时间在三次运行里是 3.4–14.3 µs，S 从 32 变到 512 也不变，而另外两种单缓冲区方式随 S 线性增长（一个编码器：约 7、20–53、100–105 µs）。这是它最像 CUDA 图的地方：录一次，之后每步的 CPU 开销是常数。</span><span lang="en">The indirect command buffer’s CPU cost does not grow with S. Its encoding time per step is 3.4–14.3 µs across the three runs and stays there as S goes from 32 to 512, while the other two single-buffer styles grow linearly with S (one encoder: about 7, 20–53 and 100–105 µs). This is where it most resembles a CUDA graph: record once, and the CPU cost of every later step is constant.</span></li>
+      <li><span lang="zh-CN">但墙钟时间几乎一样。三种单缓冲区方式在每个 S 下彼此相差不到约 6%，间接命令缓冲区并不更快，因为这里 GPU 本身就是瓶颈：S = 512 时 GPU 时间跨度约 1.6–1.7 ms，即每个依赖内核约 3.2 µs，这部分来自 GPU 上的派发和屏障，CPU 侧省多少也省不掉（推断）。另有一笔与 S 无关、约 0.2–0.3 ms 的固定成本（墙钟减 GPU 跨度），是提交和等待完成的唤醒延迟（推断）。CUDA 图在 GPU 上也只「略快」（PyTorch 说明），所以同样的规律在 NVIDIA 上大概成立：图省的是 CPU，GPU 已经忙满时收益就小（推断，Lab A 第 1 步可以核对）。</span><span lang="en">The wall time, though, is almost the same. The three single-buffer styles stay within about 6% of each other at every S, and the indirect command buffer is not faster, because here the GPU itself is the bottleneck: at S = 512 the GPU span is about 1.6–1.7 ms, or about 3.2 µs per dependent kernel, which comes from dispatch and barriers on the GPU and cannot be removed however much the CPU side saves (inference). There is also a fixed cost of about 0.2–0.3 ms that does not depend on S (wall time minus GPU span), the latency of submitting and waking on completion (inference). On NVIDIA, a graph makes kernels only slightly faster on the GPU (PyTorch notes), so the same pattern probably holds there: a graph saves CPU time, and once the GPU is fully busy the gain is small (inference; step 1 of Lab A can check it).</span></li>
+      <li><span lang="zh-CN">波动：同一行的墙钟时间在三次运行之间相差不到 4%。编码时间波动更大：S = 128 时「一个编码器」第一、二次约 20 µs、第三次 53.0 µs，间接命令缓冲区 4.0–11.0 µs，每个内核一个命令缓冲区 1127–1237 µs；这些量受 CPU 调度影响大（推断）。</span><span lang="en">Spread: the wall time of each row differs by less than 4% across the three runs. Encoding times vary more: at S = 128, one encoder took about 20 µs in the first two runs and 53.0 µs in the third, the indirect command buffer 4.0–11.0 µs, and one command buffer per kernel 1127–1237 µs; these are sensitive to CPU scheduling (inference).</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 两次 <code>one_batch</code> 的 <code>Decode.  median latency</code> 行（三个批大小）、启动日志里的捕获进度和五行 <code>Decode graph replay</code>、默认 <code>max_bs</code>、<code>toy_graph.py</code> 的四行输出和 <code>--forbidden</code> 的报错；Lab B 的三次完整输出，以及你自己的一张小表：S = 512 时四种方式的墙钟时间和编码时间。写进当天日志，并记下你的数字和本页哪里不同。还没有租用账户时，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, the <code>Decode.  median latency</code> lines of the two <code>one_batch</code> runs (three batch sizes), the capture progress and five <code>Decode graph replay</code> lines from the server log, the default <code>max_bs</code>, the four output lines of <code>toy_graph.py</code> and the error of its <code>--forbidden</code> run; from Lab B, the three full outputs and a small table of your own: the wall and encoding times of the four styles at S = 512. Write them into that day’s log, and note where your numbers differ from this page. Until a rental account exists, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/phase-3">
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">1. SGLang 为什么默认给解码步用完整的 CUDA 图，而对预填充的完整图标为实验性？</p><p lang="en">1. Why does SGLang use a full CUDA graph for decode steps by default, while marking a full prefill graph experimental?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">解码的内核很短，逐个发射的 CPU 开销占比大；预填充的内核长，发射开销占比小，而且形状变化多</span><span lang="en">Decode kernels are short, so the CPU cost of launching them one by one is a large share; prefill kernels are long, so launch overhead is a small share, and their shapes vary more</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">图能减少解码读 KV 缓存的字节数，而预填充不读 KV 缓存</span><span lang="en">A graph reduces the bytes decode reads from the KV cache, and prefill does not read the KV cache</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">分页 KV 缓存只有在图里才能用，预填充用的是不分页的 ragged 布局</span><span lang="en">The paged KV cache works only inside a graph, and prefill uses the unpaged ragged layout</span></label>
+      <div class="why" hidden><span lang="zh-CN">PyTorch 说明讲得很清楚：图的主要收益是省掉 CPU 开销，内核在 GPU 上只略快，读的字节数不变。分页 KV 在不用图时照样工作（Phase 1 的实验就是关着图做的），带缓存前缀的预填充也读分页的 KV。剩下的解释是内核长短：短内核时发射开销才显著。</span><span lang="en">The PyTorch notes are clear: the main benefit of a graph is eliding CPU overhead, kernels run only slightly faster on the GPU, and the bytes read do not change. The paged KV cache works fine without graphs (the Phase 1 lab ran with them off), and a prefill with a cached prefix reads paged KV too. What remains is kernel length: launch overhead matters when kernels are short.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">2. 在 v0.5.22 的默认捕获表下（没有推测解码，<code>max_bs</code> 为 48），一个 13 个请求的解码批次用哪张图？</p><p lang="en">2. With the v0.5.22 default capture list (no speculative decoding, <code>max_bs</code> of 48), which graph does a decode batch of 13 requests use?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">尺寸 13 的图，因为 SGLang 为 1 到 <code>max_bs</code> 的每个大小都捕获了一张</span><span lang="en">The graph for size 13, because SGLang captures one for every size from 1 to <code>max_bs</code></span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">尺寸 16 的图，多出的 3 行是填充</span><span lang="en">The graph for size 16, with the 3 extra rows as padding</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">尺寸 48 的图，所有批次都填充到 <code>max_bs</code></span><span lang="en">The graph for size 48, since every batch is padded to <code>max_bs</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">默认表是 <code>[1, 2, 4, 8, 12]</code> 加上从 16 起步长 8 的尺寸，所以 48 以内是 1、2、4、8、12、16、24、32、40、48；<code>_pad_to_bucket</code> 取不小于 13 的最小值 16。每个整数都捕获只发生在 <code>--disable-cuda-graph-padding</code> 下；都填到 48 会白算 35 行，表之所以分得这么细正是为了避免这种浪费。</span><span lang="en">The default list is <code>[1, 2, 4, 8, 12]</code> plus sizes from 16 in steps of 8, so up to 48 it is 1, 2, 4, 8, 12, 16, 24, 32, 40 and 48; <code>_pad_to_bucket</code> takes the smallest value not below 13, which is 16. Capturing every integer happens only with <code>--disable-cuda-graph-padding</code>; padding everything to 48 would waste 35 rows, which is exactly what the fine-grained list exists to avoid.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">3. 下面哪件事属于 <code>init_forward_metadata_out_graph</code>，而不能放进 <code>init_forward_metadata_in_graph</code>？</p><p lang="en">3. Which of these belongs in <code>init_forward_metadata_out_graph</code> and cannot go into <code>init_forward_metadata_in_graph</code>?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">每一层的注意力内核 <code>run()</code></span><span lang="en">Each layer’s attention kernel, <code>run()</code></span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">一个形状固定、只读写预分配缓冲区的 GPU 小内核</span><span lang="en">A small GPU kernel with a fixed shape that only reads and writes preallocated buffers</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">把这一步的序列长度拷到 CPU、在主机上算调度的 <code>plan()</code></span><span lang="en">The <code>plan()</code> that copies this step’s sequence lengths to the CPU and computes the schedule on the host</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>plan()</code> 里的 <code>indptr.to("cpu")</code> 是主机同步，<code>base_attn_backend.py</code> 的合同明文禁止在图内钩子里调 <code>.cpu()</code>，所以它在图外。<code>run()</code> 是模型前向的一部分，本来就在图里被捕获；形状固定、只碰预分配缓冲区的 GPU 操作正是图内钩子允许的内容。</span><span lang="en">The <code>indptr.to("cpu")</code> inside <code>plan()</code> is a host sync, and the contract in <code>base_attn_backend.py</code> explicitly forbids <code>.cpu()</code> in the in-graph hook, so it stays outside. <code>run()</code> is part of the model forward and is captured in the graph anyway; a fixed-shape GPU op that touches only preallocated buffers is exactly what the in-graph hook allows.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. 一个 <code>use_cuda_graph=True</code> 的 FlashInfer 解码包装器被捕获进图之后，两次重放之间可以变的是什么？</p><p lang="en">4. Once a FlashInfer decode wrapper with <code>use_cuda_graph=True</code> has been captured into a graph, what may change between two replays?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">indptr、indices 等缓冲区里的内容，也就是各请求的长度和槽位</span><span lang="en">The contents of the indptr, indices and other buffers, that is, each request’s lengths and slots</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">批大小，只要每次重放前重新调一次 <code>plan()</code></span><span lang="en">The batch size, as long as <code>plan()</code> is called again before each replay</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">indices 缓冲区本身，可以每步换成一个新分配、正好够长的张量</span><span lang="en">The indices buffer itself, which can be swapped each step for a freshly allocated tensor of exactly the right length</span></label>
+      <div class="why" hidden><span lang="zh-CN">图记下的是内核和缓冲区的地址，所以只能改内容：<code>plan()</code> 用 <code>copy_</code> 写进同一批缓冲区。批大小是冻结的形状，图模式下 <code>plan()</code> 发现批大小变了会抛 <code>ValueError</code>，所以 SGLang 为每个捕获尺寸各建一组包装器。新张量的地址图从没见过，重放仍然读旧的那块。</span><span lang="en">The graph records kernels and buffer addresses, so only contents may change: <code>plan()</code> writes into the same buffers with <code>copy_</code>. The batch size is a frozen shape, and in graph mode <code>plan()</code> raises <code>ValueError</code> when it changes, which is why SGLang builds one set of wrappers per captured size. A new tensor has an address the graph has never seen, and the replay still reads the old block.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py">decode_cuda_graph_runner.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/model_executor/runner/base_cuda_graph_runner.py">base_cuda_graph_runner.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/cuda_graph_hook.py">cuda_graph_hook.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/memory_hook.py">memory_hook.py</a> <span class="lvl" lang="zh-CN">源码，中级到进阶（SGLang v0.5.22，2026-11-01 取回）：捕获、填充、重放和裁剪，捕获尺寸表和按显存分档的 <code>max_bs</code>；概念 3 和动画 (a)</span><span class="lvl" lang="en">Source, intermediate to advanced (SGLang v0.5.22, fetched 2026-11-01): capture, padding, replay and slicing, the capture-size list and the memory-tiered <code>max_bs</code>; concept 3 and diagram (a)</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/attention/base_attn_backend.py">base_attn_backend.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/attention/flashinfer_backend.py">flashinfer_backend.py</a> <span class="lvl" lang="zh-CN">源码，进阶：三方法合同和 <code>init_cuda_graph_state</code>，FlashInfer 后端的图缓冲区、每尺寸包装器和 <code>fast_decode_plan</code>；概念 4 和 5</span><span class="lvl" lang="en">Source, advanced: the three-method contract and <code>init_cuda_graph_state</code>, the FlashInfer backend’s graph buffers, per-size wrappers and <code>fast_decode_plan</code>; concepts 4 and 5</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/exec_.py">fields/exec_.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/server_args.py">server_args.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/benchmark/one_batch.py">one_batch.py</a> <span class="lvl" lang="zh-CN">源码，入门：CUDA 图的全部命令行开关、<code>--disable-cuda-graph</code> 的弃用登记、基准脚本的输出格式；概念 1 和 Lab A</span><span class="lvl" lang="en">Source, beginner: every CUDA graph command-line switch, the deprecation of <code>--disable-cuda-graph</code>, the benchmark script’s output format; concept 1 and Lab A</span></li>
+    <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/flashinfer/decode.py">flashinfer/decode.py (v0.7.1)</a> · <a href="https://docs.flashinfer.ai/api/attention.html">docs.flashinfer.ai: Attention</a> <span class="lvl" lang="zh-CN">源码与文档字符串，中级：<code>BatchDecodeWithPagedKVCacheWrapper</code> 的 <code>use_cuda_graph</code>、<code>plan</code>、<code>run</code>，以及 <code>fast_decode_plan</code>；概念 5 和动画 (b)</span><span class="lvl" lang="en">Source and docstrings, intermediate: <code>use_cuda_graph</code>, <code>plan</code> and <code>run</code> of <code>BatchDecodeWithPagedKVCacheWrapper</code>, and <code>fast_decode_plan</code>; concept 5 and diagram (b)</span></li>
+    <li><a href="https://arxiv.org/abs/2501.01005">Ye et al., FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving (arXiv:2501.01005, v2)</a> <span class="lvl" lang="zh-CN">论文，进阶（MLSys 2025）：3.3 节负载均衡调度与 CUDA 图兼容，3.4 节 plan/run 编程接口（Listing 1），附录 D.1 图兼容的工作区布局；概念 5 的主依据</span><span class="lvl" lang="en">Paper, advanced (MLSys 2025): section 3.3 on load-balanced scheduling compatible with CUDA graphs, section 3.4 on the plan/run programming interface (Listing 1), appendix D.1 on the graph-compatible workspace layout; the main basis of concept 5</span></li>
+    <li><a href="https://github.com/pytorch/pytorch/blob/v2.14.1/docs/source/notes/cuda.md">PyTorch v2.14.1: CUDA semantics, CUDA Graphs</a> <span class="lvl" lang="zh-CN">官方文档，中级：为什么用图、<code>torch.cuda.graph</code> 的用法、捕获约束（Constraints）；概念 1、2 和 Lab A 第 3 步</span><span class="lvl" lang="en">Official docs, intermediate: why graphs, how to use <code>torch.cuda.graph</code>, and the capture Constraints; concepts 1 and 2 and step 3 of Lab A</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html">CUDA Programming Guide v13.4.2, 4.2 CUDA Graphs</a> · <a href="https://developer.nvidia.com/blog/cuda-graphs/">NVIDIA blog: Getting Started with CUDA Graphs</a> <span class="lvl" lang="zh-CN">官方文档，中级：发射开销和图的动机、流捕获里禁止的操作、图内存节点；博客是入门级的二手资料，比 CUDA 13 早得多</span><span class="lvl" lang="en">Official docs, intermediate: launch overhead and why graphs exist, operations prohibited in stream capture, graph memory nodes; the blog is a beginner-level secondary source, much older than CUDA 13</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer">MTLIndirectCommandBuffer</a> · <a href="https://developer.apple.com/documentation/metal/mtlcommandbuffer">MTLCommandBuffer</a> <span class="lvl" lang="zh-CN">官方文档，入门到中级：间接命令缓冲区的编码与执行，命令缓冲区的提交和计时；Lab B</span><span class="lvl" lang="en">Official docs, beginner to intermediate: encoding and executing indirect command buffers, committing and timing command buffers; Lab B</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Jason Sanders, Edward Kandrot, 《CUDA by Example: An Introduction to General-Purpose GPU Programming》, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">第 10 章 Streams 对应概念 1（流和异步发射，流捕获录下的就是流里的工作）。目录来自 InformIT 的页面；这本书早于 CUDA 图</span></li>
+    <li lang="en">Jason Sanders, Edward Kandrot, <em>CUDA by Example: An Introduction to General-Purpose GPU Programming</em>, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">Chapter 10, Streams, matches concept 1 (streams and asynchronous launch; stream capture records exactly the work of a stream). The table of contents comes from InformIT’s page; the book predates CUDA graphs</span></li>
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 4 章 Compute architecture and scheduling 对应概念 1（小批次下一个内核只占少数 SM、很快结束）；第 15 章 Sparse matrix computation 对应概念 5 里 plan 写的 CSR 数组。按第 5 版目录的章名对应</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 4, Compute architecture and scheduling, matches concept 1 (at a small batch a kernel occupies few SMs and finishes quickly); chapter 15, Sparse matrix computation, matches the CSR arrays plan writes in concept 5. Matched by chapter title in the 5th-edition table of contents</span></li>
+    <li lang="zh-CN">Chip Huyen, 《AI Engineering: Building Applications with Foundation Models》, O’Reilly Media, 2024, ISBN 9781098166304. <span class="lvl">讲推理优化的第 9 章里关于批处理的部分对应概念 3，服务层面的视角</span></li>
+    <li lang="en">Chip Huyen, <em>AI Engineering: Building Applications with Foundation Models</em>, O’Reilly Media, 2024, ISBN 9781098166304. <span class="lvl">The part on batching in chapter 9, on inference optimization, matches concept 3, from the serving side</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-2-prefill-and-decode/index.html"><span lang="zh-CN">← Phase 2 · 预填充与解码</span><span lang="en">← Phase 2 · Prefill and Decode</span></a>
+    <a href="../phase-4-moe-kernels/index.html"><span lang="zh-CN">Phase 4 · MoE 内核 →</span><span lang="en">Phase 4 · MoE Kernels →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

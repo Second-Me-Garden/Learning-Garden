@@ -18,6 +18,7 @@ open index.html
 | [ROS 2](topics/ros2/index.html) | 机器人中间件：从第一个 node 到一台在 Gazebo 里建图、导航的仿真机器人，脚下的内核始终在视野里（Jazzy LTS） | Phases 0–7 complete |
 | [Parallel Programming](topics/parallel-programming/index.html) | 共享内存并行：线程、锁、内存模型、无锁结构、OpenMP 与 NEON，每一步都在这台 Mac 上实测 | Phases 0–7 complete (OpenMP labs unrun: libomp not installed) |
 | [GPU Programming with CUDA](topics/gpu-cuda/index.html) | 从 warp 到驱动：在云端 NVIDIA GPU 上写、测、剖析 CUDA 内核，每课配一个在这台 Mac 上实测的 Metal 孪生实验（CUDA 13.x，sm_75 起） | Phases 0–7 complete (CUDA labs unrun until a GPU account exists; Metal twins measured) |
+| [LLM Inference Kernels (SGLang)](topics/llm-inference-kernels/index.html) | 推理引擎脚下的 GPU 内核：以 SGLang v0.5.22 为引擎，九个阶段从栈到接入点，每课一个在这台 Mac 上实测的 Metal 孪生实验（云端实验未运行） | Phases 0–8 complete (cloud labs unrun until a GPU account exists; Metal twins measured) |
 
 ## Layout
 

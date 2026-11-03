@@ -185,6 +185,45 @@
     </div>
     <p class="card-related" data-root=""></p>
   </article>
+  <article class="topic-card" aria-labelledby="t-llm" data-topic-id="llm-inference-kernels">
+    <figure class="topic-art" aria-hidden="true">
+      <svg viewBox="20 12 320 216" preserveAspectRatio="xMaxYMin meet">
+        <!-- four stacked layers (frontend, runtime, executor, kernels) with one request falling through them into a row of kernel tiles -->
+        <g class="art-node">
+          <rect x="60" y="30" width="244" height="26" rx="6"/>
+          <rect x="60" y="66" width="244" height="26" rx="6"/>
+          <rect x="60" y="102" width="244" height="26" rx="6"/>
+        </g>
+        <g class="art-node">
+          <rect x="60" y="150" width="52" height="40" rx="7"/><rect x="124" y="150" width="52" height="40" rx="7"/><rect x="188" y="150" width="52" height="40" rx="7"/><rect x="252" y="150" width="52" height="40" rx="7"/>
+        </g>
+        <path class="art-path" d="M86 56 L86 66 M86 92 L86 102 M86 128 L86 150"/>
+        <circle class="art-dot" cx="86" cy="150" r="4"/>
+        <rect class="art-hub" x="60" y="202" width="244" height="14" rx="5"/>
+      </svg>
+    </figure>
+    <h2 id="t-llm"><a href="topics/llm-inference-kernels/index.html">LLM Inference Kernels (SGLang)</a></h2>
+    <p class="what" lang="zh-CN">推理引擎脚下的 GPU 内核：运行时的每个设计选择给内核提一条要求，用代码满足它，再测端到端。九个阶段，每课一个在这台 Mac 上实测的 Metal 孪生实验。</p>
+    <p class="what" lang="en">The GPU kernels under an inference engine: each runtime design choice places a requirement on a kernel, you meet it in code, then measure end to end. Nine phases, each with a Metal twin measured on this Mac.</p>
+    <div class="track" data-topic="llm">
+      <svg viewBox="0 0 900 120" role="group" aria-labelledby="track-llm-title">
+        <title id="track-llm-title">LLM Inference Kernels: progress across nine phases / 九个阶段的进度</title>
+        <path class="bed-line" d="M50 50 L850 50"/>
+        <path class="grown" data-track d="M50 50 L50 50"/>
+        <a href="topics/llm-inference-kernels/phase-0-the-stack/index.html"><rect x="0" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-0" data-href="topics/llm-inference-kernels/phase-0-the-stack/index.html" data-title="Phase 0 · The Stack, Top to Bottom" cx="50" cy="50" r="11"/><text class="n" x="50" y="22" text-anchor="middle">0</text><text data-phase-label="llm/phase-0" x="50" y="88" text-anchor="middle" lang="zh-CN">栈</text><text data-phase-label="llm/phase-0" x="50" y="88" text-anchor="middle" lang="en">The stack</text></a>
+        <a href="topics/llm-inference-kernels/phase-1-attention-and-kv-layouts/index.html"><rect x="100" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-1" data-href="topics/llm-inference-kernels/phase-1-attention-and-kv-layouts/index.html" data-title="Phase 1 · Attention &amp; KV-Cache Layouts" cx="150" cy="50" r="11"/><text class="n" x="150" y="22" text-anchor="middle">1</text><text data-phase-label="llm/phase-1" x="150" y="88" text-anchor="middle" lang="zh-CN">KV 布局</text><text data-phase-label="llm/phase-1" x="150" y="88" text-anchor="middle" lang="en">KV layouts</text></a>
+        <a href="topics/llm-inference-kernels/phase-2-prefill-and-decode/index.html"><rect x="200" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-2" data-href="topics/llm-inference-kernels/phase-2-prefill-and-decode/index.html" data-title="Phase 2 · Prefill &amp; Decode" cx="250" cy="50" r="11"/><text class="n" x="250" y="22" text-anchor="middle">2</text><text data-phase-label="llm/phase-2" x="250" y="88" text-anchor="middle" lang="zh-CN">预填充与解码</text><text data-phase-label="llm/phase-2" x="250" y="88" text-anchor="middle" lang="en">Prefill</text></a>
+        <a href="topics/llm-inference-kernels/phase-3-cuda-graphs-plan-run/index.html"><rect x="300" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-3" data-href="topics/llm-inference-kernels/phase-3-cuda-graphs-plan-run/index.html" data-title="Phase 3 · CUDA Graphs &amp; the plan()/run() Split" cx="350" cy="50" r="11"/><text class="n" x="350" y="22" text-anchor="middle">3</text><text data-phase-label="llm/phase-3" x="350" y="88" text-anchor="middle" lang="zh-CN">CUDA 图</text><text data-phase-label="llm/phase-3" x="350" y="88" text-anchor="middle" lang="en">Graphs</text></a>
+        <a href="topics/llm-inference-kernels/phase-4-moe-kernels/index.html"><rect x="400" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-4" data-href="topics/llm-inference-kernels/phase-4-moe-kernels/index.html" data-title="Phase 4 · MoE Kernels" cx="450" cy="50" r="11"/><text class="n" x="450" y="22" text-anchor="middle">4</text><text data-phase-label="llm/phase-4" x="450" y="88" text-anchor="middle" lang="zh-CN">MoE</text><text data-phase-label="llm/phase-4" x="450" y="88" text-anchor="middle" lang="en">MoE</text></a>
+        <a href="topics/llm-inference-kernels/phase-5-fusions/index.html"><rect x="500" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-5" data-href="topics/llm-inference-kernels/phase-5-fusions/index.html" data-title="Phase 5 · Fusions" cx="550" cy="50" r="11"/><text class="n" x="550" y="22" text-anchor="middle">5</text><text data-phase-label="llm/phase-5" x="550" y="88" text-anchor="middle" lang="zh-CN">融合</text><text data-phase-label="llm/phase-5" x="550" y="88" text-anchor="middle" lang="en">Fusions</text></a>
+        <a href="topics/llm-inference-kernels/phase-6-quantization-kernels/index.html"><rect x="600" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-6" data-href="topics/llm-inference-kernels/phase-6-quantization-kernels/index.html" data-title="Phase 6 · Quantization Kernels" cx="650" cy="50" r="11"/><text class="n" x="650" y="22" text-anchor="middle">6</text><text data-phase-label="llm/phase-6" x="650" y="88" text-anchor="middle" lang="zh-CN">量化</text><text data-phase-label="llm/phase-6" x="650" y="88" text-anchor="middle" lang="en">Quantization</text></a>
+        <a href="topics/llm-inference-kernels/phase-7-speculative-and-structured-output/index.html"><rect x="700" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-7" data-href="topics/llm-inference-kernels/phase-7-speculative-and-structured-output/index.html" data-title="Phase 7 · Speculative Decoding &amp; Structured-Output Kernels" cx="750" cy="50" r="11"/><text class="n" x="750" y="22" text-anchor="middle">7</text><text data-phase-label="llm/phase-7" x="750" y="88" text-anchor="middle" lang="zh-CN">推测解码</text><text data-phase-label="llm/phase-7" x="750" y="88" text-anchor="middle" lang="en">Speculative</text></a>
+        <a href="topics/llm-inference-kernels/phase-8-plugging-in/index.html"><rect x="800" y="0" width="100" height="120" fill="transparent"/><circle class="plot" data-phase="llm/phase-8" data-href="topics/llm-inference-kernels/phase-8-plugging-in/index.html" data-title="Phase 8 · Plugging In &amp; the Capstone" cx="850" cy="50" r="11"/><text class="n" x="850" y="22" text-anchor="middle">8</text><text data-phase-label="llm/phase-8" x="850" y="88" text-anchor="middle" lang="zh-CN">接入</text><text data-phase-label="llm/phase-8" x="850" y="88" text-anchor="middle" lang="en">Plugging in</text></a>
+      </svg>
+      <p class="next" data-next>从这里开始：<a href="topics/llm-inference-kernels/phase-0-the-stack/index.html">Phase 0 · The Stack, Top to Bottom</a></p>
+    </div>
+    <p class="card-related" data-root=""></p>
+  </article>
   </div>
   <div class="legend" lang="zh-CN"><span><i class="done"></i>自测全对</span><span><i class="now"></i>正在学</span><span><i></i>还没到</span></div>
   <div class="legend" lang="en"><span><i class="done"></i>Quiz passed</span><span><i class="now"></i>In progress</span><span><i></i>Not yet</span></div>

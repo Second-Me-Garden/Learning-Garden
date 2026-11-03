@@ -1,0 +1,908 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 8 · Plugging In and the Capstone · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page">Phase 8 · Plugging In and the Capstone</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 8 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 8 / 9 · about 1–2 weeks</p>
+  <h1>Plugging In and the Capstone <span class="en" lang="zh-CN">接入点与作品项目：内核工程师在 SGLang v0.5.22 里从哪里接入（内核库里的 torch 算子、AttentionBackend、上游库），用什么工具量、用什么语言写，再用一个作品项目走完「运行时约束 → 内核 → 端到端测量」的闭环</span><span class="en" lang="en">Where a kernel engineer plugs into SGLang v0.5.22 (a torch op in the kernel library, an AttentionBackend, the upstream libraries), which tools measure the work and which languages write it, and a capstone that walks the whole loop from a runtime constraint to a kernel to an end-to-end measurement</span></h1>
+  <p class="lede" lang="zh-CN">前七个阶段看的是运行时的每个想法给内核提了什么要求；这一阶段反过来，看你写好的内核从哪几个口子进入引擎。v0.5.22 里有四个：内核库 <code>python/sglang/kernels/</code> 里的一个算子，通过 <code>TORCH_LIBRARY_FRAGMENT(sgl_kernel, …)</code> 注册成 <code>torch.ops.sgl_kernel.*</code>；一个围绕你的注意力内核实现的 <code>AttentionBackend</code>；给 FlashInfer、DeepGEMM、FlashMLA、CUTLASS 这些上游库的贡献，SGLang 升级钉住的版本后才用上；以及衡量这一切的工具 <code>one_batch</code>、torch profiler、Nsight Systems 和 Nsight Compute。作品项目把简报的「一条好的入门路径」写成带验收标准的规格：把注意力后端和 FlashInfer 的分页 API 对照着读，在 MoE 模型上剖析一个解码步，写一个小的融合算子。这台 Apple M5 上的 Metal 对照实测：融合残差加法 + RMSNorm 单独量时，批大小为 1 比两个内核快 1.40–1.88 倍；放进一个 OLMoE 形状的解码步替身里，整步只快 0.14–0.24%，因为这一步的时间几乎全花在读 2.15 GB 权重上。内核快了，端到端不一定快，这正是作品项目要你量出来的东西。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-11-01 在这台 Apple M5 上实际运行，数字原样贴出；Lab A <strong>未运行</strong>，是 2026-11-01 根据 SGLang v0.5.22 的源码整理的。</p>
+  <p class="lede" lang="en">The first seven phases looked at the requirement each runtime idea places on a kernel; this phase turns that around and looks at the openings through which a kernel you have written enters the engine. v0.5.22 has four: an op in the kernel library <code>python/sglang/kernels/</code>, registered through <code>TORCH_LIBRARY_FRAGMENT(sgl_kernel, …)</code> as <code>torch.ops.sgl_kernel.*</code>; an <code>AttentionBackend</code> implemented around your attention kernel; contributions to upstream libraries such as FlashInfer, DeepGEMM, FlashMLA and CUTLASS, which SGLang picks up when it moves its pinned versions; and the tools that measure all of it, <code>one_batch</code>, the torch profiler, Nsight Systems and Nsight Compute. The capstone turns the brief’s “good way in” into a specification with acceptance criteria: read the attention backend beside FlashInfer’s paged API, profile a decode step on a MoE model, and write one small fused op. Measured with the Metal twin on this Apple M5: a fused residual add + RMSNorm on its own is 1.40–1.88 times as fast as two kernels at batch size 1, yet inside an OLMoE-shaped decode-step stand-in the whole step is only 0.14–0.24% faster, because the step spends nearly all its time reading 2.15 GB of weights. A faster kernel does not guarantee a faster engine, and that is exactly what the capstone asks you to measure. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-11-01 and its numbers are pasted as they came; Lab A is <strong>not run</strong>, assembled on 2026-11-01 from the SGLang v0.5.22 source.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出 v0.5.22 里给内核库加一个提前编译（AOT）算子的六个步骤和每一步改哪个文件，并解释为什么要写带 <code>Tensor!</code> 的 schema。</li>
+      <li lang="en">List the six steps of adding an ahead-of-time (AOT) op to the v0.5.22 kernel library and the file each step touches, and explain why the op needs a schema with <code>Tensor!</code>.</li>
+      <li lang="zh-CN">说出 <code>AttentionBackend</code> 的方法里哪些在 CUDA 图外跑、哪些在图里跑，以及 FlashInfer 后端怎样为解码造出 <code>kv_indptr</code> 和 <code>kv_indices</code> 再交给 <code>plan()</code>。</li>
+      <li lang="en">Say which <code>AttentionBackend</code> methods run outside a CUDA graph and which inside, and how the FlashInfer backend builds <code>kv_indptr</code> and <code>kv_indices</code> for decode and hands them to <code>plan()</code>.</li>
+      <li lang="zh-CN">用 <code>one_batch</code>、torch profiler、Nsight Systems 和 Nsight Compute 一层一层地回答「哪个内核占主导」，知道 CUDA 图开着时 Nsight Systems 默认看不到图里的单个内核。</li>
+      <li lang="en">Answer “which kernel dominates” layer by layer with <code>one_batch</code>, the torch profiler, Nsight Systems and Nsight Compute, knowing that with CUDA graphs on, Nsight Systems does not show the individual kernels inside a graph by default.</li>
+      <li lang="zh-CN">把一个自己写的 CUDA 算子注册成 torch 算子，换进 SGLang 的模型里，用 <code>one_batch</code> 测端到端，并按阿姆达尔定律预测和解释内核加速与端到端加速之间的差距。</li>
+      <li lang="en">Register a CUDA op of your own as a torch op, swap it into an SGLang model, measure it end to end with <code>one_batch</code>, and predict and explain with Amdahl’s law the gap between the kernel speedup and the end-to-end speedup.</li>
+      <li lang="zh-CN">按作品项目的规格交出一份报告，满足它的验收标准。</li>
+      <li lang="en">Hand in a report that follows the capstone specification and meets its acceptance criteria.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-1-attention-and-kv-layouts/index.html">Phase 1</a>：indptr/indices 的 CSR 契约和 FlashInfer 的分页 API。概念 3 在后端代码里再看一遍它们是怎么造出来的。</li>
+    <li lang="en"><a href="../phase-1-attention-and-kv-layouts/index.html">Phase 1</a>: the CSR contract of indptr/indices and FlashInfer’s paged API. Concept 3 looks again at how the backend code builds them.</li>
+    <li lang="zh-CN"><a href="../phase-3-cuda-graphs-plan-run/index.html">Phase 3</a>：可被图捕获的内核不能做什么。你的算子要在 SGLang 的解码图里被捕获，所以必须守这些规矩。</li>
+    <li lang="en"><a href="../phase-3-cuda-graphs-plan-run/index.html">Phase 3</a>: what a capturable kernel may not do. Your op is captured inside SGLang’s decode graph, so it has to obey those rules.</li>
+    <li lang="zh-CN"><a href="../phase-4-moe-kernels/index.html">Phase 4</a> 和 <a href="../phase-5-fusions/index.html">Phase 5</a>：MoE 解码步里有哪些内核；<code>fused_add_rmsnorm</code> 从模型层一路到内核的路径、它省下的字节，以及 <code>BaseFusedOp</code>。</li>
+    <li lang="en"><a href="../phase-4-moe-kernels/index.html">Phase 4</a> and <a href="../phase-5-fusions/index.html">Phase 5</a>: which kernels a MoE decode step runs; the path of <code>fused_add_rmsnorm</code> from the model layer down to the kernel, the bytes it saves, and <code>BaseFusedOp</code>.</li>
+    <li lang="zh-CN">GPU 专题的 <a href="../../gpu-cuda/phase-7-stack-and-capstone/index.html">Phase 7 · 栈与作品项目</a>：怎样把 CUDA 内核注册成 PyTorch 算子，以及构建和兼容性。本页的 Lab A 沿用它的做法。</li>
+    <li lang="en">From the GPU topic, <a href="../../gpu-cuda/phase-7-stack-and-capstone/index.html">Phase 7 · The Stack and the Capstone</a>: registering a CUDA kernel as a PyTorch operator, plus building and compatibility. Lab A on this page follows that approach.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+  <p lang="zh-CN">下文 SGLang 的源码路径和行号都在 <code>v0.5.22</code> 标签下，2026-11-01 用 curl 从 raw.githubusercontent.com 取回后读的；FlashInfer 的 <code>flashinfer/decode.py</code> 在 <code>v0.7.1</code> 标签下（SGLang 钉的版本），它的 <code>CONTRIBUTING.md</code> 在 <code>main</code> 分支上；PyTorch 的文档是 2.14 版（SGLang 钉 <code>torch==2.14.1</code>），Nsight Systems 用户指南是 2026.4 版，Nsight Compute 命令行文档是 2026.3.1 版，都是同一天读的。路径省略了前缀 <code>python/sglang/</code>。</p><p lang="en">Every SGLang source path and line number below is at the <code>v0.5.22</code> tag, fetched with curl from raw.githubusercontent.com and read on 2026-11-01; FlashInfer’s <code>flashinfer/decode.py</code> is at the <code>v0.7.1</code> tag (the version SGLang pins) and its <code>CONTRIBUTING.md</code> on the <code>main</code> branch; the PyTorch documentation is the 2.14 version (SGLang pins <code>torch==2.14.1</code>), the Nsight Systems User Guide version 2026.4 and the Nsight Compute CLI documentation version 2026.3.1, all read the same day. Paths drop the <code>python/sglang/</code> prefix.</p>
+
+  <h3 lang="zh-CN">1. 四个接入点在栈上的位置</h3><h3 lang="en">1. Where the four plug-in points sit on the stack</h3>
+  <p lang="zh-CN">简报的四层栈是前端、运行时（SRT）、模型执行器和内核层。内核工程师几乎不碰前两层，接入点都在后两层和它们下面：</p><p lang="en">The brief’s stack has four layers: the frontend, the runtime (SRT), the model executor and the kernel layer. A kernel engineer almost never touches the first two; the plug-in points are all in the last two and below them:</p>
+  <ul>
+    <li lang="zh-CN"><strong>内核库里的一个算子</strong>：放在 <code>kernels/</code> 下。提前编译的 CUDA/C++ 在 <code>kernels/aot/</code>（PyPI 包 <code>sglang-kernel</code>，Python 模块名仍是 <code>sgl_kernel</code>，<code>kernels/aot/README.md</code> 第 12 行），注册成 <code>torch.ops.sgl_kernel.*</code>；即时编译的在 <code>kernels/jit/</code>；对 SGLang 其他代码公开的调用入口一律在 <code>kernels/ops/&lt;组&gt;/</code>。模型执行器里的层（例如 <code>srt/layers/layernorm.py</code>）调用它。概念 2。</li>
+    <li lang="en"><strong>An op in the kernel library</strong>: under <code>kernels/</code>. Ahead-of-time CUDA/C++ lives in <code>kernels/aot/</code> (PyPI package <code>sglang-kernel</code>, Python module still <code>sgl_kernel</code>, line 12 of <code>kernels/aot/README.md</code>) and registers as <code>torch.ops.sgl_kernel.*</code>; just-in-time builds live in <code>kernels/jit/</code>; the public call surface for the rest of SGLang is always <code>kernels/ops/&lt;group&gt;/</code>. Layers in the model executor (for example <code>srt/layers/layernorm.py</code>) call it. Concept 2.</li>
+    <li lang="zh-CN"><strong>一个 AttentionBackend</strong>：在 <code>srt/layers/attention/</code>，夹在模型执行器和注意力内核之间。它把运行时的批（哪些请求、各自的 KV 在哪些槽位）翻译成内核要的索引数组，再调内核。概念 3。</li>
+    <li lang="en"><strong>An AttentionBackend</strong>: in <code>srt/layers/attention/</code>, between the model executor and the attention kernel. It translates the runtime’s batch (which requests, where each one’s KV sits) into the index arrays the kernel wants, then calls the kernel. Concept 3.</li>
+    <li lang="zh-CN"><strong>上游库</strong>：FlashInfer、DeepGEMM、FlashMLA、CUTLASS 和 CuTe DSL 在 SGLang 仓库之外，以钉住版本的依赖进入（<code>python/pyproject.toml</code>）。概念 4。</li>
+    <li lang="en"><strong>The upstream libraries</strong>: FlashInfer, DeepGEMM, FlashMLA, CUTLASS and the CuTe DSL live outside the SGLang repository and come in as pinned dependencies (<code>python/pyproject.toml</code>). Concept 4.</li>
+    <li lang="zh-CN"><strong>工具</strong>：不属于任何一层，但每一层的改动都要靠它们证明。概念 5。写内核用什么语言是概念 6。</li>
+    <li lang="en"><strong>The tools</strong>: they belong to no layer, but every change on any layer is proved with them. Concept 5. The languages kernels are written in are concept 6.</li>
+  </ul>
+  <p lang="zh-CN"><code>kernels/README.md</code> 定下了一条评审规则（第 164–172 行）：SGLang 的运行时代码和测试应当从 <code>sglang.kernels.ops.*</code> 导入可调用的内核；实现可以继续写在 <code>sglang.kernels.jit</code> 或 <code>sgl_kernel</code> 里，但新加一个可调用内核的 PR 要同时给它加一个 <code>sglang.kernels.ops.*</code> 入口。分组按「公开的计算」分，不按最先用它的模型分（第 54–58 行）。</p><p lang="en"><code>kernels/README.md</code> sets a review rule (lines 164–172): SGLang runtime code and tests should import callable kernels from <code>sglang.kernels.ops.*</code>; the implementation can still live in <code>sglang.kernels.jit</code> or <code>sgl_kernel</code>, but a PR that adds a new callable kernel also adds a <code>sglang.kernels.ops.*</code> entry point for it. Groups follow the public computation, not the model that first used it (lines 54–58).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 SGLang 的代码组织。这一概念以 <code>kernels/README.md</code> 和简报为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers how SGLang’s code is organized. This concept rests on <code>kernels/README.md</code> and the brief; see Resources.</p>
+
+  <h3 lang="zh-CN">2. 内核库里的一个算子：通过 torch 算子暴露</h3><h3 lang="en">2. An op in the kernel library, exposed through torch ops</h3>
+  <p lang="zh-CN"><code>kernels/aot/README.md</code> 第 49–56 行给出了加一个新内核的六步，下面每一步都配上 v0.5.22 里 <code>silu_and_mul</code> 的实际位置：</p><p lang="en">Lines 49–56 of <code>kernels/aot/README.md</code> give six steps for adding a new kernel; each one below is paired with where <code>silu_and_mul</code> actually sits in v0.5.22:</p>
+  <ol>
+    <li lang="zh-CN"><strong>在 <code>csrc/</code> 里实现内核</strong>：<code>kernels/aot/csrc/elementwise/activation.cu</code> 第 85 行的 <code>void silu_and_mul(at::Tensor&amp; out, at::Tensor&amp; input)</code>，一个 token 一个线程块，从 <code>at::cuda::getCurrentCUDAStream()</code> 取流再发射 FlashInfer 的 <code>act_and_mul_kernel</code>。</li>
+    <li lang="en"><strong>Implement the kernel in <code>csrc/</code></strong>: <code>void silu_and_mul(at::Tensor&amp; out, at::Tensor&amp; input)</code> at line 85 of <code>kernels/aot/csrc/elementwise/activation.cu</code>, one thread block per token, taking its stream from <code>at::cuda::getCurrentCUDAStream()</code> and launching FlashInfer’s <code>act_and_mul_kernel</code>.</li>
+    <li lang="zh-CN"><strong>在 <code>include/sgl_kernel_ops.h</code> 里声明接口</strong>：第 122–129 行声明了 <code>rmsnorm</code>、<code>sgl_fused_add_rmsnorm</code>、<code>silu_and_mul</code> 等。</li>
+    <li lang="en"><strong>Declare the interface in <code>include/sgl_kernel_ops.h</code></strong>: lines 122–129 declare <code>rmsnorm</code>, <code>sgl_fused_add_rmsnorm</code>, <code>silu_and_mul</code> and others.</li>
+    <li lang="zh-CN"><strong>在 <code>csrc/common_extension.cc</code> 里建 torch 扩展</strong>：整个文件是一个 <code>TORCH_LIBRARY_FRAGMENT(sgl_kernel, m)</code>（第 21 行），每个算子一对 <code>m.def</code>（带 schema）和 <code>m.impl</code>（绑定到 <code>torch::kCUDA</code>），例如第 71–72 行的 <code>m.def("silu_and_mul(Tensor! out, Tensor input) -&gt; ()")</code>，第 62–63 行的 <code>fused_add_rmsnorm(Tensor! input, Tensor! residual, Tensor weight, float eps, bool enable_pdl) -&gt; ()</code>。</li>
+    <li lang="en"><strong>Create the torch extension in <code>csrc/common_extension.cc</code></strong>: the whole file is one <code>TORCH_LIBRARY_FRAGMENT(sgl_kernel, m)</code> (line 21), with a pair per op of <code>m.def</code> (with a schema) and <code>m.impl</code> (bound to <code>torch::kCUDA</code>), for example <code>m.def("silu_and_mul(Tensor! out, Tensor input) -&gt; ()")</code> at lines 71–72 and <code>fused_add_rmsnorm(Tensor! input, Tensor! residual, Tensor weight, float eps, bool enable_pdl) -&gt; ()</code> at lines 62–63.</li>
+    <li lang="zh-CN"><strong>在 <code>CMakeLists.txt</code> 里加入新的 CUDA 源文件</strong>：第 262 行的 <code>csrc/elementwise/activation.cu</code>、第 266 行的 <code>csrc/elementwise/fused_add_rms_norm_kernel.cu</code>。</li>
+    <li lang="en"><strong>Add the new CUDA source to <code>CMakeLists.txt</code></strong>: <code>csrc/elementwise/activation.cu</code> at line 262 and <code>csrc/elementwise/fused_add_rms_norm_kernel.cu</code> at line 266.</li>
+    <li lang="zh-CN"><strong>在 <code>python/sgl_kernel/</code> 里暴露 Python 接口</strong>：<code>sgl_kernel/elementwise.py</code> 第 258–270 行的 <code>silu_and_mul</code> 先检查形状和 16 字节对齐、必要时分配输出，再调 <code>torch.ops.sgl_kernel.silu_and_mul.default(out, input)</code>。第 6 步是加测试和基准，README 推荐用 <code>triton.testing.do_bench_cudagraph</code> 计时（第 106–113 行）。</li>
+    <li lang="en"><strong>Expose the Python interface in <code>python/sgl_kernel/</code></strong>: <code>silu_and_mul</code> at lines 258–270 of <code>sgl_kernel/elementwise.py</code> checks the shapes and 16-byte alignment, allocates the output if needed, then calls <code>torch.ops.sgl_kernel.silu_and_mul.default(out, input)</code>. Step 6 is adding tests and benchmarks, and the README recommends timing with <code>triton.testing.do_bench_cudagraph</code> (lines 106–113).</li>
+  </ol>
+  <p lang="zh-CN">schema 是这条路的关键。<code>Tensor!</code> 告诉 PyTorch 这个参数会被原地修改，返回 <code>()</code> 说明结果写在传进来的张量里；README 第 64–70 行的注释说 schema 是给 <code>torch.compile</code> 用的。另一半是 C++ 类型：PyTorch 的绑定只认 <code>int64_t</code> 和 <code>double</code>，第三方库用 <code>int</code> 和 <code>float</code> 时要用 <code>make_pytorch_shim</code> 转换（第 72–94 行）。</p><p lang="en">The schema is the key to this route. <code>Tensor!</code> tells PyTorch the argument is modified in place, and returning <code>()</code> says the results are written into tensors passed in; the comment at lines 64–70 of the README says the schema is there for <code>torch.compile</code>. The other half is C++ types: PyTorch bindings accept only <code>int64_t</code> and <code>double</code>, so a third-party library that uses <code>int</code> and <code>float</code> is wrapped with <code>make_pytorch_shim</code> (lines 72–94).</p>
+  <p lang="zh-CN">即时编译（JIT）的算子走另一条路，不经过 torch 算子。<code>kernels/ops/elementwise/add_constant.py</code> 用 <code>load_jit(…, cuda_files=["elementwise/add_constant.cuh"], …)</code> 在第一次调用时编译，返回的是 <code>tvm_ffi</code> 模块（源码 <code>kernels/jit/csrc/elementwise/add_constant.cuh</code> 包含的是 <code>tvm/ffi</code> 头文件）。两条路的算子最后都通过 <code>kernels/registry.py</code> 第 76 行的 <code>register_kernel(KernelSpec(…))</code> 登记：登记只记元数据（算子名、后端、导入路径），不导入 torch，也不触发编译（<code>kernels/README.md</code> 第 79–82 行）。</p><p lang="en">Just-in-time (JIT) ops take another route that does not go through torch ops. <code>kernels/ops/elementwise/add_constant.py</code> compiles on first call with <code>load_jit(…, cuda_files=["elementwise/add_constant.cuh"], …)</code> and gets back a <code>tvm_ffi</code> module (its source, <code>kernels/jit/csrc/elementwise/add_constant.cuh</code>, includes <code>tvm/ffi</code> headers). Ops from both routes end up registered with <code>register_kernel(KernelSpec(…))</code> (line 76 of <code>kernels/registry.py</code>); registration records metadata only (op name, backend, import path) and neither imports torch nor triggers a build (lines 79–82 of <code>kernels/README.md</code>).</p>
+  <p lang="zh-CN">算子还得能放进解码图。按 Phase 3 的规矩：用当前流（<code>getCurrentCUDAStream()</code>，SGLang 捕获的就是这个流），内核路径上不分配显存、不做主机同步、不读 <code>.item()</code>，形状只取决于输入张量。<code>silu_and_mul</code> 的 Python 包装在输出缺省时会 <code>torch.empty</code>，但调用方 <code>SiluAndMul.forward_cuda</code> 每次都传入预先分配的输出（Phase 5 概念 3）。</p><p lang="en">The op also has to fit inside the decode graph. Phase 3’s rules apply: use the current stream (<code>getCurrentCUDAStream()</code>, the very stream SGLang captures), allocate no memory, do no host sync and read no <code>.item()</code> on the kernel path, and let shapes depend only on the input tensors. The Python wrapper of <code>silu_and_mul</code> calls <code>torch.empty</code> when no output is given, but its caller, <code>SiluAndMul.forward_cuda</code>, always passes a preallocated output (Phase 5, concept 3).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 10 章 Reduction（Lab A 里那个算子的块内归约）。参考书目里没有书讲 torch 算子的注册，这部分以 <code>kernels/aot/README.md</code> 和 PyTorch 2.14 的 <code>torch.library</code> 文档为准，见资料。</p><p lang="en">Further reading: chapter 10, Reduction, of PMPP 5th ed. (the block-wide reduction inside Lab A’s op). No book in the bibliography covers torch op registration; that part rests on <code>kernels/aot/README.md</code> and the PyTorch 2.14 <code>torch.library</code> documentation; see Resources.</p>
+
+  <h3 lang="zh-CN">3. 围绕一个内核实现 AttentionBackend</h3><h3 lang="en">3. An AttentionBackend around a kernel</h3>
+  <p lang="zh-CN"><code>srt/layers/attention/base_attn_backend.py</code> 第 36 行的 <code>AttentionBackend</code> 是抽象基类。它的文档字符串（第 39–56 行）把「准备前向数据」写成三个方法的契约：</p><p lang="en"><code>AttentionBackend</code> at line 36 of <code>srt/layers/attention/base_attn_backend.py</code> is an abstract base class. Its docstring (lines 39–56) states the contract for preparing forward data as three methods:</p>
+  <ul>
+    <li lang="zh-CN"><code>init_forward_metadata(fb)</code>（第 88 行）：急切执行时的入口，默认先调 <code>_out_graph</code> 再调 <code>_in_graph</code>。</li>
+    <li lang="en"><code>init_forward_metadata(fb)</code> (line 88): the eager entry point; by default it calls <code>_out_graph</code> and then <code>_in_graph</code>.</li>
+    <li lang="zh-CN"><code>init_forward_metadata_out_graph(fb, in_capture=False)</code>（第 96 行）：每一步的元数据准备，在 <code>with graph.capture():</code> 之外跑。主机操作、动态形状、不能录进图的逻辑都放这里。</li>
+    <li lang="en"><code>init_forward_metadata_out_graph(fb, in_capture=False)</code> (line 96): per-step metadata preparation, run outside <code>with graph.capture():</code>. Host work, dynamic shapes and anything that cannot be recorded into a graph go here.</li>
+    <li lang="zh-CN"><code>init_forward_metadata_in_graph(fb)</code>（第 118 行）：静态形状、可录进图的 GPU 操作，捕获时录下、重放时自动执行。第 124–126 行的「lint 契约」写明它的实现不能调 <code>.item()</code>、<code>.cpu()</code>、<code>.tolist()</code> 或动态形状的 <code>torch.empty()</code>。</li>
+    <li lang="en"><code>init_forward_metadata_in_graph(fb)</code> (line 118): static-shape, graph-recordable GPU work, recorded at capture and executed automatically at replay. The “lint contract” at lines 124–126 says its body must not call <code>.item()</code>, <code>.cpu()</code>, <code>.tolist()</code> or a dynamic-shape <code>torch.empty()</code>.</li>
+  </ul>
+  <p lang="zh-CN">其余的钩子：<code>init_cuda_graph_state(max_bs, max_num_tokens)</code>（第 205 行）为图分配全局共享的缓冲区；<code>verify_mask</code>（第 249 行）给推测解码的验证用（Phase 7）；<code>support_triton</code>（第 347 行）默认返回 <code>True</code>。真正的计算在 <code>forward_decode</code>（第 309 行）和 <code>forward_extend</code>（第 322 行），基类都只抛 <code>NotImplementedError</code>。基类的 <code>forward</code>（第 265 行）按批的模式分派：解码走 <code>forward_decode</code>，只有在 NPU 上的混合批才走 <code>forward_mixed</code>，其余都走 <code>forward_extend</code>。</p><p lang="en">The other hooks: <code>init_cuda_graph_state(max_bs, max_num_tokens)</code> (line 205) allocates the buffers shared by the graphs; <code>verify_mask</code> (line 249) serves verification in speculative decoding (Phase 7); <code>support_triton</code> (line 347) returns <code>True</code> by default. The actual computation lives in <code>forward_decode</code> (line 309) and <code>forward_extend</code> (line 322), both of which only raise <code>NotImplementedError</code> in the base class. The base <code>forward</code> (line 265) dispatches on the batch mode: decode goes to <code>forward_decode</code>, a mixed batch goes to <code>forward_mixed</code> only on NPU, and everything else goes to <code>forward_extend</code>.</p>
+  <p lang="zh-CN">新后端怎样被选中：<code>srt/layers/attention/attention_registry.py</code> 第 41–51 行是一个字典 <code>ATTENTION_BACKENDS</code> 和装饰器 <code>register_attention_backend(name)</code>；第 53 行起的 <code>@register_attention_backend("flashinfer")</code> 定义了一个接收 model runner、返回后端实例的工厂函数。<code>--attention-backend</code> 只接受 <code>ATTENTION_BACKEND_CHOICES</code> 里的名字（<code>arg_groups/choices.py</code> 第 69–99 行）；新后端除了用 <code>@register_attention_backend(name)</code> 登记工厂，还要调 <code>add_attention_backend_choices</code>（第 222 行）把名字加进可选值，之后这个名字才能选中那个工厂。</p><p lang="en">How a new backend gets chosen: lines 41–51 of <code>srt/layers/attention/attention_registry.py</code> hold a dictionary, <code>ATTENTION_BACKENDS</code>, and a decorator, <code>register_attention_backend(name)</code>; <code>@register_attention_backend("flashinfer")</code> from line 53 defines a factory that takes the model runner and returns a backend instance. <code>--attention-backend</code> accepts only names in <code>ATTENTION_BACKEND_CHOICES</code> (lines 69–99 of <code>arg_groups/choices.py</code>); a new backend calls <code>add_attention_backend_choices</code> (line 222) as well as <code>@register_attention_backend(name)</code>, whose key then selects the factory.</p>
+  <p lang="zh-CN">拿 FlashInfer 后端当范本，对照它的分页 API 读解码这条路（作品项目的第一项）：</p><p lang="en">Take the FlashInfer backend as the model and read its decode path beside FlashInfer’s paged API (the first part of the capstone):</p>
+  <ol>
+    <li lang="zh-CN"><code>flashinfer_backend.py</code> 第 294 行的 <code>FlashInferAttnBackend</code> 在构造时建好 <code>BatchDecodeWithPagedKVCacheWrapper</code>、<code>BatchPrefillWithPagedKVCacheWrapper</code> 和 <code>BatchPrefillWithRaggedKVCacheWrapper</code>（第 498–524 行）。</li>
+    <li lang="en"><code>FlashInferAttnBackend</code> at line 294 of <code>flashinfer_backend.py</code> builds a <code>BatchDecodeWithPagedKVCacheWrapper</code>, a <code>BatchPrefillWithPagedKVCacheWrapper</code> and a <code>BatchPrefillWithRaggedKVCacheWrapper</code> in its constructor (lines 498–524).</li>
+    <li lang="zh-CN">每一步，解码的 <code>call_begin_forward</code>（第 1726 行）用 <code>kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)</code> 造出 indptr（第 1750 行），再让 KV 索引翻译器把每个请求的槽位号写进 <code>kv_indices</code>；开着 CUDA 图时直接写进图的输入缓冲区 <code>wrapper._paged_kv_indices_buf</code>（第 1754–1756 行）。</li>
+    <li lang="en">Each step, the decode <code>call_begin_forward</code> (line 1726) builds the indptr with <code>kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)</code> (line 1750), and the KV index translator then writes each request’s slot numbers into <code>kv_indices</code>; with CUDA graphs on it writes straight into the graph’s input buffer, <code>wrapper._paged_kv_indices_buf</code> (lines 1754–1756).</li>
+    <li lang="zh-CN">然后调 <code>wrapper.begin_forward(kv_indptr, kv_indices, self.kv_last_page_len[:bs], num_qo_heads, num_kv_heads, head_dim, 1, …)</code>（第 1819–1834 行），页大小是 1，也就是 token 粒度的页。FlashInfer v0.7.1 的 <code>decode.py</code> 第 2277 行写着 <code>begin_forward = plan</code>；<code>plan</code>（第 1523 行）的文档字符串规定 <code>indptr</code> 形状 <code>[batch_size + 1]</code>、<code>indices</code> 形状 <code>[indptr[-1]]</code>、<code>last_page_len</code> 形状 <code>[batch_size]</code>，都是 int32。这就是 Phase 1 的 CSR 契约。</li>
+    <li lang="en">Then it calls <code>wrapper.begin_forward(kv_indptr, kv_indices, self.kv_last_page_len[:bs], num_qo_heads, num_kv_heads, head_dim, 1, …)</code> (lines 1819–1834), with a page size of 1, that is, token-granular pages. Line 2277 of FlashInfer v0.7.1’s <code>decode.py</code> reads <code>begin_forward = plan</code>; the docstring of <code>plan</code> (line 1523) fixes <code>indptr</code> at shape <code>[batch_size + 1]</code>, <code>indices</code> at <code>[indptr[-1]]</code> and <code>last_page_len</code> at <code>[batch_size]</code>, all int32. This is Phase 1’s CSR contract.</li>
+    <li lang="zh-CN">每层的 <code>forward_decode</code> 调 <code>decode_wrapper.forward(q, kv_cache, sm_scale=…, logits_soft_cap=…, k_scale=…, v_scale=…)</code>（第 1526–1533 行）。<code>forward</code> 在 FlashInfer 里是已弃用的别名，内部转给 <code>run</code>（<code>decode.py</code> 第 2279–2300 行）。第 1531 行的注释说缩放因子必须传 Python 浮点数，以免一次设备到主机的拷贝打断 CUDA 图捕获。</li>
+    <li lang="en">Each layer’s <code>forward_decode</code> calls <code>decode_wrapper.forward(q, kv_cache, sm_scale=…, logits_soft_cap=…, k_scale=…, v_scale=…)</code> (lines 1526–1533). In FlashInfer, <code>forward</code> is a deprecated alias that hands over to <code>run</code> (lines 2279–2300 of <code>decode.py</code>). The comment at line 1531 says the scales must be passed as Python floats, to avoid a device-to-host copy that would break CUDA graph capture.</li>
+  </ol>
+  <p lang="zh-CN">所以「围绕你的内核实现这个接口」的意思是：在 <code>_out_graph</code> 里把运行时的批翻译成你的内核要的布局（CPU 侧的 <code>plan()</code>），在 <code>_in_graph</code> 或 <code>forward_decode</code> 里只做形状固定的 GPU 工作（图安全的 <code>run()</code>），再用 <code>@register_attention_backend(name)</code> 登记，并用 <code>add_attention_backend_choices</code> 把名字加进命令行的可选值。</p><p lang="en">So “implementing this interface around your kernel” means: in <code>_out_graph</code>, translate the runtime’s batch into the layout your kernel wants (the CPU-side <code>plan()</code>); in <code>_in_graph</code> or <code>forward_decode</code>, do only fixed-shape GPU work (the graph-safe <code>run()</code>); then register it with <code>@register_attention_backend(name)</code> and add the name to the command-line choices with <code>add_attention_backend_choices</code>.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲推理引擎的注意力后端。这一概念以 <code>base_attn_backend.py</code> 的文档字符串、<code>flashinfer_backend.py</code> 和 FlashInfer 的 KV 布局教程为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers inference-engine attention backends. This concept rests on the docstrings of <code>base_attn_backend.py</code>, on <code>flashinfer_backend.py</code> and on FlashInfer’s KV-layout tutorial; see Resources.</p>
+
+  <h3 lang="zh-CN">4. 上游库：贡献先进上游，再随钉住的版本进来</h3><h3 lang="en">4. Upstream libraries: contributions land upstream, then arrive with a pinned version</h3>
+  <p lang="zh-CN">简报说 SGLang 常常先从上游库采用内核。代价是一层间接：你在上游合进去的改动，要等 SGLang 把 <code>python/pyproject.toml</code> 里的版本挪过去才生效。v0.5.22 钉的版本和各上游 2026-10-31 的最新发布（主题大纲的「Pinned facts」）：</p><p lang="en">The brief says SGLang often adopts kernels from the upstream libraries first. The price is one layer of indirection: a change you land upstream takes effect only after SGLang moves the version in <code>python/pyproject.toml</code>. The versions v0.5.22 pins, beside each upstream’s latest release on 2026-10-31 (the syllabus’s “Pinned facts”):</p>
+  <ul>
+    <li lang="zh-CN"><strong>FlashInfer</strong>：钉 <code>flashinfer_python[cu13]==0.7.1</code>（第 42 行），最新 v0.7.2.post1。它的 <code>CONTRIBUTING.md</code> 规定了分层：与框架无关、只收裸指针的内核定义放 <code>include/</code>，而且那里不许包含 Torch 头文件；收 torch 张量、绑定到 PyTorch 的注册代码放 <code>csrc/</code>；Python 接口放 <code>python/</code>，测试放 <code>tests/</code>。贡献步骤依次是内核、注册、Python 接口、单元测试、可选的基准、文档。</li>
+    <li lang="en"><strong>FlashInfer</strong>: pinned at <code>flashinfer_python[cu13]==0.7.1</code> (line 42), latest v0.7.2.post1. Its <code>CONTRIBUTING.md</code> sets the layering: framework-agnostic kernel definitions that take raw pointers go in <code>include/</code>, where Torch headers must not be included; registration code that takes torch tensors and binds to PyTorch goes in <code>csrc/</code>; the Python interface in <code>python/</code> and tests in <code>tests/</code>. The contribution steps are the kernel, the registration, the Python interface, unit tests, optional benchmarks and the documentation, in that order.</li>
+    <li lang="zh-CN"><strong>DeepGEMM</strong>：钉 <code>sgl-deep-gemm==0.2.2</code>（第 80 行），这是 SGLang 自己发布的包；上游 deepseek-ai/DeepGEMM 最新 v2.1.1.post3。所有内核在运行时 JIT 编译，要求 SM90 或 SM100（Phase 4）。</li>
+    <li lang="en"><strong>DeepGEMM</strong>: pinned at <code>sgl-deep-gemm==0.2.2</code> (line 80), a package SGLang publishes itself; upstream deepseek-ai/DeepGEMM is at v2.1.1.post3. Every kernel is JIT-compiled at run time and needs SM90 or SM100 (Phase 4).</li>
+    <li lang="zh-CN"><strong>FlashMLA</strong>：上游没有发布版本；README 说 2026-09-30 那次更新去掉了 Hopper 支持，只要 SM100/SM103。SGLang v0.5.22 打包的是分叉 <code>sgl-project/FlashMLA</code> 的 3620b63 提交，仍然编译 sm_90a 的解码内核（Phase 2）。这里的「上游」其实有两个。</li>
+    <li lang="en"><strong>FlashMLA</strong>: upstream publishes no releases; its README says the 2026-09-30 update removed Hopper support and requires SM100/SM103. SGLang v0.5.22 bundles commit 3620b63 of the fork <code>sgl-project/FlashMLA</code>, which still builds the sm_90a decode kernels (Phase 2). Here “upstream” is really two places.</li>
+    <li lang="zh-CN"><strong>CUTLASS 和 CuTe DSL</strong>：钉 <code>nvidia-cutlass-dsl[cu13]==4.8.0</code>（第 55 行），最新 4.8.1。C++ 的 CUTLASS/CuTe 模板和 Python 的 CuTe DSL 出自同一个仓库 NVIDIA/cutlass（Phase 6）。</li>
+    <li lang="en"><strong>CUTLASS and the CuTe DSL</strong>: pinned at <code>nvidia-cutlass-dsl[cu13]==4.8.0</code> (line 55), latest 4.8.1. The C++ CUTLASS/CuTe templates and the Python CuTe DSL come from the same repository, NVIDIA/cutlass (Phase 6).</li>
+  </ul>
+  <p lang="zh-CN">内核库自己的轮子也是钉住的：<code>sglang-kernel==0.4.9</code>（第 81 行）。所以哪怕改的是 SGLang 仓库里的 <code>kernels/aot/</code>，普通用户也要等到下一版 <code>sglang-kernel</code> 发布、<code>pyproject.toml</code> 跟上才拿得到（推断：依据是这个钉住的依赖；轮子的发布流程这里没有核对）。</p><p lang="en">The kernel library’s own wheel is pinned too: <code>sglang-kernel==0.4.9</code> (line 81). So even a change to <code>kernels/aot/</code> inside the SGLang repository reaches ordinary users only after the next <code>sglang-kernel</code> release and a matching <code>pyproject.toml</code> (inference, from the pinned dependency; the wheel release process was not checked here).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲这些库的贡献流程。这一概念以各仓库的 README 和 FlashInfer 的 <code>CONTRIBUTING.md</code> 为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers how to contribute to these libraries. This concept rests on each repository’s README and on FlashInfer’s <code>CONTRIBUTING.md</code>; see Resources.</p>
+
+  <h3 lang="zh-CN">5. 工具：一层一层回答「哪个内核占主导」</h3><h3 lang="en">5. The tools: answering “which kernel dominates” one layer at a time</h3>
+  <ul>
+    <li lang="zh-CN"><strong><code>python -m sglang.benchmark.one_batch</code></strong>（<code>benchmark/one_batch.py</code>；简报里的 <code>bench_one_batch</code> 现在叫这个名字）：文档字符串第 1–5 行说它不启动服务器，直接用底层 API 跑一个静态批。张量并行为 1 时，测试函数就在当前进程里跑（第 1065–1066 行），所以在同一个进程里先打补丁、再调它的 <code>cli_main()</code>，就能把模型里的算子换掉（Lab A 第 3 步）。它打印 <code>Prefill.</code>、<code>Decode.  median latency</code>（第 878 行）和 <code>Total.</code> 三行。加 <code>--profile</code> 用 torch profiler，<code>--profile-stage</code> 取 <code>all</code>、<code>prefill</code> 或 <code>decode</code>（第 284–290 行），trace 存成 <code>SGLANG_TORCH_PROFILER_DIR</code> 下的 <code>&lt;前缀&gt;_batch&lt;B&gt;_input&lt;I&gt;_output&lt;O&gt;_&lt;阶段&gt;.trace.json.gz</code>（第 659–668 行），并按 <code>self_cuda_time_total</code> 排序打印 <code>key_averages</code> 表（第 671–682 行）。<code>--load-format dummy</code> 用随机权重，不下载模型（第 8–9 行）。</li>
+    <li lang="en"><strong><code>python -m sglang.benchmark.one_batch</code></strong> (<code>benchmark/one_batch.py</code>; the brief’s <code>bench_one_batch</code> goes by this name now): lines 1–5 of its docstring say it launches no server and runs a single static batch through the low-level APIs. With tensor parallelism of 1 the test function runs in the current process (lines 1065–1066), so patching first and then calling its <code>cli_main()</code> in the same process swaps an op inside the model (Lab A, step 3). It prints three lines, <code>Prefill.</code>, <code>Decode.  median latency</code> (line 878) and <code>Total.</code>. <code>--profile</code> turns on the torch profiler, <code>--profile-stage</code> takes <code>all</code>, <code>prefill</code> or <code>decode</code> (lines 284–290), the trace is saved as <code>&lt;prefix&gt;_batch&lt;B&gt;_input&lt;I&gt;_output&lt;O&gt;_&lt;stage&gt;.trace.json.gz</code> under <code>SGLANG_TORCH_PROFILER_DIR</code> (lines 659–668), and a <code>key_averages</code> table sorted by <code>self_cuda_time_total</code> is printed (lines 671–682). <code>--load-format dummy</code> uses random weights and downloads no model (lines 8–9).</li>
+    <li lang="zh-CN"><strong>torch profiler</strong>：<code>torch.profiler.profile(activities=[CPU, CUDA])</code> 用 CUPTI 记下每个 CUDA 内核；表看总量，Chrome trace（<code>export_chrome_trace</code>）在 <a href="https://ui.perfetto.dev/">ui.perfetto.dev</a> 里看时间线上谁挨着谁。它最适合回答「这一步里哪些内核、各占多少」。</li>
+    <li lang="en"><strong>The torch profiler</strong>: <code>torch.profiler.profile(activities=[CPU, CUDA])</code> records every CUDA kernel through CUPTI; the table gives totals, and the Chrome trace (<code>export_chrome_trace</code>) shows in <a href="https://ui.perfetto.dev/">ui.perfetto.dev</a> what sits next to what on the timeline. It is best at answering “which kernels are in this step, and how much does each take”.</li>
+    <li lang="zh-CN"><strong>Nsight Systems</strong>（<code>nsys</code>）：整个进程的时间线，包括 CPU 线程、CUDA API 和内核。<code>one_batch.py</code> 第 17–18 行给了现成的用法：<code>--profile-activities CUDA_PROFILER</code> 让它调 <code>cudaProfilerStart()</code>（第 150–152 行），配合 <code>nsys profile -c cudaProfilerApi</code> 只录这一段。一个坑：用户指南说 <code>--cuda-graph-trace</code> 默认是 <code>graph</code>，只把整张图记成一项、不记图里的节点；要看解码图里的单个内核，加 <code>--cuda-graph-trace=node</code>（指南说这可能有明显的运行时开销），或者关掉解码图。<code>nsys stats</code> 的默认报告里有 <code>cuda_gpu_kern_sum</code>，按内核汇总时间。</li>
+    <li lang="en"><strong>Nsight Systems</strong> (<code>nsys</code>): a timeline of the whole process, with CPU threads, CUDA API calls and kernels. Lines 17–18 of <code>one_batch.py</code> give the ready-made usage: <code>--profile-activities CUDA_PROFILER</code> makes it call <code>cudaProfilerStart()</code> (lines 150–152), which <code>nsys profile -c cudaProfilerApi</code> uses to record just that stretch. One trap: the User Guide says <code>--cuda-graph-trace</code> defaults to <code>graph</code>, which records a whole graph as one item without its nodes; to see the individual kernels of the decode graph, add <code>--cuda-graph-trace=node</code> (which the guide says may cause significant runtime overhead), or turn the decode graph off. The default report set of <code>nsys stats</code> includes <code>cuda_gpu_kern_sum</code>, which totals time per kernel.</li>
+    <li lang="zh-CN"><strong>Nsight Compute</strong>（<code>ncu</code>）：一次只看一个内核，回答「它为什么慢」：带宽用了多少、停顿在哪。用 <code>-k regex:&lt;名字&gt;</code> 选内核，<code>--launch-skip</code> 和 <code>--launch-count</code> 跳过预热、只录一次，<code>--set full</code> 收全部分节（不写时只收 basic 集）。它会重放内核，比原来慢得多，所以只对已经从前三种工具里挑出来的那个内核用。</li>
+    <li lang="en"><strong>Nsight Compute</strong> (<code>ncu</code>): one kernel at a time, answering “why is it slow”: how much bandwidth it uses and where it stalls. <code>-k regex:&lt;name&gt;</code> selects the kernel, <code>--launch-skip</code> and <code>--launch-count</code> skip the warm-up and record one launch, and <code>--set full</code> collects every section (without it only the basic set is collected). It replays the kernel and runs far slower, so use it only on the kernel the first three tools have already singled out.</li>
+  </ul>
+  <p lang="zh-CN">把内核时间换算成端到端，用的是阿姆达尔定律：一个占整步比例 <code>f</code> 的部分快了 <code>s</code> 倍，整步只快 <code>1 / ((1 − f) + f / s)</code> 倍。32 的数法：OLMoE 16 层，每层 2 处归一化，第 0 层的输入归一化没有残差、不算，最后一个归一化带残差、算上，合计 32 处残差 + RMSNorm；Lab B 的替身每层直接跑 2 处，总数相同。替身里，这 32 处按批大小 1 的单独测量合计约 60–120 µs，占 17.3 ms 一步的约 0.4–0.7%（推断，按 Lab B 第一部分的中位数相乘）；就算它们快到零，整步也只快 0.7% 以内。所以作品项目要求报告先给出这个预测，再给出测量值。</p><p lang="en">Converting kernel time into end-to-end time is Amdahl’s law: if a part that takes a fraction <code>f</code> of the step becomes <code>s</code> times faster, the step becomes only <code>1 / ((1 − f) + f / s)</code> times faster. The 32 is counted this way: OLMoE has 16 layers with 2 norms each; layer 0’s input norm has no residual and is left out, and the final norm has one and is counted, giving 32 residual + RMSNorm sites; Lab B’s stand-in simply runs 2 per layer, the same total. In the stand-in, those 32 sites, measured alone at batch size 1, add up to about 60–120 µs, about 0.4–0.7% of a 17.3 ms step (inference, multiplying the medians of Lab B’s first part); even if they took no time at all, the step would be less than 0.7% faster. That is why the capstone asks the report to give this prediction first and the measurement second.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 6 章 Performance considerations；Hennessy &amp; Patterson 第 1 章 1.9 节 Quantitative Principles of Computer Design（阿姆达尔定律）和第 4 章的 Roofline 一节。</p><p lang="en">Further reading: chapter 6, Performance considerations, of PMPP 5th ed.; section 1.9 of chapter 1 of Hennessy &amp; Patterson, Quantitative Principles of Computer Design (Amdahl’s law), and the Roofline section of its chapter 4.</p>
+
+  <h3 lang="zh-CN">6. 语言：CUDA、CuTe 与 CuTe DSL、Triton、TileLang</h3><h3 lang="en">6. The languages: CUDA, CuTe and the CuTe DSL, Triton, TileLang</h3>
+  <ul>
+    <li lang="zh-CN"><strong>CUDA C++</strong>：<code>kernels/aot/csrc/</code> 和 <code>kernels/jit/csrc/</code> 里的大部分算子。控制最细，构建最重；概念 2 的六步就是为它写的。</li>
+    <li lang="en"><strong>CUDA C++</strong>: most of the ops in <code>kernels/aot/csrc/</code> and <code>kernels/jit/csrc/</code>. The finest control and the heaviest build; concept 2’s six steps were written for it.</li>
+    <li lang="zh-CN"><strong>CuTe 和 CuTe DSL</strong>：CuTe 是 CUTLASS 里描述张量布局和分块的 C++ 模板；CuTe DSL 是它的 Python 版本，运行时编译。SGLang 的 <code>kernels/ops/</code> 下有一批 <code>cutedsl_*.py</code>（例如 <code>kernels/ops/attention/cutedsl_gdn.py</code>），Phase 5 里 FlashInfer 的归一化默认也走 CuTe DSL 内核。</li>
+    <li lang="en"><strong>CuTe and the CuTe DSL</strong>: CuTe is CUTLASS’s set of C++ templates for describing tensor layouts and tiling; the CuTe DSL is its Python form, compiled at run time. SGLang’s <code>kernels/ops/</code> holds a set of <code>cutedsl_*.py</code> files (for example <code>kernels/ops/attention/cutedsl_gdn.py</code>), and in Phase 5 FlashInfer’s normalization took a CuTe DSL kernel by default.</li>
+    <li lang="zh-CN"><strong>Triton</strong>：用 Python 写块级程序，编译器负责块内的线程映射。Phase 4 的 <code>fused_moe_kernel</code>（定义在 <code>kernels/ops/moe/fused_moe_triton_kernels.py</code> 第 325 行，由 <code>srt/layers/moe/moe_runner/triton_utils/fused_moe.py</code> 调用）和 <code>triton</code> 注意力后端（<code>srt/layers/attention/triton_backend.py</code>）都是 Triton。Triton v3.9.0 的 README 要求计算能力 8.0 以上，所以 Colab 的 T4 不行（主题大纲）。</li>
+    <li lang="en"><strong>Triton</strong>: block-level programs written in Python, with the compiler mapping threads inside a block. Phase 4’s <code>fused_moe_kernel</code> (defined at line 325 of <code>kernels/ops/moe/fused_moe_triton_kernels.py</code>, called from <code>srt/layers/moe/moe_runner/triton_utils/fused_moe.py</code>) and the <code>triton</code> attention backend (<code>srt/layers/attention/triton_backend.py</code>) are both Triton. Triton v3.9.0’s README requires compute capability 8.0 or higher, so Colab’s T4 is out (the syllabus).</li>
+    <li lang="zh-CN"><strong>TileLang</strong>：同样是 Python 里的分块内核语言。v0.5.22 钉 <code>tilelang==0.1.12</code>（<code>pyproject.toml</code> 第 85 行；最新是 v0.1.15），用在 DeepSeek 稀疏注意力的路径上，例如 <code>kernels/ops/attention/dsa/tilelang_kernel.py</code>；在 v0.5.22 的文件树里，路径带 <code>tilelang</code> 的只有 4 个文件。</li>
+    <li lang="en"><strong>TileLang</strong>: another tiled-kernel language embedded in Python. v0.5.22 pins <code>tilelang==0.1.12</code> (line 85 of <code>pyproject.toml</code>; the latest is v0.1.15) and uses it on the DeepSeek sparse-attention path, for example <code>kernels/ops/attention/dsa/tilelang_kernel.py</code>; in the v0.5.22 file tree only 4 files have <code>tilelang</code> in their path.</li>
+  </ul>
+  <p lang="zh-CN">怎么选：要和 PyTorch 之外的引擎共享、或者要逐条指令控制，写 CUDA；矩阵乘和注意力这类以 tensor core 为中心的分块内核，CuTe DSL 和 CUTLASS 给出现成的布局代数；想快速试一个融合，Triton 最省事。这是常见的分工，不是规则（推断，依据是 v0.5.22 里各类内核实际所在的位置）。</p><p lang="en">How to choose: write CUDA when the kernel is shared with engines beyond PyTorch or needs instruction-by-instruction control; for tensor-core-centred tiled kernels such as GEMMs and attention, the CuTe DSL and CUTLASS provide a ready-made layout algebra; to try a fusion quickly, Triton is the least effort. This is a common division of labour, not a rule (inference, from where each kind of kernel actually sits in v0.5.22).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲 Triton、CuTe DSL 或 TileLang。这一概念以各仓库的 README 和 CuTe DSL 的官方文档为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers Triton, the CuTe DSL or TileLang. This concept rests on each repository’s README and the official CuTe DSL documentation; see Resources.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：接入点 ↔ 在哪里 ↔ 契约 ↔ 怎么证明</h2><h2 id="compare-en" lang="en">Comparison: plug-in point ↔ where ↔ contract ↔ how to prove it</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">接入点</span><span lang="en">Plug-in point</span></th><th><span lang="zh-CN">在 v0.5.22 的哪里</span><span lang="en">Where at v0.5.22</span></th><th><span lang="zh-CN">你要守的契约</span><span lang="en">The contract you keep</span></th><th><span lang="zh-CN">怎么证明它有用</span><span lang="en">How to prove it helps</span></th></tr>
+    <tr><td><span lang="zh-CN">内核库里的 AOT 算子</span><span lang="en">An AOT op in the kernel library</span></td><td><span lang="zh-CN"><code>kernels/aot/csrc/</code>、<code>include/sgl_kernel_ops.h</code>、<code>csrc/common_extension.cc</code>、<code>CMakeLists.txt</code>、<code>python/sgl_kernel/</code>，再加一个 <code>kernels/ops/&lt;组&gt;/</code> 入口</span><span lang="en"><code>kernels/aot/csrc/</code>, <code>include/sgl_kernel_ops.h</code>, <code>csrc/common_extension.cc</code>, <code>CMakeLists.txt</code>, <code>python/sgl_kernel/</code>, plus a <code>kernels/ops/&lt;group&gt;/</code> entry</span></td><td><span lang="zh-CN">带 <code>Tensor!</code> 的 schema；<code>int64_t</code> 和 <code>double</code>；当前流；图安全</span><span lang="en">A schema with <code>Tensor!</code>; <code>int64_t</code> and <code>double</code>; the current stream; graph-safe</span></td><td><span lang="zh-CN">对参考实现的误差；<code>do_bench_cudagraph</code> 的单算子时间；<code>one_batch</code> 的解码中位延迟</span><span lang="en">Error against the reference; per-op time from <code>do_bench_cudagraph</code>; the median decode latency of <code>one_batch</code></span></td></tr>
+    <tr><td><span lang="zh-CN">内核库里的 JIT 算子</span><span lang="en">A JIT op in the kernel library</span></td><td><span lang="zh-CN"><code>kernels/jit/csrc/</code> 加 <code>kernels/ops/&lt;组&gt;/</code> 里的 <code>load_jit</code></span><span lang="en"><code>kernels/jit/csrc/</code> plus <code>load_jit</code> in <code>kernels/ops/&lt;group&gt;/</code></span></td><td><span lang="zh-CN">经 <code>tvm_ffi</code> 调用，不是 torch 算子；第一次调用时编译</span><span lang="en">Called through <code>tvm_ffi</code>, not as a torch op; compiled on first call</span></td><td><span lang="zh-CN">同上；另记第一次调用的编译时间</span><span lang="en">As above; also note the build time of the first call</span></td></tr>
+    <tr><td><span lang="zh-CN">AttentionBackend</span><span lang="en">AttentionBackend</span></td><td><span lang="zh-CN"><code>srt/layers/attention/</code> 里的子类，加 <code>attention_registry.py</code> 里的一个名字</span><span lang="en">A subclass in <code>srt/layers/attention/</code>, plus a name in <code>attention_registry.py</code></span></td><td><span lang="zh-CN">图外造元数据，图里只做静态形状的 GPU 工作；<code>forward_decode</code> 和 <code>forward_extend</code></span><span lang="en">Metadata built outside the graph, only static-shape GPU work inside it; <code>forward_decode</code> and <code>forward_extend</code></span></td><td><span lang="zh-CN">换后端前后的 logits 对比；按阶段的延迟；剖析表里注意力内核的占比</span><span lang="en">Logits compared before and after the switch; per-phase latency; the attention kernels’ share in the profiler table</span></td></tr>
+    <tr><td><span lang="zh-CN">上游库</span><span lang="en">An upstream library</span></td><td><span lang="zh-CN">FlashInfer、DeepGEMM（<code>sgl-deep-gemm</code>）、FlashMLA（SGLang 的分叉）、CUTLASS 和 CuTe DSL；版本在 <code>python/pyproject.toml</code></span><span lang="en">FlashInfer, DeepGEMM (<code>sgl-deep-gemm</code>), FlashMLA (SGLang’s fork), CUTLASS and the CuTe DSL; versions in <code>python/pyproject.toml</code></span></td><td><span lang="zh-CN">各库自己的分层（FlashInfer：<code>include/</code> 不含 Torch，<code>csrc/</code> 做绑定）</span><span lang="en">Each library’s own layering (FlashInfer: no Torch in <code>include/</code>, bindings in <code>csrc/</code>)</span></td><td><span lang="zh-CN">上游的测试和基准；SGLang 挪动钉住的版本之后，再跑一遍 <code>one_batch</code></span><span lang="en">The upstream tests and benchmarks; once SGLang moves the pin, <code>one_batch</code> once more</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 四层栈上的接入点</h3><h3 lang="en">(a) The plug-in points over the four layers</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 450" data-interval="2800"
+         data-captions='["全图：左边是简报的四层栈，最下面是 SGLang 仓库之外的上游库；右边是工具。内核工程师的接入点都在模型执行器和内核层，以及它们下面。按播放逐步看。",
+           "1. 四层：前端（lang）、运行时（managers、mem_cache）、模型执行器（model_executor 和 layers）、内核层（kernels）。内核工程师几乎不碰前两层。",
+           "2. 内核库里的算子：模型层（例如 layernorm.py）调 kernels/ops 的入口，背后是注册成 torch.ops.sgl_kernel 的 AOT 算子，或者经 tvm_ffi 调用的 JIT 算子。",
+           "3. AttentionBackend：夹在模型执行器和注意力内核之间。图外把批翻译成 indptr 和 indices，调 FlashInfer 的 plan()；图里每层调 run()。用 register_attention_backend 登记一个名字。",
+           "4. 上游库：FlashInfer、DeepGEMM、FlashMLA、CUTLASS 和 CuTe DSL 在仓库之外，按 pyproject.toml 里钉住的版本进来。上游的改动要等版本挪动才生效。",
+           "5. 工具：one_batch 跑整个模型、给出解码中位延迟；torch profiler 和 Nsight Systems 列出一步里的内核；Nsight Compute 只看挑出来的那一个内核。"]'
+         data-captions-en='["The whole picture: the four-layer stack of the brief on the left, with the upstream libraries outside the SGLang repository at the bottom; the tools on the right. A kernel engineer plugs in at the model executor and the kernel layer, and below them. Press Play to walk through it.",
+           "1. The four layers: the frontend (lang), the runtime (managers, mem_cache), the model executor (model_executor and layers) and the kernel layer (kernels). A kernel engineer almost never touches the first two.",
+           "2. An op in the kernel library: a model layer (layernorm.py, for example) calls an entry in kernels/ops, backed by an AOT op registered as torch.ops.sgl_kernel or a JIT op called through tvm_ffi.",
+           "3. An AttentionBackend: between the model executor and the attention kernel. Outside the graph it turns the batch into indptr and indices and calls FlashInfer plan(); inside the graph each layer calls run(). It registers a name with register_attention_backend.",
+           "4. The upstream libraries: FlashInfer, DeepGEMM, FlashMLA, CUTLASS and the CuTe DSL live outside the repository and arrive at the versions pinned in pyproject.toml. An upstream change takes effect only once the pin moves.",
+           "5. The tools: one_batch runs the whole model and reports the median decode latency; the torch profiler and Nsight Systems list the kernels of a step; Nsight Compute looks only at the one kernel singled out."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="22" class="small" lang="zh-CN">SGLang 仓库（v0.5.22）</text><text x="20" y="22" class="small" lang="en">The SGLang repository (v0.5.22)</text>
+      <text x="660" y="22" class="small" lang="zh-CN">工具</text><text x="660" y="22" class="small" lang="en">Tools</text>
+      <line x1="640" y1="10" x2="640" y2="440" class="lane"/>
+      <g data-step="1">
+        <rect class="box" x="20" y="34" width="600" height="46"/>
+        <text x="32" y="55" lang="zh-CN">前端</text><text x="32" y="55" lang="en">Frontend</text>
+        <text x="32" y="72" class="mono">lang/  gen · select · fork</text>
+        <rect class="box" x="20" y="90" width="600" height="46"/>
+        <text x="32" y="111" lang="zh-CN">运行时（SRT）</text><text x="32" y="111" lang="en">Runtime (SRT)</text>
+        <text x="32" y="128" class="mono">srt/managers/ · srt/mem_cache/</text>
+        <rect class="box" x="20" y="146" width="600" height="96"/>
+        <text x="32" y="167" lang="zh-CN">模型执行器</text><text x="32" y="167" lang="en">Model executor</text>
+        <text x="32" y="184" class="mono">model_executor/ · srt/layers/</text>
+        <rect class="box" x="20" y="252" width="600" height="96"/>
+        <text x="32" y="273" lang="zh-CN">内核层</text><text x="32" y="273" lang="en">Kernel layer</text>
+        <text x="32" y="290" class="mono">kernels/</text>
+      </g>
+      <line x1="20" y1="360" x2="620" y2="360" class="lane"/>
+      <text x="20" y="378" class="small" lang="zh-CN">仓库之外</text><text x="20" y="378" class="small" lang="en">Outside the repository</text>
+      <g data-step="2">
+        <rect class="box" x="250" y="158" width="160" height="34"/>
+        <text x="262" y="180" class="mono">layernorm.py</text>
+        <path class="arrow" d="M330 192 L330 262"/>
+        <rect class="box" x="250" y="264" width="250" height="74"/>
+        <text x="262" y="286" class="mono">kernels/ops/&lt;group&gt;/</text>
+        <text x="262" y="306" class="mono">AOT: torch.ops.sgl_kernel.*</text>
+        <text x="262" y="326" class="mono">JIT: load_jit · tvm_ffi</text>
+      </g>
+      <g data-step="3">
+        <rect class="box" x="430" y="158" width="180" height="74"/>
+        <text x="442" y="180">AttentionBackend</text>
+        <text x="442" y="200" class="small" lang="zh-CN">图外：indptr、indices</text><text x="442" y="200" class="small" lang="en">out of graph: indptr, indices</text>
+        <text x="442" y="220" class="small" lang="zh-CN">图里：forward_decode</text><text x="442" y="220" class="small" lang="en">in graph: forward_decode</text>
+        <path class="arrow" d="M560 232 L560 386"/>
+      </g>
+      <g data-step="4">
+        <rect class="box" x="20" y="388" width="600" height="50"/>
+        <text x="32" y="410">FlashInfer 0.7.1 · sgl-deep-gemm 0.2.2 · FlashMLA (fork)</text>
+        <text x="32" y="428" class="small" lang="zh-CN">CUTLASS / CuTe DSL 4.8.0 · 版本钉在 pyproject.toml</text><text x="32" y="428" class="small" lang="en">CUTLASS / CuTe DSL 4.8.0 · versions pinned in pyproject.toml</text>
+      </g>
+      <g data-step="5">
+        <rect class="box" x="660" y="90" width="220" height="74"/>
+        <text x="672" y="112" class="mono">one_batch</text>
+        <text x="672" y="132" class="small" lang="zh-CN">整个模型，无服务器</text><text x="672" y="132" class="small" lang="en">the whole model, no server</text>
+        <text x="672" y="150" class="small" lang="zh-CN">解码中位延迟</text><text x="672" y="150" class="small" lang="en">median decode latency</text>
+        <rect class="box" x="660" y="180" width="220" height="74"/>
+        <text x="672" y="202" lang="zh-CN">torch profiler · nsys</text><text x="672" y="202" lang="en">torch profiler · nsys</text>
+        <text x="672" y="222" class="small" lang="zh-CN">一步里有哪些内核</text><text x="672" y="222" class="small" lang="en">the kernels of one step</text>
+        <text x="672" y="240" class="small" lang="zh-CN">图里看节点：node</text><text x="672" y="240" class="small" lang="en">nodes in graphs: node</text>
+        <rect class="box" x="660" y="270" width="220" height="74"/>
+        <text x="672" y="292" class="mono">ncu</text>
+        <text x="672" y="312" class="small" lang="zh-CN">只看一个内核</text><text x="672" y="312" class="small" lang="en">one kernel only</text>
+        <text x="672" y="330" class="small" lang="zh-CN">为什么慢</text><text x="672" y="330" class="small" lang="en">why it is slow</text>
+        <path class="arrow" d="M656 127 L624 127"/><path class="arrow" d="M656 217 L624 217"/><path class="arrow" d="M656 307 L614 307"/>
+      </g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 作品项目的闭环：运行时约束 → 内核 → 端到端测量</h3><h3 lang="en">(b) The capstone loop: a runtime constraint → a kernel → an end-to-end measurement</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 440" data-interval="3000"
+         data-captions='["全图：作品项目的一圈。从运行时给出的约束出发，写一个满足它的内核，先证明它对，再单独量它，最后放回引擎里量端到端，然后用剖析结果挑下一个目标。下面的数字来自 Lab B 在这台 Apple M5 上的实测。",
+           "1. 约束：解码步，批大小 1 到 64，被捕获进 CUDA 图，BF16，OLMoE-1B-7B 的 hidden size 2048。内核必须用当前流、不分配显存、不做主机同步。",
+           "2. 内核：融合的残差加法 + RMSNorm，一个线程块一行，注册成 torch.ops.capstone.fused_add_rmsnorm，和 sgl_kernel 的同名算子有相同的原地语义。",
+           "3. 正确：和 PyTorch 参考实现比误差，过 torch.library.opcheck。Metal 版的融合与两个内核逐位相同，和 CPU 参考的误差约 1e-3，是 FP16 输出的舍入。",
+           "4. 单独量：批大小 1 时融合版比两个内核快 1.40 到 1.88 倍，4096 个 token 时快 1.21 到 1.23 倍，接近字节比 1.25。",
+           "5. 端到端：放进 OLMoE 形状的解码步替身，整步只快 0.14% 到 0.24%。这一步 17.3 毫秒几乎全花在读 2.15 GB 权重上，32 处归一化本来只占约 0.4% 到 0.7%。",
+           "6. 剖析，挑下一个目标：哪个内核占主导？在这一步里是读权重的 GEMV 和 MoE 的分组 GEMM，不是归一化。下一圈从那里的约束开始。"]'
+         data-captions-en='["The whole picture: one turn of the capstone. Start from a constraint the runtime sets, write a kernel that meets it, prove it correct, measure it alone, then put it back into the engine and measure end to end, and use the profile to pick the next target. The numbers below come from Lab B, measured on this Apple M5.",
+           "1. The constraint: a decode step, batch size 1 to 64, captured into a CUDA graph, BF16, the hidden size 2048 of OLMoE-1B-7B. The kernel must use the current stream, allocate no memory and do no host sync.",
+           "2. The kernel: a fused residual add + RMSNorm, one thread block per row, registered as torch.ops.capstone.fused_add_rmsnorm with the same in-place semantics as the sgl_kernel op of that name.",
+           "3. Correct: check the error against the PyTorch reference and pass torch.library.opcheck. The Metal version of the fused op matches the two kernels bit for bit and the CPU reference to about 1e-3, the rounding of an FP16 output.",
+           "4. Alone: at batch size 1 the fused op is 1.40 to 1.88 times as fast as two kernels, and at 4096 tokens 1.21 to 1.23 times, close to the byte ratio of 1.25.",
+           "5. End to end: inside an OLMoE-shaped decode-step stand-in the whole step is only 0.14% to 0.24% faster. The 17.3 ms step goes almost entirely on reading 2.15 GB of weights, and the 32 norm sites took only about 0.4% to 0.7% of it to begin with.",
+           "6. Profile, pick the next target: which kernel dominates? In this step it is the GEMVs reading weights and the MoE grouped GEMM, not the norm. The next turn starts from the constraints there."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <g data-step="1">
+        <rect class="box" x="20" y="30" width="260" height="104"/>
+        <text x="32" y="54" lang="zh-CN">1. 运行时约束</text><text x="32" y="54" lang="en">1. Runtime constraint</text>
+        <text x="32" y="76" class="small" lang="zh-CN">解码，批 1–64，CUDA 图</text><text x="32" y="76" class="small" lang="en">decode, batch 1–64, CUDA graph</text>
+        <text x="32" y="96" class="small" lang="zh-CN">BF16，hidden 2048</text><text x="32" y="96" class="small" lang="en">BF16, hidden 2048</text>
+        <text x="32" y="116" class="small" lang="zh-CN">当前流，不分配，不同步</text><text x="32" y="116" class="small" lang="en">current stream, no alloc, no sync</text>
+      </g>
+      <g data-step="2">
+        <path class="arrow" d="M280 82 L316 82"/>
+        <rect class="box" x="320" y="30" width="260" height="104"/>
+        <text x="332" y="54" lang="zh-CN">2. 内核</text><text x="332" y="54" lang="en">2. Kernel</text>
+        <text x="332" y="76" class="mono">fused_add_rmsnorm</text>
+        <text x="332" y="96" class="small" lang="zh-CN">一个线程块一行</text><text x="332" y="96" class="small" lang="en">one thread block per row</text>
+        <text x="332" y="116" class="mono">torch.ops.capstone.*</text>
+      </g>
+      <g data-step="3">
+        <path class="arrow" d="M580 82 L616 82"/>
+        <rect class="box" x="620" y="30" width="260" height="104"/>
+        <text x="632" y="54" lang="zh-CN">3. 先证明它对</text><text x="632" y="54" lang="en">3. Prove it correct</text>
+        <text x="632" y="76" class="small" lang="zh-CN">对 PyTorch 参考的误差</text><text x="632" y="76" class="small" lang="en">error against the PyTorch reference</text>
+        <text x="632" y="96" class="mono">torch.library.opcheck</text>
+        <text x="632" y="116" class="small" lang="zh-CN">M5：融合与两个内核逐位相同</text><text x="632" y="116" class="small" lang="en">M5: fused equals unfused bit for bit</text>
+      </g>
+      <g data-step="4">
+        <path class="arrow" d="M750 134 L750 196"/>
+        <rect class="box" x="620" y="200" width="260" height="104"/>
+        <text x="632" y="224" lang="zh-CN">4. 单独量这个算子</text><text x="632" y="224" lang="en">4. Measure the op alone</text>
+        <text x="632" y="244" class="small" lang="zh-CN"><tspan style="fill: var(--metal)">实验 B · M5 实测，</tspan></text><text x="632" y="244" class="small" lang="en"><tspan style="fill: var(--metal)">Lab B · measured on M5,</tspan></text>
+        <text x="632" y="260" class="small" lang="zh-CN"><tspan style="fill: var(--metal)">31 次中位数，2026-11-01：</tspan></text><text x="632" y="260" class="small" lang="en"><tspan style="fill: var(--metal)">median of 31, 2026-11-01:</tspan></text>
+        <text x="632" y="278" class="small" lang="zh-CN">批 1：快 1.40–1.88 倍</text><text x="632" y="278" class="small" lang="en">batch 1: 1.40–1.88× as fast</text>
+        <text x="632" y="294" class="small" lang="zh-CN">4096 个 token：1.21–1.23 倍（字节比 1.25）</text><text x="632" y="294" class="small" lang="en">4096 tokens: 1.21–1.23× (bytes 1.25)</text>
+      </g>
+      <g data-step="5">
+        <path class="arrow" d="M620 252 L584 252"/>
+        <rect class="box" x="320" y="200" width="260" height="104"/>
+        <text x="332" y="224" lang="zh-CN">5. 端到端</text><text x="332" y="224" lang="en">5. End to end</text>
+        <text x="332" y="246" class="small" lang="zh-CN">L4：one_batch 解码中位延迟</text><text x="332" y="246" class="small" lang="en">L4: one_batch median decode</text>
+        <text x="332" y="262" class="small" lang="zh-CN"><tspan style="fill: var(--metal)">实验 B · M5 实测，</tspan></text><text x="332" y="262" class="small" lang="en"><tspan style="fill: var(--metal)">Lab B · measured on M5,</tspan></text>
+        <text x="332" y="278" class="small" lang="zh-CN"><tspan style="fill: var(--metal)">93 次中位数，2026-11-01：</tspan></text><text x="332" y="278" class="small" lang="en"><tspan style="fill: var(--metal)">median of 93, 2026-11-01:</tspan></text>
+        <text x="332" y="294" class="small" lang="zh-CN">替身整步快 0.14–0.24%</text><text x="332" y="294" class="small" lang="en">stand-in step 0.14–0.24% faster</text>
+      </g>
+      <g data-step="6">
+        <path class="arrow" d="M320 252 L284 252"/>
+        <rect class="box" x="20" y="200" width="260" height="104"/>
+        <text x="32" y="224" lang="zh-CN">6. 剖析，挑下一个</text><text x="32" y="224" lang="en">6. Profile, pick the next</text>
+        <text x="32" y="246" class="small" lang="zh-CN">哪个内核占主导？</text><text x="32" y="246" class="small" lang="en">which kernel dominates?</text>
+        <text x="32" y="266" class="small" lang="zh-CN">这一步：GEMV 与分组 GEMM</text><text x="32" y="266" class="small" lang="en">here: GEMVs and grouped GEMM</text>
+        <text x="32" y="286" class="small" lang="zh-CN">torch profiler · nsys · ncu</text><text x="32" y="286" class="small" lang="en">torch profiler · nsys · ncu</text>
+        <path class="arrow flow" d="M150 200 L150 138"/>
+      </g>
+      <rect class="box" x="20" y="330" width="860" height="94"/>
+      <text x="32" y="354" lang="zh-CN">阿姆达尔：一部分占整步的 f、快了 s 倍，整步快 1 / ((1 − f) + f / s) 倍</text><text x="32" y="354" lang="en">Amdahl: a part taking f of the step, made s times faster, speeds the step up 1 / ((1 − f) + f / s) times</text>
+      <text x="32" y="378" class="small" lang="zh-CN">f ≈ 0.4–0.7%，s ≈ 1.4–1.9：预测整步快约 0.1–0.3%；实测 0.14–0.24%</text><text x="32" y="378" class="small" lang="en">f ≈ 0.4–0.7%, s ≈ 1.4–1.9: predicts a step about 0.1–0.3% faster; measured 0.14–0.24%</text>
+      <text x="32" y="402" class="small" lang="zh-CN">先写预测，再写测量；两者对不上时，用剖析结果解释</text><text x="32" y="402" class="small" lang="en">Write the prediction first and the measurement second; when they disagree, explain it with the profile</text>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 把作品项目的算子写成内核库风格的 CUDA 算子，注册成 torch 算子，用 one_batch 量端到端</h3><h3 lang="en">Lab A · Build the capstone op as a kernel-library-style CUDA op, register it as a torch op, and measure it end to end with one_batch</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。根据 SGLang v0.5.22 的源码（<code>kernels/aot/README.md</code>、<code>kernels/aot/csrc/common_extension.cc</code>、<code>kernels/aot/csrc/elementwise/activation.cu</code>、<code>sgl_kernel/elementwise.py</code>、<code>srt/layers/layernorm.py</code>、<code>srt/models/olmoe.py</code>、<code>benchmark/one_batch.py</code>）、PyTorch 2.14 的 <code>torch.utils.cpp_extension</code> 和 <code>torch.library</code> 文档、Nsight Systems 2026.4 用户指南和 Nsight Compute 2026.3.1 命令行文档整理。还没有租用的 L4，所以这里不给数字，只描述应当看到的形状。环境是实验环境页里的 L4 和名为 <code>sglang-lab</code> 的 <code>lmsysorg/sglang:v0.5.23</code> 容器，主机目录 <code>~/llm-lab</code> 挂在容器的 <code>/work</code>；镜像比本页引用的 v0.5.22 新一个补丁版本（它固定 FlashInfer 0.7.2、sglang-kernel 0.4.10 和 sgl-deep-gemm 0.2.3.post2，比这里引用的 v0.5.22 版本各新一步；torch 2.14.1、nvidia-cutlass-dsl 4.8.0 和 sgl-deep-ep 0.1.2.post1 不变），行号可能略有出入。模型是 <code>allenai/OLMoE-1B-7B-0924</code>（Hugging Face 上 6.92B 个 BF16 参数、权重文件 13.8 GB，2026-11-01 读取），放得进 L4 的 24 GB：hidden size 2048，16 层，64 个专家里每 token 走 8 个，专家中间维 1024。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Assembled from the SGLang v0.5.22 source (<code>kernels/aot/README.md</code>, <code>kernels/aot/csrc/common_extension.cc</code>, <code>kernels/aot/csrc/elementwise/activation.cu</code>, <code>sgl_kernel/elementwise.py</code>, <code>srt/layers/layernorm.py</code>, <code>srt/models/olmoe.py</code>, <code>benchmark/one_batch.py</code>), the PyTorch 2.14 documentation of <code>torch.utils.cpp_extension</code> and <code>torch.library</code>, the Nsight Systems 2026.4 User Guide and the Nsight Compute 2026.3.1 CLI documentation. There is no rented L4 yet, so this lab gives no numbers, only the shape you should see. The environment is the L4 from the lab environment page with the <code>lmsysorg/sglang:v0.5.23</code> container named <code>sglang-lab</code>, the host directory <code>~/llm-lab</code> mounted at <code>/work</code>; the image is one patch release newer than the v0.5.22 this page cites (it pins FlashInfer 0.7.2, sglang-kernel 0.4.10 and sgl-deep-gemm 0.2.3.post2, one step past the v0.5.22 pins quoted here; torch 2.14.1, nvidia-cutlass-dsl 4.8.0 and sgl-deep-ep 0.1.2.post1 are unchanged), so line numbers may shift slightly. The model is <code>allenai/OLMoE-1B-7B-0924</code> (6.92B BF16 parameters and 13.8 GB of weight files on Hugging Face, read 2026-11-01), which fits the L4’s 24 GB: hidden size 2048, 16 layers, 8 of 64 experts per token, expert intermediate size 1024.</div>
+    <ol>
+      <li><span lang="zh-CN">写内核和注册，存成 <code>~/llm-lab/capstone/capstone_norm.cu</code>。它照 <code>common_extension.cc</code> 的样子用 <code>m.def</code> 写 schema、用 <code>m.impl</code> 绑到 CUDA，只是库名换成 <code>capstone</code>，所以不用重新构建整个 <code>sglang-kernel</code> 轮子。语义和 <code>sgl_kernel.fused_add_rmsnorm</code> 相同：<code>residual += input</code>，然后 <code>input = rmsnorm(residual) * weight</code>。</span><span lang="en">Write the kernel and its registration, saved as <code>~/llm-lab/capstone/capstone_norm.cu</code>. It follows <code>common_extension.cc</code>, a schema through <code>m.def</code> and a CUDA binding through <code>m.impl</code>, but under the library name <code>capstone</code>, so the whole <code>sglang-kernel</code> wheel need not be rebuilt. The semantics match <code>sgl_kernel.fused_add_rmsnorm</code>: <code>residual += input</code>, then <code>input = rmsnorm(residual) * weight</code>.</span><pre data-lang="cpp" data-file="capstone_norm.cu">// capstone_norm.cu: fused residual add + RMSNorm, registered as torch.ops.capstone.fused_add_rmsnorm
+// 未运行 · not run; assembled from the SGLang source at v0.5.22 and the documentation on 2026-11-01
+#include &lt;ATen/cuda/CUDAContext.h&gt;
+#include &lt;c10/cuda/CUDAGuard.h&gt;
+#include &lt;cuda_bf16.h&gt;
+#include &lt;torch/all.h&gt;
+#include &lt;torch/library.h&gt;
+
+constexpr int kThreads = 256, kMaxPerThread = 16;   // hidden size up to 256 x 16 = 4096
+
+// One block per token row. Each thread keeps its part of the sum in registers between the two passes.
+// shortcut: scalar BF16 loads; the capstone asks you to vectorize them to 16 bytes and measure again.
+__global__ void fused_add_rmsnorm_kernel(__nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ r,
+                                         const __nv_bfloat16* __restrict__ w, int h, float eps) {
+  __shared__ float part[kThreads / 32];
+  const int tid = threadIdx.x;
+  __nv_bfloat16* xr = x + static_cast&lt;int64_t&gt;(blockIdx.x) * h;
+  __nv_bfloat16* rr = r + static_cast&lt;int64_t&gt;(blockIdx.x) * h;
+  float v[kMaxPerThread];
+  float ss = 0.f;
+#pragma unroll
+  for (int k = 0; k &lt; kMaxPerThread; ++k) {
+    const int j = tid + k * kThreads;
+    if (j &lt; h) {
+      const __nv_bfloat16 s = __float2bfloat16(__bfloat162float(xr[j]) + __bfloat162float(rr[j]));
+      rr[j] = s;                                      // the new residual: written once, never read back
+      v[k] = __bfloat162float(s);
+      ss += v[k] * v[k];
+    }
+  }
+  for (int o = 16; o &gt; 0; o &gt;&gt;= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);   // warp sum
+  if (tid % 32 == 0) part[tid / 32] = ss;
+  __syncthreads();
+  float total = 0.f;
+#pragma unroll
+  for (int i = 0; i &lt; kThreads / 32; ++i) total += part[i];                     // block sum
+  const float inv = rsqrtf(total / h + eps);
+#pragma unroll
+  for (int k = 0; k &lt; kMaxPerThread; ++k) {
+    const int j = tid + k * kThreads;
+    if (j &lt; h) xr[j] = __float2bfloat16(v[k] * inv * __bfloat162float(w[j]));
+  }
+}
+
+void fused_add_rmsnorm(at::Tensor&amp; input, at::Tensor&amp; residual, at::Tensor&amp; weight, double eps) {
+  TORCH_CHECK(input.is_cuda() &amp;&amp; input.dim() == 2 &amp;&amp; input.is_contiguous(), "input: contiguous 2-D CUDA tensor");
+  TORCH_CHECK(input.scalar_type() == at::kBFloat16, "input: BF16 only");
+  TORCH_CHECK(residual.sizes() == input.sizes() &amp;&amp; residual.scalar_type() == input.scalar_type()
+              &amp;&amp; residual.is_contiguous(), "residual: same shape and dtype as input, contiguous");
+  TORCH_CHECK(weight.dim() == 1 &amp;&amp; weight.size(0) == input.size(1) &amp;&amp; weight.scalar_type() == input.scalar_type(),
+              "weight: [hidden_size], same dtype as input");
+  TORCH_CHECK(input.size(1) &lt;= kThreads * kMaxPerThread, "hidden size up to 4096");
+  if (input.size(0) == 0) return;
+  const at::cuda::OptionalCUDAGuard guard(device_of(input));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();     // the stream SGLang captures into its decode graph
+  fused_add_rmsnorm_kernel&lt;&lt;&lt;input.size(0), kThreads, 0, stream&gt;&gt;&gt;(
+      reinterpret_cast&lt;__nv_bfloat16*&gt;(input.data_ptr()), reinterpret_cast&lt;__nv_bfloat16*&gt;(residual.data_ptr()),
+      reinterpret_cast&lt;const __nv_bfloat16*&gt;(weight.data_ptr()), static_cast&lt;int&gt;(input.size(1)), static_cast&lt;float&gt;(eps));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// Same shape as sgl_kernel (common_extension.cc lines 62-63): Tensor! marks the in-place arguments, float maps to double.
+TORCH_LIBRARY(capstone, m) {
+  m.def("fused_add_rmsnorm(Tensor! input, Tensor! residual, Tensor weight, float eps) -&gt; ()");
+  m.impl("fused_add_rmsnorm", torch::kCUDA, &amp;fused_add_rmsnorm);
+}</pre></li>
+      <li><span lang="zh-CN">构建、检查、单独计时，存成 <code>~/llm-lab/capstone/capstone_ops.py</code>。<code>load(…, is_python_module=False)</code> 按 PyTorch 2.14 文档的说法把共享库作为普通动态库载入进程，<code>TORCH_LIBRARY</code> 在载入时登记算子；<code>register_fake</code> 给 <code>opcheck</code> 和 <code>torch.compile</code> 用。计时把 200 次调用捕获进一张 CUDA 图再重放，和 SGLang 的解码步一样，也顺便证明这个算子能被捕获。三种写法对照：你的算子、两个内核（加法后接 <code>sgl_kernel.rmsnorm</code>）、<code>sgl_kernel.fused_add_rmsnorm</code>（装了 FlashInfer 时转给 FlashInfer，Phase 5 概念 2）。</span><span lang="en">Build, check and time it alone, saved as <code>~/llm-lab/capstone/capstone_ops.py</code>. <code>load(…, is_python_module=False)</code>, in the words of the PyTorch 2.14 documentation, loads the shared library into the process as a plain dynamic library, and <code>TORCH_LIBRARY</code> registers the op as it loads; <code>register_fake</code> serves <code>opcheck</code> and <code>torch.compile</code>. Timing captures 200 calls into a CUDA graph and replays it, as SGLang’s decode step does, which also proves the op can be captured. Three forms are compared: your op, two kernels (an add followed by <code>sgl_kernel.rmsnorm</code>), and <code>sgl_kernel.fused_add_rmsnorm</code> (which hands over to FlashInfer when FlashInfer is installed, Phase 5, concept 2).</span><pre data-lang="py" data-file="capstone_ops.py"># capstone_ops.py: build the capstone op, register it, check it, and time it alone inside a CUDA graph
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the PyTorch 2.14 documentation on 2026-11-01
+import os
+import torch
+from torch.utils.cpp_extension import load
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+load(name="capstone_norm", sources=[os.path.join(HERE, "capstone_norm.cu")],
+     extra_cuda_cflags=["-O3", "-gencode=arch=compute_89,code=sm_89"],   # the L4 is sm_89
+     is_python_module=False)                                             # plain dynamic library; TORCH_LIBRARY runs on load
+
+@torch.library.register_fake("capstone::fused_add_rmsnorm")
+def _(input, residual, weight, eps):            # it mutates its arguments and returns nothing
+    return None
+
+def fused_add_rmsnorm(input, residual, weight, eps=1e-6, enable_pdl=None):
+    """Drop-in for sgl_kernel.fused_add_rmsnorm: residual += input; input = rmsnorm(residual) * weight."""
+    torch.ops.capstone.fused_add_rmsnorm.default(input, residual, weight, eps)
+
+def two_kernels(input, residual, weight, eps=1e-6, enable_pdl=None):
+    """The unfused baseline with the same contract: an add, then a norm kernel that reads the sum back."""
+    from sgl_kernel import rmsnorm
+    residual.add_(input)
+    rmsnorm(residual, weight, eps, out=input)
+
+def reference(x, r, w, eps):                    # float32 maths, rounded where the kernels round
+    s = (x.float() + r.float()).to(x.dtype)
+    y = s.float() * torch.rsqrt(s.float().pow(2).mean(-1, keepdim=True) + eps) * w.float()
+    return y.to(x.dtype), s
+
+def graph_us(fn, args, reps=200, n=25):        # median, min and max microseconds per call, replayed from a CUDA graph
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(3):
+            fn(*args)
+    torch.cuda.current_stream().wait_stream(side)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for _ in range(reps):
+            fn(*args)
+    ts = []
+    for _ in range(3 + n):
+        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        a.record(); g.replay(); b.record(); torch.cuda.synchronize()
+        ts.append(a.elapsed_time(b) * 1000 / reps)
+    ts = sorted(ts[3:])
+    return ts[n // 2], ts[0], ts[-1]
+
+if __name__ == "__main__":
+    from sgl_kernel import fused_add_rmsnorm as sgl_fused
+    torch.manual_seed(0)
+    H, EPS, dt = 2048, 1e-5, torch.bfloat16      # OLMoE-1B-7B: hidden_size 2048; olmoe.py builds RMSNorm with eps=1e-5
+    w = (1 + 0.1 * torch.randn(H, device="cuda")).to(dt)
+    x0, r0 = torch.randn(64, H, device="cuda", dtype=dt), torch.randn(64, H, device="cuda", dtype=dt)
+    torch.library.opcheck(torch.ops.capstone.fused_add_rmsnorm.default, (x0.clone(), r0.clone(), w, EPS))
+    print("opcheck passed")
+    for T in [1, 8, 64, 4096]:
+        x, r = torch.randn(T, H, device="cuda", dtype=dt), torch.randn(T, H, device="cuda", dtype=dt)
+        y_ref, r_ref = reference(x, r, w, EPS)
+        line = f"T={T:5d}"
+        for name, f in [("two kernels", two_kernels), ("capstone", fused_add_rmsnorm), ("sgl_kernel", sgl_fused)]:
+            xi, ri = x.clone(), r.clone()
+            f(xi, ri, w, EPS)
+            err = max((xi - y_ref).abs().max().item(), (ri - r_ref).abs().max().item())
+            med, lo, hi = graph_us(f, (x.clone(), r.clone(), w, EPS))
+            line += f" | {name} {med:6.2f} us ({lo:.2f}-{hi:.2f}) err {err:.1e}"
+        print(line)</pre><pre data-lang="sh" data-file="in the container">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the documentation on 2026-11-01
+cd /work/capstone
+python3 capstone_ops.py 2&gt;&amp;1 | tee ops.txt</pre><span lang="zh-CN">应当看到：<code>opcheck passed</code>；三种写法的误差都在 BF16 舍入的量级。批大小 1 和 8 时「两个内核」最慢，因为一次图重放里它多一个内核节点；4096 个 token 时三者都被带宽限制，「两个内核」对两个融合版的比值接近字节比 1.25。你的算子和 <code>sgl_kernel</code> 的谁快，取决于向量化：本页的内核是逐元素的标量读写，FlashInfer 的内核按 16 字节向量化（推断：依据是 <code>activation.cu</code> 里 <code>vec_size = 16 / sizeof(c_type)</code> 的写法，FlashInfer 归一化内核本身这里没有核对），所以它多半更快。这个差距就是作品项目第 3 部分要你优化的东西。第一次运行会调 <code>nvcc</code> 编译；镜像从 <code>nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04</code> 开始，带着 <code>nvcc</code> 和 <code>ncu</code>。</span><span lang="en">You should see: <code>opcheck passed</code>; errors at the level of BF16 rounding for all three forms. At batch sizes 1 and 8 the two-kernel form is the slowest, because each graph replay holds one more kernel node for it; at 4096 tokens all three are bandwidth-bound, and the ratio of the two-kernel form to either fused form is close to the byte ratio of 1.25. Whether your op or the <code>sgl_kernel</code> one is faster depends on vectorization: the kernel on this page reads and writes scalar elements, while FlashInfer’s works in 16-byte vectors (inference, from the <code>vec_size = 16 / sizeof(c_type)</code> idiom in <code>activation.cu</code>; FlashInfer’s norm kernel itself was not checked here), so it is probably faster. That gap is what part 3 of the capstone asks you to optimize. The first run calls <code>nvcc</code> to build; the image starts from <code>nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04</code>, which carries <code>nvcc</code> and <code>ncu</code>.</span></li>
+      <li><span lang="zh-CN">换进模型，量端到端。<code>RMSNorm.forward_cuda</code> 在有残差时调的是 <code>layernorm.py</code> 模块里的名字 <code>fused_add_rmsnorm</code>（第 102–107 行导入，第 621 行调用），Python 在调用时才查这个名字，所以在载入模型之前把它换掉就够了；<code>one_batch</code> 在张量并行为 1 时就在当前进程里跑（概念 5）。存成 <code>~/llm-lab/capstone/run_one_batch.py</code>，用环境变量选三种写法：</span><span lang="en">Swap it into the model and measure end to end. With a residual, <code>RMSNorm.forward_cuda</code> calls the name <code>fused_add_rmsnorm</code> in the <code>layernorm.py</code> module (imported at lines 102–107, called at line 621), and Python looks the name up at call time, so replacing it before the model loads is enough; <code>one_batch</code> runs in the current process at a tensor parallelism of 1 (concept 5). Save this as <code>~/llm-lab/capstone/run_one_batch.py</code>, with an environment variable choosing one of the three forms:</span><pre data-lang="py" data-file="run_one_batch.py"># run_one_batch.py: swap the add + norm op inside SGLang, then run one_batch in the same process
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the documentation on 2026-11-01
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sglang.srt.layers.layernorm as ln       # RMSNorm.forward_cuda calls ln.fused_add_rmsnorm (line 621)
+import capstone_ops
+
+choice = os.environ.get("CAPSTONE_NORM", "default")
+if choice == "capstone":
+    ln.fused_add_rmsnorm = capstone_ops.fused_add_rmsnorm
+elif choice == "two_kernels":
+    ln.fused_add_rmsnorm = capstone_ops.two_kernels
+elif choice != "default":
+    sys.exit(f"CAPSTONE_NORM must be default, capstone or two_kernels, not {choice}")
+print(f"[capstone] fused_add_rmsnorm -&gt; {choice}", flush=True)
+
+from sglang.benchmark.one_batch import cli_main
+cli_main()</pre><pre data-lang="sh" data-file="in the container, server stopped">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the documentation on 2026-11-01
+cd /work/capstone
+M=allenai/OLMoE-1B-7B-0924
+A="--model-path $M --batch-size 1 64 --input-len 256 --output-len 32"
+for c in default two_kernels capstone; do
+  CAPSTONE_NORM=$c python3 run_one_batch.py $A 2&gt;&amp;1 | tee e2e_$c.txt
+done
+grep -H "Decode.  median" e2e_*.txt</pre><span lang="zh-CN">应当看到：三份输出的解码中位延迟非常接近，差别可能比同一设置跑两次的差别还小。OLMoE 在 L4 上一个解码步要读的权重有好几 GB（每 token 走 8 个专家，再加注意力和词表投影），而 32 处带残差的归一化每处只读写几 KiB（推断：按 Lab B 替身的比例推出，L4 上没有量）。先写下阿姆达尔的预测，再看测量值；如果 <code>capstone</code> 比 <code>default</code> 慢得能量出来，原因多半是概念 2 说的标量读写。</span><span lang="en">You should see: very close median decode latencies in all three outputs, with differences possibly smaller than between two runs of the same setting. A decode step of OLMoE on an L4 reads several GB of weights (8 experts per token, plus attention and the vocabulary projection), while each of the 32 residual norm sites reads and writes a few KiB (inference, by the proportions of Lab B’s stand-in; not measured on an L4). Write the Amdahl prediction down first, then look at the measurement; if <code>capstone</code> is measurably slower than <code>default</code>, the scalar loads described above are the likely cause.</span></li>
+      <li><span lang="zh-CN">证明换进去的真是你的内核，再看谁占主导。关掉解码图让每个内核在 torch profiler 的 trace 里单独出现，数你的内核出现了几次；再用 Nsight Systems 在开着图的情况下按节点记录，用 <code>cuda_gpu_kern_sum</code> 列出这一步的内核排行；最后用 Nsight Compute 只录你的内核一次：</span><span lang="en">Prove that the kernel swapped in really is yours, then see what dominates. Turn off the decode graph so each kernel shows up on its own in the torch profiler’s trace, and count how often yours appears; then record with Nsight Systems at node granularity with the graph on, and list the kernel ranking of the step with <code>cuda_gpu_kern_sum</code>; finally, record a single launch of your kernel with Nsight Compute:</span><pre data-lang="sh" data-file="in the container, server stopped">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the documentation on 2026-11-01
+cd /work/capstone
+M=allenai/OLMoE-1B-7B-0924
+B="--model-path $M --batch-size 1 --input-len 256 --output-len 32"
+export SGLANG_TORCH_PROFILER_DIR=/work/profiles
+# 1. torch profiler, decode graph off
+CAPSTONE_NORM=capstone python3 run_one_batch.py $B --cuda-graph-backend-decode disabled \
+  --profile --profile-stage decode --profile-prefix capstone 2&gt;&amp;1 | tee prof_capstone.txt
+python3 - &lt;&lt;'PY'
+import collections, glob, gzip, json
+f = sorted(glob.glob("/work/profiles/capstone_*_decode.trace.json.gz"))[-1]
+ev = [e for e in json.load(gzip.open(f))["traceEvents"] if e.get("cat") == "kernel"]
+dur = collections.Counter()
+for e in ev:
+    dur[e["name"]] += e.get("dur", 0)
+total = sum(dur.values())
+print(f, len(ev), "kernel launches;", sum(1 for e in ev if "fused_add_rmsnorm_kernel" in e["name"]), "are yours")
+for name, d in dur.most_common(10):
+    print(f"  {100 * d / total:5.1f}%  {name[:90]}")
+PY
+# 2. Nsight Systems, decode graph on, nodes inside the graph recorded one by one
+CAPSTONE_NORM=capstone nsys profile -c cudaProfilerApi --cuda-graph-trace=node -o /work/profiles/olmoe_decode \
+  python3 run_one_batch.py $B --profile --profile-stage decode --profile-activities CUDA_PROFILER
+nsys stats --report cuda_gpu_kern_sum /work/profiles/olmoe_decode.nsys-rep | head -25
+# 3. Nsight Compute, one launch of your kernel after the warm-up, every section
+CAPSTONE_NORM=capstone ncu -k regex:fused_add_rmsnorm_kernel --launch-skip 64 --launch-count 1 --set full \
+  -o /work/profiles/capstone_norm python3 run_one_batch.py $B --cuda-graph-backend-decode disabled</pre><span lang="zh-CN">应当看到：一个解码步里你的内核出现的次数等于你在 <code>olmoe.py</code> 里数出的带残差的归一化处数（第 0 层的输入归一化没有残差，走 <code>rmsnorm</code>，第 306 行的最后一个归一化带残差），并且它们只占 GPU 时间很小的一份；排在前面的应当是 MoE 的分组 GEMM、注意力和其他矩阵乘（推断：依据是 Phase 4 的分析和 Lab B 的比例）。<code>nsys</code> 的排行应当和 torch profiler 的大致一致；不加 <code>--cuda-graph-trace=node</code> 时，解码的内核不会单独出现。<code>ncu</code> 报告里看 DRAM 吞吐占峰值的比例：批大小 1 时一行只有 4 KiB，它离峰值很远，这一步的时间主要是固定开销（推断）。trace 事件的 <code>cat</code> 字段按 PyTorch profiler 的 Chrome trace 格式取 <code>kernel</code>，这里没有在真实 trace 上核对，和 Phase 5 的 Lab A 一样。</span><span lang="en">You should see: your kernel appearing in one decode step as many times as the norm sites with a residual that you count in <code>olmoe.py</code> (layer 0’s input norm has no residual and takes <code>rmsnorm</code>; the final norm at line 306 has one), and taking only a small share of GPU time; at the top should be the MoE grouped GEMM, attention and the other matrix products (inference, from the Phase 4 analysis and the proportions of Lab B). The <code>nsys</code> ranking should roughly agree with the torch profiler’s; without <code>--cuda-graph-trace=node</code> the decode kernels do not appear individually. In the <code>ncu</code> report, look at DRAM throughput as a share of peak: at batch size 1 a row is only 4 KiB, it sits far below peak, and the kernel’s time is mostly fixed cost (inference). The <code>cat</code> field of trace events is taken to read <code>kernel</code> in the PyTorch profiler’s Chrome trace format, which was not checked against a real trace here, as in Phase 5’s Lab A.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 对照：同一个算子，单独量，再放进一个解码步替身里量</h3><h3 lang="en">Lab B · The Metal twin: the same op, measured alone and then inside a decode-step stand-in</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01（01:00 PST；这天凌晨 2 点夏令时结束，所以比 Phase 5 的 01:26 PDT 晚）。下面的输出都来自这台 Mac 上的实际运行（macOS 27.2，Swift 6.4.2），着色器在运行时编译，不用 <code>xcrun metal</code>。数据类型用 FP16 代替 BF16，每个元素同样是 2 字节。前两次运行时另一个实验程序也在用 GPU，数字乱跳，那两次弃用；下面只报三次 GPU 上没有其他实验程序时的运行。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01 (01:00 PST; daylight saving time ended at 2 a.m. that night, so this is later than Phase 5’s 01:26 PDT). The outputs below come from actual runs on this Mac (macOS 27.2, Swift 6.4.2), with the shaders compiled at run time rather than by <code>xcrun metal</code>. FP16 stands in for BF16; both are 2 bytes per element. During the first two runs another lab program was using the GPU and the numbers jumped about, so those two are discarded; only three runs with no other lab program on the GPU are reported below.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>capstone.swift</code>。第一部分只量算子：hidden size 取 OLMoE 的 2048，token 数取 1、8、64、4096，不融合是加法内核加 RMSNorm 内核，融合是一个线程组一行、256 个线程；每种写法在一个命令缓冲区里重复若干次，用 GPU 时间戳除以次数，预热 3 个命令缓冲区后取 31 个的中位数和最小、最大值，再和 CPU 参考、以及两种写法互相比较。第二部分是 OLMoE 形状、批大小 1 的解码步替身：16 层，每层两处加法 + 归一化、qkv 和 o 两个 GEMV、把 8 个被选中专家的 gate_up 和 down 叠成两个 GEMV、中间一个 SiLU-and-mul，每层有自己的权重，合计 2.15 GB。注意力本身和路由省掉了，qkv 输出的前 2048 个值代替注意力的结果，所以它只是读权重的替身，不是 OLMoE。两种归一化写法轮流跑三轮，各取 93 步的中位数：</span><span lang="en">Save the program below as <code>capstone.swift</code>. Part 1 measures the op alone: hidden size 2048 as in OLMoE, at 1, 8, 64 and 4096 tokens; unfused is an add kernel plus an RMSNorm kernel, fused is one threadgroup per row with 256 threads. Each form is repeated several times in one command buffer, its GPU timestamps divided by the repeat count, and the median, minimum and maximum taken over 31 command buffers after 3 warm-up ones; the results are checked against a CPU reference and against each other. Part 2 is a decode-step stand-in with OLMoE’s shapes at batch size 1: 16 layers, each with two add + norm sites, two GEMVs for qkv and o, the gate_up and down weights of the 8 selected experts stacked into two GEMVs with a SiLU-and-mul between them, every layer with its own weights, 2.15 GB in all. Attention itself and routing are left out, and the first 2048 qkv outputs stand in for the attention result, so this is a stand-in for reading the weights, not OLMoE. The two norm forms take turns over three rounds, and each gets the median of 93 steps:</span><pre data-lang="swift" data-file="capstone.swift">// capstone.swift: the capstone op (fused residual add + RMSNorm) on the Mac GPU, alone and inside a decode-step stand-in
+import Metal
+import Foundation
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+constant uint TG = 256;                      // threads per row
+
+inline float tg_sum(float v, threadgroup float* part, uint tid) {
+    v = simd_sum(v);
+    if (tid % 32 == 0) part[tid / 32] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float s = 0;
+    for (uint i = 0; i &lt; TG / 32; i++) s += part[i];
+    return s;
+}
+
+// Unfused, kernel 1 of 2: r_out = x + r.
+kernel void add(device const half4* x [[buffer(0)]], device const half4* r [[buffer(1)]],
+                device half4* r_out [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    r_out[i] = half4(float4(x[i]) + float4(r[i]));
+}
+
+// Unfused, kernel 2 of 2: y = r_out / rms(r_out) * w. One threadgroup per token.
+kernel void rmsnorm(device const half4* r_out [[buffer(0)]], device const half4* w [[buffer(1)]],
+                    device half4* y [[buffer(2)]], constant uint&amp; H [[buffer(3)]],
+                    uint t [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {
+    threadgroup float part[TG / 32];
+    uint n4 = H / 4, base = t * n4;
+    float4 v[4]; float ss = 0;               // H &lt;= 4096
+    for (uint k = 0, j = tid; j &lt; n4; k++, j += TG) { v[k] = float4(r_out[base + j]); ss += dot(v[k], v[k]); }
+    float inv = rsqrt(tg_sum(ss, part, tid) / float(H) + 1e-5f);
+    for (uint k = 0, j = tid; j &lt; n4; k++, j += TG) y[base + j] = half4(v[k] * inv * float4(w[j]));
+}
+
+// The capstone op: add and norm in one pass; r_out is written once and never read back.
+kernel void fused_add_rmsnorm(device const half4* x [[buffer(0)]], device const half4* r [[buffer(1)]],
+                              device half4* r_out [[buffer(2)]], device const half4* w [[buffer(3)]],
+                              device half4* y [[buffer(4)]], constant uint&amp; H [[buffer(5)]],
+                              uint t [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {
+    threadgroup float part[TG / 32];
+    uint n4 = H / 4, base = t * n4;
+    float4 v[4]; float ss = 0;
+    for (uint k = 0, j = tid; j &lt; n4; k++, j += TG) {
+        half4 s = half4(float4(x[base + j]) + float4(r[base + j]));
+        r_out[base + j] = s; v[k] = float4(s); ss += dot(v[k], v[k]);
+    }
+    float inv = rsqrt(tg_sum(ss, part, tid) / float(H) + 1e-5f);
+    for (uint k = 0, j = tid; j &lt; n4; k++, j += TG) y[base + j] = half4(v[k] * inv * float4(w[j]));
+}
+
+// Decode GEMV, batch 1: y[n] = sum_k W[n][k] * x[k]. One SIMD-group per output row (Phase 0).
+kernel void gemv(device const half4* W [[buffer(0)]], device const half4* x [[buffer(1)]],
+                 device half* y [[buffer(2)]], constant uint&amp; K [[buffer(3)]],
+                 uint row [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                 uint tg [[threadgroup_position_in_grid]], uint sgs [[simdgroups_per_threadgroup]]) {
+    uint n = tg * sgs + row, K4 = K / 4;
+    device const half4* w = W + n * K4;
+    float acc = 0.0f;
+    for (uint k = lane; k &lt; K4; k += 32) acc += dot(float4(w[k]), float4(x[k]));
+    acc = simd_sum(acc);
+    if (lane == 0) y[n] = half(acc);
+}
+
+// gate_up is [2I]: gate in the first half, up in the second (SGLang's layout).
+kernel void silu_and_mul(device const half* gu [[buffer(0)]], device half* y [[buffer(1)]],
+                         constant uint&amp; I [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    float g = float(gu[i]), u = float(gu[I + i]);
+    y[i] = half(g / (1.0f + exp(-g)) * u);
+}
+
+// Fill a weight buffer on the GPU with small pseudo-random values (a hash of the index).
+kernel void fill(device half* w [[buffer(0)]], constant uint&amp; seed [[buffer(1)]], constant float&amp; scale [[buffer(2)]],
+                 uint i [[thread_position_in_grid]]) {
+    uint h = i * 2654435761u ^ seed; h ^= h &gt;&gt; 15; h *= 2246822519u; h ^= h &gt;&gt; 13;
+    w[i] = half((float(h &amp; 0xffff) / 32768.0f - 1.0f) * scale);
+}
+"""
+
+let dev = MTLCreateSystemDefaultDevice()!
+let lib = try dev.makeLibrary(source: src, options: nil)
+func pso(_ n: String) -&gt; MTLComputePipelineState { try! dev.makeComputePipelineState(function: lib.makeFunction(name: n)!) }
+let pAdd = pso("add"), pNorm = pso("rmsnorm"), pFused = pso("fused_add_rmsnorm")
+let pGemv = pso("gemv"), pSwiglu = pso("silu_and_mul"), pFill = pso("fill")
+let queue = dev.makeCommandQueue()!
+let H = 2048                                  // OLMoE-1B-7B: hidden_size 2048, 16 layers, 8 of 64 experts, expert intermediate 1024
+let N = 31, warm = 3
+let tg = MTLSize(width: 256, height: 1, depth: 1)
+
+func buf(_ count: Int, _ f: (Int) -&gt; Float) -&gt; MTLBuffer {
+    let b = dev.makeBuffer(length: count * 2, options: .storageModeShared)!
+    let p = b.contents().bindMemory(to: Float16.self, capacity: count)
+    for i in 0..&lt;count { p[i] = Float16(f(i)) }
+    return b
+}
+func h(_ b: MTLBuffer, _ i: Int) -&gt; Float { Float(b.contents().bindMemory(to: Float16.self, capacity: i + 1)[i]) }
+var rng = SystemRandomNumberGenerator()
+func rnd() -&gt; Float { Float.random(in: -1...1, using: &amp;rng) }
+func stats(_ ts: [Double]) -&gt; (Double, Double, Double) { let s = ts.sorted(); return (s[s.count / 2], s.first!, s.last!) }
+
+// Time `reps` repetitions inside one command buffer; median, min and max GPU time per repetition over N buffers.
+func time(reps: Int, _ encode: (MTLComputeCommandEncoder) -&gt; Void) -&gt; (Double, Double, Double) {
+    var ts: [Double] = []
+    for k in 0..&lt;(warm + N) {
+        let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+        for _ in 0..&lt;reps { encode(enc) }
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if k &gt;= warm { ts.append((cb.gpuEndTime - cb.gpuStartTime) / Double(reps)) }
+    }
+    return stats(ts)
+}
+
+var Hu = UInt32(H)
+func encUnfused(_ e: MTLComputeCommandEncoder, _ x: MTLBuffer, _ r: MTLBuffer, _ rO: MTLBuffer, _ w: MTLBuffer, _ y: MTLBuffer, _ T: Int) {
+    e.setComputePipelineState(pAdd); e.setBuffer(x, offset: 0, index: 0); e.setBuffer(r, offset: 0, index: 1)
+    e.setBuffer(rO, offset: 0, index: 2); e.dispatchThreads(MTLSize(width: T * H / 4, height: 1, depth: 1), threadsPerThreadgroup: tg)
+    e.setComputePipelineState(pNorm); e.setBuffer(rO, offset: 0, index: 0); e.setBuffer(w, offset: 0, index: 1)
+    e.setBuffer(y, offset: 0, index: 2); e.setBytes(&amp;Hu, length: 4, index: 3)
+    e.dispatchThreadgroups(MTLSize(width: T, height: 1, depth: 1), threadsPerThreadgroup: tg)
+}
+func encFused(_ e: MTLComputeCommandEncoder, _ x: MTLBuffer, _ r: MTLBuffer, _ rO: MTLBuffer, _ w: MTLBuffer, _ y: MTLBuffer, _ T: Int) {
+    e.setComputePipelineState(pFused)
+    for (i, b) in [x, r, rO, w, y].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+    e.setBytes(&amp;Hu, length: 4, index: 5); e.dispatchThreadgroups(MTLSize(width: T, height: 1, depth: 1), threadsPerThreadgroup: tg)
+}
+
+let stamp = DateFormatter(); stamp.dateFormat = "yyyy-MM-dd HH:mm zzz"
+print("device=\(dev.name) FP16, H=\(H), median of \(N) command buffers after \(warm) warm-ups, \(stamp.string(from: Date()))")
+print("Part 1: the op alone")
+print("  tokens  unfused us (min-max)        fused us (min-max)          time x  bytes x  max|fused-CPU|  max|fused-unfused|")
+var opSaving1 = 0.0
+for T in [1, 8, 64, 4096] {
+    let reps = max(5, min(400, (1 &lt;&lt; 27) / (T * H * 2)))
+    let x = buf(T * H) { _ in rnd() }, r = buf(T * H) { _ in rnd() }, w = buf(H) { _ in 1 + 0.1 * rnd() }
+    let rU = buf(T * H) { _ in 0 }, yU = buf(T * H) { _ in 0 }, rF = buf(T * H) { _ in 0 }, yF = buf(T * H) { _ in 0 }
+    let u = time(reps: reps) { e in encUnfused(e, x, r, rU, w, yU, T) }
+    let f = time(reps: reps) { e in encFused(e, x, r, rF, w, yF, T) }
+    var refErr: Float = 0, diff: Float = 0
+    for t in Set([0, T - 1]) {
+        var s = [Float](repeating: 0, count: H), ss: Float = 0
+        for j in 0..&lt;H { s[j] = Float(Float16(h(x, t * H + j) + h(r, t * H + j))); ss += s[j] * s[j] }
+        let inv = 1 / (ss / Float(H) + 1e-5).squareRoot()
+        for j in 0..&lt;H { refErr = max(refErr, abs(h(yF, t * H + j) - s[j] * inv * h(w, j))) }
+    }
+    for i in 0..&lt;(T * H) { diff = max(diff, abs(h(yF, i) - h(yU, i)), abs(h(rF, i) - h(rU, i))) }
+    if T == 1 { opSaving1 = u.0 - f.0 }
+    print(String(format: "  %6d  %7.2f (%7.2f-%7.2f)   %7.2f (%7.2f-%7.2f)   %5.2f   %5.2f   %.1e         %.1e",
+                 T, u.0 * 1e6, u.1 * 1e6, u.2 * 1e6, f.0 * 1e6, f.1 * 1e6, f.2 * 1e6, u.0 / f.0, 10.0 / 8.0, refErr, diff))
+}
+
+// Part 2: a decode-step stand-in shaped like OLMoE-1B-7B at batch 1. Per layer: add+norm, qkv GEMV (attention itself
+// left out: the first H outputs stand in for its result), o GEMV, add+norm, gate_up GEMV over the 8 active experts
+// stacked, silu_and_mul, down GEMV over the 8 experts stacked (routing weights taken as 1). Every layer has its own weights.
+let L = 16, I8 = 8 * 1024
+let shapes = [(3 * H, H), (H, H), (2 * I8, H), (H, I8)]          // (rows, K): qkv, o, gate_up, down
+var weights: [[MTLBuffer]] = []
+var fillCb = queue.makeCommandBuffer()!, fillEnc = fillCb.makeComputeCommandEncoder()!
+var totalW = 0
+for l in 0..&lt;L {
+    var ws: [MTLBuffer] = []
+    for (s, (n, k)) in shapes.enumerated() {
+        let b = dev.makeBuffer(length: n * k * 2, options: .storageModePrivate)!
+        var seed = UInt32(l * 16 + s + 1), scale = Float(1.0 / Double(k).squareRoot())
+        fillEnc.setComputePipelineState(pFill); fillEnc.setBuffer(b, offset: 0, index: 0)
+        fillEnc.setBytes(&amp;seed, length: 4, index: 1); fillEnc.setBytes(&amp;scale, length: 4, index: 2)
+        fillEnc.dispatchThreads(MTLSize(width: n * k, height: 1, depth: 1), threadsPerThreadgroup: tg)
+        ws.append(b); totalW += n * k * 2
+    }
+    weights.append(ws)
+}
+fillEnc.endEncoding(); fillCb.commit(); fillCb.waitUntilCompleted()
+let normW = buf(H) { _ in 1 + 0.1 * rnd() }
+let h0 = buf(H) { _ in rnd() }
+func stepBuffers() -&gt; [MTLBuffer] { [buf(H) { _ in 0 }, buf(H) { _ in 0 }, buf(H) { _ in 0 }, buf(3 * H) { _ in 0 },
+                                     buf(H) { _ in 0 }, buf(2 * I8) { _ in 0 }, buf(I8) { _ in 0 }, buf(H) { _ in 0 }] }
+var Ku = [UInt32](repeating: 0, count: 4), I8u = UInt32(I8)
+for (s, (_, k)) in shapes.enumerated() { Ku[s] = UInt32(k) }
+
+func encodeStep(_ e: MTLComputeCommandEncoder, fused: Bool, _ b: [MTLBuffer]) {
+    // b: 0 hidden, 1 residual, 2 normed, 3 qkv, 4 o, 5 gate_up, 6 act, 7 spare residual
+    let norm = fused ? encFused : encUnfused
+    var hid = h0, res = b[1], resNext = b[7]
+    for l in 0..&lt;L {
+        let gem = { (s: Int, x: MTLBuffer, y: MTLBuffer) in
+            e.setComputePipelineState(pGemv); e.setBuffer(weights[l][s], offset: 0, index: 0); e.setBuffer(x, offset: 0, index: 1)
+            e.setBuffer(y, offset: 0, index: 2); e.setBytes(&amp;Ku[s], length: 4, index: 3)
+            e.dispatchThreadgroups(MTLSize(width: shapes[s].0 / 8, height: 1, depth: 1), threadsPerThreadgroup: tg)
+        }
+        norm(e, hid, res, resNext, normW, b[2], 1); swap(&amp;res, &amp;resNext)
+        gem(0, b[2], b[3]); gem(1, b[3], b[4])
+        norm(e, b[4], res, resNext, normW, b[2], 1); swap(&amp;res, &amp;resNext)
+        gem(2, b[2], b[5])
+        e.setComputePipelineState(pSwiglu); e.setBuffer(b[5], offset: 0, index: 0); e.setBuffer(b[6], offset: 0, index: 1)
+        e.setBytes(&amp;I8u, length: 4, index: 2); e.dispatchThreads(MTLSize(width: I8, height: 1, depth: 1), threadsPerThreadgroup: tg)
+        gem(3, b[6], b[0]); hid = b[0]
+    }
+}
+func timeStep(fused: Bool, _ b: [MTLBuffer]) -&gt; [Double] {
+    var ts: [Double] = []
+    for k in 0..&lt;(warm + N) {
+        let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+        encodeStep(enc, fused: fused, b)
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if k &gt;= warm { ts.append(cb.gpuEndTime - cb.gpuStartTime) }
+    }
+    return ts
+}
+let bU = stepBuffers(), bF = stepBuffers()
+// Interleave the two variants in rounds so drift in clock or temperature hits both alike.
+var tsU: [Double] = [], tsF: [Double] = []
+for _ in 0..&lt;3 { tsU += timeStep(fused: false, bU); tsF += timeStep(fused: true, bF) }
+var outDiff: Float = 0
+for i in 0..&lt;H { outDiff = max(outDiff, abs(h(bU[0], i) - h(bF[0], i))) }
+let su = stats(tsU), sf = stats(tsF)
+print("Part 2: decode-step stand-in, OLMoE-1B-7B shapes, batch 1, \(L) layers, \(2 * L) add+norm sites, \(String(format: "%.2f", Double(totalW) / 1e9)) GB of weights")
+print(String(format: "  unfused norms  step %7.3f ms (%7.3f-%7.3f), %6.1f GB/s of weights", su.0 * 1e3, su.1 * 1e3, su.2 * 1e3, Double(totalW) / su.0 / 1e9))
+print(String(format: "  fused norms    step %7.3f ms (%7.3f-%7.3f), %6.1f GB/s of weights", sf.0 * 1e3, sf.1 * 1e3, sf.2 * 1e3, Double(totalW) / sf.0 / 1e9))
+print(String(format: "  measured step saving %+.1f us (%+.2f%%); predicted from Part 1: %d sites x %.2f us = %.1f us; max|out unfused-fused| %.1e",
+             (su.0 - sf.0) * 1e6, (su.0 - sf.0) / su.0 * 100, 2 * L, opSaving1 * 1e6, Double(2 * L) * opSaving1 * 1e6, outDiff))</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是三次干净运行里的第一次，原样贴出：</span><span lang="en">Build and run. Below is the first of the three clean runs, pasted as it came:</span><pre data-lang="sh">$ swiftc -O capstone.swift -o capstone
+$ ./capstone
+device=Apple M5 FP16, H=2048, median of 31 command buffers after 3 warm-ups, 2026-11-01 01:00 PST
+Part 1: the op alone
+  tokens  unfused us (min-max)        fused us (min-max)          time x  bytes x  max|fused-CPU|  max|fused-unfused|
+       1     3.84 (   3.41-   7.90)      2.05 (   1.90-   2.31)    1.87    1.25   9.8e-04         0.0e+00
+       8     2.55 (   2.22-   2.77)      1.49 (   1.44-   1.55)    1.72    1.25   9.8e-04         0.0e+00
+      64     3.88 (   3.85-   3.91)      2.54 (   2.53-   2.56)    1.53    1.25   9.7e-04         0.0e+00
+    4096   602.51 ( 597.42- 770.66)    497.08 ( 495.46- 504.74)    1.21    1.25   9.7e-04         0.0e+00
+Part 2: decode-step stand-in, OLMoE-1B-7B shapes, batch 1, 16 layers, 32 add+norm sites, 2.15 GB of weights
+  unfused norms  step  17.278 ms ( 17.099- 18.626),  124.3 GB/s of weights
+  fused norms    step  17.243 ms ( 17.119- 18.283),  124.5 GB/s of weights
+  measured step saving +34.7 us (+0.20%); predicted from Part 1: 32 sites x 1.79 us = 57.3 us; max|out unfused-fused| 0.0e+00
+# 2026-11-01 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2）</pre></li>
+      <li><span lang="zh-CN">先看正确性：三次运行里融合版和 CPU 参考的最大差都在 9.4e-4 到 9.8e-4 之间，是 FP16 输出的舍入；两种写法逐位相同，整个替身的最终输出也逐位相同，因为两边都先把和舍入成 FP16 再求平方和。</span><span lang="en">Correctness first: across the three runs the fused result differs from the CPU reference by 9.4e-4 to 9.8e-4 at most, the rounding of an FP16 output; the two forms agree bit for bit, and so does the final output of the whole stand-in, because both round the sum to FP16 before squaring it.</span></li>
+      <li><span lang="zh-CN">再看算子单独的时间（三次干净运行的中位数范围）：批大小 1 时融合版快 1.40–1.88 倍，8 个 token 时 1.41–1.72 倍，64 个 token 时 1.52–1.53 倍，都比字节比 1.25 大，因为这时省下的主要是一次派发；4096 个 token（每块张量 16 MiB）时 1.21–1.23 倍，接近字节比，两边都约 134–137 GB/s，被带宽限制。批大小 1 时不融合那一列的中位数在三次之间从 1.92 变到 3.86 µs，小尺寸的数字本来就抖。</span><span lang="en">Then the op’s time alone (ranges of the medians over the three clean runs): the fused form is 1.40–1.88 times as fast at batch size 1, 1.41–1.72 times at 8 tokens and 1.52–1.53 times at 64 tokens, all above the byte ratio of 1.25 because what is saved there is mostly one dispatch; at 4096 tokens (16 MiB per tensor) it is 1.21–1.23 times, close to the byte ratio, with both forms at about 134–137 GB/s and bandwidth-bound. At batch size 1 the median of the unfused column moved from 1.92 to 3.86 µs across the three runs; small sizes are jittery by nature.</span></li>
+      <li><span lang="zh-CN">最后看端到端。替身一步约 17.24–17.30 ms，按 2.15 GB 权重算约 124 GB/s，几乎全是读权重。归一化换成融合版，整步的中位数只少了 24.8–40.8 µs，即 0.14–0.24%；同一次运行里单步的最小到最大有 1.2 ms 以上，比这点节省大几十倍，只有取几十步的中位数才看得出来。第一部分给的预测是 17.6–57.8 µs（32 处乘以批大小 1 时两种写法的时间差），测量值落在这个范围里。</span><span lang="en">Finally, end to end. A stand-in step takes about 17.24–17.30 ms, about 124 GB/s over 2.15 GB of weights, almost entirely weight reading. Switching the norms to the fused form lowers the step median by only 24.8–40.8 µs, that is 0.14–0.24%; within a single run, single steps span more than 1.2 ms from minimum to maximum, dozens of times the saving, which shows only in a median over dozens of steps. Part 1’s prediction is 17.6–57.8 µs (32 sites times the gap between the two forms at batch size 1), and the measurement falls inside that range.</span></li>
+    </ol>
+    <div class="table-wrap">
+    <table class="cmp">
+      <tr><th><span lang="zh-CN">测量</span><span lang="en">Measurement</span></th><th class="cuda"><span lang="zh-CN">L4 · CUDA（Lab A，<strong>未运行</strong>）</span><span lang="en">L4 · CUDA (Lab A, <strong>not run</strong>)</span></th><th class="metal"><span lang="zh-CN">Apple M5 · Metal（Lab B，<strong>在这台 Mac 上实测</strong>，2026-11-01，31 个的中位数，三次干净运行的范围）</span><span lang="en">Apple M5 · Metal (Lab B, <strong>run on this Mac</strong>, 2026-11-01, median of 31, range over three clean runs)</span></th></tr>
+      <tr><td><span lang="zh-CN">算子单独，批大小 1：两个内核 ÷ 融合</span><span lang="en">Op alone, batch size 1: two kernels ÷ fused</span></td><td><span lang="zh-CN">未运行；预期大于字节比 1.25（推断）</span><span lang="en">Not run; expected above the byte ratio of 1.25 (inference)</span></td><td><span lang="zh-CN">1.40–1.88 倍</span><span lang="en">1.40–1.88×</span></td></tr>
+      <tr><td><span lang="zh-CN">算子单独，64 个 token</span><span lang="en">Op alone, 64 tokens</span></td><td><span lang="zh-CN">未运行</span><span lang="en">Not run</span></td><td><span lang="zh-CN">1.52–1.53 倍</span><span lang="en">1.52–1.53×</span></td></tr>
+      <tr><td><span lang="zh-CN">算子单独，4096 个 token</span><span lang="en">Op alone, 4096 tokens</span></td><td><span lang="zh-CN">未运行；预期接近 1.25，受带宽限制（推断）</span><span lang="en">Not run; expected near 1.25, bandwidth-bound (inference)</span></td><td><span lang="zh-CN">1.21–1.23 倍（字节比 1.25）</span><span lang="en">1.21–1.23× (byte ratio 1.25)</span></td></tr>
+      <tr><td><span lang="zh-CN">你的算子对库里的融合算子</span><span lang="en">Your op against the library’s fused op</span></td><td><span lang="zh-CN">未运行；标量读写的版本预期不比 FlashInfer 的快（推断）</span><span lang="en">Not run; the scalar-load version is not expected to beat FlashInfer’s (inference)</span></td><td><span lang="zh-CN">没有对应项：Metal 这边没有库实现</span><span lang="en">No counterpart: there is no library version on the Metal side</span></td></tr>
+      <tr><td><span lang="zh-CN">整个解码步：两个内核的归一化对融合的归一化</span><span lang="en">The whole decode step: two-kernel norms against fused norms</span></td><td><span lang="zh-CN">未运行；OLMoE-1B-7B 的 <code>one_batch</code> 解码中位延迟，预期差别很小，可能在噪声以内（推断）</span><span lang="en">Not run; the <code>one_batch</code> median decode latency of OLMoE-1B-7B, expected to differ very little, possibly within noise (inference)</span></td><td><span lang="zh-CN">替身快 0.14–0.24%（17.24–17.30 ms 中少 24.8–40.8 µs）；预测 17.6–57.8 µs</span><span lang="en">Stand-in 0.14–0.24% faster (24.8–40.8 µs off 17.24–17.30 ms); predicted 17.6–57.8 µs</span></td></tr>
+    </table>
+    </div>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>ops.txt</code>（<code>opcheck</code> 结果、三种写法在四个 token 数下的时间和误差）、三份 <code>e2e_*.txt</code> 的 <code>Decode.  median latency</code> 行、torch profiler 的内核计数和前十名、<code>cuda_gpu_kern_sum</code> 的前二十行、一份 <code>ncu</code> 报告；Lab B 的三次完整输出，以及上面那张表填上你自己的数字。写进当天日志，记下你的数字和本页哪里不同，以及哪次运行时 GPU 上还有别的程序。还没有租用账户时，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, <code>ops.txt</code> (the <code>opcheck</code> result, and the times and errors of the three forms at four token counts), the <code>Decode.  median latency</code> lines of the three <code>e2e_*.txt</code> files, the kernel count and top ten from the torch profiler, the first twenty lines of <code>cuda_gpu_kern_sum</code>, and one <code>ncu</code> report; from Lab B, the three full outputs and the table above filled in with your own numbers. Write them into that day’s log, noting where your numbers differ from this page and during which runs something else was on the GPU. Until a rental account exists, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/phase-8">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 你在 <code>kernels/aot/csrc/</code> 里写好了一个新的 CUDA 算子。按 v0.5.22 的做法，哪一步让它能以 <code>torch.ops.sgl_kernel.my_op</code> 调用，并且 <code>torch.compile</code> 知道它会改哪些参数？</p><p lang="en">1. You have written a new CUDA op in <code>kernels/aot/csrc/</code>. In the v0.5.22 way of doing it, which step makes it callable as <code>torch.ops.sgl_kernel.my_op</code> and tells <code>torch.compile</code> which arguments it modifies?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">在 <code>kernels/registry.py</code> 里用 <code>register_kernel(KernelSpec(…))</code> 登记它</span><span lang="en">Registering it in <code>kernels/registry.py</code> with <code>register_kernel(KernelSpec(…))</code></span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">在 <code>csrc/common_extension.cc</code> 的 <code>TORCH_LIBRARY_FRAGMENT(sgl_kernel, m)</code> 里写一行带 <code>Tensor!</code> 的 <code>m.def</code> schema，再用 <code>m.impl</code> 绑到 <code>torch::kCUDA</code></span><span lang="en">Writing an <code>m.def</code> schema with <code>Tensor!</code> inside <code>TORCH_LIBRARY_FRAGMENT(sgl_kernel, m)</code> in <code>csrc/common_extension.cc</code>, then binding it to <code>torch::kCUDA</code> with <code>m.impl</code></span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">在 <code>kernels/ops/&lt;组&gt;/</code> 里用 <code>load_jit</code> 加载它的源文件</span><span lang="en">Loading its source file with <code>load_jit</code> in <code>kernels/ops/&lt;group&gt;/</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">torch 算子是由 <code>m.def</code> 和 <code>m.impl</code> 注册的，schema 里的 <code>Tensor!</code> 标出原地修改的参数，README 说 schema 就是为 <code>torch.compile</code> 写的。<code>register_kernel</code> 只记元数据，不导入也不编译任何东西；<code>load_jit</code> 是 JIT 那条路，返回的是 <code>tvm_ffi</code> 模块，不是 torch 算子。</span><span lang="en">Torch ops are registered by <code>m.def</code> and <code>m.impl</code>, and the schema’s <code>Tensor!</code> marks the arguments modified in place; the README says the schema is written for <code>torch.compile</code>. <code>register_kernel</code> records metadata only and neither imports nor builds anything; <code>load_jit</code> is the JIT route and returns a <code>tvm_ffi</code> module, not a torch op.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 你的新注意力后端在 <code>init_forward_metadata_in_graph</code> 里写了 <code>n = int(seq_lens.max().item())</code>，再按 <code>n</code> 分配一个缓冲区。按基类的契约，该怎么改？</p><p lang="en">2. Your new attention backend’s <code>init_forward_metadata_in_graph</code> does <code>n = int(seq_lens.max().item())</code> and then allocates a buffer of size <code>n</code>. By the base class’s contract, how should it change?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">不用改：<code>.item()</code> 只在捕获时调一次，重放时用的是同一个值，正好</span><span lang="en">No change: <code>.item()</code> runs once at capture, and replay uses the same value, which is exactly right</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">把这两行挪进 <code>forward_decode</code>，它在每层都会调用，不受图的限制</span><span lang="en">Move the two lines into <code>forward_decode</code>, which runs for every layer and is not bound by the graph</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">把它挪进 <code>init_forward_metadata_out_graph</code>，或者在 <code>init_cuda_graph_state</code> 里按 <code>max_bs</code> 预先分配好</span><span lang="en">Move it into <code>init_forward_metadata_out_graph</code>, or preallocate in <code>init_cuda_graph_state</code> from <code>max_bs</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">第 124–126 行的 lint 契约禁止 <code>_in_graph</code> 调 <code>.item()</code> 和动态形状的 <code>torch.empty()</code>：捕获时录下的那个值在重放时不会更新，下一批更长就会越界。主机操作和动态形状属于 <code>_out_graph</code>，图要用的缓冲区在 <code>init_cuda_graph_state</code> 里按最大批预先分配。<code>forward_decode</code> 同样在解码图里被捕获，挪过去问题照旧。</span><span lang="en">The lint contract at lines 124–126 forbids <code>.item()</code> and dynamic-shape <code>torch.empty()</code> in <code>_in_graph</code>: the value recorded at capture is not updated at replay, so a longer batch later overruns it. Host work and dynamic shapes belong in <code>_out_graph</code>, and the buffers the graph uses are preallocated for the largest batch in <code>init_cuda_graph_state</code>. <code>forward_decode</code> is captured in the decode graph too, so moving the lines there keeps the problem.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. Lab B 里，融合的残差 + RMSNorm 在批大小 1 时单独量快 1.40–1.88 倍，放进解码步替身后整步只快 0.14–0.24%。最好的解释是什么？</p><p lang="en">3. In Lab B, the fused residual + RMSNorm measured alone at batch size 1 is 1.40–1.88 times as fast, yet inside the decode-step stand-in the whole step is only 0.14–0.24% faster. What is the best explanation?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">32 处归一化本来只占这一步的约 0.4–0.7%，其余时间都在读 2.15 GB 权重；按阿姆达尔定律，整步最多只能快这么多</span><span lang="en">The 32 norm sites took only about 0.4–0.7% of the step to begin with, and the rest went on reading 2.15 GB of weights; by Amdahl’s law the step cannot gain more than that</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">在整步里，GPU 驱动自动把不融合的两个内核合并成了一个，所以两边其实一样</span><span lang="en">Inside the whole step the GPU driver merges the two unfused kernels into one automatically, so the two sides are really the same</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">命令缓冲区的计时精度只有毫秒级，看不出微秒级的节省</span><span lang="en">Command-buffer timing resolves only milliseconds, too coarse to see a microsecond saving</span></label>
+      <div class="why" hidden><span lang="zh-CN">替身跑在约 124 GB/s，时间几乎全是读权重；归一化那一份很小，快一倍也只省几十微秒，测到的 24.8–40.8 µs 正落在预测的 17.6–57.8 µs 里。驱动不会合并这两个内核：节省不是零，两次派发都在命令缓冲区里。计时精度也不是问题：第一部分用同一种计时量出了 1.4 µs 级的单个内核。</span><span lang="en">The stand-in runs at about 124 GB/s and its time is almost all weight reading; the norms’ share is small, so even doubling their speed saves only tens of microseconds, and the measured 24.8–40.8 µs falls inside the predicted 17.6–57.8 µs. The driver does not merge the two kernels: the saving is not zero, and both dispatches are in the command buffer. Timing resolution is not the issue either: Part 1 uses the same timing to measure single kernels of about 1.4 µs.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 你用 <code>nsys profile</code> 录 <code>one_batch</code> 的解码，CUDA 图开着，结果时间线上只看到整张图的执行，看不到你的内核。原因和办法是什么？</p><p lang="en">4. You record <code>one_batch</code>’s decode with <code>nsys profile</code>, CUDA graphs on, and the timeline shows only whole-graph executions, not your kernel. What is the cause and the fix?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">你的算子没有被换进去，图里跑的还是 FlashInfer 的内核；去掉 CUDA 图也无济于事</span><span lang="en">Your op was not swapped in and the graph still runs FlashInfer’s kernel; turning off CUDA graphs would not help</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN"><code>--cuda-graph-trace</code> 默认是 <code>graph</code>，只记整张图；加 <code>--cuda-graph-trace=node</code>（开销更大），或者关掉解码图</span><span lang="en"><code>--cuda-graph-trace</code> defaults to <code>graph</code>, which records only whole graphs; add <code>--cuda-graph-trace=node</code> (at a higher overhead), or turn off the decode graph</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">Nsight Systems 只能看 CPU 时间线，内核要用 Nsight Compute 才看得到</span><span lang="en">Nsight Systems shows only the CPU timeline; kernels are visible only in Nsight Compute</span></label>
+      <div class="why" hidden><span lang="zh-CN">Nsight Systems 用户指南写明默认的 <code>graph</code> 粒度把整张图记成一项、不记节点，<code>node</code> 才记节点并且可能有明显开销。只看到整张图并不说明你的算子没换进去，要用节点粒度或关图后的 trace 才能判断。Nsight Systems 本来就记 CUDA 内核；Nsight Compute 是一次深入一个内核，不是用来列出一步里所有内核的。</span><span lang="en">The Nsight Systems User Guide says the default <code>graph</code> granularity records a whole graph as one item without its nodes, and only <code>node</code> records the nodes, possibly at a significant overhead. Seeing only whole graphs does not show that your op is missing; judge that from a node-granularity trace or one with the graph off. Nsight Systems does record CUDA kernels; Nsight Compute goes deep into one kernel at a time and is not the tool for listing every kernel of a step.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/README.md">kernels/README.md</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/README.md">kernels/aot/README.md</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/registry.py">kernels/registry.py</a> <span class="lvl" lang="zh-CN">源码与说明，入门（SGLang v0.5.22，2026-11-01 取回）：内核库的布局、<code>sglang.kernels.ops</code> 的评审规则、加一个 AOT 内核的六步；概念 1、2</span><span class="lvl" lang="en">Source and notes, beginner (SGLang v0.5.22, fetched 2026-11-01): the kernel library’s layout, the <code>sglang.kernels.ops</code> review rule, the six steps of adding an AOT kernel; concepts 1 and 2</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/csrc/common_extension.cc">csrc/common_extension.cc</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/include/sgl_kernel_ops.h">include/sgl_kernel_ops.h</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/csrc/elementwise/activation.cu">csrc/elementwise/activation.cu</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/python/sgl_kernel/elementwise.py">sgl_kernel/elementwise.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/elementwise/add_constant.py">ops/elementwise/add_constant.py</a> <span class="lvl" lang="zh-CN">源码，中级：一个 AOT 算子从内核到 torch 算子到 Python 包装的整条路，以及 JIT 那条路的最小例子；概念 2 和 Lab A</span><span class="lvl" lang="en">Source, intermediate: the whole path of an AOT op from kernel to torch op to Python wrapper, and the smallest example of the JIT route; concept 2 and Lab A</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/attention/base_attn_backend.py">attention/base_attn_backend.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/attention/attention_registry.py">attention/attention_registry.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/attention/flashinfer_backend.py">attention/flashinfer_backend.py</a> <span class="lvl" lang="zh-CN">源码，进阶：后端接口的契约、后端的登记，以及 FlashInfer 后端怎样造 indptr/indices 并调 <code>plan()</code>；概念 3 和作品项目第 1 部分</span><span class="lvl" lang="en">Source, advanced: the backend interface’s contract, how backends are registered, and how the FlashInfer backend builds indptr/indices and calls <code>plan()</code>; concept 3 and part 1 of the capstone</span></li>
+    <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/flashinfer/decode.py">flashinfer/decode.py (v0.7.1)</a> · <a href="https://docs.flashinfer.ai/tutorials/kv_layout.html">docs.flashinfer.ai: KV-Cache Layout</a> · <a href="https://docs.flashinfer.ai/api/attention.html">docs.flashinfer.ai: Attention</a> · <a href="https://github.com/flashinfer-ai/flashinfer/blob/main/CONTRIBUTING.md">FlashInfer CONTRIBUTING.md</a> <span class="lvl" lang="zh-CN">源码与文档，中级：分页解码包装器的 <code>plan</code> 和 <code>run</code>，分页 KV 的布局，以及给 FlashInfer 贡献内核时的分层；概念 3、4</span><span class="lvl" lang="en">Source and docs, intermediate: <code>plan</code> and <code>run</code> of the paged decode wrapper, the paged KV layout, and the layering for contributing a kernel to FlashInfer; concepts 3 and 4</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/benchmark/one_batch.py">benchmark/one_batch.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/layers/layernorm.py">layers/layernorm.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/models/olmoe.py">models/olmoe.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/pyproject.toml">python/pyproject.toml</a> <span class="lvl" lang="zh-CN">源码，中级：单批基准的参数、输出和剖析选项，Lab A 换掉的那个名字，OLMoE 的层结构，以及所有钉住的版本；概念 4、5 和 Lab A</span><span class="lvl" lang="en">Source, intermediate: the single-batch benchmark’s arguments, output and profiling options, the name Lab A swaps, OLMoE’s layer structure, and every pinned version; concepts 4 and 5 and Lab A</span></li>
+    <li><a href="https://docs.pytorch.org/docs/2.14/cpp_extension.html">torch.utils.cpp_extension (2.14)</a> · <a href="https://docs.pytorch.org/docs/2.14/library.html">torch.library (2.14)</a> · <a href="https://docs.pytorch.org/tutorials/advanced/cpp_custom_ops.html">Custom C++ and CUDA Operators</a> · <a href="https://docs.pytorch.org/docs/2.15/profiler.html">torch.profiler</a> <span class="lvl" lang="zh-CN">官方文档，中级：载入扩展、<code>register_fake</code> 和 <code>opcheck</code>，自定义 C++/CUDA 算子的教程（这一篇本页只确认了页面存在），以及 profiler 的 API；Lab A</span><span class="lvl" lang="en">Official docs, intermediate: loading an extension, <code>register_fake</code> and <code>opcheck</code>, the tutorial on custom C++/CUDA operators (for that one this page only confirmed the page exists), and the profiler API; Lab A</span></li>
+    <li><a href="https://docs.nvidia.com/nsight-systems/UserGuide/index.html">Nsight Systems User Guide (2026.4)</a> · <a href="https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html">Nsight Compute CLI (2026.3.1)</a> <span class="lvl" lang="zh-CN">官方文档，中级：<code>-c cudaProfilerApi</code>、<code>--cuda-graph-trace</code> 的两种粒度、<code>nsys stats</code> 的报告；<code>-k regex:</code>、<code>--launch-skip</code>、<code>--launch-count</code> 和 <code>--set full</code>；概念 5 和 Lab A 第 4 步</span><span class="lvl" lang="en">Official docs, intermediate: <code>-c cudaProfilerApi</code>, the two granularities of <code>--cuda-graph-trace</code>, the <code>nsys stats</code> reports; <code>-k regex:</code>, <code>--launch-skip</code>, <code>--launch-count</code> and <code>--set full</code>; concept 5 and Lab A, step 4</span></li>
+    <li><a href="https://github.com/deepseek-ai/DeepGEMM">DeepGEMM</a> · <a href="https://github.com/sgl-project/FlashMLA">sgl-project/FlashMLA</a> · <a href="https://github.com/NVIDIA/cutlass">NVIDIA/cutlass</a> · <a href="https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html">CuTe DSL overview</a> · <a href="https://github.com/triton-lang/triton">Triton</a> · <a href="https://github.com/tile-ai/tilelang">TileLang</a> <span class="lvl" lang="zh-CN">仓库与文档，入门到进阶：上游库和四种内核语言的入口；概念 4、6</span><span class="lvl" lang="en">Repositories and docs, beginner to advanced: the entry points of the upstream libraries and the four kernel languages; concepts 4 and 6</span></li>
+    <li><a href="https://huggingface.co/allenai/OLMoE-1B-7B-0924">allenai/OLMoE-1B-7B-0924</a> <span class="lvl" lang="zh-CN">模型卡和 <code>config.json</code>，入门（2026-11-01 读取）：Lab A 和 Lab B 用到的形状和权重大小</span><span class="lvl" lang="en">Model card and <code>config.json</code>, beginner (read 2026-11-01): the shapes and weight size behind Labs A and B</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal/mtlcomputecommandencoder">MTLComputeCommandEncoder</a> · <a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification</a> <span class="lvl" lang="zh-CN">官方文档，入门到中级：计算编码器的派发、<code>simd_sum</code> 和线程组内存；Lab B</span><span class="lvl" lang="en">Official docs, beginner to intermediate: dispatching from a compute encoder, <code>simd_sum</code> and threadgroup memory; Lab B</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 10 章 Reduction 对应概念 2 和 Lab A 里那个算子的块内归约；第 6 章 Performance considerations 对应概念 5 和作品项目的剖析报告。按第 5 版目录的章名对应</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 10, Reduction, matches concept 2 and the block-wide reduction in Lab A’s op; chapter 6, Performance considerations, matches concept 5 and the capstone’s profiling report. Matched by chapter title in the 5th-edition table of contents</span></li>
+    <li lang="zh-CN">John L. Hennessy &amp; David A. Patterson, 《Computer Architecture: A Quantitative Approach》, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">第 1 章 Fundamentals of Quantitative Design and Analysis 的 1.9 节 Quantitative Principles of Computer Design（阿姆达尔定律）对应概念 5 和动画 (b)；第 4 章 Data-Level Parallelism in Vector, SIMD, and GPU Architectures 的 Roofline 一节对应作品项目的字节模型。按目录的章节名对应，没有逐页核对</span></li>
+    <li lang="en">John L. Hennessy &amp; David A. Patterson, <em>Computer Architecture: A Quantitative Approach</em>, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">Section 1.9, Quantitative Principles of Computer Design (Amdahl’s law), of chapter 1, Fundamentals of Quantitative Design and Analysis, matches concept 5 and diagram (b); the Roofline section of chapter 4, Data-Level Parallelism in Vector, SIMD, and GPU Architectures, matches the capstone’s byte model. Matched by chapter and section title in the table of contents, not checked page by page</span></li>
+    <li lang="zh-CN">Sebastian Raschka, 《Build a Large Language Model (From Scratch)》, Manning, 2024, ISBN 9781633437166. <span class="lvl">第 4 章 4.2 节（layer normalization）和 4.4 节（shortcut 连接，也就是残差）对应作品项目的算子要算什么；书里是 GPT-2 的 LayerNorm，内存访问形状和 RMSNorm 相同。节名按作者仓库 rasbt/LLMs-from-scratch 的章节笔记本核对（Phase 5，2026-11-01）</span></li>
+    <li lang="en">Sebastian Raschka, <em>Build a Large Language Model (From Scratch)</em>, Manning, 2024, ISBN 9781633437166. <span class="lvl">Sections 4.2 (layer normalization) and 4.4 (shortcut connections, that is, the residual) of chapter 4 match what the capstone op computes; the book has GPT-2’s LayerNorm, whose memory-access shape is the same as RMSNorm’s. Section titles checked against the chapter notebooks in the author’s repository rasbt/LLMs-from-scratch (Phase 5, 2026-11-01)</span></li>
+  </ol>
+
+  <h2 id="capstone" lang="zh-CN">作品项目：读一个注意力后端、剖析一个 MoE 解码步、写一个小的融合算子</h2><h2 id="capstone-en" lang="en">Capstone: read an attention backend, profile a MoE decode step, write one small fused op</h2>
+  <p lang="zh-CN">作品项目就是简报的「一条好的入门路径」，三件事合起来走完一圈：运行时的一个设计选择定下一种布局或一条约束（Phase 1–3），一个内核必须满足它（Phase 4–7），然后你测量端到端的效果（本课）。下面是规格和验收标准，不是写好的答案：Lab A 和 Lab B 给出了第 3 部分的起点，CUDA 那一半没有运行过。</p>
+  <p lang="en">The capstone is the brief’s “good way in”, three pieces that together walk one turn of the loop: a runtime design choice sets a layout or a constraint (Phases 1–3), a kernel has to meet it (Phases 4–7), and you measure the end-to-end effect (this phase). Below are the specification and the acceptance criteria, not a finished answer: Labs A and B give the starting point of part 3, and their CUDA half has not been run.</p>
+  <h3 lang="zh-CN">规格</h3><h3 lang="en">Specification</h3>
+  <ul>
+    <li lang="zh-CN"><strong>第 1 部分：读注意力后端。</strong>把 <code>flashinfer_backend.py</code> 的解码路径和 FlashInfer v0.7.1 的 <code>BatchDecodeWithPagedKVCacheWrapper</code> 对照着读。交一页图解：从 <code>ForwardBatch</code> 到 <code>plan()</code> 的每个参数从哪里来，哪些在图外、哪些在图里跑；再在 L4 上给一个三个请求的解码批（其中两个共享前缀）打印 <code>kv_indptr</code>、<code>kv_indices</code> 和 <code>kv_last_page_len</code>，手画它们指向的槽位。</li>
+    <li lang="en"><strong>Part 1: read the attention backend.</strong> Read the decode path of <code>flashinfer_backend.py</code> beside FlashInfer v0.7.1’s <code>BatchDecodeWithPagedKVCacheWrapper</code>. Hand in a one-page diagram: where each argument of <code>plan()</code> comes from, starting at <code>ForwardBatch</code>, and which parts run outside the graph and which inside; then, on the L4, print <code>kv_indptr</code>, <code>kv_indices</code> and <code>kv_last_page_len</code> for a decode batch of three requests (two sharing a prefix) and draw by hand the slots they point at.</li>
+    <li lang="zh-CN"><strong>第 2 部分：剖析一个 MoE 解码步。</strong>L4 上用 OLMoE-1B-7B（Lab A 第 4 步），批大小 1 和 64 各一份；H100 层可以换成 Qwen3-30B-A3B（Phase 4 的形状，按实验环境页的费用说明）。给出前十个内核和它们的时间占比，归到注意力、MoE（路由与 top-k、<code>moe_align_block_size</code>、分组 GEMM、求和）、稠密 GEMM、归一化和激活、其他几类，并说明两种批大小下排行怎样变。</li>
+    <li lang="en"><strong>Part 2: profile a MoE decode step.</strong> On the L4 with OLMoE-1B-7B (Lab A, step 4), one profile each at batch sizes 1 and 64; on the H100 tier you may use Qwen3-30B-A3B instead (Phase 4’s shapes, with the lab environment page’s cost notes). Give the top ten kernels with their shares of time, grouped into attention, MoE (routing and top-k, <code>moe_align_block_size</code>, grouped GEMM, the sum), dense GEMM, norms and activations, and other, and say how the ranking changes between the two batch sizes.</li>
+    <li lang="zh-CN"><strong>第 3 部分：写或优化一个小的融合算子。</strong>默认是 Lab A 的融合残差加法 + RMSNorm；也可以换成另一个归一化或激活（例如 <code>gemma_fused_add_rmsnorm</code> 或 <code>gelu_tanh_and_mul</code> 的语义）。版本：V0 是 PyTorch 参考，V1 是两个内核，V2 是你的算子，V3 是 <code>sgl_kernel</code> 里的同名算子，V4 是你对 V2 的一次优化（例如把读写向量化到 16 字节，去掉 Lab A 标出的 <code>shortcut</code>），V5 是 Metal 版（Lab B）。V2 和 V4 都按 Lab A 注册成 torch 算子并换进模型。</li>
+    <li lang="en"><strong>Part 3: write or optimize one small fused op.</strong> By default, Lab A’s fused residual add + RMSNorm; another norm or activation is fine too (for example the semantics of <code>gemma_fused_add_rmsnorm</code> or <code>gelu_tanh_and_mul</code>). Versions: V0 the PyTorch reference, V1 two kernels, V2 your op, V3 the op of the same name in <code>sgl_kernel</code>, V4 one optimization of V2 (for example vectorizing loads and stores to 16 bytes, removing the <code>shortcut</code> marked in Lab A), V5 the Metal version (Lab B). V2 and V4 are both registered as torch ops as in Lab A and swapped into the model.</li>
+  </ul>
+  <h3 lang="zh-CN">报告（必交）</h3><h3 lang="en">The report (required)</h3>
+  <ul>
+    <li lang="zh-CN"><strong>环境。</strong>日期；GPU 型号和计算能力；<code>nvidia-smi</code> 的驱动版本；容器镜像的完整标签和其中 SGLang、FlashInfer、PyTorch 的版本；模型名和版本号；Mac 型号、macOS 和 Swift 版本。</li>
+    <li lang="en"><strong>Environment.</strong> The date; the GPU model and compute capability; the driver version from <code>nvidia-smi</code>; the full tag of the container image and the SGLang, FlashInfer and PyTorch versions inside it; the model name and revision; the Mac model and the macOS and Swift versions.</li>
+    <li lang="zh-CN"><strong>预测在先。</strong>测量之前，按第 2 部分的剖析给出归一化在一步里的占比 <code>f</code>，按单算子测量给出 <code>s</code>，用阿姆达尔定律写出端到端的预测范围。</li>
+    <li lang="en"><strong>Prediction first.</strong> Before measuring, give the norms’ share <code>f</code> of a step from part 2’s profile and <code>s</code> from the per-op measurements, and write down the predicted end-to-end range from Amdahl’s law.</li>
+    <li lang="zh-CN"><strong>结果表。</strong>每个 token 数、每个版本一行：中位数、最小到最大、对 V1 和 V3 的倍数、和 V0 的最大误差、按字节模型算的 GB/s；端到端一行写每个版本的 <code>Decode.  median latency</code>；CUDA 和 Metal 放在一张表里，像 Lab B 那样。</li>
+    <li lang="en"><strong>Results table.</strong> One row per token count and version: median, minimum to maximum, ratio to V1 and to V3, maximum error against V0, GB/s from the byte model; an end-to-end row with each version’s <code>Decode.  median latency</code>; CUDA and Metal side by side in one table, as in Lab B.</li>
+    <li lang="zh-CN"><strong>剖析证据。</strong>第 2 部分的两张排行；证明 V2 和 V4 确实被换进了模型的 trace（内核名和每步的次数）；V2 和 V4 各一份 <code>ncu</code> 报告，比较 DRAM 吞吐和前三个停顿原因。</li>
+    <li lang="en"><strong>Profile evidence.</strong> The two rankings from part 2; a trace proving that V2 and V4 really were swapped into the model (kernel name and count per step); one <code>ncu</code> report each for V2 and V4, comparing DRAM throughput and the top three stall reasons.</li>
+    <li lang="zh-CN"><strong>剩下的差距。</strong>一段话：V4 和 V3 比谁快、为什么；端到端的测量和预测是否吻合；哪些是测出来的，哪些是推断。</li>
+    <li lang="en"><strong>The remaining gap.</strong> One paragraph: whether V4 or V3 is faster and why; whether the end-to-end measurement matches the prediction; which parts are measured and which inferred.</li>
+  </ul>
+  <h3 lang="zh-CN">验收标准</h3><h3 lang="en">Acceptance criteria</h3>
+  <ol>
+    <li lang="zh-CN">每个 token 数下，V2 和 V4 对 V0 的最大绝对误差不超过 V3 对 V0 误差的两倍；报告里有这个检查的输出。</li>
+    <li lang="en">At every token count, the maximum absolute error of V2 and V4 against V0 is at most twice that of V3 against V0; the report contains the output of this check.</li>
+    <li lang="zh-CN">V2 和 V4 通过 <code>torch.library.opcheck</code>，能被捕获进 CUDA 图（Lab A 的 <code>graph_us</code>），并且在 SGLang 默认开着解码图时，节点粒度的 Nsight Systems trace 里每个解码步出现的次数等于你在模型代码里数出的带残差的归一化处数。</li>
+    <li lang="en">V2 and V4 pass <code>torch.library.opcheck</code>, can be captured into a CUDA graph (Lab A’s <code>graph_us</code>), and, with SGLang’s decode graph on as by default, appear in a node-granularity Nsight Systems trace as many times per decode step as the norm sites with a residual that you count in the model code.</li>
+    <li lang="zh-CN">换进 V2 或 V4 之后，<code>one_batch --correctness-test</code> 打印的 logits 和默认设置一致到 BF16 舍入的量级（这个选项会打印 prefill 和 decode 的 logits，见 <code>one_batch.py</code> 第 19–30 行的示例输出）。</li>
+    <li lang="en">With V2 or V4 swapped in, the logits printed by <code>one_batch --correctness-test</code> agree with the default setting to the level of BF16 rounding (the option prints prefill and decode logits; see the sample output at lines 19–30 of <code>one_batch.py</code>).</li>
+    <li lang="zh-CN">每个时间都是至少 3 次预热之后至少 20 次的中位数，带最小值和最大值；GPU 上同时有别的程序的运行要弃用并在报告里说明，像 Lab B 那样。</li>
+    <li lang="en">Every time is the median of at least 20 runs after at least 3 warm-ups, with its minimum and maximum; runs during which something else used the GPU are discarded and reported as such, as in Lab B.</li>
+    <li lang="zh-CN">V4 在 4096 个 token 时比 V2 快，或者报告用 <code>ncu</code> 的 DRAM 字节说明为什么没有更快。</li>
+    <li lang="en">At 4096 tokens V4 is faster than V2, or the report uses <code>ncu</code>’s DRAM bytes to explain why it is not.</li>
+    <li lang="zh-CN">端到端的测量落在你事先写下的预测范围里，或者报告用第 2 部分的剖析解释偏差。本页只在 M5 的替身上验证过这一条（测到 24.8–40.8 µs，预测 17.6–57.8 µs）。</li>
+    <li lang="en">The end-to-end measurement falls inside the prediction you wrote down beforehand, or the report explains the deviation with part 2’s profile. This page has verified that only on the M5 stand-in (24.8–40.8 µs measured against 17.6–57.8 µs predicted).</li>
+    <li lang="zh-CN">一个脚本从源码构建所有版本、跑完全部测量、打印报告里的数字；另一个人在同型号的 GPU 和同一个镜像标签上运行，中位数落在你报告的范围附近。</li>
+    <li lang="en">One script builds every version from source, runs every measurement and prints the numbers in the report; someone else running it on the same GPU model and the same image tag gets medians near the ranges you reported.</li>
+  </ol>
+
+  <h2 id="next" lang="zh-CN">接下来</h2><h2 id="next-en" lang="en">What comes next</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../../gpu-cuda/index.html">GPU Programming with CUDA</a>：写内核的手艺本身。本课的标量读写、warp 归约和 <code>ncu</code> 报告都在那里从头讲；它的作品项目是融合 softmax 或 layer norm，对照库实现并附剖析报告，正好接本课的第 3 部分。</li>
+    <li lang="en"><a href="../../gpu-cuda/index.html">GPU Programming with CUDA</a>: the craft of writing kernels itself. This phase’s scalar loads, warp reductions and <code>ncu</code> reports are all taught from the start there; its capstone is a fused softmax or layer norm measured against a library with a profiling report, which leads straight on from part 3 here.</li>
+    <li lang="zh-CN"><a href="../../kernel-engineering/index.html">Kernel Engineering</a>：GPU 驱动下面的那一层操作系统内核：内核模块、MMIO、DMA 和页错误。本专题的「内核」是 GPU 计算内核，那个专题的「内核」是操作系统内核，每一次 CUDA 调用最终落到那里。</li>
+    <li lang="en"><a href="../../kernel-engineering/index.html">Kernel Engineering</a>: the operating-system kernel beneath the GPU driver: kernel modules, MMIO, DMA and page faults. This topic’s “kernel” is a GPU compute kernel and that topic’s is the OS kernel, where every CUDA call finally lands.</li>
+    <li lang="zh-CN"><a href="../../parallel-programming/index.html">Parallel Programming</a>：CPU 这一侧。SGLang 的调度器、分词和采样之外的 CPU 工作都跑在那里讲的线程、内存模型和 SIMD 上；同样的 roofline 和「先量带宽」的方法也适用。</li>
+    <li lang="en"><a href="../../parallel-programming/index.html">Parallel Programming</a>: the CPU side. SGLang’s scheduler, tokenization and other CPU-side work run on the threads, memory model and SIMD taught there; the same roofline and measure-the-bandwidth-first method apply.</li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-7-speculative-and-structured-output/index.html"><span lang="zh-CN">← Phase 7 · 推测解码与结构化输出内核</span><span lang="en">← Phase 7 · Speculative Decoding and Structured-Output Kernels</span></a>
+    <a href="../index.html"><span lang="zh-CN">LLM Inference Kernels (SGLang) · 回到专题 →</span><span lang="en">LLM Inference Kernels (SGLang) · back to the topic →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

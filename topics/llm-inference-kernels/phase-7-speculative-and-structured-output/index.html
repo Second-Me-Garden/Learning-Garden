@@ -1,0 +1,896 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 7 · Speculative Decoding and Structured-Output Kernels · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page">Phase 7 · Speculative Decoding and Structured Output</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 7 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 7 / 9 · about 1–2 weeks</p>
+  <h1>Speculative Decoding and Structured-Output Kernels <span class="en" lang="zh-CN">推测解码与结构化输出内核：小模型先起草、大模型一次前向验证一整棵草稿树，树注意力掩码和验证内核怎么写；xgrammar 在 CPU 上算出 token 位掩码，GPU 每步用一个小内核把它盖到 logits 上</span><span class="en" lang="en">A small draft proposes, the large model verifies a whole draft tree in one forward pass; how the tree-attention mask and the verification kernel are written; and how xgrammar computes a token bitmask on the CPU that a small GPU kernel lays over the logits at every step</span></h1>
+  <p class="lede" lang="zh-CN">解码一步只出一个 token，却要把全部权重和 KV 缓存读一遍，GPU 的算力大半闲着。推测解码利用这份闲置：一个便宜的草稿模型先猜几个 token，目标模型用一次前向同时检验它们，按拒绝采样的规则接受一段前缀，输出分布和逐个解码完全一样。EAGLE 把草稿排成一棵树，验证时每个节点只能看见前缀和自己的祖先，这就是树注意力掩码；验证内核再沿着树走一遍，找出最长的被接受路径。结构化输出走的是另一条热路径：xgrammar 在 CPU 上按语法算出这一步允许哪些 token，打成每 32 个 token 一个 int32 的位掩码，GPU 在采样前用一个小内核把不允许的 logits 改成 −∞。这台 Apple M5 上的 Metal 对照实测：把 16 个树节点当成一个小矩阵来验证，耗时是解码一个 token 的 2.1–3.4 倍，逐个查询打分则是 6.3–10.8 倍；掩码本身几乎不花时间（±5% 以内）；位掩码内核处理一行只要 1–2.5 µs，256 行时比浮点加法掩码快 2.2–9.2 倍，快多少取决于有多少 logits 要写成 −∞。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-11-01 在这台 Apple M5 上实际运行，数字原样贴出；Lab A <strong>未运行</strong>，是 2026-11-01 根据 SGLang v0.5.22 的源码整理的。</p>
+  <p class="lede" lang="en">A decode step produces one token but reads all the weights and the KV cache to do it, so most of the GPU’s arithmetic sits idle. Speculative decoding spends that idle capacity: a cheap draft model guesses a few tokens, the target model checks them all in one forward pass, a rejection-sampling rule accepts a prefix of them, and the output distribution is exactly that of decoding one token at a time. EAGLE arranges its drafts as a tree; during verification each node may see only the prefix and its own ancestors, which is the tree-attention mask, and a verification kernel then walks the tree to find the longest accepted path. Structured output is a different hot path: xgrammar works out on the CPU which tokens the grammar allows at this step, packs them into a bitmask of one int32 per 32 tokens, and before sampling a small GPU kernel sets the disallowed logits to −∞. Measured with the Metal twin on this Apple M5: verifying 16 tree nodes as one small matrix takes 2.1–3.4 times as long as decoding one token, against 6.3–10.8 times when each query is scored on its own; the mask itself costs almost nothing (within ±5%); and the bitmask kernel needs only 1–2.5 µs for one row and, at 256 rows, beats an additive float mask by 2.2–9.2 times, depending on how many logits it has to set to −∞. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-11-01 and its numbers are pasted as they came; Lab A is <strong>not run</strong>, assembled on 2026-11-01 from the SGLang v0.5.22 source.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">写出推测采样的接受规则，说明它为什么不改变输出分布，并用接受率 α 和草稿长度 γ 估出每次验证平均产出几个 token。</li>
+      <li lang="en">State the acceptance rule of speculative sampling, explain why it leaves the output distribution unchanged, and estimate from the acceptance rate α and the draft length γ how many tokens one verification yields on average.</li>
+      <li lang="zh-CN">从 SGLang v0.5.22 的 <code>draft()</code> 一路追到 <code>build_tree_efficient</code> 内核，说出 EAGLE 的草稿树是怎么选出来的、<code>--speculative-num-steps</code>、<code>--speculative-eagle-topk</code> 和 <code>--speculative-num-draft-tokens</code> 各管什么。</li>
+      <li lang="en">Trace SGLang v0.5.22 from <code>draft()</code> down to the <code>build_tree_efficient</code> kernel, and say how EAGLE’s draft tree is chosen and what <code>--speculative-num-steps</code>, <code>--speculative-eagle-topk</code> and <code>--speculative-num-draft-tokens</code> each control.</li>
+      <li lang="zh-CN">给定一棵草稿树，手写它的树注意力掩码（FULL_MASK 布局），再按 <code>VerifyTreeGreedy</code> 的走法找出被接受的路径和额外的那个 token。</li>
+      <li lang="en">Given a draft tree, write its tree-attention mask by hand (the FULL_MASK layout), then follow the walk of <code>VerifyTreeGreedy</code> to find the accepted path and the one extra token.</li>
+      <li lang="zh-CN">说出 xgrammar 的位掩码在哪里填、怎么搬到 GPU、在采样前的哪一行被盖到 logits 上，以及推测解码时为什么要在 CPU 上沿草稿树做一次深度优先遍历。</li>
+      <li lang="en">Say where xgrammar’s bitmask is filled, how it reaches the GPU, and at which line before sampling it is laid over the logits, and why speculative decoding needs a depth-first walk over the draft tree on the CPU.</li>
+      <li lang="zh-CN">数出位掩码内核每步读写多少字节，解释为什么它的耗时取决于被屏蔽的 token 有多少，而不是词表本身有多大。</li>
+      <li lang="en">Count the bytes the bitmask kernel reads and writes per step, and explain why its time depends on how many tokens are masked rather than on the vocabulary size itself.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-the-stack/index.html">Phase 0</a>：解码为什么受带宽限制。推测解码的全部收益都来自这一点：多验证几个 token，读的字节几乎不变。</li>
+    <li lang="en"><a href="../phase-0-the-stack/index.html">Phase 0</a>: why decode is bandwidth-bound. The whole gain of speculative decoding comes from this: verifying a few more tokens barely changes the bytes read.</li>
+    <li lang="zh-CN"><a href="../phase-2-prefill-and-decode/index.html">Phase 2</a>：FlashAttention 的分块和在线 softmax，以及 split-KV 解码和它的合并步。验证一棵树就是一次带自定义掩码的小预填充，Lab B 的 Metal 内核用的正是这两种写法。</li>
+    <li lang="en"><a href="../phase-2-prefill-and-decode/index.html">Phase 2</a>: FlashAttention’s tiling and online softmax, and split-KV decoding with its combine step. Verifying a tree is a small prefill with a custom mask, and the Metal kernels of Lab B use exactly these two patterns.</li>
+    <li lang="zh-CN"><a href="../phase-3-cuda-graphs-plan-run/index.html">Phase 3</a>：CUDA 图和 <code>plan()</code>/<code>run()</code>。验证步也被捕获成图，自定义掩码因此要放在预先分配好的缓冲区里。</li>
+    <li lang="en"><a href="../phase-3-cuda-graphs-plan-run/index.html">Phase 3</a>: CUDA graphs and <code>plan()</code>/<code>run()</code>. The verify step is captured as a graph too, which is why the custom mask lives in a preallocated buffer.</li>
+    <li lang="zh-CN"><a href="../phase-5-fusions/index.html">Phase 5</a>：采样内核。位掩码就盖在 Phase 5 讲的那一行 logits 上，紧接着就是 softmax 和 top-k/top-p。</li>
+    <li lang="en"><a href="../phase-5-fusions/index.html">Phase 5</a>: the sampling kernels. The bitmask is laid over the very row of logits that Phase 5 samples from, right before the softmax and top-k/top-p.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+  <p lang="zh-CN">下文 SGLang 的源码路径和行号都在 <code>v0.5.22</code> 标签下，FlashInfer 的在 <code>v0.7.1</code>、xgrammar 的在 <code>v0.2.7</code>（都是 SGLang 的 <code>python/pyproject.toml</code> 钉的版本），全部是 2026-11-01 用 curl 从 raw.githubusercontent.com 取回后读的。论文读的版本：推测解码 arXiv:2211.17192v2（Leviathan、Kalman、Matias，ICML 2023），EAGLE arXiv:2401.15077v3，EAGLE-2 arXiv:2406.16858v2，XGrammar arXiv:2411.15100v3（MLSys 2025），同一天从 arXiv 取回。路径里的 <code>srt/</code> 是 <code>python/sglang/srt/</code>，<code>kernels/</code> 是 <code>python/sglang/kernels/</code>。</p><p lang="en">Every SGLang source path and line number below is at the <code>v0.5.22</code> tag, FlashInfer’s at <code>v0.7.1</code> and xgrammar’s at <code>v0.2.7</code> (the versions pinned in SGLang’s <code>python/pyproject.toml</code>); all were fetched with curl from raw.githubusercontent.com and read on 2026-11-01. The paper versions read: speculative decoding arXiv:2211.17192v2 (Leviathan, Kalman and Matias, ICML 2023), EAGLE arXiv:2401.15077v3, EAGLE-2 arXiv:2406.16858v2 and XGrammar arXiv:2411.15100v3 (MLSys 2025), fetched from arXiv the same day. In the paths, <code>srt/</code> stands for <code>python/sglang/srt/</code> and <code>kernels/</code> for <code>python/sglang/kernels/</code>.</p>
+
+  <h3 lang="zh-CN">1. 先起草、再验证，以及接受规则</h3><h3 lang="en">1. Draft, then verify, and the acceptance rule</h3>
+  <p lang="zh-CN">批很小的时候，解码一步的时间几乎全花在读权重上（Phase 0）。把 1 个 token 换成 γ+1 个 token 一起送进目标模型，权重仍然只读一遍，多出来的只是矩阵乘里多几行和注意力里多几个查询，时间增加得很少。推测解码就是让一个便宜的草稿模型 M<sub>q</sub> 先依次猜出 γ 个 token，再让目标模型 M<sub>p</sub> 用一次前向算出这 γ+1 个位置各自的分布 p。</p><p lang="en">At small batch sizes the time of a decode step goes almost entirely into reading weights (Phase 0). Feed the target model γ+1 tokens instead of 1 and the weights are still read once; what is added is a few more rows in each matmul and a few more queries in attention, so the time grows only a little. Speculative decoding lets a cheap draft model M<sub>q</sub> guess γ tokens one after another, then has the target model M<sub>p</sub> compute the distribution p at all γ+1 positions in one forward pass.</p>
+  <p lang="zh-CN">论文第 2.3 节的规则：从草稿分布 q 抽出 x，若 q(x) ≤ p(x) 就保留；否则以 1 − p(x)/q(x) 的概率拒绝，拒绝后改从调整过的分布 p′(x) = norm(max(0, p(x) − q(x))) 重新抽一个。附录 A.1 证明这样抽出的 x 正好服从 p。γ 个草稿依次检验，第一个被拒绝的位置用 p′ 补一个 token，全部通过时再从第 γ+1 个位置的 p 白得一个，所以一次验证产出 1 到 γ+1 个 token。若每个位置的接受概率独立、均值为 α，产出个数是一个封顶的几何变量，期望是 (1 − α<sup>γ+1</sup>) / (1 − α)（论文式 (1)）。贪心解码是它的特例：q 和 p 都是 one-hot，规则变成「草稿 token 等于目标模型的 argmax 就接受」。</p><p lang="en">The rule from section 2.3 of the paper: draw x from the draft distribution q and keep it if q(x) ≤ p(x); otherwise reject it with probability 1 − p(x)/q(x), and after a rejection draw again from the adjusted distribution p′(x) = norm(max(0, p(x) − q(x))). Appendix A.1 proves that x drawn this way follows p exactly. The γ drafts are checked in order; the first rejected position is filled with one token drawn from p′, and when all pass, one more token comes free from p at position γ+1, so one verification yields between 1 and γ+1 tokens. If the acceptance probabilities are independent with mean α, the count is a capped geometric variable with expectation (1 − α<sup>γ+1</sup>) / (1 − α) (equation (1) of the paper). Greedy decoding is the special case where q and p are both one-hot and the rule becomes: accept the draft token if it equals the target model’s argmax.</p>
+  <p lang="zh-CN">SGLang 的开关在 <code>srt/arg_groups/fields/spec.py</code>：<code>--speculative-algorithm</code>（第 31–34 行，内置 EAGLE、EAGLE3、NEXTN、STANDALONE、NGRAM、DFLASH、DSPARK、UNO）、<code>--speculative-draft-model-path</code>（第 36–42 行）、<code>--speculative-num-steps</code>、<code>--speculative-eagle-topk</code>、<code>--speculative-num-draft-tokens</code>（第 58–69 行），以及只在 topk 为 1 时可用的 <code>--speculative-use-rejection-sampling</code>（第 117–119 行）。<code>srt/arg_groups/speculative_hook.py</code> 第 108–117 行把 <code>NEXTN</code> 也解析成 <code>EAGLE</code>（Gemma4 的助手草稿模型例外）。日志里每隔一段打一行 <code>Decode batch ...</code>，开了推测解码就带上 <code>accept len</code> 和 <code>accept rate</code>（<code>srt/managers/scheduler_components/metrics_reporter.py</code> 第 950–982 行）：accept len 是每次验证平均提交的 token 数，含白得的那一个；accept rate 是被接受的草稿占提出的草稿的比例。每个请求的 <code>meta_info</code> 里也有 <code>spec_accept_length</code>（生成的 token 数除以验证次数）和 <code>spec_verify_ct</code>（<code>srt/managers/tokenizer_manager.py</code> 第 3145–3169 行）。</p><p lang="en">SGLang’s switches are in <code>srt/arg_groups/fields/spec.py</code>: <code>--speculative-algorithm</code> (lines 31–34, with the built-ins EAGLE, EAGLE3, NEXTN, STANDALONE, NGRAM, DFLASH, DSPARK and UNO), <code>--speculative-draft-model-path</code> (lines 36–42), <code>--speculative-num-steps</code>, <code>--speculative-eagle-topk</code> and <code>--speculative-num-draft-tokens</code> (lines 58–69), and <code>--speculative-use-rejection-sampling</code>, which needs topk 1 (lines 117–119). Lines 108–117 of <code>srt/arg_groups/speculative_hook.py</code> resolve <code>NEXTN</code> to <code>EAGLE</code> as well (Gemma4 assistant drafts excepted). Every so often the log prints a <code>Decode batch ...</code> line, and with speculative decoding on it carries <code>accept len</code> and <code>accept rate</code> (lines 950–982 of <code>srt/managers/scheduler_components/metrics_reporter.py</code>): accept len is the average number of tokens committed per verification, the free one included, and accept rate is the share of proposed drafts that were accepted. Each request’s <code>meta_info</code> carries <code>spec_accept_length</code> (generated tokens divided by verifications) and <code>spec_verify_ct</code> as well (lines 3145–3169 of <code>srt/managers/tokenizer_manager.py</code>).</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲推测解码。这一概念以 Leviathan 等人的论文（第 2.3 节和第 3.1 节）为准，见资料；Raschka 第 5 章 5.3 节讲被加速的那一步采样本身。</p><p lang="en">Further reading: no book in the bibliography covers speculative decoding. This concept rests on the paper by Leviathan et al. (sections 2.3 and 3.1); see Resources. Section 5.3 of chapter 5 of Raschka covers the sampling step that is being sped up.</p>
+
+  <h3 lang="zh-CN">2. EAGLE 的草稿树</h3><h3 lang="en">2. EAGLE’s draft tree</h3>
+  <p lang="zh-CN">EAGLE 的草稿模型不是一个独立的小语言模型，而是一层 Transformer 解码层：它读入目标模型倒数第二层的特征和提前一步的 token 序列，自回归地预测下一个特征，再用目标模型的 LM head 得到分布（论文第 3 节）。所以草稿很便宜，也和目标模型很像。Lab A 用的 <code>lmsys/sglang-EAGLE-llama2-chat-7B</code> 的 <code>config.json</code> 写的是 <code>LlamaForCausalLMEagle</code>、<code>num_hidden_layers</code> 为 1，权重文件 1,468,043,538 字节；目标模型 <code>meta-llama/Llama-2-7b-chat-hf</code> 的 safetensors 合计 13,476,872,576 字节（都是 2026-11-01 从 Hugging Face 的 API 读的）。</p><p lang="en">EAGLE’s draft model is not a separate small language model but a single Transformer decoder layer: it reads the target model’s second-to-top-layer features plus the token sequence advanced by one step, predicts the next feature autoregressively, and turns it into a distribution with the target model’s LM head (section 3 of the paper). So the draft is cheap and closely resembles the target. The <code>config.json</code> of <code>lmsys/sglang-EAGLE-llama2-chat-7B</code>, used in Lab A, says <code>LlamaForCausalLMEagle</code> with <code>num_hidden_layers</code> of 1, and its weight file is 1,468,043,538 bytes; the target <code>meta-llama/Llama-2-7b-chat-hf</code> has 13,476,872,576 bytes of safetensors (both read from the Hugging Face API on 2026-11-01).</p>
+  <p lang="zh-CN">只猜一条链太浪费：第一个 token 一旦猜错，后面全作废。EAGLE 每一步对每个节点保留概率最高的 topk 个候选，num_steps 次草稿前向就长出一棵深度为 num_steps 的树（论文第 3.2 节：3 次前向画出一棵 10 个 token 的树）；EAGLE-2 再按「从根到这个节点的累积概率」动态挑选要保留的节点。SGLang v0.5.22 里这一段在 <code>srt/speculative/eagle_worker_v2.py</code> 的 <code>draft()</code>（第 614 行起）：每一步对草稿 logits 调 <code>fast_topk(probs, self.topk, dim=-1)</code>（第 837 行），最后 <code>organize_draft_results</code>（<code>srt/speculative/eagle_utils.py</code> 第 113–142 行）对所有候选的累积分数做一次 <code>torch.topk</code>，留下 <code>num_draft_tokens − 1</code> 个，按原顺序排好，连同它们的父节点表一起交出去。加上根（上一轮已经确定的那个 token），树上共有 <code>num_draft_tokens</code> 个节点。</p><p lang="en">Guessing a single chain is wasteful: once the first token is wrong, everything after it is thrown away. At each step EAGLE keeps the topk most probable candidates of every node, so num_steps draft forwards grow a tree of depth num_steps (section 3.2 of the paper: three forwards draw a 10-token tree), and EAGLE-2 picks which nodes to keep dynamically, by the cumulative probability from the root to each node. In SGLang v0.5.22 this is <code>draft()</code> in <code>srt/speculative/eagle_worker_v2.py</code> (from line 614): every step calls <code>fast_topk(probs, self.topk, dim=-1)</code> on the draft logits (line 837), and at the end <code>organize_draft_results</code> (lines 113–142 of <code>srt/speculative/eagle_utils.py</code>) runs one <code>torch.topk</code> over the cumulative scores of all candidates, keeps <code>num_draft_tokens − 1</code> of them in their original order, and hands them over with their parent table. With the root (the token fixed by the previous round) the tree has <code>num_draft_tokens</code> nodes.</p>
+  <p lang="zh-CN">三个参数都不设时，<code>_auto_choose_speculative_params</code>（<code>speculative_hook.py</code> 第 1340–1371 行）按模型挑：<code>LlamaForCausalLM</code> 是 (5, 4, 8)，即 5 步、每步 topk 4、树上 8 个节点；DeepSeek、GPT-OSS 等和其余模型默认 (3, 1, 4)，topk 为 1 就是一条链。SGLang 的文档说要么三个都不设，要么三个都设。topk 为 1 时还有一条快路径：<code>srt/speculative/eagle_worker_common.py</code> 第 448–465 行在 <code>QLEN_ONLY</code> 掩码模式下改调 <code>build_chain_tree</code>，因为一条链的掩码就是普通的因果掩码。</p><p lang="en">When none of the three is set, <code>_auto_choose_speculative_params</code> (lines 1340–1371 of <code>speculative_hook.py</code>) picks by model: <code>LlamaForCausalLM</code> gets (5, 4, 8), meaning 5 steps, topk 4 per step and 8 nodes in the tree; DeepSeek, GPT-OSS and the rest default to (3, 1, 4), and topk 1 is a chain. SGLang’s documentation says to set all three or none. Topk 1 also has a fast path: lines 448–465 of <code>srt/speculative/eagle_worker_common.py</code> call <code>build_chain_tree</code> instead in <code>QLEN_ONLY</code> mask mode, because the mask of a chain is the ordinary causal mask.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲草稿树。这一概念以 EAGLE 和 EAGLE-2 两篇论文、以及 <code>eagle_worker_v2.py</code> 和 <code>eagle_utils.py</code> 为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers draft trees. This concept rests on the EAGLE and EAGLE-2 papers and on <code>eagle_worker_v2.py</code> and <code>eagle_utils.py</code>; see Resources.</p>
+
+  <h3 lang="zh-CN">3. 树注意力掩码和验证内核</h3><h3 lang="en">3. The tree-attention mask and the verification kernel</h3>
+  <p lang="zh-CN">验证时，树上的 N 个节点作为 N 个查询一起送进目标模型。每个节点只该看见前缀和自己的祖先：它的兄弟和堂兄弟是另一种猜法，看见了就算错了。所以普通的因果掩码不行，要一张自定义掩码。SGLang 的默认布局 <code>TreeMaskMode.FULL_MASK</code>（<code>eagle_utils.py</code> 第 145–154 行）给每个请求一块 N 行 × (seq_len + N) 列的 bool 矩阵，按请求首尾相接，总长 <code>seq_lens_sum × N + N × N × bs</code>（第 208–219 行）；前缀那 seq_len 列全是 True，后面 N × N 的树块里，第 i 行只在 i 的祖先和 i 自己那几列是 True。</p><p lang="en">For verification, the N nodes of the tree go into the target model together as N queries. Each node should see only the prefix and its own ancestors: its siblings and cousins are a different guess, and seeing them would be wrong. So an ordinary causal mask will not do, and a custom mask is needed. SGLang’s default layout, <code>TreeMaskMode.FULL_MASK</code> (lines 145–154 of <code>eagle_utils.py</code>), gives each request a bool matrix of N rows by seq_len + N columns, requests laid end to end, <code>seq_lens_sum × N + N × N × bs</code> in total (lines 208–219); the seq_len prefix columns are all True, and in the N × N tree block row i is True only in the columns of i’s ancestors and i itself.</p>
+  <p lang="zh-CN">这张表由一个 CUDA 内核一次填好：<code>kernels/jit/include/sgl_kernel/speculative/eagle.cuh</code> 的 <code>build_tree_efficient</code>（第 35–131 行），经 <code>kernels/ops/speculative/tree.py</code> 的 JIT 模块调用。一个线程块负责一个请求，线程 i 负责节点 i：先把自己这一行的树块清零、对角线置 True，再沿父节点表一路往上走，把经过的每个祖先那一列置 True，走了几步就是深度，位置写成 seq_len + 深度（RoPE 要用）。线程 0 另外把树改写成两张链表：<code>retrive_next_token</code>（第一个孩子）和 <code>retrive_next_sibling</code>（下一个兄弟），后面的验证内核就靠它们走树。</p><p lang="en">One CUDA kernel fills this table in one go: <code>build_tree_efficient</code> in <code>kernels/jit/include/sgl_kernel/speculative/eagle.cuh</code> (lines 35–131), called through the JIT module in <code>kernels/ops/speculative/tree.py</code>. One thread block handles one request and thread i handles node i: it clears its own row of the tree block and sets the diagonal True, then walks up the parent table, setting the column of every ancestor it passes to True; the number of steps is the depth, and the position is written as seq_len + depth (RoPE needs it). Thread 0 also rewrites the tree as two linked lists, <code>retrive_next_token</code> (the first child) and <code>retrive_next_sibling</code> (the next sibling), which the verification kernel later uses to walk the tree.</p>
+  <p lang="zh-CN">目标模型的这次前向是 <code>TARGET_VERIFY</code> 模式。FlashInfer 后端把它当作一次预填充：<code>srt/layers/attention/flashinfer_backend.py</code> 第 1286–1292 行在验证模式且带 <code>custom_mask</code> 时建预填充的 wrapper，第 2346 行把掩码作为 <code>custom_mask</code> 传给 <code>begin_forward</code>（即 <code>plan()</code>）；行指针和 KV 下标由 <code>EagleVerifyInput.generate_attn_arg_prefill</code> 构造（<code>srt/speculative/eagle_info.py</code> 第 90–148 行），每个请求 N 个查询、seq_len + N 个键，正是 Phase 1 的 CSR 合同。FlashInfer v0.7.1 的文档字符串说，只给 bool 掩码时它会先打包成位（<code>flashinfer/prefill.py</code> 第 1342–1353 行，打包在第 1458–1462 行：<code>packbits(..., bitorder="little")</code>），内核按 <code>MaskMode.CUSTOM</code> 读这些位。验证步也能被捕获成 CUDA 图：第 1094 行预先分配了图用的 <code>cuda_graph_custom_mask</code>。</p><p lang="en">The target model’s forward pass runs in <code>TARGET_VERIFY</code> mode, and the FlashInfer backend treats it as a prefill: lines 1286–1292 of <code>srt/layers/attention/flashinfer_backend.py</code> build prefill wrappers when verifying with a <code>custom_mask</code>, and line 2346 passes the mask as <code>custom_mask</code> to <code>begin_forward</code> (that is, <code>plan()</code>); the row pointers and KV indices come from <code>EagleVerifyInput.generate_attn_arg_prefill</code> (lines 90–148 of <code>srt/speculative/eagle_info.py</code>), N queries and seq_len + N keys per request, which is the CSR contract of Phase 1. FlashInfer v0.7.1’s docstring says that given only a bool mask it packs it into bits first (lines 1342–1353 of <code>flashinfer/prefill.py</code>; the packing is at lines 1458–1462, <code>packbits(..., bitorder="little")</code>), and the kernel reads those bits in <code>MaskMode.CUSTOM</code>. The verify step can be captured as a CUDA graph too: line 1094 preallocates <code>cuda_graph_custom_mask</code> for the graph.</p>
+  <p lang="zh-CN">前向之后是验证内核，入口在 <code>eagle_utils.py</code> 的 <code>eagle_sample</code>（第 741 行起）。全部是贪心请求时，先对每个节点的 logits 取 <code>torch.argmax</code>（第 868 行），再调 <code>VerifyTreeGreedy</code>（<code>eagle.cuh</code> 第 214–256 行）：一个线程块一个请求，从根出发，在当前节点的孩子链表里找 token 等于「目标模型在当前节点的 argmax」的那个孩子；找到就接受、走下去，找不到就停。最后把目标模型在最后一个被接受节点上的 argmax 写成白得的那个 token。所以 accept len 等于接受的草稿数加 1。带温度的请求走 <code>TreeSpeculativeSamplingTargetOnly</code>（<code>kernels/jit/include/sgl_kernel/speculative/sampling.cuh</code> 第 39 行起，在 <code>eagle_utils.py</code> 第 1023 行调用）：兄弟按顺序试，累积目标概率超过随机数就接受；被拒绝的 token 记进 <code>draft_probs</code>，最后从 relu(p − 被拒绝的部分) 里补抽一个。不开 <code>--speculative-use-rejection-sampling</code> 时，草稿被当作确定的猜测，<code>draft_probs</code> 从全零开始（第 1000–1004 行）。</p><p lang="en">After the forward pass comes the verification kernel, entered through <code>eagle_sample</code> in <code>eagle_utils.py</code> (from line 741). When every request is greedy, it takes <code>torch.argmax</code> over each node’s logits (line 868) and then calls <code>VerifyTreeGreedy</code> (lines 214–256 of <code>eagle.cuh</code>): one thread block per request, starting at the root, searching the current node’s child list for the child whose token equals the target model’s argmax at the current node; if one is found it is accepted and the walk descends, otherwise the walk stops. Finally the target’s argmax at the last accepted node is written as the free token, so accept len is the number of accepted drafts plus 1. Requests with a temperature go through <code>TreeSpeculativeSamplingTargetOnly</code> instead (from line 39 of <code>kernels/jit/include/sgl_kernel/speculative/sampling.cuh</code>, called at line 1023 of <code>eagle_utils.py</code>): siblings are tried in order and accepted when the cumulative target probability passes a random number; a rejected token is recorded in <code>draft_probs</code>, and the last token is drawn from relu(p − the rejected part). Without <code>--speculative-use-rejection-sampling</code> the draft is treated as a deterministic guess, and <code>draft_probs</code> starts as all zeros (lines 1000–1004).</p>
+  <p lang="zh-CN">多验证 N 个查询要花多少？在注意力里，N 个查询共享同一份 KV，KV 只要读一遍；但每个键要和 N 个查询各做一次点积。逐个查询打分（每个查询一次 SIMD 归约）时，算术就成了瓶颈；把 N 个查询当成一个 N × 128 的矩阵，Q·Kᵀ 和 P·V 变成小矩阵乘，在 NVIDIA 上由 Tensor Core 做，在 Apple GPU 上由 <code>simdgroup_matrix</code> 做，开销就小得多。Lab B 量的就是这个差别；掩码本身每格只是一次读和一个判断，量出来几乎不花时间。</p><p lang="en">What does it cost to verify N queries? In attention the N queries share one copy of the KV, so the KV is read once, but every key needs a dot product with each of the N queries. Score each query on its own (one SIMD reduction per query) and arithmetic becomes the bottleneck; treat the N queries as one N × 128 matrix and Q·Kᵀ and P·V become small matrix products, done by Tensor Cores on NVIDIA and by <code>simdgroup_matrix</code> on the Apple GPU, at much lower cost. Lab B measures exactly this difference; the mask itself is one read and one test per cell, and measures as nearly free.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 5 章 Memory architecture and data locality（一份数据被很多计算复用，为什么 KV 只读一遍就够）、第 10 章 Reduction（split-KV 合并时的归约）、第 23 章 Advanced Optimizations for Matrix Multiplication（把 N 个查询写成矩阵乘；只按章名对应）。</p><p lang="en">Further reading: chapter 5 of PMPP 5th ed., Memory architecture and data locality (one piece of data reused by many computations, which is why reading the KV once is enough), chapter 10, Reduction (the reduction in the split-KV combine), and chapter 23, Advanced Optimizations for Matrix Multiplication (writing the N queries as a matmul; matched by chapter title only).</p>
+
+  <h3 lang="zh-CN">4. 用 xgrammar 做结构化输出：每步一个位掩码</h3><h3 lang="en">4. Structured output with xgrammar: one bitmask per step</h3>
+  <p lang="zh-CN">要求模型输出合法的 JSON（或满足一个正则、一个 EBNF 语法），做法是约束解码：每一步先算出哪些 token 接在已生成的文本后面仍然合法，把其余 token 的 logits 设成 −∞，softmax 之后它们的概率就是 0，合法 token 之间的相对概率不变（XGrammar 论文第 2 节）。语法是上下文无关的，所以执行它要一台下推自动机；难点是每一步都要对整个词表检查一遍。XGrammar 把词表分成「上下文无关」的 token（只看自动机栈顶就能决定，预处理时算好，存进自适应 token 掩码缓存）和「上下文相关」的 token（运行时用持久化栈检查），掩码按允许多还是拒绝多选最省的存法（第 3.1 节）；运行时它在 CPU 上算掩码，和 GPU 上的前向重叠，只在采样前同步一次（第 3.5 节）。</p><p lang="en">To make a model emit valid JSON (or match a regex, or an EBNF grammar), use constrained decoding: at every step, work out which tokens can still legally follow the text so far, and set the logits of all the others to −∞; after the softmax their probability is 0, and the relative probabilities of the legal tokens are unchanged (section 2 of the XGrammar paper). The grammar is context-free, so running it takes a pushdown automaton, and the hard part is checking the whole vocabulary at every step. XGrammar splits the vocabulary into context-independent tokens (decided by the top of the automaton’s stack alone, computed in preprocessing and stored in an adaptive token mask cache) and context-dependent tokens (checked at run time with a persistent stack), storing each mask in whichever form is cheapest, accept-heavy or reject-heavy (section 3.1); at run time it computes the mask on the CPU, overlapped with the forward pass on the GPU, and synchronizes only before sampling (section 3.5).</p>
+  <p lang="zh-CN">SGLang 里的路径：</p><p lang="en">The path through SGLang:</p>
+  <ol>
+    <li lang="zh-CN">开关是 <code>--grammar-backend</code>（<code>srt/arg_groups/fields/exec_.py</code> 第 216–222 行，可选 <code>xgrammar</code>、<code>outlines</code>、<code>llguidance</code>、<code>none</code>，见 <code>choices.py</code> 第 131 行），不设时由 <code>srt/arg_groups/serving_hook.py</code> 第 232–236 行定成 <code>xgrammar</code>。请求在 <code>sampling_params</code> 里带 <code>json_schema</code>（字符串）、<code>regex</code>、<code>ebnf</code> 或 <code>structural_tag</code>，只能选一个（<code>srt/sampling/sampling_params.py</code> 第 146、298–305 行）。</li>
+    <li lang="en">The switch is <code>--grammar-backend</code> (lines 216–222 of <code>srt/arg_groups/fields/exec_.py</code>, with the choices <code>xgrammar</code>, <code>outlines</code>, <code>llguidance</code> and <code>none</code>, line 131 of <code>choices.py</code>); when it is unset, lines 232–236 of <code>srt/arg_groups/serving_hook.py</code> set it to <code>xgrammar</code>. A request carries <code>json_schema</code> (a string), <code>regex</code>, <code>ebnf</code> or <code>structural_tag</code> in its <code>sampling_params</code>, only one of them (lines 146 and 298–305 of <code>srt/sampling/sampling_params.py</code>).</li>
+    <li lang="zh-CN">掩码的形状和类型来自 xgrammar：<code>bitmask_dtype = torch.int32</code>，形状 <code>(batch_size, ceil(vocab_size / 32))</code>，第 t 位为 1 表示 token t 允许（xgrammar v0.2.7 <code>python/xgrammar/matcher.py</code> 第 15–21 行）。SGLang 在 CPU 上用钉住的内存分配它，初值 −1，也就是全部允许（<code>srt/constrained/xgrammar_backend.py</code> 第 65–74 行）。Llama-2 的词表 32000，一行 1000 个字，4000 字节。</li>
+    <li lang="en">The mask’s shape and type come from xgrammar: <code>bitmask_dtype = torch.int32</code> with shape <code>(batch_size, ceil(vocab_size / 32))</code>, where bit t set to 1 means token t is allowed (lines 15–21 of <code>python/xgrammar/matcher.py</code> at xgrammar v0.2.7). SGLang allocates it on the CPU in pinned memory, initialized to −1, which allows everything (lines 65–74 of <code>srt/constrained/xgrammar_backend.py</code>). Llama-2’s vocabulary is 32000, so a row is 1000 words, 4000 bytes.</li>
+    <li lang="zh-CN">每步的模型前向之后，<code>ModelRunner._preprocess_logits</code>（<code>srt/model_executor/model_runner.py</code> 第 2033–2059 行）调 <code>update_regex_vocab_mask</code>：对每个有语法的请求调 <code>matcher.fill_next_token_bitmask</code> 填它那一行，再用 <code>non_blocking=True</code> 拷到 GPU（<code>srt/sampling/sampling_batch_info.py</code> 第 382–407 行）。注释说在 overlap 调度下，这一步其实是在上一批的结果处理完之后就做了。</li>
+    <li lang="en">After each step’s forward pass, <code>ModelRunner._preprocess_logits</code> (lines 2033–2059 of <code>srt/model_executor/model_runner.py</code>) calls <code>update_regex_vocab_mask</code>: for every request with a grammar it calls <code>matcher.fill_next_token_bitmask</code> to fill that row, then copies the mask to the GPU with <code>non_blocking=True</code> (lines 382–407 of <code>srt/sampling/sampling_batch_info.py</code>). A comment notes that under the overlap scheduler this actually runs right after the previous batch’s results were processed.</li>
+    <li lang="zh-CN">盖掩码的那一行：<code>apply_logits_bias</code>（第 443–449 行）先加惩罚项，再调 <code>grammar_mask.apply(logits)</code>，最后加 <code>logit_bias</code>；之后才是 Phase 5 的采样。CUDA 上 <code>apply_vocab_mask</code> 调的是 Triton 内核 <code>apply_token_bitmask_inplace_triton</code>（<code>xgrammar_backend.py</code> 第 47–53、263–268 行）；CUDA C++ 版本 <code>apply_token_bitmask_inplace_cuda</code>（<code>kernels/aot/csrc/grammar/apply_token_bitmask_inplace_cuda.cu</code>）只在 ROCm 上用。</li>
+    <li lang="en">The line that applies the mask: <code>apply_logits_bias</code> (lines 443–449) adds the penalties first, then calls <code>grammar_mask.apply(logits)</code>, and finally adds <code>logit_bias</code>; only after that comes the sampling of Phase 5. On CUDA, <code>apply_vocab_mask</code> calls the Triton kernel <code>apply_token_bitmask_inplace_triton</code> (lines 47–53 and 263–268 of <code>xgrammar_backend.py</code>); the CUDA C++ version, <code>apply_token_bitmask_inplace_cuda</code> (<code>kernels/aot/csrc/grammar/apply_token_bitmask_inplace_cuda.cu</code>), is used only on ROCm.</li>
+    <li lang="zh-CN">内核本身在 <code>kernels/ops/grammar/bitmask_ops.py</code>，注释说改编自 xgrammar v0.1.17：每个程序处理一段 4096 个 token（第 90 行 <code>BLOCK_SIZE = 4096</code>），网格大小等于 SM 数，循环取活；读 128 个 int32 字，展开成 4096 个布尔值，再对位为 0 的位置做带掩码的存储，写 −∞（第 60–81 行）。它<strong>不读 logits</strong>，只写被屏蔽的那些。</li>
+    <li lang="en">The kernel itself is in <code>kernels/ops/grammar/bitmask_ops.py</code>, whose comment says it is adapted from xgrammar v0.1.17: each program handles a block of 4096 tokens (<code>BLOCK_SIZE = 4096</code>, line 90), with a grid as large as the number of SMs looping over the work; it reads 128 int32 words, expands them to 4096 booleans, and does a masked store of −∞ wherever the bit is 0 (lines 60–81). It <strong>does not read the logits</strong>; it writes only the masked ones.</li>
+  </ol>
+  <p lang="zh-CN">所以每一步、每一行的代价是：CPU 上填一行掩码，拷 V/8 字节到 GPU，内核读 V/8 字节，再给每个被屏蔽的 token 写 4 字节。被屏蔽的 token 多（比如 <code>{</code> 之后只能接 <code>"</code> 或空白），写得就多；允许的多（比如在字符串里面），几乎什么都不写。和推测解码合在一起时，掩码要按树来算：<code>srt/speculative/spec_utils.py</code> 的 <code>traverse_tree</code>（第 520–585 行）在 CPU 上对每个请求做一次深度优先遍历，每到一个节点先用父节点的掩码检查这个草稿 token 是否合法，合法就 <code>accept_token</code>、填这个节点那一行、遍历孩子、再 <code>rollback(1)</code>。掩码有 bs × N 行（第 588–635 行），在目标模型的验证前向发出之后再建，好和它重叠（<code>build_grammar_vocab_mask</code>，第 696–725 行；调用在 <code>eagle_worker_common.py</code> 第 646–689 行），最后在 <code>eagle_sample</code> 里取 argmax 之前盖到 N 行 logits 上（<code>eagle_utils.py</code> 第 807–808 行）。xgrammar 允许最多回退 200 个 token（<code>xgrammar_backend.py</code> 第 62 行 <code>MAX_ROLLBACK_TOKENS</code>），遍历超过 1 秒会打警告（<code>spec_utils.py</code> 第 226 行，注释写着 TODO）。</p><p lang="en">So the cost per step and per row is: one mask row filled on the CPU, V/8 bytes copied to the GPU, V/8 bytes read by the kernel, and 4 bytes written for every masked token. When many tokens are masked (after <code>{</code>, say, only <code>"</code> or whitespace may follow), the kernel writes a lot; when many are allowed (inside a string, say), it writes almost nothing. Combined with speculative decoding, the mask has to follow the tree: <code>traverse_tree</code> in <code>srt/speculative/spec_utils.py</code> (lines 520–585) does a depth-first walk per request on the CPU, and at each node first checks the draft token against its parent’s mask; if it is legal it calls <code>accept_token</code>, fills this node’s row, visits the children, and then calls <code>rollback(1)</code>. The mask has bs × N rows (lines 588–635) and is built after the target’s verify forward has been launched, so that the two overlap (<code>build_grammar_vocab_mask</code>, lines 696–725, called at lines 646–689 of <code>eagle_worker_common.py</code>); finally it is laid over the N rows of logits inside <code>eagle_sample</code>, before the argmax (lines 807–808 of <code>eagle_utils.py</code>). xgrammar may roll back up to 200 tokens (<code>MAX_ROLLBACK_TOKENS</code>, line 62 of <code>xgrammar_backend.py</code>), and a traversal over 1 second logs a warning (line 226 of <code>spec_utils.py</code>, whose comment says TODO).</p>
+  <p lang="zh-CN">延伸阅读：Hopcroft、Motwani、Ullman《Introduction to Automata Theory, Languages, and Computation》第 5 章 Context-Free Grammars and Languages 和第 6 章 Pushdown Automata（xgrammar 执行的就是这种自动机）。掩码缓存和与推理重叠的部分没有书讲，以 XGrammar 论文第 3.1、3.5 节为准。</p><p lang="en">Further reading: chapter 5, Context-Free Grammars and Languages, and chapter 6, Pushdown Automata, of Hopcroft, Motwani and Ullman, <em>Introduction to Automata Theory, Languages, and Computation</em> (the kind of automaton xgrammar runs). No book covers the mask cache or the overlap with inference; for those, rely on sections 3.1 and 3.5 of the XGrammar paper.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：功能 ↔ 多出来的内核 ↔ 每步的代价</h2><h2 id="compare-en" lang="en">Comparison: feature ↔ extra kernel ↔ cost per step</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">功能</span><span lang="en">Feature</span></th><th><span lang="zh-CN">多出来的内核（v0.5.22）</span><span lang="en">Extra kernel (v0.5.22)</span></th><th><span lang="zh-CN">每步的代价（随什么增长）</span><span lang="en">Cost per step (what it grows with)</span></th><th><span lang="zh-CN">Lab B 的 Metal 对照（Apple M5，2026-11-01）</span><span lang="en">Lab B Metal twin (Apple M5, 2026-11-01)</span></th></tr>
+    <tr><td><span lang="zh-CN">EAGLE 起草</span><span lang="en">EAGLE drafting</span></td><td><span lang="zh-CN">草稿模型的一层解码层、LM head 和 <code>fast_topk</code>，跑 num_steps 次；<code>eagle_worker_v2.py</code> 的 <code>draft()</code></span><span lang="en">The draft model’s single decoder layer, the LM head and <code>fast_topk</code>, run num_steps times; <code>draft()</code> in <code>eagle_worker_v2.py</code></span></td><td><span lang="zh-CN">num_steps 次小前向；每次读草稿层的权重和 LM head（推断：LM head 和词表一样宽，草稿越小它的占比越大）</span><span lang="en">num_steps small forwards, each reading the draft layer’s weights and the LM head (inference: the LM head is as wide as the vocabulary, so the smaller the draft, the larger its share)</span></td><td><span lang="zh-CN">没有对照</span><span lang="en">No twin</span></td></tr>
+    <tr><td><span lang="zh-CN">建树</span><span lang="en">Tree build</span></td><td><span lang="zh-CN"><code>build_tree_efficient</code>（<code>eagle.cuh</code>）：一个块一个请求，填掩码、位置和两张链表</span><span lang="en"><code>build_tree_efficient</code> (<code>eagle.cuh</code>): one block per request, filling the mask, the positions and the two linked lists</span></td><td><span lang="zh-CN">写 N × (seq_len + N) 个 bool；源码注释说为了避开「每步多达几百 MB 的 memset」，前缀列没人读时就不填</span><span lang="en">Writes N × (seq_len + N) bools; a source comment says the prefix columns are skipped when nothing reads them, to avoid a per-step memset of up to hundreds of MB</span></td><td><span lang="zh-CN">掩码在主机上建好；bool 掩码 4352–262400 字节，打包后 544–32800 字节</span><span lang="en">The mask is built on the host: 4352–262400 bytes as bools, 544–32800 bytes packed</span></td></tr>
+    <tr><td><span lang="zh-CN">目标模型验证</span><span lang="en">Target verify</span></td><td><span lang="zh-CN">FlashInfer 带 <code>custom_mask</code> 的预填充注意力；所有 GEMM 处理 N 个 token 而不是 1 个</span><span lang="en">FlashInfer prefill attention with a <code>custom_mask</code>; every GEMM processes N tokens instead of 1</span></td><td><span lang="zh-CN">KV 和权重仍各读一遍；多出 N − 1 个查询的算术。批小时几乎不加时间，批大时开始变成计算受限（推断，依据概念 1 和 3）</span><span lang="en">The KV and the weights are still read once each, plus the arithmetic of N − 1 more queries. At small batches this adds almost no time; at large batches it starts to become compute-bound (inference, from concepts 1 and 3)</span></td><td><span lang="zh-CN">16 个查询：按小矩阵算是解码一个的 2.1–3.4 倍，逐个查询打分是 6.3–10.8 倍；有没有掩码相差 ±5% 以内</span><span lang="en">16 queries: 2.1–3.4 times one decode as small matrices, 6.3–10.8 times when each query is scored alone; with and without the mask within ±5%</span></td></tr>
+    <tr><td><span lang="zh-CN">验证采样</span><span lang="en">Verify sampling</span></td><td><span lang="zh-CN">贪心：<code>argmax</code> + <code>VerifyTreeGreedy</code>；带温度：softmax、top-k/top-p 重归一化 + <code>TreeSpeculativeSamplingTargetOnly</code></span><span lang="en">Greedy: <code>argmax</code> + <code>VerifyTreeGreedy</code>; with temperature: softmax, top-k/top-p renormalization + <code>TreeSpeculativeSamplingTargetOnly</code></span></td><td><span lang="zh-CN">对 bs × N 行 logits 各做一次采样前处理（Phase 5 的那些读写乘以 N）；走树只读几个下标</span><span lang="en">Pre-sampling work on bs × N rows of logits (the reads and writes of Phase 5, times N); walking the tree reads only a few indices</span></td><td><span lang="zh-CN">没有对照</span><span lang="en">No twin</span></td></tr>
+    <tr><td><span lang="zh-CN">结构化输出（普通解码）</span><span lang="en">Structured output (plain decode)</span></td><td><span lang="zh-CN">CPU：<code>fill_next_token_bitmask</code>；GPU：Triton 的 <code>apply_token_bitmask_inplace_kernel</code></span><span lang="en">CPU: <code>fill_next_token_bitmask</code>; GPU: the Triton <code>apply_token_bitmask_inplace_kernel</code></span></td><td><span lang="zh-CN">每行拷 V/8 字节、读 V/8 字节，每个被屏蔽的 token 写 4 字节；CPU 那一份和前向重叠</span><span lang="en">Per row, V/8 bytes copied and V/8 bytes read, plus 4 bytes written per masked token; the CPU part overlaps the forward pass</span></td><td><span lang="zh-CN">一行 1.0–2.5 µs；256 行 94–1700 µs，取决于屏蔽了多少；浮点加法掩码慢 2.2–9.2 倍</span><span lang="en">1.0–2.5 µs for one row; 94–1700 µs for 256 rows, depending on how many are masked; an additive float mask is 2.2–9.2 times slower</span></td></tr>
+    <tr><td><span lang="zh-CN">结构化输出 + 推测解码</span><span lang="en">Structured output + speculative decoding</span></td><td><span lang="zh-CN">CPU：<code>traverse_tree</code> 深度优先遍历草稿树；GPU：同一个位掩码内核，作用于 bs × N 行</span><span lang="en">CPU: <code>traverse_tree</code>, a depth-first walk of the draft tree; GPU: the same bitmask kernel over bs × N rows</span></td><td><span lang="zh-CN">CPU 上每个节点一次 accept、一次填掩码、一次回退；GPU 上掩码行数乘以 N</span><span lang="en">On the CPU, one accept, one mask fill and one rollback per node; on the GPU, N times as many mask rows</span></td><td><span lang="zh-CN">256 行就是 16 个请求 × 16 个节点</span><span lang="en">256 rows is 16 requests × 16 nodes</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 一棵草稿树、它的注意力掩码和被接受的路径</h3><h3 lang="en">(a) A draft tree, its attention mask and the accepted path</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="3000"
+         data-captions='["全图：左边是一棵 8 个节点的草稿树，节点 0 是上一轮已确定的 token，其余是草稿模型猜的。右边是验证时用的掩码：每行是一个查询（树上一个节点），每列是一个键，最左一列代表整段前缀。按播放逐步看。",
+           "1. 起草：EAGLE 的草稿层跑 3 次前向，每次给每个节点留下几个最可能的孩子，再按从根累积的概率只保留 7 个，长成这棵深度为 3 的树。",
+           "2. 掩码：节点 6 的那一行只在前缀和它的祖先 0、1、3 以及它自己那几列是 1。兄弟 4 和另一枝上的 2、5、7 是另一种猜法，必须看不见。",
+           "3. 验证：8 个节点作为 8 个查询，带着这张掩码一起送进目标模型，一次前向得到每个节点之后的 logits。贪心时只要每个节点的 argmax。",
+           "4. 走树：根之后目标模型想要逗号，节点 1 就是逗号，接受；节点 1 之后它想要 which，节点 3 是 which，接受；节点 3 之后它想要 has，可孩子节点 6 是 is，停。",
+           "5. 结果：这一轮提交 3 个 token，两个是接受的草稿，has 是目标模型白给的那一个，accept len 为 3。没被接受的节点占的 KV 槽位被释放，下一轮从 has 开始。"]'
+         data-captions-en='["The whole picture: on the left a draft tree of 8 nodes, where node 0 is the token fixed in the previous round and the rest are guesses of the draft model. On the right the mask used for verification: each row is a query (one node of the tree), each column a key, and the leftmost column stands for the whole prefix. Press Play to walk through it.",
+           "1. Drafting: the EAGLE draft layer runs 3 forwards, each time keeping a few likely children of every node, then keeps only the 7 with the highest cumulative probability from the root, which grows this tree of depth 3.",
+           "2. The mask: the row of node 6 has a 1 only in the prefix and in the columns of its ancestors 0, 1 and 3 and its own. Its sibling 4 and nodes 2, 5 and 7 on the other branch are different guesses and must stay invisible.",
+           "3. Verification: the 8 nodes go into the target model as 8 queries with this mask, and one forward pass gives the logits after every node. Greedy decoding needs only the argmax of each.",
+           "4. The walk: after the root the target wants a comma, and node 1 is a comma, so accept; after node 1 it wants which, and node 3 is which, so accept; after node 3 it wants has, but the child node 6 is is, so stop.",
+           "5. The result: this round commits 3 tokens, two accepted drafts plus has, the free token from the target, so accept len is 3. The KV slots of the nodes that were not accepted are freed, and the next round starts from has."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="24" class="small" lang="zh-CN">草稿树（EAGLE，深度 3，8 个节点）</text><text x="20" y="24" class="small" lang="en">Draft tree (EAGLE, depth 3, 8 nodes)</text>
+      <text x="440" y="24" class="small" lang="zh-CN">树掩码：行是查询，列是键（1 = 可见）</text><text x="440" y="24" class="small" lang="en">Tree mask: rows are queries, columns keys (1 = visible)</text>
+
+      <g data-step="1">
+        <path class="arrow" d="M98 210 L116 144"/><path class="arrow" d="M98 210 L116 290"/>
+        <path class="arrow" d="M190 128 L208 92"/><path class="arrow" d="M190 132 L208 168"/>
+        <path class="arrow" d="M190 300 L208 300"/><path class="arrow" d="M282 90 L300 90"/>
+        <path class="arrow" d="M282 300 L300 300"/>
+        <rect class="box" x="20" y="196" width="78" height="28"/><text x="28" y="215" class="mono">0 Paris</text>
+        <rect class="box" x="116" y="116" width="74" height="28"/><text x="124" y="135" class="mono">1 ,</text>
+        <rect class="box" x="116" y="286" width="74" height="28"/><text x="124" y="305" class="mono">2 .</text>
+        <rect class="box" x="208" y="76" width="74" height="28"/><text x="216" y="95" class="mono">3 which</text>
+        <rect class="box" x="208" y="156" width="74" height="28"/><text x="216" y="175" class="mono">4 a</text>
+        <rect class="box" x="208" y="286" width="74" height="28"/><text x="216" y="305" class="mono">5 It</text>
+        <rect class="box" x="300" y="76" width="74" height="28"/><text x="308" y="95" class="mono">6 is</text>
+        <rect class="box" x="300" y="286" width="74" height="28"/><text x="308" y="305" class="mono">7 is</text>
+      </g>
+
+      <text x="476" y="62" class="mono" lang="zh-CN">前缀</text><text x="476" y="62" class="mono" lang="en">prefix</text>
+      <text x="543" y="62" class="mono">0</text><text x="579" y="62" class="mono">1</text><text x="615" y="62" class="mono">2</text><text x="651" y="62" class="mono">3</text>
+      <text x="687" y="62" class="mono">4</text><text x="723" y="62" class="mono">5</text><text x="759" y="62" class="mono">6</text><text x="795" y="62" class="mono">7</text>
+      <g>
+        <text x="452" y="89" class="mono">0</text><rect class="box" x="470" y="70" width="56" height="26"/><text x="478" y="89" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="70" width="32" height="26"/><text x="544" y="89" class="mono">1</text>
+        <text x="580" y="89" class="small">0</text><text x="616" y="89" class="small">0</text><text x="652" y="89" class="small">0</text><text x="688" y="89" class="small">0</text><text x="724" y="89" class="small">0</text><text x="760" y="89" class="small">0</text><text x="796" y="89" class="small">0</text>
+
+        <text x="452" y="119" class="mono">1</text><rect class="box" x="470" y="100" width="56" height="26"/><text x="478" y="119" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="100" width="32" height="26"/><text x="544" y="119" class="mono">1</text><rect class="box" x="568" y="100" width="32" height="26"/><text x="580" y="119" class="mono">1</text>
+        <text x="616" y="119" class="small">0</text><text x="652" y="119" class="small">0</text><text x="688" y="119" class="small">0</text><text x="724" y="119" class="small">0</text><text x="760" y="119" class="small">0</text><text x="796" y="119" class="small">0</text>
+
+        <text x="452" y="149" class="mono">2</text><rect class="box" x="470" y="130" width="56" height="26"/><text x="478" y="149" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="130" width="32" height="26"/><text x="544" y="149" class="mono">1</text><text x="580" y="149" class="small">0</text>
+        <rect class="box" x="604" y="130" width="32" height="26"/><text x="616" y="149" class="mono">1</text>
+        <text x="652" y="149" class="small">0</text><text x="688" y="149" class="small">0</text><text x="724" y="149" class="small">0</text><text x="760" y="149" class="small">0</text><text x="796" y="149" class="small">0</text>
+
+        <text x="452" y="179" class="mono">3</text><rect class="box" x="470" y="160" width="56" height="26"/><text x="478" y="179" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="160" width="32" height="26"/><text x="544" y="179" class="mono">1</text><rect class="box" x="568" y="160" width="32" height="26"/><text x="580" y="179" class="mono">1</text>
+        <text x="616" y="179" class="small">0</text><rect class="box" x="640" y="160" width="32" height="26"/><text x="652" y="179" class="mono">1</text>
+        <text x="688" y="179" class="small">0</text><text x="724" y="179" class="small">0</text><text x="760" y="179" class="small">0</text><text x="796" y="179" class="small">0</text>
+
+        <text x="452" y="209" class="mono">4</text><rect class="box" x="470" y="190" width="56" height="26"/><text x="478" y="209" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="190" width="32" height="26"/><text x="544" y="209" class="mono">1</text><rect class="box" x="568" y="190" width="32" height="26"/><text x="580" y="209" class="mono">1</text>
+        <text x="616" y="209" class="small">0</text><text x="652" y="209" class="small">0</text><rect class="box" x="676" y="190" width="32" height="26"/><text x="688" y="209" class="mono">1</text>
+        <text x="724" y="209" class="small">0</text><text x="760" y="209" class="small">0</text><text x="796" y="209" class="small">0</text>
+
+        <text x="452" y="239" class="mono">5</text><rect class="box" x="470" y="220" width="56" height="26"/><text x="478" y="239" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="220" width="32" height="26"/><text x="544" y="239" class="mono">1</text><text x="580" y="239" class="small">0</text>
+        <rect class="box" x="604" y="220" width="32" height="26"/><text x="616" y="239" class="mono">1</text>
+        <text x="652" y="239" class="small">0</text><text x="688" y="239" class="small">0</text><rect class="box" x="712" y="220" width="32" height="26"/><text x="724" y="239" class="mono">1</text>
+        <text x="760" y="239" class="small">0</text><text x="796" y="239" class="small">0</text>
+
+        <text x="452" y="269" class="mono">6</text><rect class="box" x="470" y="250" width="56" height="26"/><text x="478" y="269" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="250" width="32" height="26"/><text x="544" y="269" class="mono">1</text><rect class="box" x="568" y="250" width="32" height="26"/><text x="580" y="269" class="mono">1</text>
+        <text x="616" y="269" class="small">0</text><rect class="box" x="640" y="250" width="32" height="26"/><text x="652" y="269" class="mono">1</text>
+        <text x="688" y="269" class="small">0</text><text x="724" y="269" class="small">0</text><rect class="box" x="748" y="250" width="32" height="26"/><text x="760" y="269" class="mono">1</text>
+        <text x="796" y="269" class="small">0</text>
+
+        <text x="452" y="299" class="mono">7</text><rect class="box" x="470" y="280" width="56" height="26"/><text x="478" y="299" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="280" width="32" height="26"/><text x="544" y="299" class="mono">1</text><text x="580" y="299" class="small">0</text>
+        <rect class="box" x="604" y="280" width="32" height="26"/><text x="616" y="299" class="mono">1</text>
+        <text x="652" y="299" class="small">0</text><text x="688" y="299" class="small">0</text><rect class="box" x="712" y="280" width="32" height="26"/><text x="724" y="299" class="mono">1</text>
+        <text x="760" y="299" class="small">0</text><rect class="box" x="784" y="280" width="32" height="26"/><text x="796" y="299" class="mono">1</text>
+      </g>
+
+      <g data-step="2">
+        <rect class="box" x="470" y="250" width="56" height="26"/><text x="478" y="269" class="mono">1 … 1</text>
+        <rect class="box" x="532" y="250" width="32" height="26"/><text x="544" y="269" class="mono">1</text>
+        <rect class="box" x="568" y="250" width="32" height="26"/><text x="580" y="269" class="mono">1</text>
+        <rect class="box" x="640" y="250" width="32" height="26"/><text x="652" y="269" class="mono">1</text>
+        <rect class="box" x="748" y="250" width="32" height="26"/><text x="760" y="269" class="mono">1</text>
+        <rect class="box" x="20" y="196" width="78" height="28"/><text x="28" y="215" class="mono">0 Paris</text>
+        <rect class="box" x="116" y="116" width="74" height="28"/><text x="124" y="135" class="mono">1 ,</text>
+        <rect class="box" x="208" y="76" width="74" height="28"/><text x="216" y="95" class="mono">3 which</text>
+        <rect class="box" x="300" y="76" width="74" height="28"/><text x="308" y="95" class="mono">6 is</text>
+        <text x="824" y="269" class="small" lang="zh-CN">← 节点 6</text><text x="824" y="269" class="small" lang="en">← node 6</text>
+      </g>
+
+      <g data-step="3">
+        <rect class="box" x="20" y="340" width="860" height="40"/>
+        <text x="32" y="365" lang="zh-CN">目标模型一次前向：8 个查询 × (前缀 + 8) 个键，custom_mask = 上表</text><text x="32" y="365" lang="en">One target forward: 8 queries × (prefix + 8) keys, custom_mask = the table above</text>
+        <text x="20" y="44" class="small" lang="zh-CN">→ x：目标模型在这个节点之后的 argmax</text><text x="20" y="44" class="small" lang="en">→ x: the target argmax after this node</text>
+        <text x="24" y="242" class="mono">→ ,</text>
+        <text x="120" y="162" class="mono">→ which</text>
+        <text x="212" y="122" class="mono">→ has</text>
+      </g>
+
+      <g data-step="4">
+        <rect class="box" x="20" y="196" width="78" height="28"/><text x="28" y="215" class="mono">0 Paris</text>
+        <rect class="box" x="116" y="116" width="74" height="28"/><text x="124" y="135" class="mono">1 ,</text>
+        <rect class="box" x="208" y="76" width="74" height="28"/><text x="216" y="95" class="mono">3 which</text>
+        <text x="172" y="135" class="mono">✓</text><text x="271" y="95" class="mono">✓</text>
+        <text x="300" y="122" style="fill: var(--ink-2)" lang="zh-CN">× has ≠ is</text><text x="300" y="122" style="fill: var(--ink-2)" lang="en">× has ≠ is</text>
+        <text x="20" y="410" lang="zh-CN">VerifyTreeGreedy：在当前节点的孩子里找等于 argmax 的那个，找到就下去，找不到就停</text><text x="20" y="410" lang="en">VerifyTreeGreedy: find the child that equals the argmax, descend if found, stop if not</text>
+      </g>
+
+      <g data-step="5">
+        <rect class="box" x="20" y="424" width="860" height="36"/>
+        <text x="32" y="447" lang="zh-CN">提交 “, which has”：2 个草稿 + 1 个白得的 token，accept len = 3；节点 2、4、5、6、7 的 KV 槽位释放</text><text x="32" y="447" lang="en">Commit “, which has”: 2 drafts + 1 free token, accept len = 3; the KV slots of nodes 2, 4, 5, 6, 7 are freed</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 采样之前盖上 logits 位掩码</h3><h3 lang="en">(b) The logits bitmask applied before sampling</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="3000"
+         data-captions='["全图：上面一条是 CPU 上的 xgrammar，下面是 GPU。例子是按一个 JSON schema 生成，已经输出了左花括号，下一个 token 只能是引号或空白。这里只画 12 个 token，Llama-2 的词表有 32000 个。按播放逐步看。",
+           "1. 重叠：GPU 跑这一步的前向、算出 logits 的同时，CPU 上的 GrammarMatcher 按当前状态填好这一行位掩码，每 32 个 token 一个 int32，第 t 位为 1 表示允许。",
+           "2. 拷贝：位掩码在钉住的主机内存里，用 non_blocking 拷到 GPU。一行只有 V / 8 字节，32000 个 token 是 4000 字节。",
+           "3. 盖掩码：Triton 内核读位掩码，在位为 0 的位置写负无穷，不读 logits，允许的 token 原样不动。12 个里有 9 个被写成负无穷。",
+           "4. 采样：softmax 之后被屏蔽的 token 概率为 0，只剩 3 个可选，它们之间的相对概率不变。抽出的 token 交回 CPU，matcher 调 accept_token 前进一步。",
+           "5. 代价：每行读 V / 8 字节，每个被屏蔽的 token 写 4 字节。拒绝多的状态写得多，允许多的状态几乎不写。推测解码时每个树节点一行，CPU 沿树深度优先地填。"]'
+         data-captions-en='["The whole picture: xgrammar on the CPU in the top strip, the GPU below. The example generates against a JSON schema and has already emitted an opening brace, so the next token may only be a quote or whitespace. Only 12 tokens are drawn; Llama-2 has 32000. Press Play to walk through it.",
+           "1. Overlap: while the GPU runs this step and computes the logits, the GrammarMatcher on the CPU fills this row of the bitmask from its current state, one int32 per 32 tokens, where bit t set to 1 means allowed.",
+           "2. The copy: the bitmask lives in pinned host memory and is copied to the GPU with non_blocking. One row is only V / 8 bytes, 4000 bytes for 32000 tokens.",
+           "3. Applying the mask: the Triton kernel reads the bitmask and writes minus infinity wherever the bit is 0; it never reads the logits, and allowed tokens stay untouched. Here 9 of the 12 become minus infinity.",
+           "4. Sampling: after the softmax the masked tokens have probability 0 and only 3 remain, with their relative probabilities unchanged. The drawn token goes back to the CPU, where the matcher advances one step with accept_token.",
+           "5. The cost: per row, V / 8 bytes read and 4 bytes written per masked token. Reject-heavy states write a lot; accept-heavy states write almost nothing. With speculative decoding there is one row per tree node, filled on the CPU depth-first along the tree."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="24" class="small" lang="zh-CN">CPU · xgrammar（已输出 {，下一个只能是 " 或空白）</text><text x="20" y="24" class="small" lang="en">CPU · xgrammar (after {, only " or whitespace may follow)</text>
+      <g data-step="1">
+        <rect class="box" x="20" y="36" width="300" height="52"/>
+        <text x="32" y="58" class="mono">GrammarMatcher</text>
+        <text x="32" y="78" class="small">fill_next_token_bitmask(mask, row)</text>
+      </g>
+      <g data-step="2">
+        <path class="arrow" d="M320 62 L356 62"/>
+        <rect class="box" x="360" y="36" width="250" height="52"/>
+        <text x="372" y="58" lang="zh-CN">钉住的位掩码</text><text x="372" y="58" lang="en">Pinned bitmask</text>
+        <text x="372" y="78" class="small">int32 [B, ceil(V/32)]</text>
+        <path class="arrow flow" d="M610 62 L646 62"/>
+        <rect class="box" x="650" y="36" width="230" height="52"/>
+        <text x="662" y="58" lang="zh-CN">拷到 GPU</text><text x="662" y="58" lang="en">Copy to the GPU</text>
+        <text x="662" y="78" class="small">non_blocking · V/8 B</text>
+      </g>
+      <line x1="20" y1="104" x2="880" y2="104" class="lane"/>
+      <text x="20" y="126" class="small" lang="zh-CN">GPU</text><text x="20" y="126" class="small" lang="en">GPU</text>
+      <g data-step="1">
+        <rect class="box" x="60" y="112" width="550" height="34"/>
+        <text x="72" y="134" lang="zh-CN">这一步的前向 → logits [B, V]（与上面的 CPU 工作重叠）</text><text x="72" y="134" lang="en">This step’s forward → logits [B, V] (overlaps the CPU work above)</text>
+      </g>
+
+      <text x="20" y="183" class="small" lang="zh-CN">token</text><text x="20" y="183" class="small" lang="en">token</text>
+      <text x="20" y="215" class="small" lang="zh-CN">logit</text><text x="20" y="215" class="small" lang="en">logit</text>
+      <text x="20" y="247" class="small" lang="zh-CN">位</text><text x="20" y="247" class="small" lang="en">bit</text>
+      <text x="20" y="279" class="small" lang="zh-CN">盖掩码后</text><text x="20" y="279" class="small" lang="en">masked</text>
+      <rect class="box" x="164" y="164" width="56" height="28"/><text x="192" y="183" class="mono" text-anchor="middle">"</text>
+      <rect class="box" x="224" y="164" width="56" height="28"/><text x="252" y="183" class="mono" text-anchor="middle">{</text>
+      <rect class="box" x="284" y="164" width="56" height="28"/><text x="312" y="183" class="mono" text-anchor="middle">:</text>
+      <rect class="box" x="344" y="164" width="56" height="28"/><text x="372" y="183" class="mono" text-anchor="middle">Paris</text>
+      <rect class="box" x="404" y="164" width="56" height="28"/><text x="432" y="183" class="mono" text-anchor="middle">␣"</text>
+      <rect class="box" x="464" y="164" width="56" height="28"/><text x="492" y="183" class="mono" text-anchor="middle">}</text>
+      <rect class="box" x="524" y="164" width="56" height="28"/><text x="552" y="183" class="mono" text-anchor="middle">name</text>
+      <rect class="box" x="584" y="164" width="56" height="28"/><text x="612" y="183" class="mono" text-anchor="middle">,</text>
+      <rect class="box" x="644" y="164" width="56" height="28"/><text x="672" y="183" class="mono" text-anchor="middle">\n</text>
+      <rect class="box" x="704" y="164" width="56" height="28"/><text x="732" y="183" class="mono" text-anchor="middle">1</text>
+      <rect class="box" x="764" y="164" width="56" height="28"/><text x="792" y="183" class="mono" text-anchor="middle">true</text>
+      <rect class="box" x="824" y="164" width="56" height="28"/><text x="852" y="183" class="mono" text-anchor="middle">]</text>
+      <g data-step="1">
+        <text x="192" y="215" class="mono" text-anchor="middle">1.2</text><text x="252" y="215" class="mono" text-anchor="middle">0.4</text>
+        <text x="312" y="215" class="mono" text-anchor="middle">-0.3</text><text x="372" y="215" class="mono" text-anchor="middle">2.6</text>
+        <text x="432" y="215" class="mono" text-anchor="middle">0.9</text><text x="492" y="215" class="mono" text-anchor="middle">1.8</text>
+        <text x="552" y="215" class="mono" text-anchor="middle">3.1</text><text x="612" y="215" class="mono" text-anchor="middle">-1.0</text>
+        <text x="672" y="215" class="mono" text-anchor="middle">0.2</text><text x="732" y="215" class="mono" text-anchor="middle">-0.6</text>
+        <text x="792" y="215" class="mono" text-anchor="middle">0.1</text><text x="852" y="215" class="mono" text-anchor="middle">-2.2</text>
+      </g>
+      <g data-step="2">
+        <text x="192" y="247" class="mono" text-anchor="middle">1</text><text x="252" y="247" class="small" text-anchor="middle">0</text>
+        <text x="312" y="247" class="small" text-anchor="middle">0</text><text x="372" y="247" class="small" text-anchor="middle">0</text>
+        <text x="432" y="247" class="mono" text-anchor="middle">1</text><text x="492" y="247" class="small" text-anchor="middle">0</text>
+        <text x="552" y="247" class="small" text-anchor="middle">0</text><text x="612" y="247" class="small" text-anchor="middle">0</text>
+        <text x="672" y="247" class="mono" text-anchor="middle">1</text><text x="732" y="247" class="small" text-anchor="middle">0</text>
+        <text x="792" y="247" class="small" text-anchor="middle">0</text><text x="852" y="247" class="small" text-anchor="middle">0</text>
+      </g>
+      <g data-step="3">
+        <text x="192" y="279" class="mono" text-anchor="middle">1.2</text><text x="252" y="279" class="small" text-anchor="middle">−∞</text>
+        <text x="312" y="279" class="small" text-anchor="middle">−∞</text><text x="372" y="279" class="small" text-anchor="middle">−∞</text>
+        <text x="432" y="279" class="mono" text-anchor="middle">0.9</text><text x="492" y="279" class="small" text-anchor="middle">−∞</text>
+        <text x="552" y="279" class="small" text-anchor="middle">−∞</text><text x="612" y="279" class="small" text-anchor="middle">−∞</text>
+        <text x="672" y="279" class="mono" text-anchor="middle">0.2</text><text x="732" y="279" class="small" text-anchor="middle">−∞</text>
+        <text x="792" y="279" class="small" text-anchor="middle">−∞</text><text x="852" y="279" class="small" text-anchor="middle">−∞</text>
+        <rect class="box" x="60" y="296" width="820" height="34"/>
+        <text x="72" y="318" class="mono">apply_token_bitmask_inplace_kernel</text>
+        <text x="372" y="318" class="small" lang="zh-CN">Triton · 每段 4096 个 token · 只在位为 0 处存 −∞</text><text x="372" y="318" class="small" lang="en">Triton · 4096 tokens per block · stores −∞ only where the bit is 0</text>
+      </g>
+      <g data-step="4">
+        <rect class="box" x="60" y="338" width="820" height="46"/>
+        <text x="72" y="358" lang="zh-CN">softmax + 采样：只剩 " 、␣" 、\n 三个可选（概率约 0.47、0.35、0.17）</text><text x="72" y="358" lang="en">Softmax + sampling: only ", ␣" and \n remain (probabilities about 0.47, 0.35 and 0.17)</text>
+        <text x="72" y="376" class="small" lang="zh-CN">抽中的 token 交回 CPU：matcher.accept_token 前进一步，再填下一行</text><text x="72" y="376" class="small" lang="en">The drawn token goes back to the CPU: matcher.accept_token advances one step, then the next row is filled</text>
+      </g>
+      <g data-step="5">
+        <rect class="box" x="20" y="392" width="860" height="70"/>
+        <text x="32" y="412" lang="zh-CN">每行：读 V/8 字节 + 每个被屏蔽的 token 写 4 字节；不读 logits</text><text x="32" y="412" lang="en">Per row: V/8 bytes read + 4 bytes written per masked token; the logits are never read</text>
+        <text x="32" y="432" class="small" lang="zh-CN">推测解码：每个树节点一行（bs × N 行），CPU 上的 traverse_tree 深度优先地填</text><text x="32" y="432" class="small" lang="en">Speculative decoding: one row per tree node (bs × N rows), filled depth-first by traverse_tree on the CPU</text>
+        <text x="32" y="452" class="small" lang="zh-CN"><tspan style="fill: var(--metal)">实验 B · M5 实测，31 次中位数，2026-11-01：</tspan>一行 1.0–2.5 µs</text><text x="32" y="452" class="small" lang="en"><tspan style="fill: var(--metal)">Lab B · measured on M5, median of 31, 2026-11-01:</tspan> 1.0–2.5 µs per row</text>
+      </g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 L4 上开关 EAGLE、加 JSON schema，量每步接受几个 token 和位掩码内核的时间</h3><h3 lang="en">Lab A · Turn EAGLE on and off and add a JSON schema on the L4; measure accepted tokens per step and the bitmask kernel’s time</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。根据 SGLang v0.5.22 的源码（<code>srt/arg_groups/fields/spec.py</code>、<code>srt/arg_groups/speculative_hook.py</code>、<code>srt/speculative/eagle_utils.py</code>、<code>srt/speculative/spec_utils.py</code>、<code>srt/constrained/xgrammar_backend.py</code>、<code>srt/managers/scheduler_components/metrics_reporter.py</code>、<code>srt/managers/tokenizer_manager.py</code>、<code>srt/managers/io_struct.py</code>、<code>srt/entrypoints/http_server.py</code>）、v0.5.22 的文档 <code>docs/docs/advanced_features/speculative_decoding.mdx</code> 和 <code>structured_outputs.mdx</code>，以及推测解码、EAGLE 和 XGrammar 三篇论文整理。还没有租用的 L4，所以这里不给数字，只描述应当看到的形状。环境是实验环境页里的 L4 和 <code>lmsysorg/sglang:v0.5.23</code> 容器 <code>sglang-lab</code>，主机目录 <code>~/llm-lab</code> 挂在 <code>/work</code>；镜像比本页引用的 v0.5.22 新一个补丁版本（它固定 FlashInfer 0.7.2、sglang-kernel 0.4.10 和 sgl-deep-gemm 0.2.3.post2，比这里引用的 v0.5.22 版本各新一步；torch 2.14.1、nvidia-cutlass-dsl 4.8.0 和 sgl-deep-ep 0.1.2.post1 不变），行号可能略有出入。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Assembled from the SGLang v0.5.22 source (<code>srt/arg_groups/fields/spec.py</code>, <code>srt/arg_groups/speculative_hook.py</code>, <code>srt/speculative/eagle_utils.py</code>, <code>srt/speculative/spec_utils.py</code>, <code>srt/constrained/xgrammar_backend.py</code>, <code>srt/managers/scheduler_components/metrics_reporter.py</code>, <code>srt/managers/tokenizer_manager.py</code>, <code>srt/managers/io_struct.py</code>, <code>srt/entrypoints/http_server.py</code>), the v0.5.22 documentation pages <code>docs/docs/advanced_features/speculative_decoding.mdx</code> and <code>structured_outputs.mdx</code>, and the speculative decoding, EAGLE and XGrammar papers. There is no rented L4 yet, so this lab gives no numbers, only the shape you should see. The environment is the L4 from the lab environment page with the <code>lmsysorg/sglang:v0.5.23</code> container <code>sglang-lab</code>, the host directory <code>~/llm-lab</code> mounted at <code>/work</code>; the image is one patch release newer than the v0.5.22 this page cites (it pins FlashInfer 0.7.2, sglang-kernel 0.4.10 and sgl-deep-gemm 0.2.3.post2, one step past the v0.5.22 pins quoted here; torch 2.14.1, nvidia-cutlass-dsl 4.8.0 and sgl-deep-ep 0.1.2.post1 are unchanged), so line numbers may shift slightly.</div>
+    <div class="note" lang="zh-CN"><strong>要先做的决定：</strong>本专题的 Qwen3-0.6B 在 v0.5.22 的文档里没有点名的 EAGLE 草稿模型，所以这个实验换成文档 EAGLE-2 一节的那一对：<code>meta-llama/Llama-2-7b-chat-hf</code> 加 <code>lmsys/sglang-EAGLE-llama2-chat-7B</code>。前者在 Hugging Face 上是 gated 模型（2026-11-01 读到 <code>gated: manual</code>），要先在模型页接受 Meta 的许可，再用你自己的 Hugging Face token。v0.5.22 的文档没有点名任何不 gated 的 EAGLE 组合：EAGLE 草稿只为 gated 的 Llama 基座提供，所以这一步躲不开。token 是凭据：在容器里运行 <code>hf auth login</code>（旧版 huggingface_hub 用 <code>huggingface-cli login</code>），按提示粘贴，屏幕上不回显；token 永远不进 notebook、日志或命令行。两份权重合计约 15 GB（13.48 + 1.47 GB），放进 L4 的 24 GB 后，KV 缓存只剩几 GB（推断，没有上机核对；装不下就把 <code>--mem-fraction-static</code> 调低、把 <code>--cuda-graph-max-bs-decode</code> 调小）。不想用 gated 模型时，另一条路是 STANDALONE 推测解码：目标 <code>Qwen/Qwen2.5-7B-Instruct</code>，草稿 <code>Qwen/Qwen2.5-1.5B-Instruct</code>，两者都不 gated；权重约 18 GB，在 L4 上很紧（推断），本页没有为它写命令。</div><div class="note" lang="en"><strong>A decision first:</strong> v0.5.22’s documentation names no EAGLE draft model for this topic’s Qwen3-0.6B, so this lab switches to the pair from the EAGLE-2 section of the documentation, <code>meta-llama/Llama-2-7b-chat-hf</code> with <code>lmsys/sglang-EAGLE-llama2-chat-7B</code>. The former is a gated model on Hugging Face (<code>gated: manual</code>, read on 2026-11-01): accept Meta’s license on the model page first, then use your own Hugging Face token. The v0.5.22 documentation names no non-gated EAGLE pair: EAGLE drafts exist only for gated Llama bases, so this step cannot be avoided. The token is a credential: run <code>hf auth login</code> (<code>huggingface-cli login</code> on older huggingface_hub releases) inside the container and paste it at the prompt, which echoes nothing; the token never goes into a notebook, a log or a command line. The two sets of weights come to about 15 GB (13.48 + 1.47 GB), which leaves only a few GB of the L4’s 24 GB for the KV cache (inference, not checked on a machine; if it does not fit, lower <code>--mem-fraction-static</code> and <code>--cuda-graph-max-bs-decode</code>). If you would rather avoid a gated model, another route is STANDALONE speculative decoding with <code>Qwen/Qwen2.5-7B-Instruct</code> as the target and <code>Qwen/Qwen2.5-1.5B-Instruct</code> as the draft, neither gated; about 18 GB of weights, tight on an L4 (inference), and this page gives no commands for it.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的客户端存成主机上的 <code>~/llm-lab/spec_client.py</code>（容器里的 <code>/work/spec_client.py</code>）。它一个接一个地发 8 个请求（批大小 1，推测解码最有利的情形），可选带一个 JSON schema，打印每个请求的 token 数、速度，以及 <code>meta_info</code> 里的 <code>spec_accept_length</code> 和 <code>spec_verify_ct</code>（没开推测解码时是 <code>None</code>）。只用标准库：</span><span lang="en">Save the client below as <code>~/llm-lab/spec_client.py</code> on the host (<code>/work/spec_client.py</code> in the container). It sends 8 requests one after another (batch size 1, the case where speculative decoding helps most), optionally with a JSON schema, and prints each request’s token count and speed plus <code>spec_accept_length</code> and <code>spec_verify_ct</code> from <code>meta_info</code> (<code>None</code> without speculative decoding). It uses only the standard library:</span><pre data-lang="py" data-file="spec_client.py"># spec_client.py: requests to the local SGLang server, with or without a JSON schema; speed and acceptance per request
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the papers on 2026-11-01
+import json, sys, time, urllib.request
+
+URL = "http://127.0.0.1:30000/generate"          # the server listens on loopback only (lab environment page)
+SCHEMA = {"type": "object",
+          "properties": {"name": {"type": "string"}, "capital": {"type": "string"},
+                         "population": {"type": "integer"}},
+          "required": ["name", "capital", "population"]}
+COUNTRIES = ["France", "Japan", "Brazil", "Kenya", "Canada", "India", "Egypt", "Norway"]
+
+def generate(country, use_schema):
+    sp = {"temperature": 0, "max_new_tokens": 256}
+    if use_schema:
+        sp["json_schema"] = json.dumps(SCHEMA)      # a string (srt/sampling/sampling_params.py line 146)
+    prompt = f"[INST] Describe {country} as JSON with the keys name, capital and population. [/INST]"
+    body = json.dumps({"text": prompt, "sampling_params": sp}).encode()
+    req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
+    t0 = time.perf_counter()
+    with urllib.request.urlopen(req) as r:
+        out = json.load(r)
+    return out, time.perf_counter() - t0
+
+use_schema = "--schema" in sys.argv
+n = int(sys.argv[sys.argv.index("--n") + 1]) if "--n" in sys.argv else len(COUNTRIES)
+total_tok = total_s = 0
+for c in COUNTRIES[:n]:
+    out, dt = generate(c, use_schema)
+    m = out["meta_info"]
+    tok = m["completion_tokens"]
+    total_tok += tok; total_s += dt
+    valid = ""
+    if use_schema:
+        try:
+            json.loads(out["text"]); valid = "json ok"
+        except ValueError:
+            valid = "json cut off"                  # max_new_tokens reached before the closing brace
+    print(f"{c:8s} {tok:4d} tokens {tok / dt:7.1f} tok/s  accept_len={m.get('spec_accept_length')}"
+          f"  verify_ct={m.get('spec_verify_ct')}  {valid}")
+print(f"total {total_tok} tokens in {total_s:.2f} s = {total_tok / total_s:.1f} tok/s, schema={use_schema}")</pre></li>
+      <li><span lang="zh-CN">起容器（参数和实验环境页一样），在容器里登录一次 Hugging Face，在终端 1 里先起不带推测解码的服务器，在终端 2 里各跑一次不带和带 schema 的客户端：</span><span lang="en">Start the container (the arguments as on the lab environment page), log in to Hugging Face once inside it, start the server without speculative decoding in terminal 1, and run the client once without and once with the schema in terminal 2:</span><pre data-lang="sh" data-file="on the rented L4 host, then in the container">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the papers on 2026-11-01
+docker run --rm -it --name sglang-lab --gpus all --ipc=host \
+  -v "$HOME/hf-cache":/root/.cache/huggingface -v "$HOME/llm-lab":/work \
+  lmsysorg/sglang:v0.5.23 bash
+# 容器里，只为 gated 模型做一次：按提示粘贴 token，屏幕上不回显
+hf auth login                      # 旧版 huggingface_hub：huggingface-cli login
+# 终端 1（容器里）：基线，不开推测解码
+M=meta-llama/Llama-2-7b-chat-hf
+python3 -m sglang.launch_server --model-path $M --host 127.0.0.1 --port 30000 \
+  --mem-fraction-static 0.8 --cuda-graph-max-bs-decode 8 2&gt;&amp;1 | tee /work/base.log
+# 终端 2（docker exec -it sglang-lab bash）
+python3 /work/spec_client.py          | tee /work/base_free.txt
+python3 /work/spec_client.py --schema | tee /work/base_json.txt</pre><span lang="zh-CN">应当看到：两次的 <code>accept_len</code> 都是 <code>None</code>；带 schema 的那次每行都是 <code>json ok</code>（除非被 256 个 token 截断）。速度两次相近，因为位掩码内核和 CPU 上的掩码计算相对于一个 7B 模型的解码步都很小（推断，依据概念 4 和 Lab B）。</span><span lang="en">You should see: <code>accept_len</code> is <code>None</code> in both runs, and every line of the schema run says <code>json ok</code> (unless cut off at 256 tokens). The two speeds are close, because the bitmask kernel and the mask computation on the CPU are small next to a decode step of a 7B model (inference, from concept 4 and Lab B).</span></li>
+      <li><span lang="zh-CN">停掉服务器，用 EAGLE 重启（参数取自文档 EAGLE-2 一节的示例：3 步、topk 4、树上 16 个节点），再跑两次客户端，然后在服务器日志里看 <code>accept len</code>：</span><span lang="en">Stop the server, restart it with EAGLE (the parameters of the example in the EAGLE-2 section of the documentation: 3 steps, topk 4, 16 nodes in the tree), run the client twice more, then read <code>accept len</code> in the server log:</span><pre data-lang="sh" data-file="in the container">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the papers on 2026-11-01
+# 终端 1
+python3 -m sglang.launch_server --model-path $M --host 127.0.0.1 --port 30000 \
+  --speculative-algorithm EAGLE --speculative-draft-model-path lmsys/sglang-EAGLE-llama2-chat-7B \
+  --speculative-num-steps 3 --speculative-eagle-topk 4 --speculative-num-draft-tokens 16 \
+  --mem-fraction-static 0.8 --cuda-graph-max-bs-decode 8 2&gt;&amp;1 | tee /work/eagle.log
+# 终端 2
+python3 /work/spec_client.py          | tee /work/eagle_free.txt
+python3 /work/spec_client.py --schema | tee /work/eagle_json.txt
+grep -o "accept len: [0-9.]*, accept rate: [0-9.]*" /work/eagle.log | tail -20</pre><span lang="zh-CN">应当看到：<code>accept_len</code> 大于 1、最多为 4（3 步草稿加白得的一个），总速度比基线高。带 schema 时 <code>accept_len</code> 会变，方向两种都说得通：JSON 的键名和标点很好猜，接受得更多；但草稿模型不知道语法，它猜的 token 可能被掩码挡掉，接受得更少（推断）。把两个文件的 <code>accept_len</code> 平均一下，看哪种占上风。</span><span lang="en">You should see: <code>accept_len</code> above 1 and at most 4 (3 draft steps plus the free token), and a higher total speed than the baseline. With the schema, <code>accept_len</code> changes, and either direction has a reason: JSON keys and punctuation are easy to guess, so more is accepted; but the draft model knows nothing of the grammar, so its guesses can be masked out and less is accepted (inference). Average <code>accept_len</code> over each file and see which effect wins.</span></li>
+      <li><span lang="zh-CN">剖析一个带 schema 的请求。让服务器剖析接下来的 10 个前向步，再发一个请求；然后按名字统计内核（<code>dur</code> 的单位按 Chrome trace 格式是微秒）：</span><span lang="en">Profile one request with the schema. Tell the server to profile its next 10 forward steps, send one request, and tally the kernels by name (<code>dur</code> is in microseconds in the Chrome trace format):</span><pre data-lang="sh" data-file="in the container, terminal 2">
+# 未运行 · not run; assembled from the SGLang source at v0.5.22 and the papers on 2026-11-01
+curl -s -X POST http://127.0.0.1:30000/start_profile -H "Content-Type: application/json" \
+  -d '{"output_dir": "/work/profiles", "num_steps": 10, "activities": ["CPU", "GPU"], "profile_prefix": "eagle-json"}'
+python3 /work/spec_client.py --schema --n 1
+python3 - &lt;&lt;'PY'
+import glob, gzip, json
+pats = ["apply_token_bitmask", "build_tree", "VerifyTree", "TreeSpeculative", "Prefill", "topk"]
+for f in sorted(glob.glob("/work/profiles/eagle-json*.trace.json.gz")):
+    ks = [e for e in json.load(gzip.open(f))["traceEvents"] if e.get("cat") == "kernel"]
+    print(f, len(ks), "kernels")
+    for p in pats:
+        d = sorted(e["dur"] for e in ks if p in e["name"])
+        if d:
+            print(f"  {p:20s} n={len(d):4d}  total={sum(d):9.1f} us  median={d[len(d) // 2]:7.1f} us")
+PY</pre><span lang="zh-CN">应当看到：每个验证步一次 <code>build_tree</code>、一次带 <code>Prefill</code> 字样的注意力内核（每层一次）、一次位掩码内核（作用于 16 行）和一次 <code>VerifyTree</code>；位掩码内核的中位时间在微秒量级，比一层注意力短得多。内核名按 <code>bitmask_ops.py</code>、<code>eagle.cuh</code> 和 FlashInfer 的函数名猜的，trace 里可能带模板参数或被改写，所以按子串找（推断：<code>cat</code> 字段是 <code>kernel</code> 也是按 PyTorch profiler 的格式推的，没有在真实 trace 上核对）。如果 CUDA 图里的内核没有单独出现，就加 <code>--cuda-graph-backend-decode disabled</code> 再剖析一次。最后再用基线服务器剖析一次带 schema 的请求：那里每步的位掩码只有 1 行。</span><span lang="en">You should see: per verify step, one <code>build_tree</code>, one attention kernel with <code>Prefill</code> in its name (once per layer), one bitmask kernel (over 16 rows) and one <code>VerifyTree</code>; the bitmask kernel’s median time is on the order of microseconds, far shorter than one layer of attention. The kernel names are guessed from the function names in <code>bitmask_ops.py</code>, <code>eagle.cuh</code> and FlashInfer and may carry template arguments or be rewritten in the trace, so they are matched as substrings (inference: that the <code>cat</code> field reads <code>kernel</code> is also assumed from the PyTorch profiler’s format and was not checked against a real trace). If kernels inside CUDA graphs do not show up individually, profile again with <code>--cuda-graph-backend-decode disabled</code>. Finally profile one schema request on the baseline server as well: there the bitmask has only 1 row per step.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 对照：树验证注意力的三种写法，以及 logits 位掩码，三种大小</h3><h3 lang="en">Lab B · The Metal twin: three ways to write tree-verify attention, and the logits bitmask, at three sizes</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01（01:59 PDT 起连续三次；第三次的时间戳是 01:00 PST，因为那天 02:00 PDT 夏令时结束，时钟拨回了一小时）。下面的输出都来自这台 Mac 上的实际运行（macOS 27.2，Swift 6.4.2），着色器在运行时编译，不用 <code>xcrun metal</code>。K、V 用 FP32 存，好让所有矩阵运算都是同一种类型；字节数按 FP32 算。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01 (three consecutive runs from 01:59 PDT; the third is stamped 01:00 PST because daylight saving time ended at 02:00 PDT that day and the clock went back an hour). The outputs below come from actual runs on this Mac (macOS 27.2, Swift 6.4.2), with the shaders compiled at run time rather than by <code>xcrun metal</code>. K and V are stored in FP32 so that every matrix operation uses a single type, and byte counts are for FP32.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>spec.swift</code>。第一部分按 Llama-2-7B 的形状（32 个头、head_dim 128）、一棵 16 个节点的草稿树和三种前缀长度，比较：逐个查询打分的解码（1 个查询，基准）；逐个查询打分的树验证（16 个查询，bool 掩码）；以及把 16 个查询当成一个 16 × 128 矩阵、用 <code>simdgroup_matrix</code> 做 8 × 8 小矩阵乘的树验证，分别不带掩码（结果是错的，只用来计时）、带 bool 掩码、带打包成位的掩码。三种都用 split-KV（每个线程组约 256 个键）加一个合并内核。正确性的参考在 CPU 上算：节点 i 只对前缀和它自己的路径做注意力。第二部分在两种词表、三种行数、两种「允许比例」下比较位掩码内核和浮点加法掩码，并逐元素核对两者结果一致。每种情形在一个命令缓冲区里重复若干次，用 GPU 时间戳除以次数，预热 3 个后取 31 个命令缓冲区的中位数：</span><span lang="en">Save the program below as <code>spec.swift</code>. Part 1 uses Llama-2-7B’s shapes (32 heads, head_dim 128), a draft tree of 16 nodes and three prefix lengths, and compares: decode scored per query (1 query, the baseline); tree verify scored per query (16 queries, bool mask); and tree verify that treats the 16 queries as one 16 × 128 matrix and uses <code>simdgroup_matrix</code> for 8 × 8 matrix products, with no mask (a wrong result, for timing only), with a bool mask, and with a bit-packed mask. All of them use split-KV (about 256 keys per threadgroup) plus a combine kernel. The correctness reference is computed on the CPU: node i attends only to the prefix and its own path. Part 2 compares the bitmask kernel with an additive float mask for two vocabularies, three row counts and two allowed fractions, and checks element by element that both give the same result. Each case is repeated several times in one command buffer, its GPU timestamps divided by the repeat count, and the median taken over 31 command buffers after 3 warm-up ones:</span><pre data-lang="swift" data-file="spec.swift">// spec.swift: tree-verify attention with a tree mask, and a logits bitmask, on the Mac GPU
+import Metal
+import Foundation
+
+let H = 32, D = 128, NT = 16                 // Llama-2-7B: 32 heads, head_dim 128; 16 draft tokens per tree
+// The draft tree: node 0 is the root (the last accepted token), parent[i] &lt; i.
+let parent: [Int] = [-1, 0, 0, 0, 0, 1, 1, 1, 2, 2, 3, 5, 5, 6, 8, 5]
+
+func source(nq: Int) -&gt; String { return """
+#include &lt;metal_stdlib&gt;
+#include &lt;metal_simdgroup_matrix&gt;
+using namespace metal;
+constant uint NQ = \(nq);                    // queries per head in the per-query kernel
+constant uint D4 = 32;                       // head_dim 128 = 32 float4, one per SIMD lane
+
+inline bool allowed(device const uchar* m, uint mode, uint i, uint j, uint S) {
+    if (mode == 0) return true;                              // no mask
+    uint idx = i * S + j;                                    // FULL_MASK layout: row i, column j
+    if (mode == 1) return m[idx] != 0;                       // one bool per cell
+    return (m[idx &gt;&gt; 3] &gt;&gt; (idx &amp; 7)) &amp; 1;                   // bit-packed, little bit order
+}
+
+// Per-query kernel: one threadgroup per head, 8 SIMD groups split the keys, each lane holds 4 dims.
+// Each key is loaded once, but every query gets its own dot product and SIMD reduction.
+kernel void attn_per_query(device const float4* q [[buffer(0)]], device const float4* k [[buffer(1)]],
+                           device const float4* v [[buffer(2)]], device const uchar* mask [[buffer(3)]],
+                           device float* part [[buffer(4)]], constant uint&amp; S [[buffer(5)]],
+                           constant uint&amp; mode [[buffer(6)]], constant uint&amp; chunk [[buffer(7)]],
+                           uint2 tgp [[threadgroup_position_in_grid]], uint2 ntg [[threadgroups_per_grid]],
+                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    uint h = tgp.x, sp = tgp.y, P = ntg.y, j0 = sp * chunk, j1 = min(S, j0 + chunk);
+    threadgroup float tm[8], tl[8];
+    threadgroup float4 tacc[8][32];
+    float4 qv[NQ], acc[NQ];
+    float mx[NQ], l[NQ];
+    const float scale = rsqrt(128.0f);
+    for (uint i = 0; i &lt; NQ; i++) {
+        qv[i] = q[(h * NQ + i) * D4 + lane] * scale;
+        acc[i] = 0; mx[i] = -INFINITY; l[i] = 0;
+    }
+    for (uint j = j0 + sg; j &lt; j1; j += 8) {
+        float4 kk = k[(h * S + j) * D4 + lane], vv = v[(h * S + j) * D4 + lane];
+        for (uint i = 0; i &lt; NQ; i++) {
+            float s = simd_sum(dot(qv[i], kk));
+            if (!allowed(mask, mode, i, j, S)) continue;     // a masked cell never enters the softmax
+            float m2 = max(mx[i], s), c = exp(mx[i] - m2), p = exp(s - m2);
+            l[i] = l[i] * c + p; acc[i] = acc[i] * c + p * vv; mx[i] = m2;
+        }
+    }
+    for (uint i = 0; i &lt; NQ; i++) {                          // merge the 8 partial softmax states
+        if (lane == 0) { tm[sg] = mx[i]; tl[sg] = l[i]; }
+        tacc[sg][lane] = acc[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sg == 0) {
+            float M = -INFINITY;
+            for (uint g = 0; g &lt; 8; g++) M = max(M, tm[g]);
+            float L = 0; float4 a = 0;
+            for (uint g = 0; g &lt; 8; g++) { float w = (tm[g] == -INFINITY) ? 0.0f : exp(tm[g] - M); L += tl[g] * w; a += tacc[g][lane] * w; }
+            device float* pp = part + ((h * P + sp) * NQ + i) * 130;   // partial: max, sum, 128 values
+            if (lane == 0) { pp[0] = M; pp[1] = L; }
+            ((device float4*)(pp + 2))[lane] = a;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+// Tile kernel: the 16 tree queries as one 16 x 128 matrix. Per block of 8 keys, S = Q K^T and O += P V
+// are 8 x 8 simdgroup matrix products, the way a prefill kernel with a custom mask treats them.
+constant uint NSG = 4;
+kernel void attn_tree_tile(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]],
+                           device const float* v [[buffer(2)]], device const uchar* mask [[buffer(3)]],
+                           device float* part [[buffer(4)]], constant uint&amp; S [[buffer(5)]],
+                           constant uint&amp; mode [[buffer(6)]], constant uint&amp; chunk [[buffer(7)]],
+                           uint2 tgp [[threadgroup_position_in_grid]], uint2 ntg [[threadgroups_per_grid]],
+                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                           uint tid [[thread_index_in_threadgroup]]) {
+    uint h = tgp.x, sp = tgp.y, P = ntg.y, j0 = sp * chunk, j1 = min(S, j0 + chunk);
+    threadgroup float sS[NSG][128];          // this SIMD group's 16 x 8 score block, then P
+    threadgroup float sC[NSG][2][64];        // two 8 x 8 diagonal rescale matrices
+    threadgroup float sM[NSG][16], sL[NSG][16], sLt[16];
+    threadgroup float sO[16 * 128], sQ[16 * 128];
+    for (uint x = tid; x &lt; NSG * 128; x += NSG * 32) ((threadgroup float*)sC)[x] = 0;
+    for (uint x = tid; x &lt; 16 * 128; x += NSG * 32) { sO[x] = 0; sQ[x] = q[h * 16 * 128 + x]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device const float* kh = k + h * S * 128;
+    device const float* vh = v + h * S * 128;
+    simdgroup_float8x8 ot[2][16];            // the 16 x 128 output block stays in registers; Q is read from sQ
+    for (uint r = 0; r &lt; 2; r++) for (uint c = 0; c &lt; 16; c++) ot[r][c] = make_filled_simdgroup_matrix&lt;float, 8, 8&gt;(0.0f);
+    const float scale = rsqrt(128.0f);
+    float m = -INFINITY, l = 0;              // lane i &lt; 16 owns row i
+    for (uint base = j0 + sg * 8; base &lt; j1; base += NSG * 8) {
+        simdgroup_float8x8 s0 = make_filled_simdgroup_matrix&lt;float, 8, 8&gt;(0.0f), s1 = s0, kt, qa, qb;
+        for (uint c = 0; c &lt; 16; c++) {
+            simdgroup_load(kt, kh + base * 128 + c * 8, 128, ulong2(0, 0), true);   // 8 dims x 8 keys
+            simdgroup_load(qa, sQ + c * 8, 128); simdgroup_load(qb, sQ + 8 * 128 + c * 8, 128);
+            simdgroup_multiply_accumulate(s0, qa, kt, s0);
+            simdgroup_multiply_accumulate(s1, qb, kt, s1);
+        }
+        simdgroup_store(s0, sS[sg], 8); simdgroup_store(s1, sS[sg] + 64, 8);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane &lt; 16) {                                     // online softmax for row `lane`
+            float s[8], mn = m;
+            for (uint c = 0; c &lt; 8; c++) {
+                s[c] = allowed(mask, mode, lane, base + c, S) ? sS[sg][lane * 8 + c] * scale : -INFINITY;
+                mn = max(mn, s[c]);
+            }
+            float cr = (mn == -INFINITY) ? 1.0f : exp(m - mn), sum = 0;
+            for (uint c = 0; c &lt; 8; c++) { float p = (s[c] == -INFINITY) ? 0.0f : exp(s[c] - mn); sS[sg][lane * 8 + c] = p; sum += p; }
+            l = l * cr + sum; m = mn;
+            sC[sg][lane / 8][(lane % 8) * 9] = cr;
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_float8x8 p0, p1, c0, c1, vt;
+        simdgroup_load(p0, sS[sg], 8); simdgroup_load(p1, sS[sg] + 64, 8);
+        simdgroup_load(c0, sC[sg][0], 8); simdgroup_load(c1, sC[sg][1], 8);
+        for (uint c = 0; c &lt; 16; c++) {
+            simdgroup_load(vt, vh + base * 128 + c * 8, 128);                      // 8 keys x 8 dims
+            simdgroup_multiply(ot[0][c], c0, ot[0][c]);                             // rescale old rows
+            simdgroup_multiply(ot[1][c], c1, ot[1][c]);
+            simdgroup_multiply_accumulate(ot[0][c], p0, vt, ot[0][c]);
+            simdgroup_multiply_accumulate(ot[1][c], p1, vt, ot[1][c]);
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    // Merge the NSG partial states: rescale each to the common row max, then add them up in sO.
+    if (lane &lt; 16) { sM[sg][lane] = m; sL[sg][lane] = l; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane &lt; 16) {
+        float M = -INFINITY, Lt = 0;
+        for (uint g = 0; g &lt; NSG; g++) M = max(M, sM[g][lane]);
+        for (uint g = 0; g &lt; NSG; g++) if (sM[g][lane] != -INFINITY) Lt += sL[g][lane] * exp(sM[g][lane] - M);
+        sC[sg][lane / 8][(lane % 8) * 9] = (m == -INFINITY) ? 0.0f : exp(m - M);
+        if (sg == 0) sLt[lane] = Lt;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_float8x8 c0, c1, t, eye = simdgroup_float8x8(1.0f);
+    simdgroup_load(c0, sC[sg][0], 8); simdgroup_load(c1, sC[sg][1], 8);
+    for (uint g = 0; g &lt; NSG; g++) {
+        if (sg == g) {
+            for (uint r = 0; r &lt; 2; r++) for (uint c = 0; c &lt; 16; c++) {
+                simdgroup_multiply(ot[r][c], r == 0 ? c0 : c1, ot[r][c]);
+                simdgroup_load(t, sO + r * 8 * 128 + c * 8, 128);
+                simdgroup_multiply_accumulate(t, eye, ot[r][c], t);
+                simdgroup_store(t, sO + r * 8 * 128 + c * 8, 128);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint x = tid; x &lt; 16 * 128; x += NSG * 32) {       // partial: max, sum, 128 unnormalized values
+        device float* pp = part + ((h * P + sp) * 16 + x / 128) * 130;
+        if (x % 128 == 0) { float M = -INFINITY; for (uint g = 0; g &lt; NSG; g++) M = max(M, sM[g][x / 128]); pp[0] = M; pp[1] = sLt[x / 128]; }
+        pp[2 + x % 128] = sO[x];
+    }
+}
+
+// Combine the P split partials of each (head, query) row: rescale to the common max, add, divide.
+kernel void combine(device const float* part [[buffer(0)]], device half* o [[buffer(1)]],
+                    constant uint&amp; P [[buffer(2)]], constant uint&amp; nq [[buffer(3)]],
+                    uint2 g [[thread_position_in_grid]]) {
+    uint x = g.x, row = g.y, h = row / nq, i = row % nq;    // x = one of 128 dims
+    float M = -INFINITY, L = 0, a = 0;
+    for (uint p = 0; p &lt; P; p++) M = max(M, part[((h * P + p) * nq + i) * 130]);
+    for (uint p = 0; p &lt; P; p++) {
+        device const float* pp = part + ((h * P + p) * nq + i) * 130;
+        if (pp[0] == -INFINITY) continue;                    // an empty split, or a row it fully masks
+        float w = exp(pp[0] - M); L += pp[1] * w; a += pp[2 + x] * w;
+    }
+    o[row * 128 + x] = half(a / L);
+}
+
+// xgrammar-style bitmask: bit t of row r is 1 when token t is allowed. Only disallowed logits are written.
+kernel void apply_bitmask(device float* logits [[buffer(0)]], device const uint* bm [[buffer(1)]],
+                          constant uint&amp; V [[buffer(2)]], constant uint&amp; W [[buffer(3)]],
+                          uint2 g [[thread_position_in_grid]]) {
+    uint t = g.x, r = g.y;
+    if (t &gt;= V) return;
+    if (((bm[r * W + (t &gt;&gt; 5)] &gt;&gt; (t &amp; 31)) &amp; 1) == 0) logits[r * V + t] = -INFINITY;
+}
+
+// The dense alternative: an additive float mask (0 or -inf) per token, read and added to every logit.
+kernel void add_float_mask(device float* logits [[buffer(0)]], device const float* fm [[buffer(1)]],
+                           constant uint&amp; V [[buffer(2)]], uint2 g [[thread_position_in_grid]]) {
+    uint t = g.x, r = g.y;
+    if (t &gt;= V) return;
+    logits[r * V + t] += fm[r * V + t];
+}
+"""
+}
+
+guard let dev = MTLCreateSystemDefaultDevice() else { print("no Metal device"); exit(1) }
+func pso(_ lib: MTLLibrary, _ name: String) -&gt; MTLComputePipelineState {
+    return try! dev.makeComputePipelineState(function: lib.makeFunction(name: name)!)
+}
+let lib1 = try! dev.makeLibrary(source: source(nq: 1), options: nil)
+let lib16 = try! dev.makeLibrary(source: source(nq: NT), options: nil)
+let pDecode = pso(lib1, "attn_per_query"), pPerQuery = pso(lib16, "attn_per_query")
+let pTile = pso(lib16, "attn_tree_tile"), pComb = pso(lib16, "combine")
+let pBits = pso(lib16, "apply_bitmask"), pFloat = pso(lib16, "add_float_mask")
+let queue = dev.makeCommandQueue()!
+let N = 31, warm = 3
+
+func time(reps: Int, _ encode: (MTLComputeCommandEncoder) -&gt; Void) -&gt; Double {
+    var ts: [Double] = []
+    for k in 0..&lt;(warm + N) {
+        let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+        for _ in 0..&lt;reps { encode(enc) }
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if k &gt;= warm { ts.append((cb.gpuEndTime - cb.gpuStartTime) / Double(reps)) }
+    }
+    return ts.sorted()[N / 2]
+}
+var rng = SystemRandomNumberGenerator()
+func floatBuf(_ count: Int) -&gt; MTLBuffer {
+    let b = dev.makeBuffer(length: count * 4, options: .storageModeShared)!
+    let p = b.contents().bindMemory(to: Float.self, capacity: count)
+    for i in 0..&lt;count { p[i] = Float.random(in: -1...1, using: &amp;rng) }
+    return b
+}
+func fp(_ b: MTLBuffer) -&gt; UnsafeMutablePointer&lt;Float&gt; { b.contents().bindMemory(to: Float.self, capacity: b.length / 4) }
+
+// Ancestor-or-self sets of the tree: row i of the tree block of the mask.
+var anc = [[Bool]](repeating: [Bool](repeating: false, count: NT), count: NT)
+for i in 0..&lt;NT { var a = i; while a &gt;= 0 { anc[i][a] = true; a = parent[a] } }
+
+let stamp = DateFormatter(); stamp.dateFormat = "yyyy-MM-dd HH:mm zzz"
+print("device=\(dev.name), median of \(N) command buffers, \(stamp.string(from: Date()))")
+print("Part 1. tree-verify attention: \(H) heads x head_dim \(D), FP32 K/V, a \(NT)-node draft tree")
+print("  prefix L   kernel, mask                   queries  mask bytes   median us   KV GB/s   max|err| vs path ref")
+for L in [256, 2048, 16384] {
+    let S = L + NT                                       // keys: prefix plus the tree tokens
+    let k = floatBuf(H * S * D), v = floatBuf(H * S * D), q = floatBuf(H * NT * D)
+    let o = dev.makeBuffer(length: H * NT * D * 2, options: .storageModeShared)!
+    // FULL_MASK for one request: NT rows of S columns, prefix columns true, tree block = ancestors.
+    var boolMask = [UInt8](repeating: 1, count: NT * S)
+    for i in 0..&lt;NT { for j in 0..&lt;NT { boolMask[i * S + L + j] = anc[i][j] ? 1 : 0 } }
+    var bits = [UInt8](repeating: 0, count: (NT * S + 7) / 8)
+    for idx in 0..&lt;(NT * S) where boolMask[idx] != 0 { bits[idx &gt;&gt; 3] |= UInt8(1 &lt;&lt; (idx &amp; 7)) }
+    let mBool = dev.makeBuffer(bytes: boolMask, length: boolMask.count, options: .storageModeShared)!
+    let mBits = dev.makeBuffer(bytes: bits, length: bits.count, options: .storageModeShared)!
+    let reps = max(3, min(200, Int(Double(1 &lt;&lt; 28) / Double(H * S * D * 8))))
+    var Su = UInt32(S), Sd = UInt32(L + 1)
+    // Split-KV: about 256 keys per threadgroup, at most 64 splits per head, chunks a multiple of 8.
+    let P = max(1, min(64, S / 256)), chunk = ((S + P - 1) / P + 7) / 8 * 8
+    let part = dev.makeBuffer(length: H * P * NT * 130 * 4, options: .storageModeShared)!
+
+    // CPU reference: node i attends to the prefix and to its own path in the tree, nothing else.
+    func pathRef(_ h: Int, _ i: Int) -&gt; [Float] {
+        let qp = fp(q), kp = fp(k), vp = fp(v)
+        let keys = Array(0..&lt;L) + (0..&lt;NT).filter { anc[i][$0] }.map { L + $0 }
+        var s = [Float](repeating: 0, count: keys.count)
+        for (n, j) in keys.enumerated() {
+            var d: Float = 0
+            for x in 0..&lt;D { d += qp[(h * NT + i) * D + x] * kp[(h * S + j) * D + x] }
+            s[n] = d / Float(D).squareRoot()
+        }
+        let m = s.max()!; var sum: Float = 0; var out = [Float](repeating: 0, count: D)
+        for (n, j) in keys.enumerated() {
+            let p = exp(s[n] - m); sum += p
+            for x in 0..&lt;D { out[x] += p * vp[(h * S + j) * D + x] }
+        }
+        return out.map { $0 / sum }
+    }
+    var refs: [[Float]] = []
+    for h in [0, H - 1] { for i in 0..&lt;NT { refs.append(pathRef(h, i)) } }
+    func maxErr() -&gt; String {
+        let op = o.contents().bindMemory(to: Float16.self, capacity: H * NT * D); var e: Float = 0, n = 0
+        for h in [0, H - 1] { for i in 0..&lt;NT {
+            for x in 0..&lt;D {                           // a NaN must show up, not vanish inside max()
+                let d = abs(Float(op[(h * NT + i) * D + x]) - refs[n][x])
+                if d.isNaN { return "NaN" }
+                e = max(e, d)
+            }
+            n += 1
+        } }
+        return String(format: "%.2e", e)
+    }
+    let grid = MTLSize(width: H, height: P, depth: 1)
+    func run(_ p: MTLComputePipelineState, _ threads: Int, _ m: MTLBuffer, _ mode: UInt32, _ len: inout UInt32, _ nq: Int) -&gt; Double {
+        var md = mode, ch = UInt32(chunk), Pu = UInt32(P), nqu = UInt32(nq)
+        return time(reps: reps) { e in
+            e.setComputePipelineState(p)
+            for (i, b) in [q, k, v, m, part].enumerated() { e.setBuffer(b, offset: 0, index: i) }
+            e.setBytes(&amp;len, length: 4, index: 5); e.setBytes(&amp;md, length: 4, index: 6); e.setBytes(&amp;ch, length: 4, index: 7)
+            e.dispatchThreadgroups(grid, threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+            e.setComputePipelineState(pComb); e.setBuffer(part, offset: 0, index: 0); e.setBuffer(o, offset: 0, index: 1)
+            e.setBytes(&amp;Pu, length: 4, index: 2); e.setBytes(&amp;nqu, length: 4, index: 3)
+            e.dispatchThreads(MTLSize(width: 128, height: H * nq, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        }
+    }
+    func row(_ name: String, _ nq: Int, _ mb: Int, _ t: Double, _ err: String) {
+        let gbs = Double(H * (nq == 1 ? L + 1 : S) * D * 8) / t / 1e9
+        print(String(format: "  %8d   %@ %7d %11d %11.1f %9.1f   %@", L, name.padding(toLength: 29, withPad: " ", startingAt: 0),
+                     nq, mb, t * 1e6, gbs, err))
+    }
+    let tDec = run(pDecode, 256, mBool, 0, &amp;Sd, 1)
+    row("decode, per-query, none", 1, 0, tDec, "-")
+    let tPQ = run(pPerQuery, 256, mBool, 1, &amp;Su, NT)
+    row("verify, per-query, bool", NT, boolMask.count, tPQ, maxErr())
+    let tNone = run(pTile, 128, mBool, 0, &amp;Su, NT)
+    row("verify, tile, none (wrong)", NT, 0, tNone, maxErr())
+    let tBool = run(pTile, 128, mBool, 1, &amp;Su, NT)
+    row("verify, tile, bool", NT, boolMask.count, tBool, maxErr())
+    let tBits = run(pTile, 128, mBits, 2, &amp;Su, NT)
+    row("verify, tile, bit-packed", NT, bits.count, tBits, maxErr())
+    print("             split-KV: \(P) splits of \(chunk) keys per head, then one combine pass")
+    print(String(format: "             per-query verify / decode = %.2f x;  tile verify (bits) / decode = %.2f x;  mask cost bits vs none %+.1f%%",
+                 tPQ / tDec, tBits / tDec, (tBits / tNone - 1) * 100))
+}
+
+print("Part 2. logits bitmask before sampling: FP32 logits, int32 bitmask words (ceil(V/32) per row)")
+print("  vocab    rows  allowed   bitmask us   float-mask us   bitmask bytes   float-mask bytes   wrong")
+for V in [32000, 151936] {
+    let W = (V + 31) / 32
+    for rows in [1, 16, 256] {
+        for frac in [0.01, 0.99] {
+            let lg = dev.makeBuffer(length: rows * V * 4, options: .storageModeShared)!
+            let lgF = dev.makeBuffer(length: rows * V * 4, options: .storageModeShared)!
+            let bm = dev.makeBuffer(length: rows * W * 4, options: .storageModeShared)!
+            let fm = dev.makeBuffer(length: rows * V * 4, options: .storageModeShared)!
+            let lp = fp(lg), lpF = fp(lgF), fmp = fp(fm)
+            let bp = bm.contents().bindMemory(to: UInt32.self, capacity: rows * W)
+            for i in 0..&lt;(rows * W) { bp[i] = 0 }
+            var nAllowed = 0
+            for r in 0..&lt;rows { for t in 0..&lt;V {
+                let ok = Double.random(in: 0..&lt;1, using: &amp;rng) &lt; frac
+                if ok { bp[r * W + t / 32] |= UInt32(1) &lt;&lt; UInt32(t % 32); nAllowed += 1 }
+                fmp[r * V + t] = ok ? 0 : -Float.infinity
+                lp[r * V + t] = Float.random(in: -5...5, using: &amp;rng); lpF[r * V + t] = lp[r * V + t]
+            } }
+            var Vu = UInt32(V), Wu = UInt32(W)
+            let grid = MTLSize(width: V, height: rows, depth: 1), tg = MTLSize(width: 256, height: 1, depth: 1)
+            let reps = max(5, min(400, (1 &lt;&lt; 26) / (rows * V * 4)))
+            let tB = time(reps: reps) { e in          // repeatable: masked logits are already -inf
+                e.setComputePipelineState(pBits); e.setBuffer(lg, offset: 0, index: 0); e.setBuffer(bm, offset: 0, index: 1)
+                e.setBytes(&amp;Vu, length: 4, index: 2); e.setBytes(&amp;Wu, length: 4, index: 3)
+                e.dispatchThreads(grid, threadsPerThreadgroup: tg)
+            }
+            let tF = time(reps: reps) { e in          // repeatable: -inf + -inf stays -inf, and 0 adds nothing
+                e.setComputePipelineState(pFloat); e.setBuffer(lgF, offset: 0, index: 0); e.setBuffer(fm, offset: 0, index: 1)
+                e.setBytes(&amp;Vu, length: 4, index: 2); e.dispatchThreads(grid, threadsPerThreadgroup: tg)
+            }
+            var wrong = 0                              // the two masks must agree element for element
+            for i in 0..&lt;(rows * V) where lp[i] != lpF[i] { wrong += 1 }
+            let bBytes = rows * W * 4 + (rows * V - nAllowed) * 4      // read the words, write each masked logit
+            let fBytes = rows * V * 12                                 // read logit and mask, write logit
+            print(String(format: "  %6d %6d   %4.0f%%  %11.2f %15.2f %15d %18d   %d", V, rows, frac * 100, tB * 1e6, tF * 1e6, bBytes, fBytes, wrong))
+        }
+    }
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是连续三次运行里的第三次，原样贴出：</span><span lang="en">Build and run. Below is the third of three consecutive runs, pasted as it came:</span><pre data-lang="sh">$ swiftc -O spec.swift -o spec
+$ ./spec
+device=Apple M5, median of 31 command buffers, 2026-11-01 01:00 PST
+Part 1. tree-verify attention: 32 heads x head_dim 128, FP32 K/V, a 16-node draft tree
+  prefix L   kernel, mask                   queries  mask bytes   median us   KV GB/s   max|err| vs path ref
+       256   decode, per-query, none             1           0        59.2     142.3   -
+       256   verify, per-query, bool            16        4352       636.0      14.0   5.60e-05
+       256   verify, tile, none (wrong)         16           0       193.2      46.1   3.43e-02
+       256   verify, tile, bool                 16        4352       192.3      46.4   5.60e-05
+       256   verify, tile, bit-packed           16         544       193.0      46.2   5.60e-05
+             split-KV: 1 splits of 272 keys per head, then one combine pass
+             per-query verify / decode = 10.75 x;  tile verify (bits) / decode = 3.26 x;  mask cost bits vs none -0.1%
+      2048   decode, per-query, none             1           0       498.1     134.8   -
+      2048   verify, per-query, bool            16       33024      3957.2      17.1   1.51e-05
+      2048   verify, tile, none (wrong)         16           0      1577.0      42.9   3.79e-03
+      2048   verify, tile, bool                 16       33024      1564.0      43.2   1.51e-05
+      2048   verify, tile, bit-packed           16        4128      1558.5      43.4   1.51e-05
+             split-KV: 8 splits of 264 keys per head, then one combine pass
+             per-query verify / decode = 7.95 x;  tile verify (bits) / decode = 3.13 x;  mask cost bits vs none -1.2%
+     16384   decode, per-query, none             1           0      4252.5     126.3   -
+     16384   verify, per-query, bool            16      262400     31441.8      17.1   3.83e-06
+     16384   verify, tile, none (wrong)         16           0     10418.1      51.6   5.28e-04
+     16384   verify, tile, bool                 16      262400     10745.1      50.0   3.83e-06
+     16384   verify, tile, bit-packed           16       32800     10582.6      50.8   3.83e-06
+             split-KV: 64 splits of 264 keys per head, then one combine pass
+             per-query verify / decode = 7.39 x;  tile verify (bits) / decode = 2.49 x;  mask cost bits vs none +1.6%
+Part 2. logits bitmask before sampling: FP32 logits, int32 bitmask words (ceil(V/32) per row)
+  vocab    rows  allowed   bitmask us   float-mask us   bitmask bytes   float-mask bytes   wrong
+   32000      1      1%         1.01            1.17          130744             384000   0
+   32000      1     99%         0.99            1.23            5300             384000   0
+   32000     16      1%         6.82           25.64         2091660            6144000   0
+   32000     16     99%         6.33           28.03           84808            6144000   0
+   32000    256      1%       238.29          769.80        33465064           98304000   0
+   32000    256     99%        93.72          786.45         1351732           98304000   0
+  151936      1      1%         2.47            3.27          620512            1823232   0
+  151936      1     99%         2.32            3.30           24944            1823232   0
+  151936     16      1%       152.80          125.56         9930228           29171712   0
+  151936     16     99%        27.52          178.14          400828           29171712   0
+  151936    256      1%      1696.30         3744.62       158886608          466747392   0
+  151936    256     99%       409.09         3738.25         6419232          466747392   0
+# 2026-11-01 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2）</pre></li>
+      <li><span lang="zh-CN">先看正确性：带掩码的两种树验证和 CPU 参考的最大差在 4e-6 到 6e-5 之间，是 FP16 输出的舍入（K、V 用 FP32 存，合并内核把结果写成 half）；三次运行都一样。不带掩码时差到 3e-2（L = 256）到 5e-4（L = 16384）：每个节点多看了 16 个键里本不该看的那些，前缀越长，这几个键在注意力里的份额越小，误差也越小，但结果始终是错的。</span><span lang="en">Correctness first: the two masked tree verifies differ from the CPU reference by 4e-6 to 6e-5 at most, the rounding of the FP16 output (K and V are stored in FP32, and the combine kernel writes the result as half), in all three runs. Without the mask the difference grows to 3e-2 (L = 256) down to 5e-4 (L = 16384): every node sees those of the 16 tree keys it should not, and the longer the prefix, the smaller their share of the attention and the smaller the error, but the result is always wrong.</span></li>
+      <li><span lang="zh-CN">16 个查询要花多少：逐个查询打分时，树验证是解码的 6.3–10.8 倍，有效带宽只有约 14–17 GB/s，算术成了瓶颈；当成小矩阵算时是 2.1–3.4 倍，约 37–52 GB/s。KV 两种写法都只读一遍，差别全在每个键和 16 个查询的点积怎么做。这台机器上还没到「验证 16 个和解码 1 个一样快」的程度（解码约 100–140 GB/s）：FP32 的 <code>simdgroup_matrix</code> 和每块 8 个键的在线 softmax 还有开销。在有 Tensor Core 的 GPU 上，这一差距应当更小（推断，没有在 NVIDIA 上量）。</span><span lang="en">What 16 queries cost: scored per query, tree verify takes 6.3–10.8 times as long as decode, with only about 14–17 GB/s of effective bandwidth, because arithmetic is the bottleneck; as small matrices it takes 2.1–3.4 times, at about 37–52 GB/s. Both read the KV only once; the whole difference is in how each key’s dot products with the 16 queries are done. On this machine verifying 16 is not yet as fast as decoding 1 (decode runs at about 100–140 GB/s): the FP32 <code>simdgroup_matrix</code> and the online softmax over blocks of 8 keys still cost something. On a GPU with Tensor Cores the gap should be smaller (inference, not measured on NVIDIA).</span></li>
+      <li><span lang="zh-CN">掩码本身的代价：同一个小矩阵内核，带 bool 掩码或打包掩码和不带掩码相比，三次运行里在 −1.7% 到 +4.6% 之间，就是噪声的大小。打包让掩码从 262400 字节缩到 32800 字节（L = 16384），但掩码比 KV（这时每个头 16 MiB）小得多，所以时间看不出差别。</span><span lang="en">The cost of the mask itself: for the same small-matrix kernel, a bool or bit-packed mask against no mask comes to between −1.7% and +4.6% across the three runs, which is the size of the noise. Packing shrinks the mask from 262400 to 32800 bytes (L = 16384), but the mask is far smaller than the KV (16 MiB per head at that length), so the time shows no difference.</span></li>
+      <li><span lang="zh-CN">位掩码：只有 1 行时，两种掩码都是 1–3 µs，时间基本是一次派发。行多时位掩码明显更快，而且快多少取决于有多少 token 被屏蔽：256 行、151936 个 token 时，只允许 1% 的状态要 1660–1700 µs（几乎每个 logit 都要写 −∞），允许 99% 的状态只要约 407 µs（几乎什么都不写）；浮点加法掩码不管哪种都要约 3740 µs，因为它每个 token 都要读 8 字节、写 4 字节。比值是 2.2–9.2 倍（第二、三次运行）。两种掩码的结果逐元素一致（<code>wrong</code> 一列都是 0）。</span><span lang="en">The bitmask: with 1 row, both masks take 1–3 µs, which is essentially one dispatch. With many rows the bitmask is clearly faster, and how much faster depends on how many tokens are masked: for 256 rows of 151936 tokens, a state that allows 1% takes 1660–1700 µs (nearly every logit gets −∞ written), and a state that allows 99% only about 407 µs (almost nothing is written); the additive float mask takes about 3740 µs either way, because it reads 8 bytes and writes 4 for every token. The ratios are 2.2–9.2 times (runs 2 and 3). The two masks agree element by element (the <code>wrong</code> column is 0 throughout).</span></li>
+      <li><span lang="zh-CN">噪声：第一次运行第二部分的几行小尺寸慢了几倍到几十倍（例如 151936 × 1 的位掩码是 42–45 µs，另两次是 2.3–2.5 µs），而第二、三次互相吻合。最可能是那几秒 GPU 上同时有别的工作（推断）。151936 × 16、只允许 1% 的那一行在三次里是 568、110、153 µs，也不稳定。报数字时三次都报，不要只挑一次。</span><span lang="en">Noise: in the first run, several small rows of Part 2 were slower by factors of a few to a few dozen (the 151936 × 1 bitmask took 42–45 µs, against 2.3–2.5 µs in the other two runs), while runs 2 and 3 agree with each other. The most likely cause is other work on the GPU during those seconds (inference). The 151936 × 16 row that allows 1% came out at 568, 110 and 153 µs in the three runs and is unstable as well. Report all three runs rather than picking one.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>base_free.txt</code>、<code>base_json.txt</code>、<code>eagle_free.txt</code>、<code>eagle_json.txt</code>，<code>eagle.log</code> 里 <code>accept len</code> 的那些行，以及内核统计的输出；Lab B 的三次完整输出，以及你自己的一张小表：三种前缀长度下两种验证写法相对解码的倍数，和 256 行时位掩码相对浮点掩码的倍数。写进当天日志，并记下你的数字和本页哪里不同。还没有租用账户时，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, <code>base_free.txt</code>, <code>base_json.txt</code>, <code>eagle_free.txt</code> and <code>eagle_json.txt</code>, the <code>accept len</code> lines of <code>eagle.log</code>, and the output of the kernel tally; from Lab B, the three full outputs and a small table of your own: the two verify styles as multiples of decode at the three prefix lengths, and the bitmask against the float mask at 256 rows. Write them into that day’s log, and note where your numbers differ from this page. Until a rental account exists, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/phase-7">
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">1. 贪心验证一棵树：根之后目标模型的 argmax 是 A，根有孩子 A 和 B；A 之后 argmax 是 C，A 只有孩子 D。这一轮提交几个 token？</p><p lang="en">1. Greedy verification of a tree: after the root the target’s argmax is A, and the root has children A and B; after A the argmax is C, and A has only the child D. How many tokens does this round commit?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">1 个：D 被拒绝，整轮作废，只留下目标模型在根上给的 A</span><span lang="en">1: D is rejected, so the whole round is discarded and only the target’s A at the root remains</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">3 个：A、D，再加白得的 C</span><span lang="en">3: A and D, plus the free C</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">2 个：接受草稿 A，然后在 A 上停下，补上目标模型的 C</span><span lang="en">2: the draft A is accepted, the walk stops at A, and the target’s C is added</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>VerifyTreeGreedy</code> 在根的孩子里找到等于 argmax 的 A，接受；在 A 的孩子里找不到 C（只有 D），停下，再把目标模型在最后一个被接受节点 A 上的 argmax C 写成白得的 token。所以是 A 和 C 两个。D 和 C 不同，不会被接受；被拒绝也不会让已经接受的 A 作废。</span><span lang="en"><code>VerifyTreeGreedy</code> finds A, equal to the argmax, among the root’s children and accepts it; among A’s children it finds no C (only D), so it stops and writes the target’s argmax at the last accepted node A, which is C, as the free token. That makes two, A and C. D differs from C and is not accepted, and a rejection never discards the A that was already accepted.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">2. 动画 (a) 里节点 6 的掩码行为什么只在前缀和节点 0、1、3、6 上是 1，而不是一个普通的下三角因果掩码？</p><p lang="en">2. In diagram (a), why does node 6’s mask row have 1s only in the prefix and at nodes 0, 1, 3 and 6, rather than following an ordinary lower-triangular causal mask?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">为了省算术：只看祖先可以少算几个点积，结果和因果掩码一样</span><span lang="en">To save arithmetic: looking only at ancestors skips a few dot products and gives the same result as a causal mask</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">树按顺序排开后，节点 6 前面还有兄弟 4 和另一枝的 2、5，它们是另一种猜法；因果掩码会让节点 6 看见它们，算出的分布就不再是「前缀 + 这条路径」之后的分布</span><span lang="en">Laid out in order, the tree puts the sibling 4 and nodes 2 and 5 of the other branch before node 6, and they are different guesses; a causal mask would let node 6 see them, and the distribution computed would no longer be the one that follows the prefix plus this path</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">因为 FlashInfer 的预填充内核不支持因果掩码，只能接受自定义掩码</span><span lang="en">Because FlashInfer’s prefill kernel does not support a causal mask and accepts only custom masks</span></label>
+      <div class="why" hidden><span lang="zh-CN">节点的位置是 seq_len + 深度，它的输出必须等于「只把前缀和它自己的路径送进模型」时的输出，Lab B 的 CPU 参考就是这样核对的；不带掩码的那一行误差到 3e-2，说明多看几个键结果就错了。掩码不是为了省算术，内核照样算所有点积。FlashInfer 支持因果掩码（<code>MaskMode.CAUSAL</code>），只是这里需要的是树形的。</span><span lang="en">A node’s position is seq_len + depth, and its output must equal what the model would give with only the prefix and its own path as input, which is exactly how the CPU reference of Lab B checks it; the no-mask row’s error of 3e-2 shows that seeing a few extra keys makes the result wrong. The mask is not there to save arithmetic, since the kernel still computes every dot product. FlashInfer does support a causal mask (<code>MaskMode.CAUSAL</code>); what is needed here is a tree-shaped one.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. SGLang 在 CUDA 上用的位掩码内核 <code>apply_token_bitmask_inplace_kernel</code>，每行的显存流量主要由什么决定？</p><p lang="en">3. For the bitmask kernel SGLang uses on CUDA, <code>apply_token_bitmask_inplace_kernel</code>, what mainly determines the memory traffic per row?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">读 V/8 字节的位掩码，再给每个被屏蔽的 token 写 4 字节；它不读 logits，所以被屏蔽的越多写得越多</span><span lang="en">Reading V/8 bytes of bitmask, plus 4 bytes written per masked token; it never reads the logits, so the more tokens are masked, the more it writes</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">读一遍整行 logits、写一遍整行 logits，和掩码内容无关，每行固定 8V 字节</span><span lang="en">Reading the whole row of logits and writing it back, regardless of the mask, a fixed 8V bytes per row</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">语法的复杂程度：内核在 GPU 上运行下推自动机，状态越多读得越多</span><span lang="en">The complexity of the grammar: the kernel runs the pushdown automaton on the GPU, and more states mean more reads</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>bitmask_ops.py</code> 第 70–81 行只加载位掩码，再用 <code>tl.store(..., -inf, vocab_mask &amp; bitmask)</code> 做带掩码的存储，没有加载 logits。读写整行是 Lab B 里浮点加法掩码的做法，它每个 token 12 字节，所以慢 2.2–9.2 倍。自动机在 CPU 上的 xgrammar 里跑，GPU 内核只看到填好的位。</span><span lang="en">Lines 70–81 of <code>bitmask_ops.py</code> load only the bitmask and then do a masked store with <code>tl.store(..., -inf, vocab_mask &amp; bitmask)</code>; the logits are never loaded. Reading and writing the whole row is what the additive float mask of Lab B does, at 12 bytes per token, which is why it is 2.2–9.2 times slower. The automaton runs in xgrammar on the CPU, and the GPU kernel only sees the filled bits.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 结构化输出和 EAGLE 一起用时，v0.5.22 怎么得到验证步要用的掩码？</p><p lang="en">4. With structured output and EAGLE together, how does v0.5.22 obtain the mask for the verify step?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">只为根节点算一行掩码，盖到全部 N 行 logits 上，因为树上的节点都接在同一段前缀后面</span><span lang="en">It computes one mask row for the root only and lays it over all N rows of logits, since every node in the tree follows the same prefix</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">在 CPU 上沿草稿树深度优先地走：每个节点先用父节点的掩码检查草稿 token，合法就 accept_token、填这一行、走孩子、再回退一个 token；得到 bs × N 行，在验证前向发出之后建，再在取 argmax 之前盖上</span><span lang="en">It walks the draft tree depth-first on the CPU: at each node it checks the draft token against the parent’s mask, and if it is legal it calls accept_token, fills this row, visits the children and rolls back one token; that gives bs × N rows, built after the verify forward is launched and applied before the argmax</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">把掩码交给草稿模型，在起草时就只从允许的 token 里选，所以验证时不需要再盖掩码</span><span lang="en">It hands the mask to the draft model, which picks only allowed tokens while drafting, so no mask is needed at verification</span></label>
+      <div class="why" hidden><span lang="zh-CN">这是 <code>spec_utils.py</code> 的 <code>traverse_tree</code> 和 <code>build_grammar_vocab_mask</code>，盖掩码在 <code>eagle_utils.py</code> 第 807–808 行。只用根的掩码不对：节点 3 之后允许什么，取决于路径上已经接受的 <code>,</code> 和 <code>which</code>，每个节点的语法状态都不同。起草时 v0.5.22 不盖语法掩码，草稿 token 可能不合法，所以 DFS 先检查它，不合法的子树直接跳过。</span><span lang="en">This is <code>traverse_tree</code> and <code>build_grammar_vocab_mask</code> in <code>spec_utils.py</code>, and the mask is applied at lines 807–808 of <code>eagle_utils.py</code>. The root’s mask alone is wrong: what may follow node 3 depends on the <code>,</code> and <code>which</code> already accepted on its path, so every node has a different grammar state. v0.5.22 applies no grammar mask while drafting, so a draft token may be illegal, which is why the walk checks it first and skips an illegal subtree entirely.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://arxiv.org/abs/2211.17192">Leviathan, Kalman, Matias: Fast Inference from Transformers via Speculative Decoding (arXiv:2211.17192v2)</a> <span class="lvl" lang="zh-CN">论文，中级（ICML 2023，2026-11-01 读 v2）：接受规则、正确性证明、期望产出个数的式 (1)；概念 1 的主依据</span><span class="lvl" lang="en">Paper, intermediate (ICML 2023, v2 read 2026-11-01): the acceptance rule, the correctness proof and equation (1) for the expected yield; the main basis of concept 1</span></li>
+    <li><a href="https://arxiv.org/abs/2401.15077">Li, Wei, Zhang, Zhang: EAGLE (arXiv:2401.15077v3)</a> · <a href="https://arxiv.org/abs/2406.16858">EAGLE-2: Dynamic Draft Trees (arXiv:2406.16858v2)</a> <span class="lvl" lang="zh-CN">论文，中级到进阶：特征层草稿、树形起草与树注意力（EAGLE 第 3、4.3.1 节），按累积概率动态选树（EAGLE-2）；概念 2、3</span><span class="lvl" lang="en">Papers, intermediate to advanced: feature-level drafting, tree drafts and tree attention (sections 3 and 4.3.1 of EAGLE), dynamic tree selection by cumulative probability (EAGLE-2); concepts 2 and 3</span></li>
+    <li><a href="https://arxiv.org/abs/2411.15100">Dong et al.: XGrammar (arXiv:2411.15100v3)</a> <span class="lvl" lang="zh-CN">论文，进阶（MLSys 2025）：逐 token 掩码、上下文无关与相关 token、自适应存储、与推理重叠（第 2、3.1、3.5 节）；概念 4 和动画 (b)</span><span class="lvl" lang="en">Paper, advanced (MLSys 2025): per-token masks, context-independent and context-dependent tokens, adaptive storage, overlap with inference (sections 2, 3.1 and 3.5); concept 4 and diagram (b)</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/speculative/eagle_utils.py">srt/speculative/eagle_utils.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/speculative/eagle_worker_v2.py">eagle_worker_v2.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/speculative/eagle_worker_common.py">eagle_worker_common.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/speculative/eagle_info.py">eagle_info.py</a> <span class="lvl" lang="zh-CN">源码，进阶（SGLang v0.5.22，2026-11-01 取回）：起草、选树、建掩码、验证和采样的整条路径；概念 2、3 和动画 (a)</span><span class="lvl" lang="en">Source, advanced (SGLang v0.5.22, fetched 2026-11-01): the whole path of drafting, tree selection, mask building, verification and sampling; concepts 2 and 3 and diagram (a)</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/jit/include/sgl_kernel/speculative/eagle.cuh">kernels/jit/include/sgl_kernel/speculative/eagle.cuh</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/jit/include/sgl_kernel/speculative/sampling.cuh">speculative/sampling.cuh</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/speculative/tree.py">kernels/ops/speculative/tree.py</a> <span class="lvl" lang="zh-CN">源码，进阶：<code>build_tree_efficient</code>、<code>VerifyTreeGreedy</code> 和 <code>TreeSpeculativeSamplingTargetOnly</code> 三个内核本身；概念 3</span><span class="lvl" lang="en">Source, advanced: the three kernels themselves, <code>build_tree_efficient</code>, <code>VerifyTreeGreedy</code> and <code>TreeSpeculativeSamplingTargetOnly</code>; concept 3</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/constrained/xgrammar_backend.py">srt/constrained/xgrammar_backend.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/ops/grammar/bitmask_ops.py">kernels/ops/grammar/bitmask_ops.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/sampling/sampling_batch_info.py">srt/sampling/sampling_batch_info.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/speculative/spec_utils.py">srt/speculative/spec_utils.py</a> <span class="lvl" lang="zh-CN">源码，中级：位掩码的分配、填充、拷贝、盖到 logits 上，以及推测解码时沿树遍历；概念 4 和动画 (b)</span><span class="lvl" lang="en">Source, intermediate: allocating, filling, copying and applying the bitmask to the logits, and the tree walk under speculative decoding; concept 4 and diagram (b)</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/spec.py">srt/arg_groups/fields/spec.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/speculative_hook.py">speculative_hook.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/exec_.py">fields/exec_.py</a> <span class="lvl" lang="zh-CN">源码，入门：推测解码和语法后端的命令行开关、默认值和自动选参；概念 1、2、4 和 Lab A</span><span class="lvl" lang="en">Source, beginner: the command-line switches, defaults and automatic parameter choice for speculative decoding and the grammar backend; concepts 1, 2 and 4 and Lab A</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docs/docs/advanced_features/speculative_decoding.mdx">SGLang docs: Speculative Decoding (v0.5.22)</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docs/docs/advanced_features/structured_outputs.mdx">Structured Outputs (v0.5.22)</a> <span class="lvl" lang="zh-CN">官方文档，入门：EAGLE-2 和 EAGLE-3 的启动示例、参数表、<code>json_schema</code> 请求格式；Lab A</span><span class="lvl" lang="en">Official docs, beginner: launch examples for EAGLE-2 and EAGLE-3, the parameter table, and the <code>json_schema</code> request format; Lab A</span></li>
+    <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/v0.7.1/flashinfer/prefill.py">flashinfer/prefill.py (v0.7.1)</a> · <a href="https://github.com/mlc-ai/xgrammar/blob/v0.2.7/python/xgrammar/matcher.py">xgrammar/matcher.py (v0.2.7)</a> <span class="lvl" lang="zh-CN">源码，中级：<code>custom_mask</code> 和 <code>packbits</code> 的文档字符串，位掩码的类型和形状；概念 3、4</span><span class="lvl" lang="en">Source, intermediate: the docstrings of <code>custom_mask</code> and <code>packbits</code>, and the bitmask’s type and shape; concepts 3 and 4</span></li>
+    <li><a href="https://huggingface.co/lmsys/sglang-EAGLE-llama2-chat-7B">lmsys/sglang-EAGLE-llama2-chat-7B</a> · <a href="https://huggingface.co/meta-llama/Llama-2-7b-chat-hf">meta-llama/Llama-2-7b-chat-hf</a> <span class="lvl" lang="zh-CN">模型页，入门（2026-11-01 读取）：草稿模型的一层配置和权重大小，目标模型的 gated 状态和大小；Lab A</span><span class="lvl" lang="en">Model pages, beginner (read 2026-11-01): the draft model’s one-layer config and weight size, the target model’s gated status and size; Lab A</span></li>
+    <li><a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification</a> · <a href="https://developer.apple.com/documentation/metal/mtlcomputecommandencoder">MTLComputeCommandEncoder</a> <span class="lvl" lang="zh-CN">官方文档，中级：<code>simdgroup_matrix</code> 的加载、存储和乘加，SIMD 组函数，线程组内存；Lab B</span><span class="lvl" lang="en">Official docs, intermediate: loading, storing and multiply-accumulating <code>simdgroup_matrix</code>, SIMD-group functions and threadgroup memory; Lab B</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 5 章 Memory architecture and data locality 对应概念 3 里「KV 只读一遍、被 N 个查询复用」；第 10 章 Reduction 对应 split-KV 的合并；第 23 章 Advanced Optimizations for Matrix Multiplication 对应把 N 个查询写成小矩阵乘。按第 5 版目录的章名对应</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 5, Memory architecture and data locality, matches the KV read once and reused by N queries in concept 3; chapter 10, Reduction, matches the split-KV combine; chapter 23, Advanced Optimizations for Matrix Multiplication, matches writing the N queries as small matrix products. Matched by chapter title in the 5th-edition table of contents</span></li>
+    <li lang="zh-CN">John E. Hopcroft, Rajeev Motwani, Jeffrey D. Ullman, 《Introduction to Automata Theory, Languages, and Computation》, 3rd ed., Pearson/Addison-Wesley, 2007, ISBN 9780321455369. <span class="lvl">第 5 章 Context-Free Grammars and Languages 和第 6 章 Pushdown Automata 对应概念 4（JSON schema 编译成的上下文无关语法，以及执行它的下推自动机）。章名按 Open Library 上这个 ISBN 的目录核对（2026-11-01）</span></li>
+    <li lang="en">John E. Hopcroft, Rajeev Motwani, Jeffrey D. Ullman, <em>Introduction to Automata Theory, Languages, and Computation</em>, 3rd ed., Pearson/Addison-Wesley, 2007, ISBN 9780321455369. <span class="lvl">Chapter 5, Context-Free Grammars and Languages, and chapter 6, Pushdown Automata, match concept 4 (the context-free grammar a JSON schema compiles to, and the pushdown automaton that runs it). Chapter titles checked against the Open Library table of contents for this ISBN (2026-11-01)</span></li>
+    <li lang="zh-CN">Sebastian Raschka, 《Build a Large Language Model (From Scratch)》, Manning, 2024, ISBN 9781633437166. <span class="lvl">第 5 章 5.3 节 Decoding strategies to control randomness（温度缩放、top-k 采样）对应概念 1 里被加速的那一步采样，以及验证时带温度的分支</span></li>
+    <li lang="en">Sebastian Raschka, <em>Build a Large Language Model (From Scratch)</em>, Manning, 2024, ISBN 9781633437166. <span class="lvl">Section 5.3 of chapter 5, Decoding strategies to control randomness (temperature scaling, top-k sampling), matches the sampling step that concept 1 speeds up, and the temperature branch of verification</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-6-quantization-kernels/index.html"><span lang="zh-CN">← Phase 6 · 量化内核</span><span lang="en">← Phase 6 · Quantization Kernels</span></a>
+    <a href="../phase-8-plugging-in/index.html"><span lang="zh-CN">Phase 8 · 接入点与作品项目 →</span><span lang="en">Phase 8 · Plugging In and the Capstone →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

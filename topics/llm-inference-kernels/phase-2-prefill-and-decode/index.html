@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 2 · Prefill and Decode · LLM Inference Kernels (SGLang)</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">LLM Inference Kernels (SGLang)</a>
+    <span class="crumb current" aria-current="page">Phase 2 · Prefill and Decode</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 2 / 9 · 约 1–2 周</p><p class="meta" lang="en">Phase 2 / 9 · about 1–2 weeks</p>
+  <h1>Prefill and Decode <span class="en" lang="zh-CN">预填充与解码：受算力限制的分块注意力、受带宽限制的 split-KV 解码、MLA、分块预填充，以及 SGLang 按阶段选注意力后端</span><span class="en" lang="en">Compute-bound tiled attention for prefill, bandwidth-bound split-KV for decode, MLA, chunked prefill, and choosing an attention backend per phase in SGLang</span></h1>
+  <p class="lede" lang="zh-CN">同一个注意力算子，在预填充和解码里是两种完全不同的内核。预填充一次给几千个查询，运算量随长度平方增长，要紧的是别把 T × T 的分数矩阵写回显存，并让 tensor core 一直有活干：这是 FlashAttention 的分块与在线 softmax，到 Hopper 上再加 FA3 的 warp 专门化和 FP8。解码每个头只有一个查询，要做的只是把整段 KV 从显存里流过一遍；批大小为 1 时连 GPU 都填不满，于是要沿着 KV 的长度切开、各算一段、最后合并：这是 split-KV，也叫 flash-decoding。SGLang v0.5.22 让两个阶段各选各的内核：<code>--prefill-attention-backend</code> 和 <code>--decode-attention-backend</code>。这台 Apple M5 上实测：64K 个 token 的解码，不切分时 8 个头只用 8 个 SIMD-group，读 KV 只有约 16 GB/s；每个头切成 256 段后跑到约 125 GB/s，快约 7.9 倍，结果与 CPU 参考一致。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-11-01 在这台 Apple M5 上实际运行，数字原样贴出；Lab A 在 L4 上比较两个注意力后端、在 H100 上比较 FA3 与 FA2，<strong>未运行</strong>，是 2026-11-01 根据 SGLang v0.5.22 的源码和几篇论文整理的。</p>
+  <p class="lede" lang="en">The same attention operator becomes two entirely different kernels in prefill and in decode. Prefill hands over thousands of queries at once and its arithmetic grows with the square of the length; what matters is never writing the T × T score matrix back to memory and keeping the tensor cores busy: FlashAttention’s tiling and online softmax, with FA3’s warp specialization and FP8 added on Hopper. Decode has one query per head, and all it has to do is stream the whole KV through from memory once; at batch size 1 it cannot even fill the GPU, so the KV is cut along its length, each piece is computed separately, and the pieces are merged at the end: split-KV, also called flash-decoding. SGLang v0.5.22 lets each phase choose its own kernels with <code>--prefill-attention-backend</code> and <code>--decode-attention-backend</code>. Measured on this Apple M5: decoding against 64K tokens without splitting puts 8 heads on only 8 SIMD-groups and reads KV at about 16 GB/s; cutting each head into 256 splits reaches about 125 GB/s, about 7.9 times as fast, and the result matches the CPU reference. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-11-01 and its numbers are pasted as they came; Lab A, which compares two attention backends on an L4 and FA3 against FA2 on an H100, is <strong>not run</strong>, assembled from the SGLang v0.5.22 source and the papers on 2026-11-01.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">给定长度 T、头数和 head_dim，算出预填充注意力和解码注意力各自的运算量、字节数和运算强度，并说明为什么前者受算力限制、后者受带宽限制，以及把分数矩阵写回显存会怎样把预填充拉回带宽一侧。</li>
+      <li lang="en">Given a length T, the head counts and the head_dim, work out the FLOPs, bytes and arithmetic intensity of prefill attention and of decode attention, explain why the first is compute-bound and the second bandwidth-bound, and show how writing the score matrix back to memory drags prefill back to the bandwidth side.</li>
+      <li lang="zh-CN">一步一步讲清 FlashAttention-2 的分块：每一行的运行最大值 m、运行和 l、未归一化的输出 O，新块到来时怎样按 exp(m − m′) 重新缩放，以及为什么最后除一次 l 就得到精确结果。</li>
+      <li lang="en">Explain FlashAttention-2’s tiling step by step: each row’s running maximum m, running sum l and unnormalized output O, how they are rescaled by exp(m − m′) when a new tile arrives, and why one division by l at the end gives the exact result.</li>
+      <li lang="zh-CN">说出 FA3 在 Hopper 上多做了什么（warp 专门化、GEMM 与 softmax 交错、FP8 块量化），以及 split-KV 解码怎样切分 KV、写出部分结果、再用对数和指数（LSE）合并。</li>
+      <li lang="en">State what FA3 adds on Hopper (warp specialization, interleaved GEMM and softmax, FP8 block quantization), and how split-KV decode cuts the KV, writes partial results and merges them with the log-sum-exp (LSE).</li>
+      <li lang="zh-CN">解释 MLA 为什么把每个 token 的 KV 压到 576 个数、它怎样改变解码注意力的运算强度；以及分块预填充让内核面对什么样的查询与 KV 形状。</li>
+      <li lang="en">Explain why MLA shrinks each token’s KV to 576 numbers and how that changes the intensity of decode attention; and what shape of queries and KV chunked prefill presents to the kernel.</li>
+      <li lang="zh-CN">在 SGLang v0.5.22 里按阶段选择注意力后端，并用 <code>sglang.benchmark.one_batch</code> 分别量预填充和解码（Lab A）；在 Metal 上写出分块预填充注意力和 split-KV 解码，量出它们的速率（Lab B）。</li>
+      <li lang="en">Choose an attention backend per phase in SGLang v0.5.22 and time prefill and decode separately with <code>sglang.benchmark.one_batch</code> (Lab A); write a tiled prefill attention and a split-KV decode in Metal and measure their rates (Lab B).</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-the-stack/index.html">Phase 0 · 自顶向下的栈</a>：运算强度、拐点，以及为什么批大小为 1 的解码受带宽限制。本页沿用那里的 Qwen3-8B 形状和 L4 规格。</li>
+    <li lang="en"><a href="../phase-0-the-stack/index.html">Phase 0 · The Stack, Top to Bottom</a>: arithmetic intensity, the ridge point, and why decode at batch size 1 is bandwidth-bound. This page reuses its Qwen3-8B shapes and L4 specifications.</li>
+    <li lang="zh-CN"><a href="../phase-1-attention-and-kv-layouts/index.html">Phase 1 · 注意力与 KV 缓存布局</a>：分页的 KV、indptr/indices 索引数组。本页的内核都假设 KV 是这样存放的，但为了讲清算法，Lab B 用连续的 KV。</li>
+    <li lang="en"><a href="../phase-1-attention-and-kv-layouts/index.html">Phase 1 · Attention and KV-Cache Layouts</a>: paged KV and the indptr/indices arrays. The kernels on this page assume KV is stored that way, but to keep the algorithm clear Lab B uses contiguous KV.</li>
+    <li lang="zh-CN"><a href="../../gpu-cuda/index.html">GPU Programming with CUDA</a>：shared memory 分块、warp 内归约，以及 Phase 7 作品项目里的融合 softmax 和在线 softmax。本页的预填充内核就是把那个在线 softmax 从一行推广到一块。</li>
+    <li lang="en"><a href="../../gpu-cuda/index.html">GPU Programming with CUDA</a>: shared-memory tiling, in-warp reductions, and the fused and online softmax of the Phase 7 capstone. This page’s prefill kernel generalizes that online softmax from one row to one tile.</li>
+    <li lang="zh-CN">按 <a href="../lab-setup/index.html">实验环境</a> 准备好 L4 上的 <code>sglang-lab</code> 容器（Lab A，H100 那一步另算）和这台 Mac 上的 <code>swiftc</code>（Lab B）。</li>
+    <li lang="en">Prepare the <code>sglang-lab</code> container on the L4 (Lab A; the H100 step is a separate tier) and <code>swiftc</code> on this Mac (Lab B), following <a href="../lab-setup/index.html">Lab environment</a>.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 同一个注意力，两种界</h3><h3 lang="en">1. One attention, two bounds</h3>
+  <p lang="zh-CN">设一层有 H<sub>q</sub> 个查询头、H<sub>kv</sub> 个 KV 头，head_dim 为 d，BF16 每元素 2 字节。每一对（查询，键）在 QK<sup>T</sup> 里做 d 次乘加、在 PV 里再做 d 次，共 4d FLOP。</p>
+  <p lang="en">Let a layer have H<sub>q</sub> query heads and H<sub>kv</sub> KV heads with head_dim d, at 2 bytes per BF16 element. Each (query, key) pair does d multiply-adds in QK<sup>T</sup> and d more in PV, 4d FLOP in all.</p>
+  <ul>
+    <li lang="zh-CN"><strong>预填充 T 个 token（因果）</strong>：约 T²/2 对，运算 ≈ 2·d·T²·H<sub>q</sub>；字节是读 Q、K、V、写 O，≈ 2·T·d·(2H<sub>q</sub> + 2H<sub>kv</sub>)。运算强度随 T 线性增长。代入 Phase 0 的 Qwen3-8B（H<sub>q</sub> = 32，H<sub>kv</sub> = 8，d = 128），T = 4096 时一层约 137.5 GFLOP、83.9 MB，约 1640 FLOP/字节，远过 L4 约 400 的拐点。</li>
+    <li lang="en"><strong>Prefill of T tokens (causal)</strong>: about T²/2 pairs, so FLOPs ≈ 2·d·T²·H<sub>q</sub>; the bytes are reading Q, K, V and writing O, ≈ 2·T·d·(2H<sub>q</sub> + 2H<sub>kv</sub>). The intensity grows linearly with T. With Phase 0’s Qwen3-8B (H<sub>q</sub> = 32, H<sub>kv</sub> = 8, d = 128) at T = 4096, one layer is about 137.5 GFLOP over 83.9 MB, about 1640 FLOP per byte, far past the L4’s ridge of about 400.</li>
+    <li lang="zh-CN"><strong>解码，上下文 L</strong>：每个查询头一个查询，运算 4·d·L·H<sub>q</sub>；字节是把 K、V 读一遍，4·d·L·H<sub>kv</sub>。运算强度 = H<sub>q</sub> ÷ H<sub>kv</sub>，也就是 GQA 的组大小，与 L 无关。Qwen3-8B 是 4 FLOP/字节，正是 Phase 0 算出的数。</li>
+    <li lang="en"><strong>Decode with context L</strong>: one query per query head, 4·d·L·H<sub>q</sub> FLOP; the bytes are one read of K and V, 4·d·L·H<sub>kv</sub>. The intensity is H<sub>q</sub> ÷ H<sub>kv</sub>, the GQA group size, independent of L. For Qwen3-8B it is 4 FLOP per byte, exactly the figure Phase 0 worked out.</li>
+  </ul>
+  <p lang="zh-CN">预填充的高强度有一个前提：分数矩阵 S = QK<sup>T</sup> 和 P = softmax(S) 不能写回显存。照教科书的写法先算出整个 S，Qwen3-8B 在 T = 4096 时一层的 S 是 4096² × 32 个 BF16，约 1.07 GB，写一次再读一次就是 2.15 GB，在 L4 的 300 GB/s 下至少 7.2 ms，而这一层的运算按峰值算力只要约 1.14 ms：本来受算力限制的内核被拖回了带宽一侧。FlashAttention 的全部意义就是让 S 和 P 只活在片上。解码这边没有大的中间矩阵，每个查询只有长度为 L 的一行分数，问题变成另一个：怎样用满带宽。以上都是由形状推出的下限，不是测量值。</p>
+  <p lang="en">Prefill’s high intensity has one precondition: the score matrix S = QK<sup>T</sup> and P = softmax(S) must never be written back to memory. Computed the textbook way, S for one Qwen3-8B layer at T = 4096 is 4096² × 32 BF16 values, about 1.07 GB; writing it once and reading it once is 2.15 GB, at least 7.2 ms at the L4’s 300 GB/s, while the layer’s arithmetic at peak compute takes only about 1.14 ms: a kernel that should be compute-bound is dragged back to the bandwidth side. The whole point of FlashAttention is to keep S and P on chip. Decode has no large intermediate matrix, only one row of L scores per query, and its problem is a different one: how to use all of the bandwidth. All of these are lower bounds derived from the shapes, not measurements.</p>
+  <p lang="zh-CN">延伸阅读：Huyen《AI Engineering》讲推理优化的一章（预填充与解码、受算力限制与受带宽限制）；Hennessy &amp; Patterson 第 4 章讲 Roofline 的一节（拐点）；Raschka《Build a Large Language Model (From Scratch)》第 3 章（因果注意力掩码与 QK<sup>T</sup>、PV 本身）。</p>
+  <p lang="en">Further reading: the chapter on inference optimization in Huyen’s <em>AI Engineering</em> (prefill and decode, compute-bound and bandwidth-bound); the Roofline section of Hennessy &amp; Patterson, Chapter 4 (the ridge point); Chapter 3 of Raschka’s <em>Build a Large Language Model (From Scratch)</em> (the causal attention mask and QK<sup>T</sup> and PV themselves).</p>
+
+  <h3 lang="zh-CN">2. FlashAttention 与 FlashAttention-2：分块与在线 softmax</h3><h3 lang="en">2. FlashAttention and FlashAttention-2: tiling and the online softmax</h3>
+  <p lang="zh-CN">FlashAttention（Dao 等，arXiv:2205.14135，读的是 v2）把注意力写成 IO 感知的算法：按块把 Q、K、V 从显存（论文称 HBM）搬进片上 SRAM，在片上算完一块的 S、P 和对 O 的贡献，不把 S 写回去，摘要说它比标准注意力需要更少的 HBM 访问。难点是 softmax 要用整行的最大值和整行的和，而一块只看到一行的一段。解法就是 GPU 专题作品项目里的在线 softmax，从一行推广到一块：</p>
+  <p lang="en">FlashAttention (Dao et al., arXiv:2205.14135, read at v2) recasts attention as an IO-aware algorithm: Q, K and V move from device memory (HBM in the paper) into on-chip SRAM tile by tile, each tile’s S, P and contribution to O are computed on chip, and S is never written back; the abstract says it needs fewer HBM accesses than standard attention. The difficulty is that softmax needs the maximum and the sum of a whole row, while one tile sees only a stretch of the row. The answer is the online softmax of the GPU topic’s capstone, generalized from one row to one tile:</p>
+  <ol>
+    <li lang="zh-CN">一个线程块拿到一个查询块 Q<sub>i</sub>（B<sub>r</sub> 行），每一行在寄存器里维护三样东西：运行最大值 m、运行和 l、未归一化的输出 O（d 个数），初值是 −∞、0、0。</li>
+    <li lang="en">One thread block takes one query block Q<sub>i</sub> (B<sub>r</sub> rows), and each row keeps three things in registers: a running maximum m, a running sum l and an unnormalized output O (d numbers), starting at −∞, 0 and 0.</li>
+    <li lang="zh-CN">依次搬进 K<sub>j</sub>、V<sub>j</sub>（每块 B<sub>c</sub> 个 token），在片上算 S = Q<sub>i</sub>K<sub>j</sub><sup>T</sup> · scale，得到这一块的行最大值，m′ = max(m, rowmax(S))。</li>
+    <li lang="en">Bring in K<sub>j</sub> and V<sub>j</sub> in turn (B<sub>c</sub> tokens per tile), compute S = Q<sub>i</sub>K<sub>j</sub><sup>T</sup> · scale on chip, take this tile’s row maximum, and set m′ = max(m, rowmax(S)).</li>
+    <li lang="zh-CN">P = exp(S − m′)；旧的 l 和 O 都是相对旧的 m 算的，先乘 exp(m − m′) 换到新的基准，再加上这一块：l ← l·exp(m − m′) + rowsum(P)，O ← O·exp(m − m′) + P·V<sub>j</sub>。</li>
+    <li lang="en">P = exp(S − m′); the old l and O were computed against the old m, so first multiply them by exp(m − m′) to move them to the new baseline, then add this tile: l ← l·exp(m − m′) + rowsum(P), O ← O·exp(m − m′) + P·V<sub>j</sub>.</li>
+    <li lang="zh-CN">所有块走完，O<sub>i</sub> = O ÷ l，写回显存一次。因果掩码下，越过对角线的整块直接跳过，对角线上的块按位置掩掉一半。</li>
+    <li lang="en">After the last tile, O<sub>i</sub> = O ÷ l is written back to memory once. Under the causal mask, tiles entirely past the diagonal are skipped, and the tile on the diagonal masks out half its entries by position.</li>
+  </ol>
+  <p lang="zh-CN">结果是精确的，不是近似：每一步的缩放都只是把同一个和换一个基准。动画 (a) 用一行四个分数手算一遍。FlashAttention-2（arXiv:2307.08691，v1）不改这个算法，改的是分工，摘要列了三条：减少非矩阵乘的运算（例如 1/l 只在最后乘一次，而不是每块都乘），即使只有一个头也把工作分给不同线程块以提高占用率（正文说是沿序列长度分），以及在线程块内部按 Q 的行而不是按 K/V 给 warp 分工，减少经过 shared memory 的通信。摘要说这样比 FlashAttention 快约 2 倍，在 A100 上达到理论峰值的 50–73%。</p>
+  <p lang="en">The result is exact, not an approximation: each rescaling merely moves the same sum to a new baseline. Diagram (a) works one row of four scores by hand. FlashAttention-2 (arXiv:2307.08691, v1) keeps the algorithm and changes the division of work, listing three changes in its abstract: fewer non-matmul FLOPs (for example, 1/l applied once at the end instead of after every tile), parallelizing across thread blocks even for a single head to raise occupancy (along the sequence length, per the paper body), and, inside a thread block, dividing work among warps by rows of Q instead of by K/V to cut communication through shared memory. The abstract reports about 2 times the speed of FlashAttention, reaching 50–73% of the theoretical peak on an A100.</p>
+  <p lang="zh-CN">在 SGLang v0.5.22 里，FlashInfer 后端的分页预填充和解码 wrapper 都用 FlashInfer 的 <code>"fa2"</code> 内核（<code>srt/layers/attention/flashinfer_backend.py</code> 第 310–311 行），新 token 的 ragged 预填充 wrapper 用 <code>"auto"</code>（第 476 行，SM100 上改成 <code>"fa2"</code> 或 <code>"cutlass"</code>）。Lab B 的 Metal 内核就是这五步的直译。</p>
+  <p lang="en">In SGLang v0.5.22, the FlashInfer backend’s paged prefill and decode wrappers both use FlashInfer’s <code>"fa2"</code> kernels (<code>srt/layers/attention/flashinfer_backend.py</code>, lines 310–311), and the ragged prefill wrapper for new tokens uses <code>"auto"</code> (line 476; on SM100 it switches to <code>"fa2"</code> or <code>"cutlass"</code>). Lab B’s Metal kernel is a literal translation of these five steps.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 5 章 Memory architecture and data locality（经 shared memory 分块复用，正是 K<sub>j</sub>、V<sub>j</sub> 被一个查询块的所有行复用的方式）；Raschka 第 3 章（被分块的那个注意力本身）。在线 softmax 本身，参考书目里没有书讲，依据是 FlashAttention 和 FlashAttention-2 两篇论文。</p>
+  <p lang="en">Further reading: chapter 5 of PMPP, 5th ed., Memory architecture and data locality, on matrix multiplication with tiling (reuse through shared memory, exactly how K<sub>j</sub> and V<sub>j</sub> are reused by every row of a query block); Raschka, Chapter 3 (the attention being tiled). No book in the bibliography covers the online softmax itself; it rests on the FlashAttention and FlashAttention-2 papers.</p>
+
+  <h3 lang="zh-CN">3. FA3：Hopper 上的 warp 专门化与 FP8</h3><h3 lang="en">3. FA3: warp specialization and FP8 on Hopper</h3>
+  <p lang="zh-CN">FlashAttention-3（arXiv:2407.08608，v2）的摘要开门见山：FA2 在 H100 上只用到 35% 的算力。Hopper 的 tensor core（WGMMA）和 TMA 搬运都是异步的，FA3 用三招把它们用起来：</p>
+  <p lang="en">FlashAttention-3 (arXiv:2407.08608, v2) states it in its abstract: FA2 reaches only 35% utilization on the H100. Hopper’s tensor cores (WGMMA) and its TMA copies are both asynchronous, and FA3 uses three techniques to exploit them:</p>
+  <ul>
+    <li lang="zh-CN"><strong>warp 专门化</strong>：一部分 warp 只负责用 TMA 把 K、V 块搬进 shared memory（生产者），其余的 warpgroup 只做矩阵乘和 softmax（消费者），搬运与计算整体重叠。</li>
+    <li lang="en"><strong>Warp specialization</strong>: some warps only bring K and V tiles into shared memory with TMA (producers) while the other warpgroups only do the matmuls and the softmax (consumers), so data movement overlaps computation as a whole.</li>
+    <li lang="zh-CN"><strong>GEMM 与 softmax 交错</strong>：softmax 里的 exp 不走 tensor core，吞吐低得多（H100 上 exp 所用的多功能单元只有 3.9 TFLOPS，矩阵乘是 989 TFLOPS，FA3 论文第 3.2 节）；FA3 让一个 warpgroup 做 softmax 时另一个做 GEMM，并在一个 warpgroup 内部把下一块的 QK<sup>T</sup> 与这一块的 softmax 流水起来（论文正文称前者为 ping-pong 调度）。</li>
+    <li lang="en"><strong>Interleaved GEMM and softmax</strong>: the exp in softmax does not run on the tensor cores and has far lower throughput (the H100’s multi-function units that compute exp deliver 3.9 TFLOPS against 989 TFLOPS of matmul, §3.2 of the FA3 paper); FA3 has one warpgroup do softmax while another does a GEMM, and pipelines the next tile’s QK<sup>T</sup> with this tile’s softmax inside one warpgroup (the paper body calls the former ping-pong scheduling).</li>
+    <li lang="zh-CN"><strong>FP8</strong>：块量化（每块一个缩放因子）加上非相干处理（把 Q 和 K 乘以一个随机 ±1 对角矩阵再乘一个 Hadamard 矩阵来摊平离群值，FA3 论文第 3.3 节，可以在 O(d log d) 内算完），摘要说 FP8 版本的数值误差比基线 FP8 注意力低 2.6 倍。</li>
+    <li lang="en"><strong>FP8</strong>: block quantization (one scale per block) plus incoherent processing (multiplying Q and K by a random ±1 diagonal matrix times a Hadamard matrix to spread out outliers, §3.3 of the FA3 paper, computable in O(d log d)); the abstract says the FP8 version has 2.6 times lower numerical error than a baseline FP8 attention.</li>
+  </ul>
+  <p lang="zh-CN">摘要给的结果：在 H100 上比 FA2 快 1.5–2.0 倍，FP16 最高 740 TFLOPs/s（75% 利用率），FP8 接近 1.2 PFLOPs/s。这些是论文作者的数字，本页没有复现。FlashAttention 仓库的 README（2026-11-01 读取）把 FA3 放在 <code>hopper/</code> 目录，写明「optimized for Hopper GPUs」，要求 H100 / H800 和 CUDA 12.3 以上。</p>
+  <p lang="en">The abstract’s results: 1.5–2.0 times as fast as FA2 on the H100, up to 740 TFLOPs/s in FP16 (75% utilization) and close to 1.2 PFLOPs/s in FP8. These are the authors’ figures; this page did not reproduce them. The FlashAttention repository’s README (read 2026-11-01) puts FA3 in the <code>hopper/</code> directory, describes it as “optimized for Hopper GPUs”, and requires an H100 / H800 with CUDA 12.3 or later.</p>
+  <p lang="zh-CN">SGLang 的 <code>fa3</code> 后端不直接用上游仓库，而是自己编进内核库：<code>python/sglang/kernels/aot/CMakeLists.txt</code> 第 83–89 行从 <code>sgl-project/sgl-attn</code> 的一个固定提交取源码，编译其中 <code>hopper/</code> 下的 sm90 实例（第 415–433 行，含 e4m3 即 FP8 的实例），并加上 sm80/sm86 的 FA3 实例（第 406–414 行；<code>ENABLE_BELOW_SM90</code> 默认打开）。上游 FA3 只支持 Hopper，SGLang 的 fa3 后端却还接受 sm_80 到 sm_89（<code>ops/attention/flash_attention_v3.py</code> 第 84–97 行；后端注册处的断言 <code>srt/layers/attention/attention_registry.py</code> 第 243–250 行也接受 SM 8.x 上的非 MLA 模型），所以 L4（sm_89）上指定 <code>fa3</code> 不会被拒绝。发布的 wheel 能不能在 L4 上跑 fa3，没有核对：SGLang 先试 hub 内核 <code>kernels-community/sgl-flash-attn3</code>，它写着只支持 Hopper，只给 torch 2.9–2.11 出构建；在 torch 2.14.1 上退回 sgl_kernel 是推断。所以 Lab A 在 L4 上不用它。</p>
+  <p lang="en">SGLang’s <code>fa3</code> backend does not use the upstream repository directly but builds it into its own kernel library: lines 83–89 of <code>python/sglang/kernels/aot/CMakeLists.txt</code> fetch the source from a pinned commit of <code>sgl-project/sgl-attn</code> and compile its sm90 instances under <code>hopper/</code> (lines 415–433, including the e4m3, that is FP8, instances), and add sm80/sm86 FA3 instances (lines 406–414; <code>ENABLE_BELOW_SM90</code> is on by default). FA3 upstream is Hopper-only, but SGLang’s fa3 backend also admits sm_80 to sm_89 (lines 84–97 of <code>ops/attention/flash_attention_v3.py</code>; the assertion where the backend is registered, <code>srt/layers/attention/attention_registry.py</code> lines 243–250, also accepts non-MLA models on SM 8.x), so asking for <code>fa3</code> on an L4 (sm_89) is not refused. Whether the released wheel runs fa3 on an L4 was not checked: SGLang first tries the hub kernel <code>kernels-community/sgl-flash-attn3</code>, which says Hopper only and ships builds for torch 2.9–2.11; the fallback to sgl_kernel on torch 2.14.1 is inferred. So Lab A does not use it on the L4.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 Hopper 的 WGMMA、TMA 或 FA3，这一概念依据 FA3 论文和 FlashAttention 仓库 README 的 FlashAttention-3 一节。</p>
+  <p lang="en">Further reading: no book in the bibliography covers Hopper’s WGMMA, TMA or FA3; this concept rests on the FA3 paper and the FlashAttention-3 section of the FlashAttention repository’s README.</p>
+
+  <h3 lang="zh-CN">4. 解码：split-KV（flash-decoding）</h3><h3 lang="en">4. Decode: split-KV (flash-decoding)</h3>
+  <p lang="zh-CN">FlashAttention 沿批和查询块分配线程块。解码时查询长度是 1，线程块数就只剩「批大小 × 头数」这么多。Flash-Decoding 的文章（Dao、Haziza、Massa、Sizov，Stanford CRFM，2023-10-12）说得很直白：批大小小于 SM 数时（A100 有 108 个），这个算子只用到 GPU 的一小部分；批大小为 1 时 FlashAttention 用不到 GPU 的 1%。解法分三步，文章原样列出：</p>
+  <p lang="en">FlashAttention assigns thread blocks along the batch and the query blocks. In decode the query length is 1, so the number of thread blocks shrinks to batch size × heads. The Flash-Decoding post (Dao, Haziza, Massa and Sizov, Stanford CRFM, 2023-10-12) puts it plainly: when the batch size is smaller than the number of SMs (108 on an A100), the operation uses only a small part of the GPU, and at batch size 1 FlashAttention uses less than 1% of it. The fix has three steps, which the post lists as such:</p>
+  <ol>
+    <li lang="zh-CN">把 K/V 沿长度切成 S 段。</li>
+    <li lang="en">Split the K/V along its length into S chunks.</li>
+    <li lang="zh-CN">每一段由自己的线程块并行地算查询对这一段的注意力（段内就是概念 2 的在线 softmax），写出未归一化的部分输出 o<sub>s</sub>，外加每行每段一个标量：这一段的 log-sum-exp（等价于这里的 m<sub>s</sub> 与 l<sub>s</sub>）。</li>
+    <li lang="en">Compute the query’s attention to each chunk in parallel in its own thread block (the online softmax of concept 2 within the chunk), writing an unnormalized partial output o<sub>s</sub> plus one scalar per row per split: that chunk’s log-sum-exp (equivalent to m<sub>s</sub> and l<sub>s</sub> here).</li>
+    <li lang="zh-CN">再起一个小内核合并：M = max<sub>s</sub> m<sub>s</sub>，w<sub>s</sub> = exp(m<sub>s</sub> − M)，o = Σ w<sub>s</sub>·o<sub>s</sub> ÷ Σ w<sub>s</sub>·l<sub>s</sub>。这和块内的缩放是同一个公式，所以结果同样精确。</li>
+    <li lang="en">Merge in one more small kernel: M = max<sub>s</sub> m<sub>s</sub>, w<sub>s</sub> = exp(m<sub>s</sub> − M), o = Σ w<sub>s</sub>·o<sub>s</sub> ÷ Σ w<sub>s</sub>·l<sub>s</sub>. This is the same formula as the in-tile rescaling, so the result is just as exact.</li>
+  </ol>
+  <p lang="zh-CN">代价是每段多写 d + 2 个数、多一次启动，和整段 KV 比微不足道；收益是线程块数从「批 × 头」变成「批 × 头 × S」，带宽能用满。切多少段要权衡：太少填不满 GPU，太多则每段太短、合并变贵。v0.5.22 里三种做法：FlashInfer 的解码 wrapper 在 <code>plan()</code> 里决定切分（SGLang 文档 <code>attention_backend.mdx</code> 讲如何实现后端的部分，第 745 行说 <code>init_forward_metadata</code> 里调用 plan 函数做 split_kv 这类优化；Phase 3 细讲 plan/run）；Triton 后端用固定上限 <code>--triton-attention-num-kv-splits</code>，默认 8，帮助文字写的正是「flash decoding Triton kernel」（<code>arg_groups/fields/exec_.py</code> 第 359–362 行），内核在 <code>python/sglang/kernels/ops/attention/decode_attention.py</code>：分段的 <code>_fwd_kernel_stage1</code>（GQA 用 <code>_fwd_grouped_kernel_stage1</code>）和合并的 <code>_fwd_kernel_stage2</code>；FA3 后端把 <code>num_splits</code> 设成 0，源码注释说这是把 SplitKV 的大小交给 FA 运行时决定（<code>flashattention_backend.py</code> 第 338–341 行）。</p>
+  <p lang="en">The cost is d + 2 extra numbers written per split and one more launch, negligible against the whole KV; the gain is that thread blocks go from batch × heads to batch × heads × S, so the bandwidth can be used in full. The number of splits is a trade-off: too few leaves the GPU unfilled, too many makes each split short and the merge expensive. v0.5.22 does it three ways: FlashInfer’s decode wrapper decides the split in <code>plan()</code> (the part of SGLang’s <code>attention_backend.mdx</code> on implementing a backend says, on line 745, that <code>init_forward_metadata</code> calls the plan function for optimizations such as split_kv; Phase 3 covers plan/run); the Triton backend uses a fixed cap, <code>--triton-attention-num-kv-splits</code>, default 8, whose help text says exactly “flash decoding Triton kernel” (<code>arg_groups/fields/exec_.py</code>, lines 359–362), with the kernels in <code>python/sglang/kernels/ops/attention/decode_attention.py</code>: <code>_fwd_kernel_stage1</code> for the splits (<code>_fwd_grouped_kernel_stage1</code> under GQA) and <code>_fwd_kernel_stage2</code> for the merge; the FA3 backend sets <code>num_splits</code> to 0, which the source comment says delegates SplitKV sizing to the FA runtime (<code>flashattention_backend.py</code>, lines 338–341).</p>
+  <p lang="zh-CN">同一个合并公式在 SGLang 里还出现在另一处：FlashInfer 后端做预填充时，新 token 之间的注意力用 ragged wrapper（因果）、对已缓存前缀的注意力用 paged wrapper（不因果），两边各返回输出和 LSE，再用 <code>merge_state</code> 合并（<code>flashinfer_backend.py</code> 第 1442–1463 行）。这就是概念 6 里分块预填充和 Phase 1 前缀共享背后的那一步。</p>
+  <p lang="en">The same merge formula appears in one more place in SGLang: during prefill, the FlashInfer backend computes attention among the new tokens with the ragged wrapper (causal) and attention to the cached prefix with the paged wrapper (not causal); each returns an output and an LSE, and <code>merge_state</code> combines them (<code>flashinfer_backend.py</code>, lines 1442–1463). This is the step behind chunked prefill in concept 6 and prefix sharing in Phase 1.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 split-KV，这一概念依据 Flash-Decoding 文章和 FlashInfer 论文（arXiv:2501.01005）。</p>
+  <p lang="en">Further reading: no book in the bibliography covers split-KV; this concept rests on the Flash-Decoding post and the FlashInfer paper (arXiv:2501.01005).</p>
+
+  <h3 lang="zh-CN">5. MLA：DeepSeek 式模型的 KV</h3><h3 lang="en">5. MLA: the KV of DeepSeek-style models</h3>
+  <p lang="zh-CN">多头潜在注意力（MLA）由 DeepSeek-V2（arXiv:2405.04434，v5）提出，摘要说 MLA 把 KV 缓存显著压缩成一个潜向量，并说 DeepSeek-V2 比 DeepSeek 67B 的 KV 缓存少 93.3%；DeepSeek-V3 技术报告（arXiv:2412.19437，v2）沿用了它。不缓存每个头的 k、v，而是每个 token 缓存一个共享的潜向量 c<sub>KV</sub>，外加一个单独携带 RoPE 的小键。DeepSeek-V3 的 <code>config.json</code>（2026-11-01 从 Hugging Face 读取）：128 个注意力头，<code>kv_lora_rank</code> 512，<code>qk_rope_head_dim</code> 64，<code>qk_nope_head_dim</code> 128，<code>v_head_dim</code> 128，61 层。于是每个 token 每层缓存 512 + 64 = 576 个数；同样的头数若用普通多头注意力，要缓存 128 × (128 + 64) 个键和 128 × 128 个值，共 40960 个，约是 MLA 的 71 倍（由 config 推出）。SGLang 内置 FlashMLA 的构建文件里有名为 <code>phase1_k576</code> 的稀疏预填充实例（第 120 行），与这个 576 对得上（推断）。</p>
+  <p lang="en">Multi-head latent attention (MLA) was introduced by DeepSeek-V2 (arXiv:2405.04434, v5), whose abstract says MLA significantly compresses the KV cache into a latent vector and that DeepSeek-V2 has a 93.3% smaller KV cache than DeepSeek 67B; the DeepSeek-V3 technical report (arXiv:2412.19437, v2) keeps it. Instead of caching each head’s k and v, each token caches one shared latent vector c<sub>KV</sub> plus a small separate key that carries RoPE. DeepSeek-V3’s <code>config.json</code> (read from Hugging Face on 2026-11-01): 128 attention heads, <code>kv_lora_rank</code> 512, <code>qk_rope_head_dim</code> 64, <code>qk_nope_head_dim</code> 128, <code>v_head_dim</code> 128, 61 layers. So each token caches 512 + 64 = 576 numbers per layer; ordinary multi-head attention with the same heads would cache 128 × (128 + 64) keys and 128 × 128 values, 40960 in all, about 71 times as much (derived from the config). The build file of SGLang’s bundled FlashMLA has a sparse-prefill instance named <code>phase1_k576</code> (line 120), which matches this 576 (an inference).</p>
+  <p lang="zh-CN">对内核来说，变化在运算强度上。DeepSeek-V2 论文描述了把上投影矩阵「吸收」进查询和输出投影的算法，解码时 128 个查询头都直接对同一份 576 维的潜向量做注意力，就像一个 128 组的多查询注意力。按这个吸收形式推算：每个缓存 token 读 576 × 2 = 1152 字节，每个头做 2 × 576（打分）+ 2 × 512（对潜向量加权）= 2176 FLOP，128 个头共约 27.9 万 FLOP，约 242 FLOP/字节，比 Qwen3-8B 的 4 高六十倍。这是推断，不是测量；张量并行把头分到几张卡上时，每张卡上的强度相应降低。所以 MLA 的解码内核要像预填充那样认真对待 tensor core，FlashMLA 就是为此写的。</p>
+  <p lang="en">For the kernel, the change is in arithmetic intensity. The DeepSeek-V2 paper describes absorbing the up-projection matrices into the query and output projections, so in decode all 128 query heads attend directly to the same 576-dimensional latent, like a multi-query attention with 128 heads per group. Worked out in that absorbed form: each cached token reads 576 × 2 = 1152 bytes, and each head does 2 × 576 (scoring) + 2 × 512 (weighting the latent) = 2176 FLOP, about 279 thousand FLOP over 128 heads, about 242 FLOP per byte, sixty times Qwen3-8B’s 4. This is an inference, not a measurement; when tensor parallelism spreads the heads over several GPUs, the intensity on each GPU drops accordingly. So an MLA decode kernel has to take the tensor cores as seriously as a prefill kernel does, which is what FlashMLA was written for.</p>
+  <p lang="zh-CN"><strong>FlashMLA 现在在哪一层。</strong>上游 <code>deepseek-ai/FlashMLA</code> 的 README（<code>main</code>，2026-11-01 读取）开头的破坏性变更通知说：2026.09.30 的版本移除了对 Hopper 架构和前代模型（包括 DeepSeek V3 / V3.2 / V4.0）的支持，改了 FP8 / FP4 KV 缓存格式，需要 Hopper 时切回提交 <code>ba89a3466e9470ad08ab39738d4e7bb66989e1e7</code>；它的要求一节写的是 SM100 / SM103。SGLang v0.5.22 内置的不是上游，而是 <code>sgl-project/FlashMLA</code> 的提交 <code>3620b63</code>（2026-09-28，早于上游那次发布两天；<code>python/sglang/kernels/aot/cmake/flashmla.cmake</code> 第 1–8 行，注释写的是 DeepSeek v4.1 的内核）。这个构建文件仍然生成 <code>sm_90a</code> 代码（第 29–35 行），并编译 sm90 的稠密与稀疏解码（第 105–115 行），CUDA 12.8 以上再加 <code>sm_100f</code>，13.0 以上再加 <code>sm_103a</code>。也就是说，按源码，SGLang 自带的 FlashMLA 在 H100 上有内核；但一个 MLA 模型要在一张 H100 上跑起来、<code>flashmla</code> 后端能不能接它，本页都没有核对，所以 FlashMLA 在本页只作描述，不放进任何一层实验。<code>--attention-backend flashmla</code> 要求 page size 64（<code>attention_backend.mdx</code> 第 329 行），文档给的示例是 8 卡跑 DeepSeek-R1。</p>
+  <p lang="en"><strong>Where FlashMLA sits now.</strong> The breaking-change notice at the top of the upstream <code>deepseek-ai/FlashMLA</code> README (<code>main</code>, read 2026-11-01) says that the 2026.09.30 release removed support for the Hopper architecture and for earlier models (including DeepSeek V3 / V3.2 / V4.0) and changed the FP8 / FP4 KV-cache format, and that Hopper users should switch to commit <code>ba89a3466e9470ad08ab39738d4e7bb66989e1e7</code>; its requirements section says SM100 / SM103. SGLang v0.5.22 does not bundle upstream but commit <code>3620b63</code> of <code>sgl-project/FlashMLA</code> (2026-09-28, two days before that upstream release; <code>python/sglang/kernels/aot/cmake/flashmla.cmake</code>, lines 1–8, whose comment says DeepSeek v4.1 kernels). That build file still generates <code>sm_90a</code> code (lines 29–35) and compiles the sm90 dense and sparse decode (lines 105–115), adding <code>sm_100f</code> above CUDA 12.8 and <code>sm_103a</code> from 13.0. So by the source, SGLang’s own FlashMLA does have kernels for the H100; but whether an MLA model can run on one H100 and whether the <code>flashmla</code> backend accepts it were not checked here, so FlashMLA is only described on this page and placed in no lab tier. <code>--attention-backend flashmla</code> requires page size 64 (<code>attention_backend.mdx</code>, line 329), and the documentation’s example runs DeepSeek-R1 on 8 GPUs.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有一本书讲 MLA，这一概念依据 DeepSeek-V2 论文讲 MLA 的一节、DeepSeek-V3 技术报告讲架构的一节，以及 FlashMLA 的 README。</p>
+  <p lang="en">Further reading: no book in the bibliography covers MLA; this concept rests on the MLA section of the DeepSeek-V2 paper, the architecture section of the DeepSeek-V3 technical report, and the FlashMLA README.</p>
+
+  <h3 lang="zh-CN">6. 分块预填充与按阶段选后端</h3><h3 lang="en">6. Chunked prefill and choosing a backend per phase</h3>
+  <p lang="zh-CN"><strong>分块预填充</strong>：一个很长的提示不一次预填充完，而是按 <code>--chunked-prefill-size</code> 个 token 一块地做，帮助文字是「The maximum number of tokens in a chunk for the chunked prefill」，设成 -1 关闭（<code>arg_groups/fields/schedule.py</code> 第 52–55 行）。默认值是 None，启动时按显存大小决定（<code>arg_groups/memory_hook.py</code> 的 <code>handle_gpu_memory_settings</code>，第 90–111 行；门槛按 MiB 比较，<code>gpu_mem</code> 来自 <code>nvidia-smi</code>，单位 MiB）：20 GB 以下 2048，20–35 GB 是 4096（L4 的 24 GB 落在这一档），60–90 GB 是 8192（H100 80 GB）。<code>--enable-mixed-chunk</code> 让预填充块和正在解码的请求拼进同一批（同一文件第 202–205 行），这就是 Phase 0 提到的 <code>ForwardMode.MIXED</code>。对内核而言，第 k 块的查询要看前面所有块已经写进缓存的 KV，再加自己块内的因果部分：查询长度小于 KV 长度、前缀不因果、块内因果。FlashInfer 后端用概念 4 末尾那对 ragged + paged 调用和 <code>merge_state</code> 处理它。这样做的好处在调度上：一个长提示不会一口气占住 GPU 几百毫秒，让正在解码的请求干等（推断：这是对调度目的的概括，源码帮助文字没有这样写）。</p>
+  <p lang="en"><strong>Chunked prefill</strong>: a very long prompt is not prefilled all at once but in chunks of <code>--chunked-prefill-size</code> tokens, whose help text is “The maximum number of tokens in a chunk for the chunked prefill”; -1 turns it off (<code>arg_groups/fields/schedule.py</code>, lines 52–55). The default is None, decided at startup by memory size (<code>handle_gpu_memory_settings</code> in <code>arg_groups/memory_hook.py</code>, lines 90–111; the thresholds are compared in MiB, and <code>gpu_mem</code> comes from <code>nvidia-smi</code> in MiB): 2048 below 20 GB, 4096 for 20–35 GB (the L4’s 24 GB falls here), 8192 for 60–90 GB (an 80 GB H100). <code>--enable-mixed-chunk</code> lets a prefill chunk and the requests being decoded share one batch (lines 202–205 of the same file), which is the <code>ForwardMode.MIXED</code> of Phase 0. For the kernel, the queries of chunk k must see the KV that all earlier chunks have already written into the cache plus the causal part inside their own chunk: a query length shorter than the KV length, a non-causal prefix and a causal chunk. The FlashInfer backend handles it with the ragged + paged pair and <code>merge_state</code> from the end of concept 4. The benefit is in scheduling: one long prompt does not hold the GPU for hundreds of milliseconds while running decodes wait (an inference summarizing the scheduling purpose; the source help text does not say this).</p>
+  <p lang="zh-CN"><strong>按阶段选后端</strong>：v0.5.22 的 <code>arg_groups/fields/exec_.py</code> 第 165–192 行定义了三个字段，字段名按 <code>arg_utils.py</code> 第 288–290 行的规则（下划线换成连字符、前面加 <code>--</code>）变成命令行参数：</p>
+  <p lang="en"><strong>Choosing a backend per phase</strong>: lines 165–192 of <code>arg_groups/fields/exec_.py</code> at v0.5.22 define three fields, which become command-line flags by the rule on lines 288–290 of <code>arg_utils.py</code> (underscores become hyphens, prefixed with <code>--</code>):</p>
+  <ul>
+    <li lang="zh-CN"><code>--attention-backend</code>：「Choose the kernels for attention layers.」</li>
+    <li lang="en"><code>--attention-backend</code>: “Choose the kernels for attention layers.”</li>
+    <li lang="zh-CN"><code>--prefill-attention-backend</code>：「Choose the kernels for prefill attention layers (have priority over --attention-backend).」</li>
+    <li lang="en"><code>--prefill-attention-backend</code>: “Choose the kernels for prefill attention layers (have priority over --attention-backend).”</li>
+    <li lang="zh-CN"><code>--decode-attention-backend</code>：「Choose the kernels for decode attention layers (have priority over --attention-backend).」</li>
+    <li lang="en"><code>--decode-attention-backend</code>: “Choose the kernels for decode attention layers (have priority over --attention-backend).”</li>
+  </ul>
+  <p lang="zh-CN">三者的取值都来自 <code>arg_groups/choices.py</code> 第 69–99 行的同一张表，NVIDIA 上有 <code>fa3</code>、<code>fa4</code>、<code>flashinfer</code>、<code>flashmla</code>、<code>trtllm_mla</code>、<code>cutedsl_mla</code>、<code>trtllm_mha</code> 等，通用的有 <code>triton</code>、<code>torch_native</code>、<code>flex_attention</code>。文档 <code>attention_backend.mdx</code>（第 507–542 行）把预填充和解码用不同后端叫作 hybrid attention，标为实验性功能：只设其中一个时，另一个阶段继承 <code>--attention-backend</code>；两个都设且不同，就自动套上 <code>hybrid_attn_backend.py</code> 的 <code>HybridAttnBackend</code>，它把 EXTEND 交给预填充后端、DECODE 交给解码后端。不指定时的自动选择（同一文档第 545–559 行）：MHA 模型在 Hopper 上默认 <code>fa3</code>，Blackwell 上默认 <code>trtllm_mha</code>，Ampere、Ada 等其他架构默认 <code>flashinfer</code>，不可用时退回 <code>triton</code>；MLA 模型在 Hopper 上默认 <code>fa3</code>，Blackwell 上默认 <code>flashinfer</code>（DeepSeek V3 自动选 <code>trtllm_mla</code>），其他架构默认 <code>triton</code>。为什么要分开选：预填充要的是把 tensor core 喂饱的分块内核，解码要的是能分页收集、能切分、能进 CUDA 图的流式内核，最擅长两头的往往不是同一个库；文档的原话是「one backend excels at prefill and another excels at decode」。</p>
+  <p lang="en">All three take their values from the same list on lines 69–99 of <code>arg_groups/choices.py</code>: on NVIDIA there are <code>fa3</code>, <code>fa4</code>, <code>flashinfer</code>, <code>flashmla</code>, <code>trtllm_mla</code>, <code>cutedsl_mla</code>, <code>trtllm_mha</code> and others, and generic ones such as <code>triton</code>, <code>torch_native</code> and <code>flex_attention</code>. The documentation, <code>attention_backend.mdx</code> (lines 507–542), calls using different backends for prefill and decode hybrid attention and marks it experimental: set only one of the two and the other phase inherits <code>--attention-backend</code>; set both and differently, and <code>HybridAttnBackend</code> from <code>hybrid_attn_backend.py</code> is wrapped around them automatically, sending EXTEND to the prefill backend and DECODE to the decode backend. Automatic selection when nothing is given (the same document, lines 545–559): for MHA models, <code>fa3</code> on Hopper, <code>trtllm_mha</code> on Blackwell, and <code>flashinfer</code> on other architectures such as Ampere and Ada, falling back to <code>triton</code>; for MLA models, <code>fa3</code> on Hopper, <code>flashinfer</code> on Blackwell (with <code>trtllm_mla</code> picked automatically for DeepSeek V3), and <code>triton</code> elsewhere. Why choose separately: prefill wants a tiled kernel that keeps the tensor cores fed, decode wants a streaming kernel that gathers pages, splits and fits in a CUDA graph, and the library best at one is often not the one best at the other; in the documentation’s words, “one backend excels at prefill and another excels at decode”.</p>
+  <p lang="zh-CN">延伸阅读：Huyen《AI Engineering》推理优化一章里预填充与解码分开处理的讨论（服务层面的视角）；参数本身依据 v0.5.22 的 <code>exec_.py</code>、<code>schedule.py</code>、<code>memory_hook.py</code> 和 <code>attention_backend.mdx</code>。</p>
+  <p lang="en">Further reading: the discussion of handling prefill and decode separately in the inference-optimization chapter of Huyen’s <em>AI Engineering</em> (from the serving side); the flags themselves rest on <code>exec_.py</code>, <code>schedule.py</code>, <code>memory_hook.py</code> and <code>attention_backend.mdx</code> at v0.5.22.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：阶段 ↔ 受什么限制 ↔ 内核家族 ↔ 后端参数</h2><h2 id="compare-en" lang="en">Comparison: phase ↔ bound ↔ kernel family ↔ backend flag</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">阶段（<code>ForwardMode</code>）</span><span lang="en">Phase (<code>ForwardMode</code>)</span></th><th><span lang="zh-CN">受什么限制</span><span lang="en">Bound</span></th><th><span lang="zh-CN">内核家族</span><span lang="en">Kernel family</span></th><th><span lang="zh-CN">v0.5.22 的后端参数</span><span lang="en">Backend flag at v0.5.22</span></th></tr>
+    <tr><td><span lang="zh-CN">预填充（<code>EXTEND</code>），长提示</span><span lang="en">Prefill (<code>EXTEND</code>), a long prompt</span></td><td><span lang="zh-CN">算力；强度约随 T 线性增长（Qwen3-8B，T = 4096 时约 1640 FLOP/字节）。前提是 S 不落显存</span><span lang="en">Compute; intensity grows about linearly with T (about 1640 FLOP per byte for Qwen3-8B at T = 4096), provided S never reaches memory</span></td><td><span lang="zh-CN">分块注意力加在线 softmax：FlashInfer 的 FA2 式内核；Hopper 上的 FA3（warp 专门化、FP8）；<code>fa4</code></span><span lang="en">Tiled attention with the online softmax: FlashInfer’s FA2-style kernels; FA3 on Hopper (warp specialization, FP8); <code>fa4</code></span></td><td><span lang="zh-CN"><code>--prefill-attention-backend</code>，未设时继承 <code>--attention-backend</code></span><span lang="en"><code>--prefill-attention-backend</code>, inheriting <code>--attention-backend</code> when unset</span></td></tr>
+    <tr><td><span lang="zh-CN">分块预填充（<code>EXTEND</code>，加 <code>--enable-mixed-chunk</code> 时为 <code>MIXED</code>）</span><span lang="en">Chunked prefill (<code>EXTEND</code>, or <code>MIXED</code> with <code>--enable-mixed-chunk</code>)</span></td><td><span lang="zh-CN">算力，按块大小计；每块还要读一遍已缓存的前缀</span><span lang="en">Compute, at the chunk size; each chunk also reads the cached prefix once</span></td><td><span lang="zh-CN">同上的预填充内核，查询短于 KV：ragged（块内，因果）加 paged（前缀），用 LSE 合并</span><span lang="en">The same prefill kernels with queries shorter than the KV: ragged (inside the chunk, causal) plus paged (the prefix), merged by LSE</span></td><td><span lang="zh-CN"><code>--chunked-prefill-size</code>（L4 默认 4096，H100 默认 8192，-1 关闭）加预填充后端</span><span lang="en"><code>--chunked-prefill-size</code> (default 4096 on an L4 and 8192 on an H100, -1 to turn off) plus the prefill backend</span></td></tr>
+    <tr><td><span lang="zh-CN">解码（<code>DECODE</code>），MHA / GQA</span><span lang="en">Decode (<code>DECODE</code>), MHA / GQA</span></td><td><span lang="zh-CN">带宽；强度 = H<sub>q</sub> ÷ H<sub>kv</sub>（Qwen3-8B 是 4），与上下文长度无关</span><span lang="en">Bandwidth; intensity = H<sub>q</sub> ÷ H<sub>kv</sub> (4 for Qwen3-8B), independent of the context length</span></td><td><span lang="zh-CN">split-KV / flash-decoding：FlashInfer 的分页解码（<code>plan()</code> 定切分）、Triton 的 stage1 + stage2、FA3 的 <code>num_splits</code></span><span lang="en">Split-KV / flash-decoding: FlashInfer’s paged decode (splits set in <code>plan()</code>), Triton’s stage1 + stage2, FA3’s <code>num_splits</code></span></td><td><span lang="zh-CN"><code>--decode-attention-backend</code>；Triton 的切分上限 <code>--triton-attention-num-kv-splits</code>（默认 8）</span><span lang="en"><code>--decode-attention-backend</code>; Triton’s split cap <code>--triton-attention-num-kv-splits</code> (default 8)</span></td></tr>
+    <tr><td><span lang="zh-CN">解码，MLA（DeepSeek 式）</span><span lang="en">Decode, MLA (DeepSeek-style)</span></td><td><span lang="zh-CN">强度高得多：按吸收形式推算约 242 FLOP/字节（DeepSeek-V3 的 128 个头，单卡），已接近算力一侧</span><span lang="en">Far higher intensity: about 242 FLOP per byte in the absorbed form (DeepSeek-V3’s 128 heads on one GPU, derived), close to the compute side</span></td><td><span lang="zh-CN">对共享潜向量的多查询式解码：FlashMLA（SGLang 自带分支，sm90 与 sm100）、TRT-LLM MLA、CuTe DSL MLA、FlashInfer MLA</span><span lang="en">Multi-query-style decode over the shared latent: FlashMLA (SGLang’s own fork, sm90 and sm100), TRT-LLM MLA, CuTe DSL MLA, FlashInfer MLA</span></td><td><span lang="zh-CN"><code>--attention-backend flashmla</code>（page size 64）、<code>trtllm_mla</code>、<code>cutedsl_mla</code>；不指定时 Hopper 上默认 <code>fa3</code></span><span lang="en"><code>--attention-backend flashmla</code> (page size 64), <code>trtllm_mla</code>, <code>cutedsl_mla</code>; with nothing given, <code>fa3</code> by default on Hopper</span></td></tr>
+  </table>
+  </div>
+  <p class="small" lang="zh-CN">参数名、取值和默认值都按 v0.5.22 标签下的源文件和 <code>docs/docs/advanced_features/attention_backend.mdx</code>，2026-11-01 用 curl 取回核对。强度一栏是由形状推出的下限，不是测量值。这张表的两侧不是 NVIDIA 与 Apple，所以表头不着色。</p>
+  <p class="small" lang="en">Flag names, values and defaults follow the source files and <code>docs/docs/advanced_features/attention_backend.mdx</code> at the v0.5.22 tag, fetched with curl and checked on 2026-11-01. The intensity column gives lower bounds derived from the shapes, not measurements. The two sides of this table are not NVIDIA and Apple, so its headers carry no colour.</p>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) FlashAttention-2 的分块：运行最大值与运行和</h3><h3 lang="en">(a) FlashAttention-2 tiling: the running max and the running sum</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 460" data-interval="2800"
+         data-captions='["全图：上面是显存里的 Q、K、V、O，下面是一个线程块的片上存储。这个线程块负责第 3 个查询块 Q_i，按块读入 K_j、V_j；右边是每一行的运行状态。按播放逐步看。",
+           "1. 把查询块 Q_i（Br 行）从显存读进片上，只读这一次。整个计算过程中它一直留在片上。",
+           "2. 读入第 1 块 K_1、V_1。在片上算 S = Q_i 乘 K_1 的转置再乘 scale，取每行最大值 m，P = exp(S − m)，l = P 的行和，O = P 乘 V_1。S 和 P 都不离开片上。",
+           "3. 读入第 2 块。新的行最大值 m′ 可能比 m 大，于是旧的 l 和 O 先乘 exp(m − m′) 换到新的基准，再加上这一块的贡献。这就是在线 softmax。",
+           "4. 第 3 块正好在对角线上，按因果掩码掩掉一半；第 4 块整块都在对角线右边，直接跳过，连读都不读。",
+           "5. 所有块走完，O_i = O ÷ l，写回显存一次。显存里只多了这一块输出，S 和 P 从来没有写回去。",
+           "6. 手算一行：分数 1、3 在第 1 块，5、2 在第 2 块。分块算出的和 1.203 与整行一次算出的完全相同，在线 softmax 是精确的。",
+           "7. FlashAttention-2 改的是分工：网格按查询块、头和批展开，块内的 warp 按 Q 的行分工，彼此不用交换部分结果；1/l 只在最后乘一次，减少非矩阵乘的运算。"]'
+         data-captions-en='["The whole picture: above, Q, K, V and O in device memory; below, the on-chip storage of one thread block. This block owns the third query block Q_i and reads K_j and V_j tile by tile; on the right is the running state of each row. Press Play to step through.",
+           "1. The query block Q_i (Br rows) is read from device memory onto the chip, this once only. It stays on chip for the whole computation.",
+           "2. Tile 1, K_1 and V_1, comes in. On chip: S = Q_i times K_1 transposed times scale, m = the row maximum, P = exp(S − m), l = the row sum of P, O = P times V_1. Neither S nor P leaves the chip.",
+           "3. Tile 2 comes in. The new row maximum m′ may exceed m, so the old l and O are first multiplied by exp(m − m′) to move them to the new baseline, and then this tile is added. This is the online softmax.",
+           "4. Tile 3 lies on the diagonal and the causal mask hides half of it; tile 4 lies entirely to the right of the diagonal and is skipped without even being read.",
+           "5. After the last tile, O_i = O ÷ l is written back to device memory once. The only new data in memory is this block of output; S and P were never written back.",
+           "6. One row by hand: scores 1 and 3 in tile 1, 5 and 2 in tile 2. The tiled sum, 1.203, is exactly the sum computed over the whole row at once: the online softmax is exact.",
+           "7. FlashAttention-2 changes the division of work: the grid spans query blocks, heads and batch, the warps inside a block split the rows of Q so they never exchange partial results, and 1/l is applied once at the end to cut non-matmul FLOPs."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="24" class="small" lang="zh-CN">显存（HBM）：Q、K、V 各读一次，O 写一次</text><text x="30" y="24" class="small" lang="en">Device memory (HBM): Q, K, V read once each, O written once</text>
+      <rect class="box" x="30" y="52" width="110" height="60"/>
+      <rect class="box" x="180" y="52" width="88" height="26"/><rect class="box" x="180" y="86" width="88" height="26"/>
+      <rect class="box" x="275" y="52" width="88" height="26"/><rect class="box" x="275" y="86" width="88" height="26"/>
+      <rect class="box" x="370" y="52" width="88" height="26"/><rect class="box" x="370" y="86" width="88" height="26"/>
+      <rect class="box" x="465" y="52" width="88" height="26"/><rect class="box" x="465" y="86" width="88" height="26"/>
+      <rect class="box" x="580" y="52" width="110" height="60"/>
+      <rect class="box" x="30" y="160" width="110" height="56"/>
+      <rect class="box" x="180" y="160" width="180" height="56"/>
+      <rect class="box" x="400" y="160" width="150" height="56"/>
+      <rect class="box" x="580" y="152" width="290" height="192"/>
+
+      <g data-step="1"><rect class="box" x="30" y="82" width="110" height="15"/><path class="arrow" d="M85 112 L85 156"/><rect class="box" x="30" y="160" width="110" height="56"/></g>
+      <g data-step="2"><rect class="box" x="180" y="52" width="88" height="26"/><rect class="box" x="180" y="86" width="88" height="26"/><path class="arrow" d="M224 112 L250 156"/></g>
+      <g data-step="3"><rect class="box" x="275" y="52" width="88" height="26"/><rect class="box" x="275" y="86" width="88" height="26"/><path class="arrow" d="M319 112 L290 156"/></g>
+      <g data-step="4"><rect class="box" x="370" y="52" width="88" height="26"/><rect class="box" x="370" y="86" width="88" height="26"/><path class="arrow" d="M414 112 L330 156"/></g>
+      <g data-step="2 3 4"><rect class="box" x="180" y="160" width="180" height="56"/><rect class="box" x="400" y="160" width="150" height="56"/><path class="arrow" d="M360 188 L396 188"/><path class="arrow" d="M550 188 L576 188"/></g>
+      <g data-step="5"><rect class="box" x="580" y="82" width="110" height="15"/><path class="arrow" d="M640 150 L640 114"/></g>
+
+      <path class="lane" d="M30 67 L140 67 M30 82 L140 82 M30 97 L140 97"/>
+      <path class="lane" d="M580 67 L690 67 M580 82 L690 82 M580 97 L690 97"/>
+      <path class="lane" d="M30 132 L870 132"/>
+      <text x="30" y="44" class="mono">Q</text>
+      <text x="180" y="44" class="small" lang="zh-CN">K_j、V_j：每块 Bc 个 token</text><text x="180" y="44" class="small" lang="en">K_j, V_j: Bc tokens per tile</text>
+      <text x="580" y="44" class="mono">O</text>
+      <text x="188" y="70" class="mono">K_1</text><text x="188" y="104" class="mono">V_1</text>
+      <text x="283" y="70" class="mono">K_2</text><text x="283" y="104" class="mono">V_2</text>
+      <text x="378" y="70" class="mono">K_3</text><text x="378" y="104" class="mono">V_3</text>
+      <text x="473" y="70" class="mono">K_4</text><text x="473" y="104" class="mono">V_4</text>
+      <text x="30" y="238" class="small" lang="zh-CN">片上：shared memory 与寄存器（一个线程块）</text><text x="30" y="238" class="small" lang="en">On chip: shared memory and registers (one thread block)</text>
+      <text x="42" y="184" class="mono">Q_i</text>
+      <text x="42" y="204" class="small" lang="zh-CN">Br 行 × d</text><text x="42" y="204" class="small" lang="en">Br rows × d</text>
+      <text x="192" y="184" class="mono">S = Q_i·K_jᵀ·scale</text>
+      <text x="192" y="204" class="small" lang="zh-CN">Br × Bc，只在片上</text><text x="192" y="204" class="small" lang="en">Br × Bc, on chip only</text>
+      <text x="412" y="184" class="mono">P = exp(S − m′)</text>
+      <text x="412" y="204" class="mono">O += P·V_j</text>
+      <text x="592" y="176" lang="zh-CN">每行的运行状态：m、l、O</text><text x="592" y="176" lang="en">Per-row running state: m, l, O</text>
+
+      <g data-step="1"><text x="146" y="94" class="mono">Q_i</text></g>
+      <g data-step="2">
+        <text x="592" y="202" lang="zh-CN">块 1：m = rowmax(S)</text><text x="592" y="202" lang="en">Tile 1: m = rowmax(S)</text>
+        <text x="592" y="220" class="mono">l = rowsum(P), O = P·V_1</text>
+      </g>
+      <g data-step="3">
+        <text x="592" y="246" lang="zh-CN">块 2：m′ = max(m, rowmax(S))</text><text x="592" y="246" lang="en">Tile 2: m′ = max(m, rowmax(S))</text>
+        <text x="592" y="264" class="mono">l ← l·exp(m − m′) + rowsum(P)</text>
+        <text x="592" y="282" class="mono">O ← O·exp(m − m′) + P·V_2</text>
+      </g>
+      <g data-step="4">
+        <text x="592" y="308" lang="zh-CN">块 3：掩掉一半；块 4：跳过</text><text x="592" y="308" lang="en">Tile 3: half masked; tile 4: skipped</text>
+        <text x="509" y="70" class="small" lang="zh-CN">✕ 跳过</text><text x="509" y="70" class="small" lang="en">✕ skip</text>
+        <text x="509" y="104" class="small" lang="zh-CN">✕ 跳过</text><text x="509" y="104" class="small" lang="en">✕ skip</text>
+      </g>
+      <g data-step="5">
+        <text x="592" y="334" lang="zh-CN">结束：O_i = O ÷ l，写回一次</text><text x="592" y="334" lang="en">End: O_i = O ÷ l, written once</text>
+        <text x="700" y="74" class="mono">O_i = O ÷ l</text>
+        <text x="700" y="94" class="small" lang="zh-CN">S、P 从不写回显存</text><text x="700" y="94" class="small" lang="en">S and P never reach HBM</text>
+      </g>
+      <path class="lane" d="M30 356 L870 356"/>
+      <g data-step="6">
+        <text x="30" y="378" lang="zh-CN">一行的例子：分数 [1, 3 | 5, 2]，两块</text><text x="30" y="378" lang="en">One row: scores [1, 3 | 5, 2], two tiles</text>
+        <text x="30" y="400" lang="zh-CN">块 1：m = 3，l = exp(−2) + exp(0) = 1.135</text><text x="30" y="400" lang="en">Tile 1: m = 3, l = exp(−2) + exp(0) = 1.135</text>
+        <text x="30" y="420" lang="zh-CN">块 2：m′ = 5，l = 1.135·exp(−2) + exp(0) + exp(−3) = 1.203</text><text x="30" y="420" lang="en">Tile 2: m′ = 5, l = 1.135·exp(−2) + exp(0) + exp(−3) = 1.203</text>
+        <text x="30" y="440" lang="zh-CN">整行一次：exp(−4) + exp(−2) + exp(0) + exp(−3) = 1.203，相同</text><text x="30" y="440" lang="en">Whole row: exp(−4) + exp(−2) + exp(0) + exp(−3) = 1.203, the same</text>
+      </g>
+      <g data-step="7">
+        <text x="620" y="378" lang="zh-CN">FA2 的分工</text><text x="620" y="378" lang="en">How FA2 divides the work</text>
+        <text x="620" y="400" lang="zh-CN">网格：查询块 × 头 × 批</text><text x="620" y="400" lang="en">Grid: Q blocks × heads × batch</text>
+        <text x="620" y="420" lang="zh-CN">warp 按 Q 的行分工，不分 K/V</text><text x="620" y="420" lang="en">Warps split rows of Q, not K/V</text>
+        <text x="620" y="440" lang="zh-CN">1/l 只在最后乘一次</text><text x="620" y="440" lang="en">1/l applied once, at the end</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) split-KV 解码：每段的部分结果与合并</h3><h3 lang="en">(b) Split-KV decode: partial results per split and the merge</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="2800"
+         data-captions='["全图：一个头在解码，1 个查询要对 L 个缓存 token 做注意力。上面是切成 4 段的 KV，中间是每段的部分结果，下面是合并内核和 GPU 上的 SM。按播放逐步看。",
+           "1. 不切分：查询长度是 1，一个头只有一个线程块，它从第一个 token 走到最后一个。批大小为 1 时整块 GPU 只有头数这么多个线程块在干活，其余 SM 空闲，带宽读不满。",
+           "2. 切分：沿长度把 KV 切成 S 段（这里 S = 4），每段一个线程块，同时读自己那一段。线程块数从头数变成头数乘 S。",
+           "3. 每个线程块在自己的段内做在线 softmax，写出这一段的最大值 m_s、和 l_s，以及未归一化的输出 o_s。每段只多写 d + 2 个数。",
+           "4. 合并内核读回 S 份部分结果：M 取各段最大值中最大的那个，每段的权重 w_s = exp(m_s − M)，o = 加权的 o_s 之和除以加权的 l_s 之和。",
+           "5. 结果与不切分时完全相同，不是近似：合并用的是和块内缩放同一个公式。Flash-Decoding 文章每段记一个 log-sum-exp，与这里的 m_s、l_s 等价。",
+           "6. 谁来定 S：FlashInfer 的解码 wrapper 在 plan() 里决定；Triton 后端用 --triton-attention-num-kv-splits，默认 8；FA3 后端把 num_splits 设成 0，交给 FA 运行时。",
+           "7. Lab B 在这台 M5 上实测：64K 个 token、8 个头、head_dim 128。每头 1 段用 17.01 ms，只读到 15.8 GB/s；每头 256 段用 2.15 ms，124.8 GB/s，结果与 CPU 参考一致。"]'
+         data-captions-en='["The whole picture: one head is decoding, so 1 query attends to L cached tokens. Above, the KV cut into 4 splits; in the middle, the partial result of each split; below, the merge kernel and the SMs of the GPU. Press Play to step through.",
+           "1. Unsplit: the query length is 1, so one head gets one thread block, which walks from the first token to the last. At batch size 1 the whole GPU has only as many thread blocks as there are heads; the other SMs sit idle and the bandwidth goes unused.",
+           "2. Split: cut the KV along its length into S splits (here S = 4), one thread block each, all reading their own split at the same time. The thread blocks go from the number of heads to heads times S.",
+           "3. Each thread block runs the online softmax within its split and writes the maximum m_s, the sum l_s and the unnormalized output o_s of that split. Each split writes only d + 2 extra numbers.",
+           "4. The merge kernel reads the S partial results back: M is the largest of the split maxima, the weight of each split is w_s = exp(m_s − M), and o is the weighted sum of the o_s divided by the weighted sum of the l_s.",
+           "5. The result is exactly the unsplit one, not an approximation: the merge uses the same formula as the in-tile rescaling. The Flash-Decoding post keeps one log-sum-exp per split, equivalent to m_s and l_s here.",
+           "6. Who picks S: the FlashInfer decode wrapper decides in plan(); the Triton backend uses --triton-attention-num-kv-splits, default 8; the FA3 backend sets num_splits to 0 and leaves it to the FA runtime.",
+           "7. Measured by Lab B on this M5: 64K tokens, 8 heads, head_dim 128. One split per head takes 17.01 ms and reads only 15.8 GB/s; 256 splits per head take 2.15 ms at 124.8 GB/s, and the result matches the CPU reference."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="24" class="small" lang="zh-CN">一个头的解码：1 个查询对 L 个缓存 token</text><text x="30" y="24" class="small" lang="en">Decode for one head: 1 query against L cached tokens</text>
+      <rect class="box" x="30" y="40" width="120" height="44"/>
+      <rect class="box" x="180" y="40" width="170" height="44"/><rect class="box" x="353" y="40" width="170" height="44"/>
+      <rect class="box" x="526" y="40" width="170" height="44"/><rect class="box" x="699" y="40" width="170" height="44"/>
+      <rect class="box" x="180" y="150" width="170" height="64"/><rect class="box" x="353" y="150" width="170" height="64"/>
+      <rect class="box" x="526" y="150" width="170" height="64"/><rect class="box" x="699" y="150" width="170" height="64"/>
+      <rect class="box" x="300" y="250" width="400" height="64"/>
+      <rect class="box" x="740" y="250" width="130" height="64"/>
+      <rect class="box" x="180" y="338" width="34" height="22"/><rect class="box" x="223" y="338" width="34" height="22"/><rect class="box" x="266" y="338" width="34" height="22"/><rect class="box" x="309" y="338" width="34" height="22"/>
+      <rect class="box" x="352" y="338" width="34" height="22"/><rect class="box" x="395" y="338" width="34" height="22"/><rect class="box" x="438" y="338" width="34" height="22"/><rect class="box" x="481" y="338" width="34" height="22"/>
+      <rect class="box" x="524" y="338" width="34" height="22"/><rect class="box" x="567" y="338" width="34" height="22"/><rect class="box" x="610" y="338" width="34" height="22"/><rect class="box" x="653" y="338" width="34" height="22"/>
+      <rect class="box" x="696" y="338" width="34" height="22"/><rect class="box" x="739" y="338" width="34" height="22"/><rect class="box" x="782" y="338" width="34" height="22"/><rect class="box" x="825" y="338" width="34" height="22"/>
+
+      <g data-step="1">
+        <path class="arrow" d="M180 102 L866 102"/>
+        <rect class="box" x="180" y="338" width="34" height="22"/>
+      </g>
+      <g data-step="2">
+        <path class="arrow" d="M330 86 L330 146"/><path class="arrow" d="M503 86 L503 146"/><path class="arrow" d="M676 86 L676 146"/><path class="arrow" d="M849 86 L849 146"/>
+        <rect class="box" x="180" y="338" width="34" height="22"/><rect class="box" x="223" y="338" width="34" height="22"/><rect class="box" x="266" y="338" width="34" height="22"/><rect class="box" x="309" y="338" width="34" height="22"/>
+      </g>
+      <g data-step="3">
+        <rect class="box" x="180" y="150" width="170" height="64"/><rect class="box" x="353" y="150" width="170" height="64"/>
+        <rect class="box" x="526" y="150" width="170" height="64"/><rect class="box" x="699" y="150" width="170" height="64"/>
+      </g>
+      <g data-step="4">
+        <path class="arrow" d="M265 214 L380 246"/><path class="arrow" d="M438 214 L460 246"/><path class="arrow" d="M611 214 L540 246"/><path class="arrow" d="M784 214 L620 246"/>
+        <rect class="box" x="300" y="250" width="400" height="64"/>
+      </g>
+      <g data-step="5">
+        <path class="arrow" d="M700 282 L736 282"/>
+        <rect class="box" x="740" y="250" width="130" height="64"/>
+      </g>
+
+      <text x="42" y="60" class="mono">q</text>
+      <text x="42" y="76" class="small">1 × d</text>
+      <text x="190" y="60" lang="zh-CN">第 1 段</text><text x="190" y="60" lang="en">split 1</text><text x="190" y="76" class="small" lang="zh-CN">L/4 个 token</text><text x="190" y="76" class="small" lang="en">L/4 tokens</text>
+      <text x="363" y="60" lang="zh-CN">第 2 段</text><text x="363" y="60" lang="en">split 2</text><text x="363" y="76" class="small" lang="zh-CN">L/4 个 token</text><text x="363" y="76" class="small" lang="en">L/4 tokens</text>
+      <text x="536" y="60" lang="zh-CN">第 3 段</text><text x="536" y="60" lang="en">split 3</text><text x="536" y="76" class="small" lang="zh-CN">L/4 个 token</text><text x="536" y="76" class="small" lang="en">L/4 tokens</text>
+      <text x="709" y="60" lang="zh-CN">第 4 段</text><text x="709" y="60" lang="en">split 4</text><text x="709" y="76" class="small" lang="zh-CN">L/4 个 token</text><text x="709" y="76" class="small" lang="en">L/4 tokens</text>
+      <text x="190" y="172" class="mono">m_1, l_1</text><text x="190" y="190" class="mono">o_1 (1 × d)</text><text x="190" y="206" class="small" lang="zh-CN">未归一化</text><text x="190" y="206" class="small" lang="en">unnormalized</text>
+      <text x="363" y="172" class="mono">m_2, l_2</text><text x="363" y="190" class="mono">o_2 (1 × d)</text><text x="363" y="206" class="small" lang="zh-CN">未归一化</text><text x="363" y="206" class="small" lang="en">unnormalized</text>
+      <text x="536" y="172" class="mono">m_3, l_3</text><text x="536" y="190" class="mono">o_3 (1 × d)</text><text x="536" y="206" class="small" lang="zh-CN">未归一化</text><text x="536" y="206" class="small" lang="en">unnormalized</text>
+      <text x="709" y="172" class="mono">m_4, l_4</text><text x="709" y="190" class="mono">o_4 (1 × d)</text><text x="709" y="206" class="small" lang="zh-CN">未归一化</text><text x="709" y="206" class="small" lang="en">unnormalized</text>
+      <text x="180" y="286" class="small" lang="zh-CN">合并内核</text><text x="180" y="286" class="small" lang="en">merge kernel</text>
+      <text x="312" y="276" class="mono">M = max m_s ;  w_s = exp(m_s − M)</text>
+      <text x="312" y="298" class="mono">o = Σ w_s·o_s ÷ Σ w_s·l_s</text>
+      <text x="752" y="276" class="mono">o (1 × d)</text>
+      <text x="752" y="298" class="small" lang="zh-CN">与不切分时相同</text><text x="752" y="298" class="small" lang="en">same as unsplit</text>
+      <text x="30" y="354" class="small" lang="zh-CN">GPU 上的 SM</text><text x="30" y="354" class="small" lang="en">SMs on the GPU</text>
+
+      <g data-step="1">
+        <text x="190" y="122" class="small" lang="zh-CN">不切分：</text><text x="190" y="122" class="small" lang="en">Unsplit:</text>
+        <text x="345" y="122" class="small" lang="zh-CN">一个线程块走完全程</text><text x="345" y="122" class="small" lang="en">one block walks it all</text>
+        <text x="518" y="122" class="small" lang="zh-CN">其余 SM 空闲</text><text x="518" y="122" class="small" lang="en">other SMs sit idle</text>
+      </g>
+      <g data-step="2"><text x="700" y="122" class="small" lang="zh-CN">4 个线程块并行</text><text x="700" y="122" class="small" lang="en">4 blocks in parallel</text></g>
+      <path class="lane" d="M30 374 L870 374"/>
+      <g data-step="6">
+        <text x="30" y="396" lang="zh-CN">谁来定切分数 S</text><text x="30" y="396" lang="en">Who picks the number of splits S</text>
+        <text x="30" y="416" class="mono" lang="zh-CN">FlashInfer：在 plan() 里决定</text><text x="30" y="416" class="mono" lang="en">FlashInfer: decided in plan()</text>
+        <text x="30" y="434" class="mono" lang="zh-CN">Triton：--triton-attention-num-kv-splits（默认 8）</text><text x="30" y="434" class="mono" lang="en">Triton: --triton-attention-num-kv-splits (default 8)</text>
+        <text x="30" y="452" class="mono" lang="zh-CN">FA3：num_splits = 0，交给运行时</text><text x="30" y="452" class="mono" lang="en">FA3: num_splits = 0, left to the runtime</text>
+      </g>
+      <g data-step="7">
+        <text x="490" y="396" lang="zh-CN"><tspan style="fill: var(--metal)">实验 B · M5 实测，21 次中位数，2026-11-01：</tspan></text><text x="490" y="396" lang="en"><tspan style="fill: var(--metal)">Lab B · measured on M5, median of 21, 2026-11-01:</tspan></text>
+        <text x="490" y="416" class="mono" lang="zh-CN">每头 1 段：17.01 ms · 15.8 GB/s</text><text x="490" y="416" class="mono" lang="en">1 split/head: 17.01 ms · 15.8 GB/s</text>
+        <text x="490" y="434" class="mono" lang="zh-CN">每头 256 段：2.15 ms · 124.8 GB/s</text><text x="490" y="434" class="mono" lang="en">256 splits/head: 2.15 ms · 124.8 GB/s</text>
+        <text x="490" y="452" class="small" lang="zh-CN">L = 65536 · 8 个头 · d = 128</text><text x="490" y="452" class="small" lang="en">L = 65536 · 8 heads · d = 128</text>
+      </g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 L4 上用两个注意力后端分别量预填充和解码；H100 层：FA3 对 FA2</h3><h3 lang="en">Lab A · Time prefill and decode with two attention backends on an L4; the H100 tier: FA3 against FA2</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-11-01。L4 层（第 1–4 步）和 H100 层（第 5 步）都没有运行。根据 SGLang v0.5.22 的源码（<code>python/sglang/benchmark/one_batch.py</code>、<code>python/sglang/srt/arg_groups/fields/exec_.py</code>、<code>arg_groups/fields/schedule.py</code>、<code>arg_groups/memory_hook.py</code>、<code>srt/layers/attention/</code>）、文档 <code>docs/docs/advanced_features/attention_backend.mdx</code> 和 FA3 论文整理。命令都在 <a href="../lab-setup/index.html">实验环境</a> 页的 <code>sglang-lab</code> 容器里执行（用 <code>docker exec -it sglang-lab bash</code> 进去，<code>/work</code> 挂在主机的 <code>$HOME/llm-lab</code>）。还没有租用的机器，所以这里不给数字，只描述应当看到的形状。<code>one_batch</code> 不起服务器，直接在进程里加载模型跑一个静态批（文件开头的说明是「Benchmark the latency of running a single static batch without a server」），所以这个实验不开任何网络端口。租用、计费和停机的规则见实验环境页。</div>
+    <div class="note" lang="en"><strong>Not run</strong>, 2026-11-01. Neither the L4 tier (steps 1–4) nor the H100 tier (step 5) has been run. Assembled from the SGLang v0.5.22 source (<code>python/sglang/benchmark/one_batch.py</code>, <code>python/sglang/srt/arg_groups/fields/exec_.py</code>, <code>arg_groups/fields/schedule.py</code>, <code>arg_groups/memory_hook.py</code>, <code>srt/layers/attention/</code>), the documentation page <code>docs/docs/advanced_features/attention_backend.mdx</code> and the FA3 paper. Every command runs in the <code>sglang-lab</code> container of the <a href="../lab-setup/index.html">Lab environment</a> page (enter it with <code>docker exec -it sglang-lab bash</code>; <code>/work</code> is mounted from the host’s <code>$HOME/llm-lab</code>). There is no rented machine yet, so this lab gives no numbers, only the shape you should see. <code>one_batch</code> starts no server; it loads the model in-process and runs one static batch (the file’s header reads “Benchmark the latency of running a single static batch without a server”), so this lab opens no network port. The rules for renting, billing and shutting down are on the lab environment page.</div>
+    <ol>
+      <li><span lang="zh-CN">L4 层：同一个模型、同一组长度，用 <code>flashinfer</code>（Ada 上的默认）和 <code>triton</code> 各跑一遍。<code>--input-len</code> 接受多个值，依次跑 512、4096、16384 个 token 的预填充，每个之后解码 64 步。每次运行打印 <code>Prefill. latency: … s</code>（第 820 行）和 <code>Decode.  median latency: … s</code>（第 878 行），并以追加方式往结果文件里写一行 JSON（第 1005 行）：</span><span lang="en">The L4 tier: run the same model over the same lengths once with <code>flashinfer</code> (the default on Ada) and once with <code>triton</code>. <code>--input-len</code> takes several values and runs prefills of 512, 4096 and 16384 tokens in turn, each followed by 64 decode steps. Each run prints <code>Prefill. latency: … s</code> (line 820) and <code>Decode.  median latency: … s</code> (line 878), and appends one JSON line to the result file (line 1005):</span><pre data-lang="sh" data-file="in the container, L4"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the papers on 2026-11-01
+MODEL=Qwen/Qwen3-0.6B
+for BK in flashinfer triton; do
+  python3 -m sglang.benchmark.one_batch --model-path "$MODEL" --attention-backend "$BK" \
+    --batch-size 1 --input-len 512 4096 16384 --output-len 64 \
+    --run-name "l4_$BK" --result-filename /work/phase2_l4.jsonl
+done</pre></li>
+      <li><span lang="zh-CN">把结果排成一张表。每行 JSON 里有 <code>run_name</code>、<code>input_len</code>（第 779–782 行）、<code>prefill_latency</code>（第 822 行）和 <code>median_decode_latency</code>（第 880 行）：</span><span lang="en">Lay the results out as a table. Each JSON line carries <code>run_name</code>, <code>input_len</code> (lines 779–782), <code>prefill_latency</code> (line 822) and <code>median_decode_latency</code> (line 880):</span><pre data-lang="py" data-file="table.py"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the papers on 2026-11-01
+import json, sys
+
+path = sys.argv[1] if len(sys.argv) &gt; 1 else "/work/phase2_l4.jsonl"
+for line in open(path):
+    r = json.loads(line)
+    print(f'{r["run_name"]:18s} input={r["input_len"]:6d}  '
+          f'prefill={r["prefill_latency"] * 1e3:9.1f} ms  decode/step={r["median_decode_latency"] * 1e3:7.2f} ms')</pre></li>
+      <li><span lang="zh-CN">先算下限再看结果（由 config 推出，不是测量值）。Qwen3-0.6B 每个 token 每层缓存 8 个 KV 头 × 128 × 2（k 和 v）× 2 字节，28 层共 114688 字节。一步解码要读一遍权重（Phase 0 算过，约 1.19 GB）再读一遍全部 KV：上下文 512 时 KV 约 59 MB，4096 时约 470 MB，16384 时约 1.88 GB，已经比权重还多。在 300 GB/s 下，每步解码至少约 4.2、5.5、10.2 ms。预期结果（定性描述，不是实测）：每步解码时间应当随输入长度明显增长，16384 与 4096 的下限之比约 1.9；预填充时间应当比线性增长得更快，因为注意力的运算随长度平方增长，长度越大它在总时间里占得越多。两个后端在 512 时应当相差不大，那时线性层占了大部分时间；差别应当主要出现在 16384（这一条是推断）。</span><span lang="en">Work out the lower bounds before reading the results (derived from the config, not measured). Qwen3-0.6B caches 8 KV heads × 128 × 2 (k and v) × 2 bytes per token per layer, 114688 bytes over 28 layers. One decode step reads the weights once (Phase 0 worked this out, about 1.19 GB) and then all of the KV: about 59 MB at a context of 512, about 470 MB at 4096 and about 1.88 GB at 16384, already more than the weights. At 300 GB/s each decode step takes at least about 4.2, 5.5 and 10.2 ms. Expected result (described, not measured): decode time per step should grow clearly with the input length, the lower bounds at 16384 and 4096 standing in a ratio of about 1.9; prefill time should grow faster than linearly, because attention’s arithmetic grows with the square of the length and takes a larger share of the total as the length grows. The two backends should differ little at 512, where the linear layers take most of the time; the differences should appear mainly at 16384 (this last point is an inference).</span></li>
+      <li><span lang="zh-CN">在 Triton 后端上改切分上限，看 split-KV 的效果；再把两个阶段拆给两个后端，最后抓一份解码的 trace。<code>--triton-attention-num-kv-splits</code> 是上限（后端把它读进 <code>max_kv_splits</code>，<code>triton_backend.py</code> 第 322 行），每个序列实际切几段由后端按长度算。Qwen3-0.6B 有 16 个查询头、8 个 KV 头，组大小 2，所以走 GQA 的 <code>_fwd_grouped_kernel_stage1</code>，合并是 <code>_fwd_kernel_stage2</code>（<code>decode_attention.py</code> 里 <code>kv_group_num == 1</code> 时才走普通版）。trace 写到 <code>SGLANG_TORCH_PROFILER_DIR</code>（不设时是 <code>/tmp</code>，<code>one_batch.py</code> 第 660 行），文件名形如 <code>profile_batch1_input16384_output64_decode.trace.json.gz</code>（第 667 行）：</span><span lang="en">On the Triton backend, change the split cap to see split-KV at work; then give the two phases to two backends, and finally capture one decode trace. <code>--triton-attention-num-kv-splits</code> is a cap (the backend reads it into <code>max_kv_splits</code>, <code>triton_backend.py</code> line 322), and the backend works out from the length how many splits each sequence actually gets. Qwen3-0.6B has 16 query heads and 8 KV heads, a group size of 2, so it takes the GQA kernel <code>_fwd_grouped_kernel_stage1</code>, with <code>_fwd_kernel_stage2</code> as the merge (<code>decode_attention.py</code> takes the plain version only when <code>kv_group_num == 1</code>). The trace goes to <code>SGLANG_TORCH_PROFILER_DIR</code> (<code>/tmp</code> when unset, <code>one_batch.py</code> line 660) under a name such as <code>profile_batch1_input16384_output64_decode.trace.json.gz</code> (line 667):</span><pre data-lang="sh" data-file="in the container, L4"># 未运行 · not run; assembled from the SGLang source at v0.5.22 and the papers on 2026-11-01
+MODEL=Qwen/Qwen3-0.6B
+for S in 1 8 32; do
+  python3 -m sglang.benchmark.one_batch --model-path "$MODEL" --attention-backend triton \
+    --triton-attention-num-kv-splits "$S" --batch-size 1 --input-len 16384 --output-len 64 \
+    --run-name "l4_triton_s$S" --result-filename /work/phase2_l4.jsonl
+done
+# prefill on FlashInfer, decode on Triton: HybridAttnBackend is wrapped around them automatically
+python3 -m sglang.benchmark.one_batch --model-path "$MODEL" \
+  --prefill-attention-backend flashinfer --decode-attention-backend triton \
+  --batch-size 1 --input-len 16384 --output-len 64 \
+  --run-name l4_hybrid --result-filename /work/phase2_l4.jsonl
+# one decode trace
+export SGLANG_TORCH_PROFILER_DIR=/work/profiles
+python3 -m sglang.benchmark.one_batch --model-path "$MODEL" --attention-backend triton \
+  --batch-size 1 --input-len 16384 --output-len 64 --profile --profile-stage decode
+python3 table.py /work/phase2_l4.jsonl</pre><span lang="zh-CN">预期结果（定性描述，不是实测）：上限为 1 时每步解码应当明显慢于 8，原因就是 Lab B 量到的那件事，线程块太少读不满带宽；预填充时间不应随上限变化，因为它只影响解码内核。32 比 8 是否更快取决于长度和 GPU，不作预测。<code>l4_hybrid</code> 一行的预填充应当接近 <code>l4_flashinfer</code> 在 16384 时的预填充，解码接近 <code>l4_triton_s8</code>（推断）。在 trace 里，每层应当能看到一对 stage1 与 stage2 内核。</span><span lang="en">Expected result (described, not measured): with a cap of 1, each decode step should be clearly slower than with 8, for exactly the reason Lab B measures: too few thread blocks to fill the bandwidth; prefill time should not change with the cap, which only affects the decode kernel. Whether 32 beats 8 depends on the length and the GPU, and is not predicted here. The <code>l4_hybrid</code> row’s prefill should be close to <code>l4_flashinfer</code>’s prefill at 16384, and its decode close to <code>l4_triton_s8</code> (an inference). In the trace, each layer should show one stage1 and one stage2 kernel.</span></li>
+      <li><span lang="zh-CN"><strong>H100 层（sm_90），FA3 对 FA2。</strong>换到租用的 H100，用 Phase 0 算过账的 Qwen3-8B（BF16 约 16 GB，80 GB 的 H100 装得下；config 的 <code>max_position_embeddings</code> 是 40960，16384 个 token 的提示放得下），比较 <code>fa3</code> 和 <code>flashinfer</code>。H100 上 MHA 模型不指定后端时默认就是 <code>fa3</code>（<code>attention_backend.mdx</code> 第 552 行）。注意 <code>flashinfer</code> 不完全等于 FA2：SGLang 把它的分页预填充和解码 wrapper 固定为 <code>"fa2"</code>，但新 token 的 ragged 预填充用 <code>"auto"</code>，在 Hopper 上 FlashInfer 可能自己选它的 Hopper 内核（本页没有核对 FlashInfer 0.7.1 的选择规则）。所以要用 trace 里的内核名确认到底跑了哪个：</span><span lang="en"><strong>The H100 tier (sm_90), FA3 against FA2.</strong> Move to a rented H100, use Qwen3-8B from Phase 0’s sums (about 16 GB in BF16, which fits in the H100’s 80 GB; its config’s <code>max_position_embeddings</code> is 40960, so a 16384-token prompt fits), and compare <code>fa3</code> with <code>flashinfer</code>. On an H100, an MHA model with no backend given gets <code>fa3</code> by default (<code>attention_backend.mdx</code>, line 552). Note that <code>flashinfer</code> is not exactly FA2: SGLang pins its paged prefill and decode wrappers to <code>"fa2"</code>, but the ragged prefill for new tokens uses <code>"auto"</code>, and on Hopper FlashInfer may pick its own Hopper kernels (FlashInfer 0.7.1’s selection rule was not checked here). So confirm from the kernel names in a trace which one actually ran:</span><pre data-lang="sh" data-file="in the container, H100 tier"># H100 tier · 未运行 · not run; assembled from the SGLang source at v0.5.22 and the papers on 2026-11-01
+MODEL=Qwen/Qwen3-8B
+for BK in fa3 flashinfer; do
+  python3 -m sglang.benchmark.one_batch --model-path "$MODEL" --attention-backend "$BK" \
+    --batch-size 1 --input-len 4096 16384 --output-len 64 \
+    --run-name "h100_$BK" --result-filename /work/phase2_h100.jsonl
+done
+export SGLANG_TORCH_PROFILER_DIR=/work/profiles
+for BK in fa3 flashinfer; do
+  python3 -m sglang.benchmark.one_batch --model-path "$MODEL" --attention-backend "$BK" \
+    --batch-size 1 --input-len 16384 --output-len 8 --profile --profile-stage prefill \
+    --profile-prefix "h100_$BK"
+done
+python3 table.py /work/phase2_h100.jsonl</pre><span lang="zh-CN">预期结果（定性描述，不是实测）：<code>fa3</code> 的预填充应当在 16384 时明显快于 <code>flashinfer</code> 的 FA2 路径，但端到端的差距应当小于 FA3 论文在内核层面报告的 1.5–2.0 倍，因为预填充时间里还有线性层的 GEMM；解码两者应当相差不大，那一步受带宽限制，内核快慢不是主因。FP8 注意力和 FlashMLA 在本页只作描述：FlashMLA 的位置见概念 5，FP8 KV 缓存要换模型和 <code>--kv-cache-dtype</code>，本页没有核对 <code>fa3</code> 后端在那时走哪个内核。</span><span lang="en">Expected result (described, not measured): <code>fa3</code>’s prefill should be clearly faster than <code>flashinfer</code>’s FA2 path at 16384, but the end-to-end gap should be smaller than the 1.5–2.0 times the FA3 paper reports at the kernel level, because prefill time also includes the GEMMs of the linear layers; decode should differ little between the two, since that step is bandwidth-bound and kernel speed is not the main factor. FP8 attention and FlashMLA are only described on this page: concept 5 says where FlashMLA stands, and FP8 KV caching needs a different model setup and <code>--kv-cache-dtype</code>, and which kernel the <code>fa3</code> backend takes then was not checked here.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 对照：分块的预填充注意力与 split-KV 解码</h3><h3 lang="en">Lab B · The Metal twin: tiled prefill attention and split-KV decode</h3>
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-11-01。下面的输出都来自这台 Mac 上的实际运行。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-11-01. The outputs below come from actual runs on this Mac.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>prefill_decode.swift</code>。它在运行时编译三个 Metal 内核，都是 8 个头、head_dim 128、FP16 的 Q/K/V、FP32 的累加和输出。<code>flash_prefill</code> 是概念 2 的直译：一个 threadgroup 负责一个头的 16 个查询行（4 个 SIMD-group，每个 4 行），K、V 每块 32 个 token 经 threadgroup memory 流过，每一行在寄存器里维护 m、l 和 O，因果掩码之外的块不读。<code>decode_partial</code> 和 <code>decode_combine</code> 是概念 4：每个（段，头）一个 SIMD-group，写出部分结果，再合并；每头只切 1 段时就是不切分的版本。预填充取 T = 1024、2048、4096，解码取 L = 4096、16384、65536，每段 256 个 token。每个配置预热一次后跑 21 次取中位数，GPU 时间来自 command buffer 的 <code>gpuStartTime</code> 和 <code>gpuEndTime</code>。程序最后用 CPU 上的 Double 参考检查结果：预填充查 6 个（头，行），解码查全部输出：</span><span lang="en">Save the program below as <code>prefill_decode.swift</code>. It compiles three Metal kernels at run time, all with 8 heads, head_dim 128, FP16 Q/K/V and FP32 accumulators and outputs. <code>flash_prefill</code> is a literal translation of concept 2: one threadgroup owns 16 query rows of one head (4 SIMD-groups of 4 rows each), K and V stream through threadgroup memory 32 tokens per tile, each row keeps m, l and O in registers, and tiles outside the causal mask are not read. <code>decode_partial</code> and <code>decode_combine</code> are concept 4: one SIMD-group per (split, head) writes a partial result, and the partials are then merged; with one split per head this is the unsplit version. Prefill takes T = 1024, 2048 and 4096; decode takes L = 4096, 16384 and 65536 with 256 tokens per split. Each configuration warms up once and then runs 21 times for the median, with GPU time from the command buffer’s <code>gpuStartTime</code> and <code>gpuEndTime</code>. At the end the program checks the results against a Double reference on the CPU: six (head, row) pairs for prefill, every output for decode:</span><pre data-lang="swift" data-file="prefill_decode.swift">// prefill_decode.swift: a FlashAttention-2-style causal prefill tile and a split-KV (flash-decoding) decode in Metal.
+// H heads, head_dim 128, FP16 Q/K/V, FP32 accumulators and outputs. GPU time from the command buffer, median of 21 runs.
+// build: swiftc -O prefill_decode.swift -o prefill_decode    run: ./prefill_decode
+import Foundation
+import Metal
+
+let source = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+constant uint D  = 128;   // head_dim; each of the 32 lanes owns 4 output dims
+constant uint BR = 16;    // query rows per threadgroup (4 SIMD-groups x 4 rows)
+constant uint BC = 32;    // keys per K/V tile: one key per lane when scoring
+
+// prefill: O = softmax(Q K^T * scale, causal) V for one head and BR query rows per threadgroup.
+// Q, K, V: [H][T][D] half. O: [H][T][D] float. K/V tiles go through threadgroup memory;
+// each row keeps a running max m, a running sum l and an unnormalized output o (the online softmax).
+kernel void flash_prefill(device const half* Q [[buffer(0)]], device const half* K [[buffer(1)]],
+                          device const half* V [[buffer(2)]], device float* O [[buffer(3)]],
+                          constant uint&amp; T [[buffer(4)]], constant float&amp; scale [[buffer(5)]],
+                          uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                          uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half Qs[BR][D], Ks[BC][D], Vs[BC][D];
+    uint h = tg.y, q0 = tg.x * BR;
+    ulong base = ulong(h) * T * D;
+    for (uint i = tid; i &lt; BR * D / 4; i += 128)                       // load this block's Q rows once
+        ((threadgroup half4*)Qs)[i] = ((device const half4*)(Q + base + ulong(q0) * D))[i];
+    float m[4], l[4]; float4 o[4];
+    for (uint r = 0; r &lt; 4; r++) { m[r] = -INFINITY; l[r] = 0.0f; o[r] = float4(0.0f); }
+    uint kEnd = q0 + BR;                                                // causal: keys up to the last row of the block
+    for (uint k0 = 0; k0 &lt; kEnd; k0 += BC) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tid; i &lt; BC * D / 4; i += 128) {                 // stream one K tile and one V tile in
+            ((threadgroup half4*)Ks)[i] = ((device const half4*)(K + base + ulong(k0) * D))[i];
+            ((threadgroup half4*)Vs)[i] = ((device const half4*)(V + base + ulong(k0) * D))[i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint r = 0; r &lt; 4; r++) {
+            uint row = sg * 4 + r, qi = q0 + row, kj = k0 + lane;
+            float s = 0.0f;                                             // lane j scores key k0 + j
+            for (uint d = 0; d &lt; D; d += 4)
+                s += dot(float4(*(threadgroup half4*)&amp;Qs[row][d]), float4(*(threadgroup half4*)&amp;Ks[lane][d]));
+            s = (kj &lt;= qi) ? s * scale : -INFINITY;
+            float mNew = max(m[r], simd_max(s));                        // running max over all tiles so far
+            float p = exp(s - mNew), corr = exp(m[r] - mNew);
+            l[r] = l[r] * corr + simd_sum(p);                           // rescale the old sum, add this tile
+            o[r] *= corr;                                               // rescale the old output the same way
+            for (uint j = 0; j &lt; BC; j++)
+                o[r] += simd_shuffle(p, j) * float4(*(threadgroup half4*)&amp;Vs[j][lane * 4]);
+            m[r] = mNew;
+        }
+    }
+    for (uint r = 0; r &lt; 4; r++) {
+        uint qi = q0 + sg * 4 + r;
+        *(device float4*)(O + base + ulong(qi) * D + lane * 4) = o[r] / l[r];   // normalize once, at the end
+    }
+}
+
+// decode, step 1: one SIMD-group per (split, head) walks `chunk` keys of one head's KV and writes a partial
+// (m, l, o) for its split. With one split per head this is the unsplit kernel: H SIMD-groups for the whole GPU.
+kernel void decode_partial(device const half* q [[buffer(0)]], device const half* K [[buffer(1)]],
+                           device const half* V [[buffer(2)]], device float* pm [[buffer(3)]],
+                           device float* pl [[buffer(4)]], device float* po [[buffer(5)]],
+                           constant uint&amp; L [[buffer(6)]], constant uint&amp; chunk [[buffer(7)]],
+                           constant float&amp; scale [[buffer(8)]],
+                           uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+                           uint2 ntg [[threadgroups_per_grid]]) {
+    uint split = tg.x, h = tg.y, S = ntg.x;
+    ulong base = ulong(h) * L * D;
+    float4 qv = float4(*(device const half4*)(q + h * D + lane * 4));
+    float m = -INFINITY, l = 0.0f; float4 o = float4(0.0f);
+    for (uint k = split * chunk; k &lt; (split + 1) * chunk; k++) {       // the SIMD-group reads each K and V row together
+        float s = simd_sum(dot(qv, float4(*(device const half4*)(K + base + ulong(k) * D + lane * 4)))) * scale;
+        float mNew = max(m, s), corr = exp(m - mNew), p = exp(s - mNew);
+        l = l * corr + p;
+        o = o * corr + p * float4(*(device const half4*)(V + base + ulong(k) * D + lane * 4));
+        m = mNew;
+    }
+    uint idx = h * S + split;
+    if (lane == 0) { pm[idx] = m; pl[idx] = l; }
+    *(device float4*)(po + ulong(idx) * D + lane * 4) = o;
+}
+
+// decode, step 2: combine the S partials of each head. Rescale each by exp(m_s - M), add, divide by the total sum.
+kernel void decode_combine(device const float* pm [[buffer(0)]], device const float* pl [[buffer(1)]],
+                           device const float* po [[buffer(2)]], device float* out [[buffer(3)]],
+                           constant uint&amp; S [[buffer(4)]],
+                           uint h [[threadgroup_position_in_grid]], uint d [[thread_index_in_threadgroup]]) {
+    float M = -INFINITY;
+    for (uint s = 0; s &lt; S; s++) M = max(M, pm[h * S + s]);
+    float lsum = 0.0f, acc = 0.0f;
+    for (uint s = 0; s &lt; S; s++) {
+        float w = exp(pm[h * S + s] - M);
+        lsum += w * pl[h * S + s];
+        acc  += w * po[ulong(h * S + s) * D + d];
+    }
+    out[h * D + d] = acc / lsum;
+}
+"""
+
+func fail(_ msg: String) -&gt; Never { print("error: \(msg)"); exit(1) }
+guard let dev = MTLCreateSystemDefaultDevice(), let queue = dev.makeCommandQueue() else { fail("no Metal device") }
+let lib: MTLLibrary
+do { lib = try dev.makeLibrary(source: source, options: nil) } catch { fail("compile: \(error)") }
+func pipeline(_ name: String) -&gt; MTLComputePipelineState {
+    guard let fn = lib.makeFunction(name: name) else { fail("no function \(name)") }
+    do { return try dev.makeComputePipelineState(function: fn) } catch { fail("pipeline \(name): \(error)") }
+}
+let prefillPSO = pipeline("flash_prefill"), partialPSO = pipeline("decode_partial"), combinePSO = pipeline("decode_combine")
+print("device=\(dev.name) threadExecutionWidth=\(prefillPSO.threadExecutionWidth) " +
+      "maxTotalThreadsPerThreadgroup=\(prefillPSO.maxTotalThreadsPerThreadgroup)")
+
+let H = 8, D = 128, reps = 21
+var scale = Float(1.0 / sqrt(Double(D)))
+func median(_ v: [Double]) -&gt; Double { let s = v.sorted(); return s[s.count / 2] }
+func time(_ encode: (MTLComputeCommandEncoder) -&gt; Void) -&gt; Double {     // one warm-up, then the median of `reps`
+    var ms: [Double] = []
+    for r in 0...reps {
+        guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { fail("encoder") }
+        encode(enc); enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if cb.status != .completed { fail("command buffer: \(String(describing: cb.error))") }
+        if r &gt; 0 { ms.append((cb.gpuEndTime - cb.gpuStartTime) * 1e3) }
+    }
+    return median(ms)
+}
+func buffer(_ bytes: Int) -&gt; MTLBuffer {
+    guard let b = dev.makeBuffer(length: bytes, options: .storageModeShared) else { fail("buffer of \(bytes) bytes") }
+    return b
+}
+var seed: UInt32 = 12345
+func rnd() -&gt; Float16 { seed = seed &amp;* 1664525 &amp;+ 1013904223; return Float16(Float(seed &gt;&gt; 8) / 16777216.0 - 0.5) }
+func halves(_ count: Int) -&gt; (MTLBuffer, UnsafeMutablePointer&lt;Float16&gt;) {
+    let b = buffer(count * 2), p = b.contents().bindMemory(to: Float16.self, capacity: count)
+    for i in 0..&lt;count { p[i] = rnd() }
+    return (b, p)
+}
+// reference attention of one query against keys 0..&lt;n of one head, in Double; returns the D outputs
+func reference(_ q: UnsafePointer&lt;Float16&gt;, _ K: UnsafePointer&lt;Float16&gt;, _ V: UnsafePointer&lt;Float16&gt;, _ n: Int) -&gt; [Double] {
+    var s = [Double](repeating: 0, count: n)
+    for k in 0..&lt;n { var a = 0.0; for d in 0..&lt;D { a += Double(q[d]) * Double(K[k * D + d]) }; s[k] = a * Double(scale) }
+    let mx = s.max()!; var sum = 0.0; var o = [Double](repeating: 0, count: D)
+    for k in 0..&lt;n { let p = exp(s[k] - mx); sum += p; for d in 0..&lt;D { o[d] += p * Double(V[k * D + d]) } }
+    return o.map { $0 / sum }
+}
+
+print("-- prefill: causal, H=\(H), head_dim=\(D), FP16 in, FP32 out; one threadgroup per (16 query rows, head)")
+for T in [1024, 2048, 4096] {
+    let n = H * T * D
+    let (Qb, pQ) = halves(n), (Kb, pK) = halves(n), (Vb, pV) = halves(n)
+    let Ob = buffer(n * 4)
+    var t32 = UInt32(T)
+    let ms = time { enc in
+        enc.setComputePipelineState(prefillPSO)
+        enc.setBuffer(Qb, offset: 0, index: 0); enc.setBuffer(Kb, offset: 0, index: 1)
+        enc.setBuffer(Vb, offset: 0, index: 2); enc.setBuffer(Ob, offset: 0, index: 3)
+        enc.setBytes(&amp;t32, length: 4, index: 4); enc.setBytes(&amp;scale, length: 4, index: 5)
+        enc.dispatchThreadgroups(MTLSize(width: T / 16, height: H, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+    }
+    let pO = Ob.contents().bindMemory(to: Float.self, capacity: n)
+    var worst = 0.0
+    for c in 0..&lt;6 {                                               // check six (head, row) pairs, including row 0 and the last row
+        let h = c % H, row = [0, 1, 17, T / 2 + 5, T - 2, T - 1][c]
+        let off = h * T * D
+        let ref = reference(pQ + off + row * D, pK + off, pV + off, row + 1)
+        for d in 0..&lt;D { worst = max(worst, abs(Double(pO[off + row * D + d]) - ref[d])) }
+    }
+    let flops = 2.0 * Double(D) * Double(T) * Double(T + 1) * Double(H)   // QK^T and PV over the causal half
+    let bytes = Double(n) * (2 * 3 + 4)                                    // Q, K, V read once, O written once
+    let sBytes = Double(H) * Double(T) * Double(T) * 4                     // what a materialized FP32 score matrix would take
+    print(String(format: "T=%-5d gpu_ms=%8.3f  TFLOP/s=%5.2f  FLOP/B=%6.1f  min_bytes=%6.1f MB  (S matrix would be %6.1f MB)  max_abs_err=%.1e",
+                 T, ms, flops / (ms * 1e9), flops / bytes, bytes / 1e6, sBytes / 1e6, worst))
+}
+
+print("-- decode: one query per head, H=\(H), head_dim=\(D), FP16 KV; partial kernel + combine kernel in one command buffer")
+for L in [4096, 16384, 65536] {
+    let n = H * L * D
+    let (qb, pq) = halves(H * D), (Kb, pK) = halves(n), (Vb, pV) = halves(n)
+    let out = buffer(H * D * 4)
+    var refs: [[Double]] = []
+    for h in 0..&lt;H { refs.append(reference(pq + h * D, pK + h * L * D, pV + h * L * D, L)) }
+    for chunk in [L, 256] {                                        // chunk == L: one split per head (unsplit)
+        let S = L / chunk
+        let pm = buffer(H * S * 4), pl = buffer(H * S * 4), po = buffer(H * S * D * 4)
+        var l32 = UInt32(L), c32 = UInt32(chunk), s32 = UInt32(S)
+        let ms = time { enc in
+            enc.setComputePipelineState(partialPSO)
+            enc.setBuffer(qb, offset: 0, index: 0); enc.setBuffer(Kb, offset: 0, index: 1); enc.setBuffer(Vb, offset: 0, index: 2)
+            enc.setBuffer(pm, offset: 0, index: 3); enc.setBuffer(pl, offset: 0, index: 4); enc.setBuffer(po, offset: 0, index: 5)
+            enc.setBytes(&amp;l32, length: 4, index: 6); enc.setBytes(&amp;c32, length: 4, index: 7); enc.setBytes(&amp;scale, length: 4, index: 8)
+            enc.dispatchThreadgroups(MTLSize(width: S, height: H, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            enc.setComputePipelineState(combinePSO)                // same encoder: runs after the partials are written
+            enc.setBuffer(pm, offset: 0, index: 0); enc.setBuffer(pl, offset: 0, index: 1)
+            enc.setBuffer(po, offset: 0, index: 2); enc.setBuffer(out, offset: 0, index: 3)
+            enc.setBytes(&amp;s32, length: 4, index: 4)
+            enc.dispatchThreadgroups(MTLSize(width: H, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: D, height: 1, depth: 1))
+        }
+        let pOut = out.contents().bindMemory(to: Float.self, capacity: H * D)
+        var worst = 0.0
+        for h in 0..&lt;H { for d in 0..&lt;D { worst = max(worst, abs(Double(pOut[h * D + d]) - refs[h][d])) } }
+        let kvBytes = Double(n) * 2 * 2                             // K and V, FP16, read once
+        print(String(format: "L=%-6d splits/head=%-4d SIMD-groups=%-5d gpu_ms=%8.4f  GB/s=%6.1f  KV=%6.1f MB  max_abs_err=%.1e",
+                     L, S, S * H, ms, kvBytes / (ms * 1e6), kvBytes / 1e6, worst))
+    }
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是实验 Mac（Apple M5，macOS 27.2，Apple Swift 6.4.2）在 2026-11-01（本地时间，PDT）的实测，不是计算值；这是连续三次运行中的第一次：</span><span lang="en">Build and run it. These are measurements on the lab Mac (Apple M5, macOS 27.2, Apple Swift 6.4.2) on 2026-11-01 (local time, PDT), not computed values; this is the first of three consecutive runs:</span><pre>$ swiftc -O prefill_decode.swift -o prefill_decode
+$ ./prefill_decode
+device=Apple M5 threadExecutionWidth=32 maxTotalThreadsPerThreadgroup=1024
+-- prefill: causal, H=8, head_dim=128, FP16 in, FP32 out; one threadgroup per (16 query rows, head)
+T=1024  gpu_ms=   4.361  TFLOP/s= 0.49  FLOP/B= 205.0  min_bytes=  10.5 MB  (S matrix would be   33.6 MB)  max_abs_err=4.6e-08
+T=2048  gpu_ms=  16.865  TFLOP/s= 0.51  FLOP/B= 409.8  min_bytes=  21.0 MB  (S matrix would be  134.2 MB)  max_abs_err=3.9e-08
+T=4096  gpu_ms=  66.489  TFLOP/s= 0.52  FLOP/B= 819.4  min_bytes=  41.9 MB  (S matrix would be  536.9 MB)  max_abs_err=2.7e-08
+-- decode: one query per head, H=8, head_dim=128, FP16 KV; partial kernel + combine kernel in one command buffer
+L=4096   splits/head=1    SIMD-groups=8     gpu_ms=  1.0510  GB/s=  16.0  KV=  16.8 MB  max_abs_err=3.0e-08
+L=4096   splits/head=16   SIMD-groups=128   gpu_ms=  0.1130  GB/s= 148.5  KV=  16.8 MB  max_abs_err=7.0e-09
+L=16384  splits/head=1    SIMD-groups=8     gpu_ms=  4.2567  GB/s=  15.8  KV=  67.1 MB  max_abs_err=3.1e-08
+L=16384  splits/head=64   SIMD-groups=512   gpu_ms=  0.5410  GB/s= 124.1  KV=  67.1 MB  max_abs_err=3.5e-09
+L=65536  splits/head=1    SIMD-groups=8     gpu_ms= 17.0142  GB/s=  15.8  KV= 268.4 MB  max_abs_err=4.4e-08
+L=65536  splits/head=256  SIMD-groups=2048  gpu_ms=  2.1511  GB/s= 124.8  KV= 268.4 MB  max_abs_err=2.9e-09</pre></li>
+      <li><span lang="zh-CN">读懂预填充三行。T 每翻一倍，时间约乘 3.9（4.36、16.9、66.5 ms），正是因果注意力的运算随长度平方增长；三次运行之间每个时间相差不到 0.2%。运算强度 205–819 FLOP/字节，远过 Phase 0 在 M5 上量到的约 27 的拐点，显存流量只有几十 MB，所以它受的是算力一侧的限制，不是带宽。最后一列是这一行若照教科书把 FP32 的分数矩阵写出来要占多少：T = 4096 时约 537 MB，是这个内核真正搬动的 41.9 MB 的十几倍，这就是分块省下的东西。这个内核只跑到 0.49–0.52 TFLOP/s，远低于 Phase 0 那个用 <code>simdgroup_matrix</code> 的 GEMM 的约 3.4 TFLOP/s：它的 QK<sup>T</sup> 和 PV 都是标量乘加，每个键还要一次 <code>simd_shuffle</code>。把这两个矩阵乘换成 8 × 8 的 <code>simdgroup_matrix</code>，就是 FA2 用 tensor core 做的事；FA3 再把搬运和 softmax 藏到矩阵乘后面（这一条是类比，不是测量）。</span><span lang="en">Read the three prefill rows. Each doubling of T multiplies the time by about 3.9 (4.36, 16.9 and 66.5 ms), which is causal attention’s arithmetic growing with the square of the length; across the three runs each time varied by less than 0.2%. The intensity is 205–819 FLOP per byte, far past the ridge of about 27 that Phase 0 measured on the M5, and memory traffic is only tens of MB, so the limit is on the compute side, not bandwidth. The last column is what the FP32 score matrix would take if this row were done the textbook way: about 537 MB at T = 4096, more than ten times the 41.9 MB this kernel actually moves, which is what tiling saves. This kernel reaches only 0.49–0.52 TFLOP/s, far below the roughly 3.4 TFLOP/s of Phase 0’s GEMM built on <code>simdgroup_matrix</code>: its QK<sup>T</sup> and PV are scalar multiply-adds, plus one <code>simd_shuffle</code> per key. Replacing those two matrix products with 8 × 8 <code>simdgroup_matrix</code> tiles is what FA2 does with tensor cores; FA3 then hides data movement and softmax behind the matrix products (an analogy, not a measurement).</span></li>
+      <li><span lang="zh-CN">读懂解码六行。不切分时只有 8 个 SIMD-group，三种长度都停在 15.1–16.1 GB/s：每个 SIMD-group 一个键一个键地往下走，一条依赖链，再长也快不起来（推断：每个 SIMD-group 约 2 GB/s，受访存延迟限制）。每头切成 256 个 token 一段后，SIMD-group 数是 128、512、2048，速率到 123–149 GB/s，离 Apple 给 M5 标的 153 GB/s 不远，三次运行里快 7.9–9.3 倍。两种做法的最大绝对误差都在 10<sup>-8</sup> 量级：合并是精确的，不是近似。L = 4096 时 16.8 MB 的 KV 跑到 131–149 GB/s，可能有一部分来自片上缓存，Phase 0 在 D = 2048 时见过同样的现象（推断）。</span><span lang="en">Read the six decode rows. Unsplit, there are only 8 SIMD-groups, and all three lengths stall at 15.1–16.1 GB/s: each SIMD-group walks the keys one by one in a single dependency chain, which no length can speed up (an inference: about 2 GB/s per SIMD-group, bound by memory latency). With each head cut into splits of 256 tokens, there are 128, 512 and 2048 SIMD-groups, the rate reaches 123–149 GB/s, not far from the 153 GB/s Apple gives for the M5, and the speedup across the three runs is 7.9–9.3 times. Both versions have a largest absolute error of order 10<sup>-8</sup>: the merge is exact, not an approximation. At L = 4096 the 16.8 MB of KV reached 131–149 GB/s, which may come partly from on-chip caches, the same effect Phase 0 saw at D = 2048 (an inference).</span></li>
+      <li><span lang="zh-CN">自己扫一遍切分大小。把解码循环里的 <code>[L, 256]</code> 改成 <code>[L, 4096, 1024, 256, 64, 16]</code>，在 L = 65536 上画出 GB/s 随每段 token 数的曲线：段太长时 SIMD-group 太少，段太短时合并内核要读的部分结果变多、每段的固定开销变大。再试一次 GQA：让 4 个查询头共用一个 KV 头（<code>decode_partial</code> 里一个 SIMD-group 读一次 K、V，给 4 个查询各算一遍），看运算强度从 1 变成 4 之后速率怎样变。</span><span lang="en">Sweep the split size yourself. Change <code>[L, 256]</code> in the decode loop to <code>[L, 4096, 1024, 256, 64, 16]</code> and plot GB/s against tokens per split at L = 65536: with splits too long there are too few SIMD-groups, and with splits too short the merge kernel has more partials to read and each split’s fixed cost grows. Then try GQA: let 4 query heads share one KV head (in <code>decode_partial</code>, one SIMD-group reads K and V once and scores 4 queries), and see how the rate changes once the intensity goes from 1 to 4.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 两层各一张表（<code>table.py</code> 的输出：每个后端、每个长度的预填充时间和每步解码时间），L4 上 Triton 切分上限 1、8、32 的三行，混合后端那一行，以及 trace 里每层 stage1 与 stage2 两个内核的时间；Lab B 在你的 Mac 上连续三次运行的输出，以及切分大小的扫描曲线；一段 10 行以内的解释：为什么预填充注意力的时间随长度平方增长却仍受算力限制，为什么批大小为 1 的解码不切分就读不满带宽，以及切分之后结果为什么仍然精确。</div>
+    <div class="note" lang="en">Deliverables: one table per Lab A tier (the output of <code>table.py</code>: prefill time and decode time per step for each backend and length), the three rows for Triton split caps of 1, 8 and 32 on the L4, the hybrid-backend row, and the times of the stage1 and stage2 kernels of one layer from the trace; the output of three consecutive Lab B runs on your Mac and the split-size sweep; and an explanation in 10 lines or fewer of why prefill attention’s time grows with the square of the length yet stays compute-bound, why decode at batch size 1 cannot fill the bandwidth without splitting, and why the result is still exact after splitting.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="llm/phase-2">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. FlashAttention 处理到第 2 块 K/V 时，某一行的最大值从 m 变成了更大的 m′。它怎样处理已经累加好的 l 和 O？</p>
+      <p lang="en">1. When FlashAttention reaches the second K/V tile, the maximum of one row grows from m to a larger m′. What does it do with the l and O it has already accumulated?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">丢掉它们，用新的 m′ 把第 1 块重新读一遍再算</span><span lang="en">Discard them and read tile 1 again to recompute it against the new m′</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">两者都乘 exp(m − m′) 换到新的基准，再加上第 2 块的贡献</span><span lang="en">Multiply both by exp(m − m′) to move them to the new baseline, then add tile 2’s contribution</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">不处理，最后统一除以 exp(m′) 就能修正</span><span lang="en">Nothing; one division by exp(m′) at the end corrects it</span></label>
+      <div class="why" hidden><span lang="zh-CN">l 和 O 里的每一项都是相对旧的 m 算的，乘 exp(m − m′) 正好把它们换成相对 m′ 的值，所以 b 精确且不用回头。a 也能得到对的结果，但每次最大值变大都要重读前面的块，失去了分块的意义。c 不对：不同的块是相对不同的 m 累加的，最后一次除法无法知道每一项当初用的是哪个 m。</span><span lang="en">Every term in l and O was computed against the old m, and multiplying by exp(m − m′) turns each into its value against m′, so b is exact and never looks back. a also gives the right answer, but it rereads earlier tiles every time the maximum grows, defeating the tiling. c is wrong: different tiles were accumulated against different values of m, and one final division cannot know which m each term used.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">2. 批大小 1、8 个 KV 头、上下文 64K 的解码，在一块有几十个 SM 的 GPU 上。不做 split-KV 时为什么慢？</p>
+      <p lang="en">2. Decode at batch size 1 with 8 KV heads and a 64K context runs on a GPU with dozens of SMs. Why is it slow without split-KV?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">运算量太大，解码注意力在长上下文时受算力限制</span><span lang="en">There is too much arithmetic; at long contexts decode attention is compute-bound</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">查询长度为 1，只有约 8 个线程块在读 KV，大部分 SM 空闲，带宽读不满</span><span lang="en">The query length is 1, so only about 8 thread blocks read the KV, most SMs sit idle, and the bandwidth goes unused</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">64K 个 token 的 KV 放不进 shared memory，内核只能退回逐元素访问</span><span lang="en">The KV of 64K tokens does not fit in shared memory, so the kernel falls back to element-by-element access</span></label>
+      <div class="why" hidden><span lang="zh-CN">解码注意力的强度是 GQA 组大小，与上下文长度无关，远低于拐点，所以 a 不对。FlashAttention 本来就不需要整段 KV 放进 shared memory，它按块流过，所以 c 不对。问题出在并行度：线程块按批和查询块分配，解码时只剩批 × 头个。Lab B 在 M5 上量到，同样 64K 的 KV，8 个 SIMD-group 只读到约 16 GB/s，切成 2048 个之后约 125 GB/s。</span><span lang="en">Decode attention’s intensity is the GQA group size, independent of the context length and far below the ridge, so a is wrong. FlashAttention never needed the whole KV in shared memory; it streams through in tiles, so c is wrong. The problem is parallelism: thread blocks are assigned by batch and query block, which in decode leaves only batch × heads of them. Lab B measured on the M5 that the same 64K of KV reads at about 16 GB/s with 8 SIMD-groups and about 125 GB/s once split into 2048.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 在 SGLang v0.5.22 上，想让预填充用 FlashInfer、解码用 Triton，应该怎样启动？</p>
+      <p lang="en">3. On SGLang v0.5.22, how do you launch with FlashInfer for prefill and Triton for decode?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN"><code>--attention-backend flashinfer,triton</code></span><span lang="en"><code>--attention-backend flashinfer,triton</code></span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN"><code>--prefill-attention-backend flashinfer --decode-attention-backend triton</code></span><span lang="en"><code>--prefill-attention-backend flashinfer --decode-attention-backend triton</code></span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN"><code>--attention-backend flashinfer --triton-attention-num-kv-splits 8</code></span><span lang="en"><code>--attention-backend flashinfer --triton-attention-num-kv-splits 8</code></span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>--attention-backend</code> 只接受 <code>choices.py</code> 那张表里的单个值，<code>flashinfer,triton</code> 不在表里，所以 a 会被拒绝。c 只设了 Triton 解码内核的切分上限，而两个阶段用的都是 FlashInfer，这个参数不起作用。b 的两个参数都优先于 <code>--attention-backend</code>，两者不同时自动套上 <code>HybridAttnBackend</code>，文档把它标为实验性功能。</span><span lang="en"><code>--attention-backend</code> takes a single value from the list in <code>choices.py</code>, and <code>flashinfer,triton</code> is not on it, so a is refused. c only sets the split cap of the Triton decode kernel, while both phases run on FlashInfer, so the flag has no effect. Both flags in b take priority over <code>--attention-backend</code>, and when they differ <code>HybridAttnBackend</code> is wrapped around them automatically, a feature the documentation marks experimental.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. DeepSeek-V3 用 MLA，每个 token 每层只缓存 576 个数。为什么它的解码注意力比 Qwen3-8B 的 GQA 更接近受算力限制？</p>
+      <p lang="en">4. DeepSeek-V3 uses MLA and caches only 576 numbers per token per layer. Why is its decode attention much closer to compute-bound than Qwen3-8B’s GQA?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">128 个查询头都对同一份潜向量做注意力，读一次 KV 做的运算多得多（吸收形式下约 242 FLOP/字节）</span><span lang="en">All 128 query heads attend to the same latent vector, so each read of the KV buys far more arithmetic (about 242 FLOP per byte in the absorbed form)</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">MLA 去掉了 softmax，省下的时间都给了矩阵乘</span><span lang="en">MLA removes the softmax, and the time saved goes to the matrix products</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">576 比 128 大，每个头读的字节更多，所以强度更高</span><span lang="en">576 is larger than 128, so each head reads more bytes and the intensity is higher</span></label>
+      <div class="why" hidden><span lang="zh-CN">MLA 仍然要对潜向量做 softmax，所以 b 不对。c 把方向弄反了：读的字节变多只会降低强度，而且 576 个数是所有头共用的，不是每个头一份。强度高是因为共享：Qwen3-8B 每 4 个查询头共用一组 KV，强度约 4；DeepSeek-V3 的 128 个头共用同一份 576 维潜向量，按吸收形式推算约 242（单卡，未计张量并行）。</span><span lang="en">MLA still applies a softmax over the latent, so b is wrong. c has it backwards: more bytes read can only lower the intensity, and the 576 numbers are shared by all heads, not one copy per head. The intensity is high because of sharing: in Qwen3-8B every 4 query heads share one KV group, for an intensity of about 4; DeepSeek-V3’s 128 heads share one 576-dimensional latent, about 242 in the absorbed form (one GPU, before tensor parallelism).</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/docs/docs/advanced_features/attention_backend.mdx">SGLang v0.5.22 docs: Attention Backend</a> <span class="lvl" lang="zh-CN">官方文档（v0.5.22 标签下的源文件，2026-11-01 读取），入门到中级：MHA 与 MLA 的支持矩阵、hybrid attention（第 507–542 行）、各架构的默认后端（第 545–559 行）、FlashMLA 的 page size；概念 4–6 与对照表</span><span class="lvl" lang="en">Official docs (the source file at the v0.5.22 tag, read 2026-11-01), beginner to intermediate: the support matrix for MHA and MLA, hybrid attention (lines 507–542), the default backend per architecture (lines 545–559), FlashMLA’s page size; concepts 4–6 and the comparison table</span></li>
+    <li><a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/exec_.py">arg_groups/fields/exec_.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/choices.py">choices.py</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/memory_hook.py">memory_hook.py</a> · <a href="https://github.com/sgl-project/sglang/tree/v0.5.22/python/sglang/srt/layers/attention">srt/layers/attention/</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/benchmark/one_batch.py">benchmark/one_batch.py</a> <span class="lvl" lang="zh-CN">源码，中级（2026-11-01 按标签取回）：三个注意力后端参数和 Triton 切分上限、后端取值表、分块预填充的默认值、各个后端的实现，以及 Lab A 用的基准工具</span><span class="lvl" lang="en">Source, intermediate (fetched at the tag on 2026-11-01): the three attention-backend flags and Triton’s split cap, the list of backend values, the chunked-prefill defaults, the implementation of each backend, and the benchmark tool Lab A uses</span></li>
+    <li><a href="https://arxiv.org/abs/2205.14135">Dao et al., FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness (arXiv:2205.14135, v2)</a> · <a href="https://arxiv.org/abs/2307.08691">Dao, FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning (arXiv:2307.08691, v1)</a> <span class="lvl" lang="zh-CN">论文，中级到进阶：IO 感知的分块与在线 softmax，FA2 的分工；概念 2 和动画 (a)</span><span class="lvl" lang="en">Papers, intermediate to advanced: IO-aware tiling and the online softmax, FA2’s division of work; concept 2 and diagram (a)</span></li>
+    <li><a href="https://arxiv.org/abs/2407.08608">Shah et al., FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision (arXiv:2407.08608, v2)</a> · <a href="https://github.com/Dao-AILab/flash-attention">Dao-AILab/flash-attention</a> <span class="lvl" lang="zh-CN">论文与源码，进阶：warp 专门化、GEMM 与 softmax 交错、FP8 块量化；README 的 FlashAttention-3 一节写明 H100 / H800 与 CUDA 12.3 以上（2026-11-01 读取）；概念 3</span><span class="lvl" lang="en">Paper and source, advanced: warp specialization, interleaved GEMM and softmax, FP8 block quantization; the README’s FlashAttention-3 section requires an H100 / H800 and CUDA 12.3 or later (read 2026-11-01); concept 3</span></li>
+    <li><a href="https://crfm.stanford.edu/2023/10/12/flashdecoding.html">Dao, Haziza, Massa, Sizov: Flash-Decoding for long-context inference (Stanford CRFM, 2023-10-12)</a> <span class="lvl" lang="zh-CN">设计文章，中级：为什么批大小小时 FlashAttention 填不满 GPU，split-KV 的三步与 log-sum-exp 合并；概念 4 和动画 (b)</span><span class="lvl" lang="en">Design article, intermediate: why FlashAttention cannot fill the GPU at small batch sizes, the three steps of split-KV and the log-sum-exp merge; concept 4 and diagram (b)</span></li>
+    <li><a href="https://arxiv.org/abs/2405.04434">DeepSeek-AI, DeepSeek-V2 (arXiv:2405.04434, v5)</a> · <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report (arXiv:2412.19437, v2)</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json">DeepSeek-V3 config.json</a> <span class="lvl" lang="zh-CN">论文与配置，进阶：MLA 的提出与吸收形式（V2）、V3 的架构，以及概念 5 用到的每一个维度（2026-11-01 读取）</span><span class="lvl" lang="en">Papers and configuration, advanced: MLA’s introduction and absorbed form (V2), V3’s architecture, and every dimension used in concept 5 (read 2026-11-01)</span></li>
+    <li><a href="https://github.com/deepseek-ai/FlashMLA">deepseek-ai/FlashMLA</a> · <a href="https://github.com/sgl-project/FlashMLA/commit/3620b63fc4ebe33950c50e1b7701b6607f44150e">sgl-project/FlashMLA @ 3620b63</a> · <a href="https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/kernels/aot/cmake/flashmla.cmake">flashmla.cmake</a> <span class="lvl" lang="zh-CN">源码，进阶：上游 README 的 2026.09.30 破坏性变更通知（移除 Hopper），SGLang 自带的分支提交，以及它仍然构建 sm90 内核的构建文件；概念 5</span><span class="lvl" lang="en">Source, advanced: the upstream README’s 2026.09.30 breaking-change notice (Hopper removed), the fork commit SGLang bundles, and the build file that still builds sm90 kernels; concept 5</span></li>
+    <li><a href="https://arxiv.org/abs/2501.01005">Ye et al., FlashInfer (arXiv:2501.01005)</a> · <a href="https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpustarttime">MTLCommandBuffer.gpuStartTime</a> · <a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Specification</a> <span class="lvl" lang="zh-CN">论文与官方文档，中级：SGLang 默认依赖的注意力库（分页解码、plan/run、合并状态）；Lab B 的 GPU 时间戳，以及 <code>simd_sum</code>、<code>simd_max</code>、<code>simd_shuffle</code> 和 threadgroup memory 的定义</span><span class="lvl" lang="en">Paper and official docs, intermediate: the attention library SGLang depends on (paged decode, plan/run, merging states); Lab B’s GPU timestamps, and the definitions of <code>simd_sum</code>, <code>simd_max</code>, <code>simd_shuffle</code> and threadgroup memory</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 5 章 Memory architecture and data locality 里讲分块矩阵乘法的部分对应概念 2（K、V 块经 shared memory 被一个查询块的所有行复用）和 Lab B 的预填充内核</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">the tiled-matrix-multiplication part of chapter 5, Memory architecture and data locality matches concept 2 (K and V tiles reused through shared memory by every row of a query block) and the prefill kernel of Lab B</span></li>
+    <li lang="zh-CN">Sebastian Raschka, 《Build a Large Language Model (From Scratch)》, Manning, 2024, ISBN 9781633437166. <span class="lvl">第 3 章（注意力机制，含因果注意力掩码）对应概念 1 和 2 里被分块的那个计算</span></li>
+    <li lang="en">Sebastian Raschka, <em>Build a Large Language Model (From Scratch)</em>, Manning, 2024, ISBN 9781633437166. <span class="lvl">Chapter 3 (attention mechanisms, including the causal attention mask) matches the computation being tiled in concepts 1 and 2</span></li>
+    <li lang="zh-CN">Chip Huyen, 《AI Engineering: Building Applications with Foundation Models》, O’Reilly Media, 2024, ISBN 9781098166304. <span class="lvl">讲推理优化的一章对应概念 1 和 6（预填充与解码、受算力限制与受带宽限制、两个阶段分开处理），服务层面的视角</span></li>
+    <li lang="en">Chip Huyen, <em>AI Engineering: Building Applications with Foundation Models</em>, O’Reilly Media, 2024, ISBN 9781098166304. <span class="lvl">The chapter on inference optimization matches concepts 1 and 6 (prefill and decode, compute-bound and bandwidth-bound, handling the two phases separately), from the serving side</span></li>
+    <li lang="zh-CN">John L. Hennessy &amp; David A. Patterson, 《Computer Architecture: A Quantitative Approach》, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">第 4 章「Data-Level Parallelism in Vector, SIMD, and GPU Architectures」中讲 Roofline 可视化性能模型的一节对应概念 1 的拐点</span></li>
+    <li lang="en">John L. Hennessy &amp; David A. Patterson, <em>Computer Architecture: A Quantitative Approach</em>, 6th ed., Morgan Kaufmann, 2017, ISBN 9780128119051. <span class="lvl">The section on the Roofline visual performance model in Chapter 4, “Data-Level Parallelism in Vector, SIMD, and GPU Architectures”, matches the ridge point of concept 1</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-1-attention-and-kv-layouts/index.html">← <span lang="zh-CN">Phase 1 · 注意力与 KV 缓存布局</span><span lang="en">Phase 1 · Attention and KV-Cache Layouts</span></a>
+    <a href="../phase-3-cuda-graphs-plan-run/index.html"><span lang="zh-CN">Phase 3 · CUDA 图与 plan()/run() 拆分 →</span><span lang="en">Phase 3 · CUDA Graphs and the plan()/run() Split →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
