@@ -15,6 +15,9 @@ open index.html
 | Topic | Goal | Status |
 |---|---|---|
 | [Kernel Engineering](topics/kernel-engineering/index.html) | 成为 Apple 的 kernel engineer：从内核基础（以 Linux 为教学载体）到 XNU/Darwin 与 Apple 面试 | Phases 0–8 complete |
+| [ROS 2](topics/ros2/index.html) | 机器人中间件：从第一个 node 到一台在 Gazebo 里建图、导航的仿真机器人，脚下的内核始终在视野里（Jazzy LTS） | Phases 0–7 complete |
+| [Parallel Programming](topics/parallel-programming/index.html) | 共享内存并行：线程、锁、内存模型、无锁结构、OpenMP 与 NEON，每一步都在这台 Mac 上实测 | Phases 0–7 complete (OpenMP labs unrun: libomp not installed) |
+| [GPU Programming with CUDA](topics/gpu-cuda/index.html) | 从 warp 到驱动：在云端 NVIDIA GPU 上写、测、剖析 CUDA 内核，每课配一个在这台 Mac 上实测的 Metal 孪生实验（CUDA 13.x，sm_75 起） | Phases 0–7 complete (CUDA labs unrun until a GPU account exists; Metal twins measured) |
 
 ## Layout
 
@@ -31,7 +34,7 @@ docs/agent/                   Shadow project memory
 
 ## Writing a phase
 
-Copy `topics/kernel-engineering/phase-0-foundations/index.html`. Sections in order: 目标 → 前置 → 核心概念 → 对照表 → 动画图解 → 动手实验 → 自测 → 资料。
+Follow `docs/authoring/PAGE_CONTRACT.md` (page skeleton, bilingual pairing, diagrams, code, quiz, bibliography, checks) and the topic's syllabus under `docs/authoring/`. Copy `topics/kernel-engineering/phase-1-boot-and-processes/index.html` as the exemplar. Sections in order: 目标 → 前置 → 核心概念 → 对照表 → 动画图解 → 动手实验 → 自测 → 资料 → 参考书目。
 
 An animated diagram is an inline `<svg data-diagram data-captions='[...]'>` whose parts carry `data-step="N"`; `assets/diagram.js` adds the controls. Step 0 is the full picture; steps 1..N highlight that step's parts and dim the rest. Use `class="pulse"` or `class="flow"` on a part for continuous motion.
 
