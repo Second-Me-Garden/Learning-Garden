@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 6 · Control and Navigation · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page">Phase 6 · Control &amp; Navigation</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 6 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 6 / 8 · about 1–2 weeks</p>
+  <h1>Control and Navigation <span class="en" lang="zh-CN">控制与导航：ros2_control 的固定周期控制环，Nav2 从一个目标位姿到轮子转动的全过程</span><span class="en" lang="en">The fixed-period control loop of ros2_control, and everything Nav2 does between a goal pose and a turning wheel</span></h1>
+  <p class="lede" lang="zh-CN">Phase 5 里，机器人靠 Gazebo 自带的差速插件动起来：<code>/cmd_vel</code> 进去，轮子转，<code>odom</code> 出来，中间发生了什么你看不见，也换不到真车上。这一阶段把这段路拆成两层。下层是 <strong>ros2_control</strong>：一个按固定周期运行的循环，每个周期从硬件<strong>读</strong>状态、让控制器<strong>算</strong>一次、再把命令<strong>写</strong>回硬件；同一个 <code>diff_drive_controller</code> 既能驱动 Gazebo 里的关节，也能驱动真正的电机，换的只是硬件插件。上层是 <strong>Nav2</strong>：一棵<strong>行为树</strong>把「去那里」拆成规划、跟随和脱困三类动作调用，规划器和控制器各看一张 <strong>costmap</strong>，<strong>AMCL</strong> 或 <strong>slam_toolbox</strong> 告诉它们机器人在地图的哪里。实验里你先给 Phase 5 的机器人换上 ros2_control，再用 slam_toolbox 建一张房间地图，最后让 Nav2 在这张图上自己开过去。</p>
+  <p class="lede" lang="en">In Phase 5 the robot moved thanks to Gazebo’s own differential-drive plugin: <code>/cmd_vel</code> went in, the wheels turned, <code>odom</code> came out, and what happened in between was invisible and could not move to a real robot. This phase splits that path into two layers. The lower one is <strong>ros2_control</strong>: a loop that runs at a fixed period and, every period, <strong>reads</strong> state from the hardware, lets the controllers <strong>compute</strong> once, and <strong>writes</strong> commands back; the same <code>diff_drive_controller</code> drives joints in Gazebo or real motors, and only the hardware plugin changes. The upper one is <strong>Nav2</strong>: a <strong>behavior tree</strong> breaks “go there” into three kinds of action calls (plan, follow, recover), the planner and the controller each look at a <strong>costmap</strong>, and <strong>AMCL</strong> or <strong>slam_toolbox</strong> tells them where the robot is on the map. In the labs you first give the Phase 5 robot ros2_control, then build a map of a room with slam_toolbox, and finally let Nav2 drive across that map on its own.</p>
+  <div class="note" lang="zh-CN"><strong>状态说明：</strong>本页的配置、代码和命令按 2026-10-31 的文档与源码写成：control.ros.org 的 Jazzy 文档，ros2_control、ros2_controllers、gz_ros2_control、navigation2、slam_toolbox 各自的 <code>jazzy</code> 分支。它们<strong>没有在这台 Mac 上运行过</strong>。分支末端可能比你装到的二进制包更新，所以默认值和参数名以你容器里 <code>/opt/ros/jazzy/share</code> 下的文件为准。实验里的「预期结果」是推断，标着「请查文档」的地方是作者没有逐字核对的细节。</div><div class="note" lang="en"><strong>Status:</strong> the configuration, code and commands on this page were written on 2026-10-31 against the Jazzy docs on control.ros.org and the <code>jazzy</code> branches of ros2_control, ros2_controllers, gz_ros2_control, navigation2 and slam_toolbox. They <strong>have not been run on this Mac</strong>. A branch tip can be newer than the binary packages you install, so for defaults and parameter names the files under <code>/opt/ros/jazzy/share</code> in your container win. The “expected results” in the labs are inference, and places marked “check the docs” are details the author did not verify word for word.</div>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">画出 ros2_control 的结构：controller_manager、硬件组件、state 与 command 接口、控制器，并说出哪个接口由谁读、由谁独占。</li>
+      <li lang="en">Draw the structure of ros2_control: the controller_manager, hardware components, state and command interfaces, and controllers, and say who reads each interface and who owns it exclusively.</li>
+      <li lang="zh-CN">解释控制环为什么要在<strong>一个线程</strong>上以<strong>固定频率</strong>运行，错过一次截止时间对轮子和里程计意味着什么，以及它和 Phase 2 的调度抖动、Kernel Engineering 的中断驱动路径是什么关系。</li>
+      <li lang="en">Explain why the control loop must run at a <strong>fixed rate</strong> on <strong>one thread</strong>, what a missed deadline means for a wheel and for odometry, and how this relates to the scheduling jitter of Phase 2 and the interrupt-driven driver path of Kernel Engineering.</li>
+      <li lang="zh-CN">通过 <code>gz_ros2_control</code> 给 Phase 5 的机器人配上 <code>joint_state_broadcaster</code> 和 <code>diff_drive_controller</code>，用 <code>ros2 control</code> 查看并切换控制器的状态。</li>
+      <li lang="en">Give the Phase 5 robot a <code>joint_state_broadcaster</code> and a <code>diff_drive_controller</code> through <code>gz_ros2_control</code>, and inspect and switch controller states with <code>ros2 control</code>.</li>
+      <li lang="zh-CN">说清 bt_navigator 的行为树怎样把一个 <code>NavigateToPose</code> 目标变成对 planner_server、controller_server 和 behavior_server 的调用，以及失败时它按什么顺序恢复。</li>
+      <li lang="en">Say how bt_navigator’s behavior tree turns a <code>NavigateToPose</code> goal into calls to planner_server, controller_server and behavior_server, and in what order it recovers from failure.</li>
+      <li lang="zh-CN">说出 costmap 的 static、obstacle、inflation 三层各加进了什么，膨胀为什么必须存在，并能读懂膨胀代价的公式。</li>
+      <li lang="en">Say what each of the static, obstacle and inflation costmap layers adds, why inflation has to exist, and read the inflation cost formula.</li>
+      <li lang="zh-CN">区分 AMCL 和 slam_toolbox 各自估计的是什么，用 slam_toolbox 建图、保存，再让 Nav2 在这张图上从 RViz2 和 Python 动作客户端接受目标。</li>
+      <li lang="en">Tell apart what AMCL and slam_toolbox each estimate, build and save a map with slam_toolbox, and have Nav2 accept goals on that map from RViz2 and from a Python action client.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN">完成 <a href="../phase-5-tf2-urdf-simulation/index.html">Phase 5</a>：<code>/root/ws/p5</code> 下的 <code>bot.urdf.xacro</code> 和 <code>view.launch.py</code>、<code>ros_gz_bridge</code>、<code>use_sim_time</code>、REP 105 的 map → odom → base_link。Lab A 从这两个文件的副本开始。</li>
+    <li lang="en">Finish <a href="../phase-5-tf2-urdf-simulation/index.html">Phase 5</a>: <code>bot.urdf.xacro</code> and <code>view.launch.py</code> under <code>/root/ws/p5</code>, <code>ros_gz_bridge</code>, <code>use_sim_time</code>, and REP 105’s map → odom → base_link. Lab A starts from copies of those two files.</li>
+    <li lang="zh-CN">完成 <a href="../phase-4-launch-lifecycle-composition/index.html">Phase 4</a>：lifecycle 状态机和组件容器。ros2_control 的每个控制器、Nav2 的每个服务器都是 lifecycle 节点；Nav2 默认把全部服务器装进一个组件容器。</li>
+    <li lang="en">Finish <a href="../phase-4-launch-lifecycle-composition/index.html">Phase 4</a>: the lifecycle state machine and component containers. Every ros2_control controller and every Nav2 server is a lifecycle node, and Nav2 by default loads all its servers into one component container.</li>
+    <li lang="zh-CN">完成 <a href="../phase-2-executors-and-timing/index.html">Phase 2</a>：执行器线程、<code>SCHED_FIFO</code>、<code>mlockall</code> 和抖动的四个来源。控制环正是那一页「实时线程」的典型用户。</li>
+    <li lang="en">Finish <a href="../phase-2-executors-and-timing/index.html">Phase 2</a>: executor threads, <code>SCHED_FIFO</code>, <code>mlockall</code> and the four sources of jitter. The control loop is the textbook user of that page’s “real-time thread”.</li>
+    <li lang="zh-CN"><a href="../lab-setup/index.html">实验环境</a>的镜像已经装了 <code>ros-jazzy-ros2-control</code>、<code>ros-jazzy-ros2-controllers</code>、<code>ros-jazzy-gz-ros2-control</code>、<code>ros-jazzy-navigation2</code>、<code>ros-jazzy-nav2-bringup</code> 和 <code>ros-jazzy-slam-toolbox</code>，本页不用再装大件。</li>
+    <li lang="en">The image from <a href="../lab-setup/index.html">Lab environment</a> already has <code>ros-jazzy-ros2-control</code>, <code>ros-jazzy-ros2-controllers</code>, <code>ros-jazzy-gz-ros2-control</code>, <code>ros-jazzy-navigation2</code>, <code>ros-jazzy-nav2-bringup</code> and <code>ros-jazzy-slam-toolbox</code>, so this page needs no large installs.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. ros2_control 的结构：硬件、接口、控制器</h3><h3 lang="en">1. The structure of ros2_control: hardware, interfaces, controllers</h3>
+  <p lang="zh-CN">ros2_control 把「和硬件打交道」与「控制算法」切开，中间只隔着一层<strong>接口</strong>。四个角色：</p>
+  <p lang="en">ros2_control separates “talking to hardware” from “the control algorithm”, with only a layer of <strong>interfaces</strong> between them. Four roles:</p>
+  <ul>
+    <li lang="zh-CN"><strong>硬件组件</strong>（hardware component）：一个 pluginlib 插件，负责和一种具体硬件说话，实现 <code>read()</code> 和 <code>write()</code>。种类有 system（多关节，例如一台底盘的两个轮子）、actuator（单个执行器）和 sensor（只读）。仿真里是 <code>gz_ros2_control/GazeboSimSystem</code>，真车上是厂商或你自己写的电机驱动插件。用哪个插件、导出哪些接口，写在 URDF 的 <code>&lt;ros2_control&gt;</code> 块里。</li>
+    <li lang="en"><strong>Hardware component</strong>: a pluginlib plugin that talks to one kind of hardware and implements <code>read()</code> and <code>write()</code>. The kinds are system (several joints, such as the two wheels of a base), actuator (one actuator) and sensor (read-only). In simulation it is <code>gz_ros2_control/GazeboSimSystem</code>; on a real robot it is a motor-driver plugin from the vendor or from you. Which plugin to use and which interfaces it exports are written in the URDF’s <code>&lt;ros2_control&gt;</code> block.</li>
+    <li lang="zh-CN"><strong>state 与 command 接口</strong>：每个接口就是一个带名字的 <code>double</code>，名字是「关节名/接口类型」，例如 <code>left_wheel_joint/position</code>、<code>left_wheel_joint/velocity</code>。state 接口由硬件在 <code>read()</code> 里填写，任何控制器都可以读，可以共享；command 接口由控制器写、由硬件在 <code>write()</code> 里送出，同一时刻<strong>只能被一个控制器占用</strong>（claim）。这条独占规则让两个控制器不会同时给一个电机下命令。</li>
+    <li lang="en"><strong>State and command interfaces</strong>: each interface is one named <code>double</code>, named “joint name/interface type”, for example <code>left_wheel_joint/position</code> and <code>left_wheel_joint/velocity</code>. State interfaces are filled in by the hardware in <code>read()</code> and any controller may read them, shared; command interfaces are written by a controller and sent out by the hardware in <code>write()</code>, and <strong>only one controller may claim one at a time</strong>. This exclusivity rule means two controllers never command one motor at the same time.</li>
+    <li lang="zh-CN"><strong>控制器</strong>：也是 pluginlib 插件，例如 <code>diff_drive_controller/DiffDriveController</code>。它声明自己要哪些 state 和 command 接口，每个周期的 <code>update()</code> 里读前者、写后者。控制器本身是 lifecycle 节点：加载后是 unconfigured，configure 后是 inactive，activate 时才去占用 command 接口（Phase 4 的状态机，原样复用）。</li>
+    <li lang="en"><strong>Controllers</strong>: also pluginlib plugins, such as <code>diff_drive_controller/DiffDriveController</code>. A controller declares which state and command interfaces it needs, and in every period’s <code>update()</code> reads the former and writes the latter. A controller is itself a lifecycle node: unconfigured after loading, inactive after configure, and it claims its command interfaces only on activate (the state machine of Phase 4, reused as is).</li>
+    <li lang="zh-CN"><strong>controller_manager</strong>：把以上三者串起来的节点。它的资源管理器（resource manager）加载硬件组件、登记全部接口；它按名字加载控制器，并在每个周期依次调用 read、各控制器的 update、write。对外它是一组服务（加载、配置、切换、卸载控制器），<code>ros2 control …</code> 命令和 <code>spawner</code> 都是这些服务的客户端。真车上它跑在 <code>ros2_control_node</code> 这个可执行文件里；仿真里它由 Gazebo 插件在 Gazebo 进程内创建（概念 3）。</li>
+    <li lang="en"><strong>controller_manager</strong>: the node that ties the three together. Its resource manager loads hardware components and registers all their interfaces; it loads controllers by name and, every period, calls read, each controller’s update, then write. To the outside it is a set of services (load, configure, switch and unload controllers), and the <code>ros2 control …</code> commands and <code>spawner</code> are clients of those services. On a real robot it runs in the <code>ros2_control_node</code> executable; in simulation a Gazebo plugin creates it inside the Gazebo process (concept 3).</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ros2_control 的章节；官方 <a href="https://control.ros.org/jazzy/doc/getting_started/getting_started.html">ros2_control Getting Started</a>。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on ros2_control; the official <a href="https://control.ros.org/jazzy/doc/getting_started/getting_started.html">ros2_control Getting Started</a>.</p>
+
+  <h3 lang="zh-CN">2. 实时更新环：为什么固定频率、为什么一个线程、错过截止时间会怎样</h3><h3 lang="en">2. The real-time update loop: why a fixed rate, why one thread, and what a missed deadline does</h3>
+  <p lang="zh-CN">controller_manager 的参数 <code>update_rate</code> 决定周期 T = 1 / update_rate，Lab A 用 100 Hz，即 10 ms。每个周期严格按 <strong>read → update → write</strong> 的顺序跑一遍，然后睡到下一个周期边界。这样设计有三个原因：</p>
+  <p lang="en">The controller_manager parameter <code>update_rate</code> sets the period T = 1 / update_rate; Lab A uses 100 Hz, which is 10 ms. Every period runs strictly <strong>read → update → write</strong>, then sleeps until the next period boundary. The design has three reasons:</p>
+  <ol>
+    <li lang="zh-CN"><strong>控制器是离散时间系统。</strong>PID 的积分项累加 e·dt，微分项算 (e<sub>k</sub> − e<sub>k−1</sub>) / dt；差速控制器用两次读数之间的轮转角度积分出位姿；速度和加速度限幅也按 dt 换算。控制器的增益是按某个采样周期调出来的，周期一抖，等效增益就跟着抖。ros2_control 会把实测的周期传进 <code>update(time, period)</code>，让控制器至少用对 dt，但「被控对象在这段时间里没人管」这件事无法靠算数补回来：反馈来得越晚，相位滞后越大，闭环越接近不稳定。</li>
+    <li lang="en"><strong>Controllers are discrete-time systems.</strong> A PID’s integral term accumulates e·dt and its derivative term computes (e<sub>k</sub> − e<sub>k−1</sub>) / dt; a differential-drive controller integrates the pose from the wheel angle turned between two readings; velocity and acceleration limits are converted with dt too. A controller’s gains are tuned for some sampling period, and when the period jitters, the effective gain jitters with it. ros2_control passes the measured period into <code>update(time, period)</code> so that a controller at least uses the right dt, but arithmetic cannot make up for “nobody controlled the plant during that gap”: the later the feedback, the more phase lag, and the closer the closed loop comes to instability.</li>
+    <li lang="zh-CN"><strong>一份一致的快照。</strong>read 一次性把所有关节的状态拷进 state 接口，本周期所有控制器都基于同一时刻的数据计算，write 再一次性送出。接口只是普通内存里的 <code>double</code>，只有这一个线程碰它们，所以不需要加锁。一旦让第二个线程也来读写，就得加锁，而锁会带来优先级反转：高优先级的控制线程等一个被抢占的低优先级线程放锁。</li>
+    <li lang="en"><strong>One consistent snapshot.</strong> read copies the state of every joint into the state interfaces in one go, every controller in the period computes from data of the same instant, and write sends everything out in one go. The interfaces are plain <code>double</code>s in ordinary memory and only this one thread touches them, so no locks are needed. Let a second thread read or write them and you need a lock, and a lock brings priority inversion: the high-priority control thread waits for a preempted low-priority thread to release it.</li>
+    <li lang="zh-CN"><strong>热路径里不做不确定的事。</strong>话题订阅、服务、参数这些 ROS 通信都在执行器的<em>其他</em>线程里跑。新的 <code>cmd_vel</code> 由订阅回调放进一个实时安全的缓冲区（realtime_tools 提供的 realtime buffer 一类结构，具体类名随版本变化，请查文档），<code>update()</code> 只取最新的一份；发布 <code>/odom</code> 也用不阻塞的实时发布器，抢不到就跳过这一次。控制环里不分配内存、不打日志、不等锁，这正是 Phase 2 概念 7 的规则。</li>
+    <li lang="en"><strong>Nothing unpredictable on the hot path.</strong> ROS communication (topic subscriptions, services, parameters) runs on <em>other</em> executor threads. A new <code>cmd_vel</code> is put by the subscription callback into a real-time-safe buffer (a realtime buffer of the kind realtime_tools provides; the exact class name changes between versions, check the docs), and <code>update()</code> only takes the latest one; publishing <code>/odom</code> also uses a non-blocking real-time publisher that skips a cycle if it cannot get its lock. The control loop does not allocate memory, log or wait on locks, which are exactly the rules of Phase 2 concept 7.</li>
+  </ol>
+  <p lang="zh-CN"><strong>真车上的线程。</strong>按 controller_manager 的 Jazzy 文档和 <code>ros2_control_node</code> 的源码：主循环跑在一个专门的线程里，不管内核是不是 <code>PREEMPT_RT</code>，它都会尝试把自己设成 <code>SCHED_FIFO</code> 优先级 50（参数 <code>thread_priority</code>），失败时打印一条警告继续跑；<code>lock_memory</code> 在实时内核上默认为真，否则为假；<code>cpu_affinity</code> 可以把它钉在某个核上。实验容器的 compose 给了 <code>CAP_SYS_NICE</code> 和 rtprio 99，所以 FIFO 能设上，但没有放宽 memlock，也没有 <code>PREEMPT_RT</code>（见 Phase 2）。</p>
+  <p lang="en"><strong>The thread on a real robot.</strong> Per the Jazzy controller_manager docs and the <code>ros2_control_node</code> source: the main loop runs on a dedicated thread that, whether or not the kernel is <code>PREEMPT_RT</code>, tries to put itself into <code>SCHED_FIFO</code> at priority 50 (parameter <code>thread_priority</code>), and on failure logs a warning and carries on; <code>lock_memory</code> defaults to true on a real-time kernel and false otherwise; <code>cpu_affinity</code> can pin it to a core. The lab container’s compose file grants <code>CAP_SYS_NICE</code> and rtprio 99, so FIFO can be set, but it does not raise memlock and there is no <code>PREEMPT_RT</code> (see Phase 2).</p>
+  <p lang="zh-CN"><strong>错过截止时间会怎样。</strong>假设 100 Hz 的环里有一个周期因为缺页或被别的任务抢占做了 25 ms。按 2026-10-31 的 <code>jazzy</code> 分支源码，<code>overruns.manage</code> 默认为真时，下一个截止时间已经过去，循环打印 <code>Overrun detected!</code> 警告、跳过错过的周期，不会连跑几次去「补」；关掉它，循环会立刻连跑追赶。无论哪种，对轮子来说这 25 ms 里硬件一直执行<strong>上一条命令</strong>：如果这时本该刹车，以 4 rad/s 转的轮子会多转约 0.1 rad，对一台 5 cm 半径的小车是 5 mm，无伤大雅；对一个靠反馈保持平衡的机器人，或者一个在接触中用力控的机械臂，这就是一次没有反馈的 25 ms。很多电机驱动器还有自己的看门狗，超过一段时间收不到命令就断电停转，轮子会突然一顿（是否有、多长，取决于驱动器）。仿真时间下 overrun 处理被关闭，所以在 Gazebo 里你看不到这一切。</p>
+  <p lang="en"><strong>What a missed deadline does.</strong> Suppose one period of a 100 Hz loop takes 25 ms because of a page fault or preemption by another task. Per the <code>jazzy</code> branch source on 2026-10-31, with <code>overruns.manage</code> at its default of true, the next deadline has already passed, so the loop logs an <code>Overrun detected!</code> warning and skips the missed periods instead of running several in a row to “catch up”; with it turned off, the loop runs back to back at once to catch up. Either way, for the wheel the hardware keeps executing the <strong>previous command</strong> for those 25 ms: if it should have braked just then, a wheel turning at 4 rad/s turns about 0.1 rad too far, which is 5 mm for a small robot with 5 cm wheels and harmless; for a robot that keeps its balance through feedback, or an arm in contact under force control, it is 25 ms with no feedback at all. Many motor drivers also have their own watchdog that cuts power when no command arrives for a while, and the wheel stops with a jerk (whether there is one and how long it waits depends on the driver). Overrun handling is disabled under simulation time, so in Gazebo you see none of this.</p>
+  <div class="note" lang="zh-CN"><strong>和 Kernel Engineering 的连接。</strong>这个控制环是内核里中断驱动的驱动程序路径在用户态的孪生（<a href="../../kernel-engineering/phase-5-device-drivers/index.html">Kernel Phase 5 · 设备驱动</a>）。在那里，设备一来中断，上半部只做最少的事：读寄存器、确认中断、把数据交给下半部或线程化中断，慢的工作挪出热路径。这里，一个定时器把一个高优先级线程叫醒，它只做 read、update、write 这一小段有界的工作，ROS 通信交给执行器线程，中间靠无锁缓冲区交接。两边的规则相同：热路径有上界、不睡眠、不分配。区别在于谁来叫醒：中断由硬件触发，控制环由内核的定时器和调度器触发，所以它的抖动就是 <a href="../phase-2-executors-and-timing/index.html">Phase 2</a> 讲的调度故事：定时器的精度、FIFO 任务被唤醒后等多久才上 CPU、内核里不可抢占的区段。</div>
+  <div class="note" lang="en"><strong>The connection to Kernel Engineering.</strong> This control loop is the user-space twin of the kernel’s interrupt-driven driver path (<a href="../../kernel-engineering/phase-5-device-drivers/index.html">Kernel Phase 5 · Device Drivers</a>). There, when a device raises an interrupt, the top half does the least it can: read a register, acknowledge the interrupt, hand the data to a bottom half or a threaded interrupt, and move the slow work off the hot path. Here, a timer wakes one high-priority thread that does only the short, bounded work of read, update and write, while ROS communication goes to executor threads, with a lock-free buffer as the hand-off. The rules on both sides are the same: a bounded hot path, no sleeping, no allocation. The difference is what does the waking: an interrupt is triggered by hardware, the control loop by the kernel’s timer and scheduler, so its jitter is the scheduling story of <a href="../phase-2-executors-and-timing/index.html">Phase 2</a>: timer precision, how long a woken FIFO task waits for a CPU, and the non-preemptible sections inside the kernel.</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ros2_control 的章节；官方 <a href="https://control.ros.org/jazzy/doc/ros2_control/controller_manager/doc/userdoc.html">controller_manager 文档</a>的 Determinism 一节。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on ros2_control; the Determinism section of the official <a href="https://control.ros.org/jazzy/doc/ros2_control/controller_manager/doc/userdoc.html">controller_manager documentation</a>.</p>
+
+  <h3 lang="zh-CN">3. diff_drive_controller、joint_trajectory_controller 与 gz_ros2_control</h3><h3 lang="en">3. diff_drive_controller, joint_trajectory_controller and gz_ros2_control</h3>
+  <ul>
+    <li lang="zh-CN"><strong><code>diff_drive_controller</code></strong>：订阅 <code>~/cmd_vel</code>，在 Jazzy 上类型是 <code>geometry_msgs/msg/TwistStamped</code>（控制器文档原文），只取线速度 x 分量 v 和角速度 z 分量 ω。用轮距 L（参数 <code>wheel_separation</code>）和轮半径 r（<code>wheel_radius</code>）做逆运动学：ω<sub>左</sub> = (v − ω·L/2) / r，ω<sub>右</sub> = (v + ω·L/2) / r，写进 <code>left_wheel_names</code>、<code>right_wheel_names</code> 列出的关节的 velocity command 接口。反过来用两轮的 position（或 velocity）state 积分出位姿，发布 <code>~/odom</code>，<code>enable_odom_tf</code> 为真时还发布 odom → base_link 的 tf。<code>cmd_vel_timeout</code>（默认 0.5 s）内收不到新命令就停车。</li>
+    <li lang="en"><strong><code>diff_drive_controller</code></strong>: subscribes to <code>~/cmd_vel</code>, whose type on Jazzy is <code>geometry_msgs/msg/TwistStamped</code> (as the controller docs say), and takes only the linear x component v and the angular z component ω. With the wheel separation L (parameter <code>wheel_separation</code>) and wheel radius r (<code>wheel_radius</code>) it does the inverse kinematics ω<sub>left</sub> = (v − ω·L/2) / r and ω<sub>right</sub> = (v + ω·L/2) / r, and writes them to the velocity command interfaces of the joints listed in <code>left_wheel_names</code> and <code>right_wheel_names</code>. In the other direction it integrates the pose from the two wheels’ position (or velocity) state, publishes <code>~/odom</code>, and, when <code>enable_odom_tf</code> is true, the odom → base_link tf. If no new command arrives within <code>cmd_vel_timeout</code> (default 0.5 s), it stops.</li>
+    <li lang="zh-CN"><strong><code>joint_state_broadcaster</code></strong>：不占用任何 command 接口，只读全部 state 接口，发布 <code>/joint_states</code>，<code>robot_state_publisher</code> 再据此算出轮子的 tf。Phase 5 里这件事由 Gazebo 的 JointStatePublisher 系统做，现在换成了控制器。</li>
+    <li lang="en"><strong><code>joint_state_broadcaster</code></strong>: claims no command interface, reads every state interface and publishes <code>/joint_states</code>, from which <code>robot_state_publisher</code> computes the wheels’ tf. In Phase 5 Gazebo’s JointStatePublisher system did this job; now a controller does.</li>
+    <li lang="zh-CN"><strong><code>joint_trajectory_controller</code></strong>：机械臂的标准控制器。它接受一条带时间戳的关节轨迹（话题或 <code>FollowJointTrajectory</code> 动作，MoveIt 2 就是用后者），每个周期在相邻轨迹点之间插值出当前时刻的期望位置、速度，再写进 position、velocity 或 effort command 接口。插值方式和容差参数请查文档。本课程的底盘用不到它，但它把「固定周期」说得最清楚：轨迹是连续时间的，控制器只在每个周期边界采样一次。</li>
+    <li lang="en"><strong><code>joint_trajectory_controller</code></strong>: the standard controller for arms. It accepts a time-stamped joint trajectory (by topic or through the <code>FollowJointTrajectory</code> action, which is what MoveIt 2 uses), interpolates the desired position and velocity at the current instant between neighbouring trajectory points every period, and writes them to position, velocity or effort command interfaces. Check the docs for the interpolation methods and tolerance parameters. This course’s base does not use it, but it shows “fixed period” most plainly: the trajectory is in continuous time, and the controller samples it once at each period boundary.</li>
+    <li lang="zh-CN"><strong><code>gz_ros2_control</code></strong>：一个 Gazebo 系统插件（<code>gz_ros2_control::GazeboSimROS2ControlPlugin</code>），在 Gazebo 进程里创建一个 controller_manager，并把 URDF <code>&lt;ros2_control&gt;</code> 块里列出的关节接成硬件组件 <code>GazeboSimSystem</code>。按它 <code>jazzy</code> 分支的源码，它<em>没有</em>单独的实时线程：Gazebo 每个仿真步的 PostUpdate 里，仿真时间每过一个控制周期就调用一次 read 和 update，PreUpdate 里调用 write；它还强制 <code>use_sim_time:=true</code>。于是控制环按<strong>仿真时间</strong>严格等周期，即使墙上时间里 Gazebo 卡了一下，仿真也只是变慢，控制器察觉不到。这让仿真结果可重复，也意味着仿真永远测不出概念 2 的那些实时问题。</li>
+    <li lang="en"><strong><code>gz_ros2_control</code></strong>: a Gazebo system plugin (<code>gz_ros2_control::GazeboSimROS2ControlPlugin</code>) that creates a controller_manager inside the Gazebo process and connects the joints listed in the URDF’s <code>&lt;ros2_control&gt;</code> block as the hardware component <code>GazeboSimSystem</code>. Per the source on its <code>jazzy</code> branch it has <em>no</em> separate real-time thread: in the PostUpdate of each Gazebo simulation step, every time a control period of simulation time has passed, it calls read and update, and in PreUpdate it calls write; it also forces <code>use_sim_time:=true</code>. So the control loop is exactly periodic in <strong>simulation time</strong>: even if Gazebo stalls in wall time, the simulation just runs slower and the controllers cannot tell. That makes simulation results repeatable, and it also means simulation can never reveal the real-time problems of concept 2.</li>
+  </ul>
+  <div class="note" lang="zh-CN">这就是换成 ros2_control 的收益：Phase 5 的 DiffDrive 是 Gazebo 的东西，到了真车上要换成另一套代码；现在 <code>diff_drive_controller</code> 和它的 YAML 参数在仿真和真车上完全一样，换掉的只有 <code>&lt;hardware&gt;&lt;plugin&gt;</code> 那一行。代价是多了一层要配的东西，以及 Jazzy 上 <code>TwistStamped</code> 和不带时间戳的 <code>Twist</code> 之间的类型差别（Lab A 第 6、7 步、Lab B 第 4、5 步都会遇到）。</div>
+  <div class="note" lang="en">This is what switching to ros2_control buys: Phase 5’s DiffDrive belongs to Gazebo and has to be replaced by different code on a real robot; now <code>diff_drive_controller</code> and its YAML parameters are identical in simulation and on the real robot, and only the <code>&lt;hardware&gt;&lt;plugin&gt;</code> line changes. The price is one more layer to configure, and on Jazzy the type difference between <code>TwistStamped</code> and the unstamped <code>Twist</code> (you meet it in steps 6 and 7 of Lab A and steps 4 and 5 of Lab B).</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ros2_control 与 Gazebo 仿真的章节；官方 <a href="https://control.ros.org/jazzy/doc/ros2_controllers/diff_drive_controller/doc/userdoc.html">diff_drive_controller</a>、<a href="https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/userdoc.html">joint_trajectory_controller</a> 与 <a href="https://control.ros.org/jazzy/doc/gz_ros2_control/doc/index.html">gz_ros2_control</a> 文档。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on ros2_control and Gazebo simulation; the official <a href="https://control.ros.org/jazzy/doc/ros2_controllers/diff_drive_controller/doc/userdoc.html">diff_drive_controller</a>, <a href="https://control.ros.org/jazzy/doc/ros2_controllers/joint_trajectory_controller/doc/userdoc.html">joint_trajectory_controller</a> and <a href="https://control.ros.org/jazzy/doc/gz_ros2_control/doc/index.html">gz_ros2_control</a> documentation.</p>
+
+  <h3 lang="zh-CN">4. Nav2 的结构：服务器、插件与生命周期</h3><h3 lang="en">4. The structure of Nav2: servers, plugins and lifecycle</h3>
+  <p lang="zh-CN">Nav2 不是一个节点，而是一组各管一件事的<strong>服务器</strong>，彼此主要通过 ROS 2 <strong>动作</strong>（Phase 1）说话。每个服务器都是一个 lifecycle 节点，算法部分是可替换的 pluginlib 插件：</p>
+  <p lang="en">Nav2 is not one node but a set of <strong>servers</strong> that each do one job and talk to each other mainly through ROS 2 <strong>actions</strong> (Phase 1). Every server is a lifecycle node, and the algorithmic part of each is a replaceable pluginlib plugin:</p>
+  <ul>
+    <li lang="zh-CN"><strong><code>bt_navigator</code></strong>：对外提供 <code>navigate_to_pose</code>（类型 <code>nav2_msgs/action/NavigateToPose</code>）和 <code>navigate_through_poses</code> 动作，收到目标后加载一棵行为树并执行它（概念 5）。它也订阅 <code>/goal_pose</code>，RViz2 的 2D Goal Pose 工具发到这里的位姿会被当成一个 NavigateToPose 目标。</li>
+    <li lang="en"><strong><code>bt_navigator</code></strong>: offers the <code>navigate_to_pose</code> action (type <code>nav2_msgs/action/NavigateToPose</code>) and <code>navigate_through_poses</code>, and on a goal loads and runs a behavior tree (concept 5). It also subscribes to <code>/goal_pose</code>, so a pose sent there by RViz2’s 2D Goal Pose tool is treated as a NavigateToPose goal.</li>
+    <li lang="zh-CN"><strong><code>planner_server</code></strong>：<code>compute_path_to_pose</code> 动作，在 global costmap 上算一条从当前位置到目标的路径。插件有 NavFn（2026-10-31 <code>jazzy</code> 分支默认参数里的选择）和 Smac 系列等。</li>
+    <li lang="en"><strong><code>planner_server</code></strong>: the <code>compute_path_to_pose</code> action, which computes a path from the current position to the goal on the global costmap. Plugins include NavFn (the choice in the default parameters on the <code>jazzy</code> branch on 2026-10-31) and the Smac family.</li>
+    <li lang="zh-CN"><strong><code>controller_server</code></strong>：<code>follow_path</code> 动作，以 <code>controller_frequency</code>（默认参数 20 Hz）在 local costmap 上算出每一步的速度命令，发布到 <code>cmd_vel</code>。插件有 DWB、MPPI、Regulated Pure Pursuit（RPP）；上述默认参数里是 MPPI，你装到的版本默认是哪个，请查文档和 <code>nav2_params.yaml</code>。</li>
+    <li lang="en"><strong><code>controller_server</code></strong>: the <code>follow_path</code> action, which at <code>controller_frequency</code> (20 Hz in the default parameters) computes each step’s velocity command on the local costmap and publishes it on <code>cmd_vel</code>. Plugins include DWB, MPPI and Regulated Pure Pursuit (RPP); those default parameters choose MPPI, and which one is the default in your installed release is for the docs and <code>nav2_params.yaml</code> to say.</li>
+    <li lang="zh-CN"><strong><code>smoother_server</code></strong> 让路径更平滑；<strong><code>behavior_server</code></strong> 提供 Spin、BackUp、DriveOnHeading、Wait 等脱困动作；<strong><code>map_server</code></strong> 从 YAML 加 PGM 文件发布 <code>/map</code>；<strong><code>amcl</code></strong> 做定位（概念 7）；<strong><code>velocity_smoother</code></strong> 和 <strong><code>collision_monitor</code></strong> 依次过滤速度命令。按 <code>navigation_launch.py</code> 的 <code>jazzy</code> 版本，controller_server 的输出被重映射为 <code>cmd_vel_nav</code>，平滑后成为 <code>cmd_vel_smoothed</code>，过了碰撞监视才是最终的 <code>cmd_vel</code>。</li>
+    <li lang="en"><strong><code>smoother_server</code></strong> smooths paths; <strong><code>behavior_server</code></strong> provides recovery actions such as Spin, BackUp, DriveOnHeading and Wait; <strong><code>map_server</code></strong> publishes <code>/map</code> from a YAML plus PGM file; <strong><code>amcl</code></strong> localises (concept 7); <strong><code>velocity_smoother</code></strong> and <strong><code>collision_monitor</code></strong> filter velocity commands in turn. Per the <code>jazzy</code> version of <code>navigation_launch.py</code>, controller_server’s output is remapped to <code>cmd_vel_nav</code>, becomes <code>cmd_vel_smoothed</code> after smoothing, and only after the collision monitor is it the final <code>cmd_vel</code>.</li>
+    <li lang="zh-CN"><strong><code>lifecycle_manager</code></strong>：参数 <code>node_names</code> 列出它管的服务器，<code>autostart</code> 为真时启动后自动先把全部服务器 configure，再全部 activate，这正是 Phase 4 概念 4 说的「两阶段启动」。它还和每个服务器建立 bond 心跳，一个服务器崩溃，管理者能察觉并把整个栈带下来（重启策略请查文档）。<code>nav2_bringup</code> 里定位和导航各有一个管理者。</li>
+    <li lang="en"><strong><code>lifecycle_manager</code></strong>: its <code>node_names</code> parameter lists the servers it manages, and with <code>autostart</code> true it first configures all of them after start-up and then activates all of them, which is exactly the “two-phase start-up” of Phase 4 concept 4. It also keeps a bond heartbeat with each server, so when a server crashes the manager notices and brings the whole stack down (check the docs for the restart policy). <code>nav2_bringup</code> has one manager for localisation and one for navigation.</li>
+  </ul>
+  <div class="note" lang="zh-CN">Nav2 发布 <code>Twist</code> 还是 <code>TwistStamped</code>，由每个相关节点的参数 <code>enable_stamped_cmd_vel</code> 决定。按 <code>nav2_util/twist_publisher.hpp</code> 的 <code>jazzy</code> 源码，它在 Jazzy 上默认为假，即发布不带时间戳的 <code>Twist</code>；Nav2 的迁移指南说下一个发行版把默认改成了 <code>TwistStamped</code>。而 Jazzy 的 <code>diff_drive_controller</code> 只收 <code>TwistStamped</code>。两者直接相连时什么也不会动，也不报错（Phase 5 的测验 3 是同一个现象），所以 Lab B 要把相关节点的这个参数都设成真。</div>
+  <div class="note" lang="en">Whether Nav2 publishes <code>Twist</code> or <code>TwistStamped</code> is decided by the <code>enable_stamped_cmd_vel</code> parameter of each node involved. Per the <code>jazzy</code> source of <code>nav2_util/twist_publisher.hpp</code>, it defaults to false on Jazzy, which means unstamped <code>Twist</code>; Nav2’s migration guide says the next distribution changed the default to <code>TwistStamped</code>. Jazzy’s <code>diff_drive_controller</code>, meanwhile, accepts only <code>TwistStamped</code>. Wired straight together, nothing moves and nothing complains (the same effect as Phase 5’s quiz question 3), so Lab B sets this parameter to true on every node involved.</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 Nav2 的章节；Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲导航的章节；官方 <a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/navigation_servers/">Navigation Servers</a> 概念页。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on Nav2; the chapter of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on navigation; the official <a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/navigation_servers/">Navigation Servers</a> concept page.</p>
+
+  <h3 lang="zh-CN">5. 行为树：从一个目标到规划、跟随与恢复</h3><h3 lang="en">5. Behavior trees: from one goal to planning, following and recovery</h3>
+  <p lang="zh-CN"><strong>行为树</strong>（behavior tree，Nav2 用 BehaviorTree.CPP 4.x）是一棵节点树，由 bt_navigator 以固定频率从根开始 <strong>tick</strong>。每个节点被 tick 后返回三种结果之一：<code>SUCCESS</code>、<code>FAILURE</code>，或者 <code>RUNNING</code>（还没做完，下次 tick 再问）。叶子是<strong>动作节点</strong>，内部组合规则在<strong>控制节点</strong>里：</p>
+  <p lang="en">A <strong>behavior tree</strong> (Nav2 uses BehaviorTree.CPP 4.x) is a tree of nodes that bt_navigator <strong>ticks</strong> from the root at a fixed rate. Each node, when ticked, returns one of three results: <code>SUCCESS</code>, <code>FAILURE</code>, or <code>RUNNING</code> (not done yet; ask again next tick). The leaves are <strong>action nodes</strong>, and the rules for combining them live in <strong>control nodes</strong>:</p>
+  <ul>
+    <li lang="zh-CN"><strong>动作节点包着动作客户端。</strong><code>ComputePathToPose</code> 第一次被 tick 时向 planner_server 发一个动作目标并返回 <code>RUNNING</code>，之后每次 tick 查一下结果，规划完成时返回 <code>SUCCESS</code>，并把路径写进<strong>黑板</strong>（blackboard，树里共享的键值表）上的 <code>{path}</code>。<code>FollowPath</code> 从黑板读 <code>{path}</code>，调用 controller_server。<code>Spin</code>、<code>BackUp</code>、<code>Wait</code> 调用 behavior_server，<code>ClearEntireCostmap</code> 调用 costmap 的清除服务。行为树本身不做规划，也不算速度，它只决定<em>什么时候调用谁</em>。</li>
+    <li lang="en"><strong>Action nodes wrap action clients.</strong> When <code>ComputePathToPose</code> is ticked for the first time it sends an action goal to planner_server and returns <code>RUNNING</code>; each later tick checks for the result, and when planning finishes it returns <code>SUCCESS</code> and writes the path to <code>{path}</code> on the <strong>blackboard</strong> (a key-value table shared across the tree). <code>FollowPath</code> reads <code>{path}</code> from the blackboard and calls controller_server. <code>Spin</code>, <code>BackUp</code> and <code>Wait</code> call behavior_server, and <code>ClearEntireCostmap</code> calls a costmap’s clearing service. The behavior tree itself neither plans nor computes velocities; it only decides <em>when to call whom</em>.</li>
+    <li lang="zh-CN"><strong>控制节点决定组合方式。</strong><code>Sequence</code> 按顺序执行孩子，一个失败就整体失败；<code>Fallback</code> 依次尝试，一个成功就整体成功；<code>PipelineSequence</code> 在后面的孩子还在 <code>RUNNING</code> 时继续重新 tick 前面已经成功的孩子；<code>RecoveryNode</code> 有两个孩子，第一个失败时执行第二个（恢复动作），再重试第一个，最多 <code>number_of_retries</code> 次；<code>RoundRobin</code> 每次被 tick 时轮到下一个孩子；装饰节点 <code>RateController</code> 限制它的孩子被 tick 的频率。</li>
+    <li lang="en"><strong>Control nodes decide how to combine.</strong> <code>Sequence</code> runs its children in order and fails as soon as one fails; <code>Fallback</code> tries them in turn and succeeds as soon as one succeeds; <code>PipelineSequence</code> keeps re-ticking the earlier, already successful children while a later one is still <code>RUNNING</code>; <code>RecoveryNode</code> has two children, and when the first fails it runs the second (the recovery) and retries the first, up to <code>number_of_retries</code> times; <code>RoundRobin</code> moves to the next child each time it is ticked; and the decorator <code>RateController</code> limits how often its child is ticked.</li>
+  </ul>
+  <p lang="zh-CN"><strong>默认树怎样运转</strong>（<code>navigate_to_pose_w_replanning_and_recovery.xml</code>，按 2026-10-31 的 <code>jazzy</code> 分支；你装到的版本细节可能不同，以 <code>nav2_bt_navigator</code> 包 <code>share</code> 目录下 <code>behavior_trees/</code> 里的文件为准）：</p>
+  <p lang="en"><strong>How the default tree runs</strong> (<code>navigate_to_pose_w_replanning_and_recovery.xml</code>, per the <code>jazzy</code> branch on 2026-10-31; your installed release may differ in details, and the file under <code>behavior_trees/</code> in the <code>nav2_bt_navigator</code> package’s <code>share</code> directory wins):</p>
+  <ol>
+    <li lang="zh-CN">根是 <code>RecoveryNode</code>（<code>number_of_retries="6"</code>）。它的第一个孩子是一个 <code>PipelineSequence</code>，里面依次是：放在 <code>RateController hz="1.0"</code> 下的 <code>ComputePathToPose</code>，和 <code>FollowPath</code>。</li>
+    <li lang="en">The root is a <code>RecoveryNode</code> (<code>number_of_retries="6"</code>). Its first child is a <code>PipelineSequence</code> holding, in order, <code>ComputePathToPose</code> under a <code>RateController hz="1.0"</code>, and <code>FollowPath</code>.</li>
+    <li lang="zh-CN">第一次 tick：先规划，成功后开始跟随。之后 <code>FollowPath</code> 一直 <code>RUNNING</code>，<code>PipelineSequence</code> 每次 tick 都会回头再 tick 规划那一支，而 <code>RateController</code> 只让它每秒真正执行一次。于是机器人边走边以 1 Hz <strong>重新规划</strong>，新路径写进黑板，正在运行的 FollowPath 换用它。</li>
+    <li lang="en">On the first tick it plans, and once that succeeds it starts following. From then on <code>FollowPath</code> stays <code>RUNNING</code>, <code>PipelineSequence</code> goes back and re-ticks the planning branch on every tick, and <code>RateController</code> lets it actually run only once per second. So the robot <strong>replans</strong> at 1 Hz while driving, the new path goes onto the blackboard, and the running FollowPath switches to it.</li>
+    <li lang="zh-CN">两个动作各自先有一次<strong>局部恢复</strong>：规划失败就清空 global costmap 再试一次，跟随失败就清空 local costmap 再试一次（新版本还会先判断这个错误码值不值得恢复）。</li>
+    <li lang="en">Each of the two actions first gets one <strong>local recovery</strong>: if planning fails, clear the global costmap and try once more; if following fails, clear the local costmap and try once more (newer versions first check whether the error code is worth recovering from).</li>
+    <li lang="zh-CN">局部恢复也失败，整个 <code>PipelineSequence</code> 失败，根上的 <code>RecoveryNode</code> 转去执行恢复分支：<code>RoundRobin</code> 依次轮到「清空两张 costmap」「原地转 1.57 rad」「等 5 秒」「以 0.15 m/s 后退 0.30 m」中的<em>一个</em>，然后从头重试导航。目标在恢复期间被更新时（<code>GoalUpdated</code>），立刻放弃恢复回去导航。</li>
+    <li lang="en">If the local recovery fails too, the whole <code>PipelineSequence</code> fails and the root <code>RecoveryNode</code> runs the recovery branch: <code>RoundRobin</code> takes <em>one</em> of “clear both costmaps”, “spin 1.57 rad in place”, “wait 5 s” and “back up 0.30 m at 0.15 m/s”, in turn, and then navigation is retried from the top. If the goal is updated during recovery (<code>GoalUpdated</code>), recovery is abandoned at once and navigation resumes.</li>
+    <li lang="zh-CN">重试 6 次仍失败，根返回 <code>FAILURE</code>，bt_navigator 以 ABORTED 结束这个 NavigateToPose 目标。反馈里的 <code>number_of_recoveries</code> 就是数这些恢复的。</li>
+    <li lang="en">If it still fails after 6 retries, the root returns <code>FAILURE</code> and bt_navigator ends the NavigateToPose goal as ABORTED. The <code>number_of_recoveries</code> in the feedback counts these recoveries.</li>
+  </ol>
+  <div class="note" lang="zh-CN">为什么用行为树而不是一台状态机：「边走边每秒重规划」「失败先做便宜的恢复、再做昂贵的」「目标一更新就打断恢复」这些组合，用状态机写要为每种组合加状态和转换；在行为树里只是换一种控制节点或加一个装饰节点，而且整个策略是一份 XML，换策略不用重新编译。代价是行为不再写在一处的 C++ 里，排查时要对着 XML 和每个节点的返回值读。</div>
+  <div class="note" lang="en">Why a behavior tree rather than a state machine: combinations such as “replan every second while driving”, “try cheap recoveries before expensive ones” and “interrupt recovery as soon as the goal changes” would each need extra states and transitions in a state machine; in a behavior tree they are a different control node or one more decorator, and the whole strategy is one XML file, so changing strategy needs no recompiling. The price is that behaviour no longer lives in one place in C++, and debugging means reading the XML against each node’s return values.</div>
+  <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲行为树的章节；官方 <a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/behavior_trees/">Behavior Trees</a> 概念页与 <a href="https://docs.nav2.org/jazzy/getting_started/nav2_behavior_trees/detailed_behavior_tree_walkthrough/detailed_behavior_tree_walkthrough/">Detailed Behavior Tree Walkthrough</a>；<a href="https://www.behaviortree.dev/">BehaviorTree.CPP</a> 文档。</p>
+  <p lang="en">Further reading: the chapter of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on behavior trees; the official <a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/behavior_trees/">Behavior Trees</a> concept page and the <a href="https://docs.nav2.org/jazzy/getting_started/nav2_behavior_trees/detailed_behavior_tree_walkthrough/detailed_behavior_tree_walkthrough/">Detailed Behavior Tree Walkthrough</a>; the <a href="https://www.behaviortree.dev/">BehaviorTree.CPP</a> documentation.</p>
+
+  <h3 lang="zh-CN">6. costmap 与它的层：为什么要膨胀</h3><h3 lang="en">6. Costmaps and their layers: why inflation exists</h3>
+  <p lang="zh-CN"><strong>costmap</strong> 是一张二维栅格，默认参数里每格 0.05 m，每格存一个 0–255 的代价。几个特殊值写在 <code>nav2_costmap_2d/cost_values.hpp</code>：0 是自由空间，253 是「内切」（机器人中心到这里就必然碰撞），254 是致命障碍，255 是未知。costmap 由若干<strong>层</strong>（layer 插件）叠出来：每层维护自己的栅格，更新时每层先报告这次改动了哪个范围，再按列出的顺序把自己的值合进总图。</p>
+  <p lang="en">A <strong>costmap</strong> is a 2D grid, 0.05 m per cell in the default parameters, each cell holding a cost from 0 to 255. The special values are in <code>nav2_costmap_2d/cost_values.hpp</code>: 0 is free space, 253 is “inscribed” (with the robot’s centre here, a collision is certain), 254 is a lethal obstacle and 255 is unknown. A costmap is stacked from several <strong>layers</strong> (layer plugins): each layer keeps its own grid, and on each update every layer first reports which area it changed, then merges its values into the master grid in the order listed.</p>
+  <ul>
+    <li lang="zh-CN"><strong>static 层</strong>：把 <code>/map</code>（map_server 或 slam_toolbox 发布的占据栅格）里被占据的格子标为致命，未知格子标为未知。它只反映建图那一刻的世界。</li>
+    <li lang="en"><strong>Static layer</strong>: marks the occupied cells of <code>/map</code> (the occupancy grid published by map_server or slam_toolbox) as lethal and unknown cells as unknown. It reflects the world only as it was when the map was built.</li>
+    <li lang="zh-CN"><strong>obstacle 层</strong>：订阅 <code>/scan</code> 这类传感器。每束激光的<strong>终点</strong>所在的格子标为障碍（marking），从传感器到终点之间穿过的格子清为自由（clearing，靠光线追踪）。于是地图上没有的箱子会出现，走开的人会消失。<strong>voxel 层</strong>是它的三维版本，按高度分层，适合深度相机；默认参数里 local costmap 用的是它。</li>
+    <li lang="en"><strong>Obstacle layer</strong>: subscribes to sensors such as <code>/scan</code>. The cell at each beam’s <strong>end point</strong> is marked as an obstacle (marking), and the cells the beam passed through between sensor and end point are cleared to free (clearing, by ray tracing). So a box that is not on the map appears, and a person who walks away disappears. The <strong>voxel layer</strong> is its 3D version, split by height, suited to depth cameras; the default parameters use it for the local costmap.</li>
+    <li lang="zh-CN"><strong>inflation 层</strong>：把每个致命格子向外「膨胀」，放在层列表的最后。</li>
+    <li lang="en"><strong>Inflation layer</strong>: “inflates” every lethal cell outwards, and comes last in the list of layers.</li>
+  </ul>
+  <p lang="zh-CN"><strong>膨胀为什么必须存在。</strong>规划器和大部分控制器把机器人当成<strong>一个点</strong>（它的中心）在栅格上搜索，这样快得多。但机器人有半径。把每个障碍向外扩出机器人的内切半径，「点不进入这些格子」就等价于「整台机器人不碰障碍」：这是把机器人的形状搬进地图，即运动规划里的构型空间。只做到这一步，最优路径会贴着墙走，任何定位误差都会擦墙。所以膨胀在内切半径之外继续给一段<em>递减</em>的代价，让路径愿意离墙远一点。按 <code>inflation_layer.hpp</code> 的 <code>jazzy</code> 源码，距最近障碍 d 米处的代价是：</p>
+  <p lang="en"><strong>Why inflation has to exist.</strong> The planner and most controllers search the grid treating the robot as <strong>one point</strong> (its centre), which is much faster. But the robot has a radius. Expand every obstacle outwards by the robot’s inscribed radius, and “the point never enters these cells” becomes equivalent to “the whole robot never touches an obstacle”: the robot’s shape has been moved into the map, which is the configuration space of motion planning. Stopping there, the optimal path would hug the walls and any localisation error would scrape them. So beyond the inscribed radius inflation keeps adding a <em>decreasing</em> cost, so that paths are willing to keep some distance from walls. Per the <code>jazzy</code> source of <code>inflation_layer.hpp</code>, the cost at d metres from the nearest obstacle is:</p>
+  <ul>
+    <li lang="zh-CN">d = 0：254（致命）；0 &lt; d ≤ 内切半径：253（内切）；</li>
+    <li lang="en">d = 0: 254 (lethal); 0 &lt; d ≤ inscribed radius: 253 (inscribed);</li>
+    <li lang="zh-CN">再往外：252 × exp(−k × (d − 内切半径))，k 是 <code>cost_scaling_factor</code>（默认参数 3.0），直到 <code>inflation_radius</code>（默认参数 0.70 m）为止。k 越大，代价随距离下降得越快，路径越敢贴近障碍；<code>inflation_radius</code> 要大于机器人的外接半径，否则窄门前后的代价会突然断开。</li>
+    <li lang="en">further out: 252 × exp(−k × (d − inscribed radius)), where k is <code>cost_scaling_factor</code> (3.0 in the default parameters), up to <code>inflation_radius</code> (0.70 m in the default parameters). The larger k, the faster cost falls with distance and the closer paths dare to go to obstacles; <code>inflation_radius</code> should exceed the robot’s circumscribed radius, otherwise the cost in front of and behind a narrow door breaks off abruptly.</li>
+  </ul>
+  <p lang="zh-CN"><strong>两张图、两个坐标系。</strong>global costmap 在 <code>map</code> 坐标系里，覆盖整张地图（默认参数：static、obstacle、inflation 三层，1 Hz 更新），给规划器用。local costmap 是一个跟着机器人滚动的小窗口（<code>rolling_window: true</code>），在 <code>odom</code> 坐标系里（默认参数：voxel、inflation，5 Hz），给控制器用。控制器放在 odom 里，是因为 odom 连续平滑；AMCL 每次修正 map → odom 时 map 坐标系里的位姿会跳一下，控制器不该被这种跳变扰动（REP 105 对 odom 的定义正是「连续但会漂移」）。</p>
+  <p lang="en"><strong>Two maps, two frames.</strong> The global costmap is in the <code>map</code> frame, covers the whole map (default parameters: static, obstacle and inflation layers, updated at 1 Hz) and serves the planner. The local costmap is a small window that rolls along with the robot (<code>rolling_window: true</code>), in the <code>odom</code> frame (default parameters: voxel and inflation, 5 Hz), and serves the controller. The controller works in odom because odom is continuous and smooth; each time AMCL corrects map → odom, the pose in the map frame jumps, and the controller should not be disturbed by such jumps (REP 105 defines odom as exactly “continuous but drifting”).</p>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 Nav2 配置的章节；官方 <a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/environmental_representation/">Environmental Representation</a> 概念页与 <a href="https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/core_servers/costmap_2d/costmap_plugins/inflation/">Inflation Layer</a> 参数页。</p>
+  <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on configuring Nav2; the official <a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/environmental_representation/">Environmental Representation</a> concept page and the <a href="https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/core_servers/costmap_2d/costmap_plugins/inflation/">Inflation Layer</a> parameter page.</p>
+
+  <h3 lang="zh-CN">7. 定位与建图：AMCL 估计什么，slam_toolbox 估计什么</h3><h3 lang="en">7. Localisation and mapping: what AMCL estimates, what slam_toolbox estimates</h3>
+  <p lang="zh-CN">两者都发布 map → odom，都吃激光和里程计，但回答的问题不同：</p>
+  <p lang="en">Both publish map → odom and both consume laser scans and odometry, but they answer different questions:</p>
+  <ul>
+    <li lang="zh-CN"><strong>AMCL</strong>（自适应蒙特卡洛定位）：<strong>地图已知、固定</strong>，只估计机器人此刻的<strong>位姿</strong>。它维护一群粒子，每个粒子是一个位姿假设。机器人一动，每个粒子按里程计的增量加上噪声移动（差速机器人用 <code>nav2_amcl::DifferentialMotionModel</code>）；一帧激光到来，按「如果我在这里，这帧激光和地图有多吻合」给每个粒子打分；再按分数重新抽样，吻合的留下、不吻合的淘汰。「自适应」指粒子数随不确定度增减。粒子群可以同时保持几个分开的假设，所以它能处理「两条一模一样的走廊」。它需要一个初始位姿（RViz2 的 2D Pose Estimate，或参数），算出 map → base_link 后减去 odom → base_link，发布 map → odom，让 tf 树保持 REP 105 的形状。</li>
+    <li lang="en"><strong>AMCL</strong> (Adaptive Monte Carlo Localisation): the <strong>map is known and fixed</strong>, and it estimates only the robot’s current <strong>pose</strong>. It keeps a set of particles, each a pose hypothesis. When the robot moves, every particle moves by the odometry increment plus noise (a differential robot uses <code>nav2_amcl::DifferentialMotionModel</code>); when a scan arrives, every particle is scored by “if I were here, how well would this scan match the map”; then particles are resampled by score, keeping those that match and dropping those that do not. “Adaptive” means the number of particles grows and shrinks with uncertainty. The cloud can hold several separate hypotheses at once, so it copes with “two identical corridors”. It needs an initial pose (RViz2’s 2D Pose Estimate, or a parameter), computes map → base_link, subtracts odom → base_link, and publishes map → odom so the tf tree keeps REP 105’s shape.</li>
+    <li lang="zh-CN"><strong>slam_toolbox</strong>：<strong>地图未知</strong>，同时估计<strong>地图和整条轨迹</strong>。它是基于图的 SLAM：每走过一段距离或转过一个角度（<code>minimum_travel_distance</code>、<code>minimum_travel_heading</code>），就把当前位姿连同这帧激光加成图里的一个节点；新节点和前面节点的扫描做匹配，得到一条相对位姿约束（边）。回到走过的地方时，扫描和很早以前的节点也匹配上，这就是<strong>回环</strong>（loop closure），加进一条长边；然后优化器（默认配置里是 Ceres）重新求解所有节点的位姿，让所有约束尽量同时满足，地图由全部扫描按优化后的位姿重新画出。所以它的地图会在回环那一刻「啪」地对齐，过去的位姿也被改写。它发布 <code>/map</code> 和 map → odom；配置里的 <code>mode</code> 还可以设成 localization，只在已有的图上定位（请查文档）。</li>
+    <li lang="en"><strong>slam_toolbox</strong>: the <strong>map is unknown</strong>, and it estimates <strong>the map and the whole trajectory</strong> together. It is graph-based SLAM: each time the robot has travelled some distance or turned some angle (<code>minimum_travel_distance</code>, <code>minimum_travel_heading</code>), the current pose together with its scan is added as a node in a graph; the new node’s scan is matched against earlier nodes, giving a relative pose constraint (an edge). When the robot comes back to a place it has been, the scan also matches a node from long ago: that is a <strong>loop closure</strong>, adding a long edge; then the optimiser (Ceres in the default configuration) re-solves every node’s pose so that all constraints hold as well as possible at once, and the map is redrawn from all scans at the optimised poses. So its map “snaps” into alignment at the moment of a loop closure, and past poses are rewritten. It publishes <code>/map</code> and map → odom; the <code>mode</code> in its configuration can also be set to localization, localising on an existing graph only (check the docs).</li>
+  </ul>
+  <div class="note" lang="zh-CN">一个直接的后果：<strong>不要同时运行两者</strong>。两个节点都发布 map → odom，tf 树里同一条边有两个作者，查到的变换会在两份估计之间跳。Lab B 先用 slam_toolbox 建图、保存，<em>停掉它</em>，再让 map_server 加 AMCL 接手。</div>
+  <div class="note" lang="en">A direct consequence: <strong>never run both at once</strong>. Both nodes publish map → odom, so one edge of the tf tree has two authors and lookups jump between two estimates. Lab B first builds and saves a map with slam_toolbox, <em>stops it</em>, and only then lets map_server and AMCL take over.</div>
+  <p lang="zh-CN">延伸阅读：Quigley、Gerkey 与 Smart《Programming Robots with ROS》讲建图与导航的章节（ROS 1 的 gmapping、amcl、move_base，概念仍然适用）；官方 <a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/state_estimation/">State Estimation</a> 概念页、<a href="https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/others/configuring_amcl/">AMCL 参数</a>；<a href="https://github.com/SteveMacenski/slam_toolbox/tree/jazzy">slam_toolbox（jazzy 分支）</a>。</p>
+  <p lang="en">Further reading: the chapters of Quigley, Gerkey and Smart, <em>Programming Robots with ROS</em>, on maps and navigation (ROS 1’s gmapping, amcl and move_base; the concepts still apply); the official <a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/state_estimation/">State Estimation</a> concept page and <a href="https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/others/configuring_amcl/">AMCL parameters</a>; <a href="https://github.com/SteveMacenski/slam_toolbox/tree/jazzy">slam_toolbox (jazzy branch)</a>.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：Nav2 服务器 ↔ 它回答的问题</h2><h2 id="compare-en" lang="en">Comparison: Nav2 server ↔ what it answers</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">服务器</span><span lang="en">Server</span></th><th><span lang="zh-CN">它回答的问题</span><span lang="en">What it answers</span></th><th><span lang="zh-CN">怎么问它、它给出什么</span><span lang="en">How it is asked, what it returns</span></th></tr>
+    <tr><td><code>bt_navigator</code></td><td><span lang="zh-CN">「去那里」整体怎么办：何时规划、跟随、恢复，何时放弃</span><span lang="en">How to “get there” as a whole: when to plan, follow, recover, and when to give up</span></td><td><span lang="zh-CN">动作 <code>NavigateToPose</code>（及 <code>NavigateThroughPoses</code>），也收 <code>/goal_pose</code>；反馈剩余距离和恢复次数</span><span lang="en">The <code>NavigateToPose</code> action (and <code>NavigateThroughPoses</code>), plus <code>/goal_pose</code>; feedback has the remaining distance and the recovery count</span></td></tr>
+    <tr><td><code>planner_server</code></td><td><span lang="zh-CN">从这里到目标，在整张地图上走哪条路？</span><span lang="en">From here to the goal, which route across the whole map?</span></td><td><span lang="zh-CN">动作 <code>ComputePathToPose</code>；在 global costmap 上运行 NavFn 或 Smac；返回 <code>nav_msgs/Path</code></span><span lang="en">The <code>ComputePathToPose</code> action; runs NavFn or Smac on the global costmap; returns a <code>nav_msgs/Path</code></span></td></tr>
+    <tr><td><code>smoother_server</code></td><td><span lang="zh-CN">这条路径能不能更平滑、更好跟？</span><span lang="en">Can this path be smoother and easier to follow?</span></td><td><span lang="zh-CN">动作 <code>SmoothPath</code>；默认参数里是 SimpleSmoother</span><span lang="en">The <code>SmoothPath</code> action; SimpleSmoother in the default parameters</span></td></tr>
+    <tr><td><code>controller_server</code></td><td><span lang="zh-CN">此刻该以多大的线速度和角速度走？</span><span lang="en">What linear and angular velocity, right now?</span></td><td><span lang="zh-CN">动作 <code>FollowPath</code>；在 local costmap 上运行 DWB、MPPI 或 RPP；约 20 Hz 发出速度命令</span><span lang="en">The <code>FollowPath</code> action; runs DWB, MPPI or RPP on the local costmap; emits velocity commands at about 20 Hz</span></td></tr>
+    <tr><td><code>behavior_server</code></td><td><span lang="zh-CN">卡住了，做什么动作脱困？</span><span lang="en">Stuck: which manoeuvre gets us out?</span></td><td><span lang="zh-CN">动作 <code>Spin</code>、<code>BackUp</code>、<code>DriveOnHeading</code>、<code>Wait</code> 等；由行为树的恢复分支调用</span><span lang="en">Actions such as <code>Spin</code>, <code>BackUp</code>, <code>DriveOnHeading</code> and <code>Wait</code>; called by the tree’s recovery branch</span></td></tr>
+    <tr><td><code>velocity_smoother</code></td><td><span lang="zh-CN">这条命令对电机来说是否太猛？</span><span lang="en">Is this command too abrupt for the motors?</span></td><td><span lang="zh-CN">话题 <code>cmd_vel_nav</code> 进、<code>cmd_vel_smoothed</code> 出；限制速度与加速度</span><span lang="en">Topic <code>cmd_vel_nav</code> in, <code>cmd_vel_smoothed</code> out; limits velocity and acceleration</span></td></tr>
+    <tr><td><code>collision_monitor</code></td><td><span lang="zh-CN">再这样走下去马上会撞吗？</span><span lang="en">Are we about to hit something?</span></td><td><span lang="zh-CN">话题 <code>cmd_vel_smoothed</code> 进、<code>cmd_vel</code> 出；直接读 <code>/scan</code>，在多边形区域内减速或停车</span><span lang="en">Topic <code>cmd_vel_smoothed</code> in, <code>cmd_vel</code> out; reads <code>/scan</code> directly and slows or stops inside polygon zones</span></td></tr>
+    <tr><td><code>map_server</code></td><td><span lang="zh-CN">地图长什么样？</span><span lang="en">What does the map look like?</span></td><td><span lang="zh-CN">读 YAML 加 PGM，发布 <code>/map</code>（transient_local，晚来的订阅者也收得到）</span><span lang="en">Reads YAML plus PGM and publishes <code>/map</code> (transient_local, so late subscribers still get it)</span></td></tr>
+    <tr><td><code>amcl</code></td><td><span lang="zh-CN">在这张已知地图上，我在哪里？</span><span lang="en">On this known map, where am I?</span></td><td><span lang="zh-CN">读 <code>/scan</code>、<code>/map</code>、初始位姿；发布 <code>/amcl_pose</code>、粒子云和 tf map → odom</span><span lang="en">Reads <code>/scan</code>, <code>/map</code> and an initial pose; publishes <code>/amcl_pose</code>, the particle cloud and the tf map → odom</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>slam_toolbox</code>（不属于 Nav2）</span><span lang="en"><code>slam_toolbox</code> (not part of Nav2)</span></td><td><span lang="zh-CN">地图长什么样、我在哪里，两件同时</span><span lang="en">What the map looks like and where I am, both at once</span></td><td><span lang="zh-CN">读 <code>/scan</code> 和 odom；发布 <code>/map</code> 和 tf map → odom；建好的图用 <code>map_saver_cli</code> 保存</span><span lang="en">Reads <code>/scan</code> and odom; publishes <code>/map</code> and the tf map → odom; the finished map is saved with <code>map_saver_cli</code></span></td></tr>
+    <tr><td><code>lifecycle_manager</code></td><td><span lang="zh-CN">整个栈准备好了吗？谁倒下了？</span><span lang="en">Is the whole stack ready? Who went down?</span></td><td><span lang="zh-CN">参数 <code>node_names</code>、<code>autostart</code>；先 configure 全部再 activate 全部；bond 心跳</span><span lang="en">Parameters <code>node_names</code> and <code>autostart</code>; configures all, then activates all; bond heartbeats</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) ros2_control 的控制环：一个实时线程上固定周期的 read → update → write</h3><h3 lang="en">(a) The ros2_control loop: read → update → write at a fixed period on one real-time thread</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
+         data-captions='["全图：左边是 controller_manager 的一个实时线程，每个周期按 read → update → write 的固定顺序跑一遍；右边是硬件组件和它导出的 state 与 command 接口；下方是 ROS 一侧的非实时线程和一条时间线。按「播放」逐步看。",
+           "第 1 步，定时唤醒：线程睡到下一个周期边界醒来，周期 T = 1 / update_rate，Lab A 里是 100 Hz，也就是 10 ms。真机上 ros2_control_node 会尝试把这个线程设成 SCHED_FIFO 50；在 Gazebo 里则由仿真步驱动，按仿真时间计时。",
+           "第 2 步，read：硬件组件把传感器的当前值，这里是两个轮子关节的位置和速度，写进 state 接口。本周期所有控制器看到的都是这一份快照，不会读到一半新一半旧。",
+           "第 3 步，update：控制器按顺序各算一次。joint_state_broadcaster 把全部 state 发到 /joint_states；diff_drive_controller 取最新的 cmd_vel，用轮距和轮半径算出两轮角速度写进 command 接口，并用测得的轮转积分出 odom。",
+           "第 4 步，write：硬件组件把 command 接口里的值送出去：Gazebo 里设置关节速度，真机上经总线发给电机驱动器。一个 command 接口同一时刻只能被一个控制器占用。",
+           "第 5 步，非实时一侧：/cmd_vel 的订阅、服务和参数都在执行器的其他线程里运行。新命令先放进一个实时安全的缓冲区，update 只取最新的一份，实时线程既不等锁，也不分配内存。",
+           "第 6 步，错过截止时间：某个周期做了 25 ms，后面的周期边界已经过去。Jazzy 的 ros2_control_node 默认打印 overrun 警告并跳过错过的周期，不连跑补回；这段时间里轮子一直执行旧命令，下一次 update 看到的周期变长，修正来得更晚。"]'
+         data-captions-en='["The whole picture: on the left, one real-time thread of the controller_manager runs read → update → write in a fixed order every period; on the right, the hardware component and the state and command interfaces it exports; below, the non-real-time threads on the ROS side and a timeline. Press Play to step through.",
+           "Step 1, timed wake-up: the thread sleeps until the next period boundary and wakes. The period is T = 1 / update_rate, 100 Hz in Lab A, which is 10 ms. On a real robot ros2_control_node tries to put this thread into SCHED_FIFO 50; in Gazebo it is driven by the simulation step and timed in simulation time.",
+           "Step 2, read: the hardware component writes the current sensor values, here the position and velocity of the two wheel joints, into the state interfaces. Every controller in this period sees this one snapshot, never half old and half new.",
+           "Step 3, update: the controllers compute once each, in order. joint_state_broadcaster publishes every state on /joint_states; diff_drive_controller takes the latest cmd_vel, computes the two wheel speeds from the wheel separation and radius, writes them to the command interfaces, and integrates odom from the measured wheel motion.",
+           "Step 4, write: the hardware component sends out the values in the command interfaces: in Gazebo it sets joint velocities, on a real robot it sends them over a bus to the motor drivers. Only one controller may claim a command interface at a time.",
+           "Step 5, the non-real-time side: the /cmd_vel subscription, services and parameters run on other executor threads. A new command goes into a real-time-safe buffer first, and update takes only the latest one, so the real-time thread neither waits on a lock nor allocates memory.",
+           "Step 6, a missed deadline: one period takes 25 ms, and the following period boundaries have already passed. On Jazzy, ros2_control_node by default logs an overrun warning and skips the missed periods instead of running back to back to catch up; meanwhile the wheel keeps executing the old command, the next update sees a longer period, and the correction comes later."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="24" class="small" lang="zh-CN">controller_manager：一个实时线程</text><text x="20" y="24" class="small" lang="en">controller_manager: one real-time thread</text>
+      <text x="600" y="24" class="small" lang="zh-CN">硬件组件</text><text x="600" y="24" class="small" lang="en">hardware component</text>
+
+      <g data-step="1"><rect class="box ros" x="20" y="70" width="92" height="52"/>
+        <text x="32" y="92" lang="zh-CN">定时器</text><text x="32" y="92" lang="en">timer</text>
+        <text x="32" y="112" class="small" lang="zh-CN">每 T 一次</text><text x="32" y="112" class="small" lang="en">every T</text>
+        <path class="arrow" d="M114 96 L128 96"/>
+        <path class="arrow" d="M495 124 L495 138 L66 138 L66 124"/>
+        <text x="130" y="156" class="small" lang="zh-CN">T = 1 / update_rate；100 Hz 即 10 ms</text><text x="130" y="156" class="small" lang="en">T = 1 / update_rate; 100 Hz is 10 ms</text></g>
+
+      <g data-step="2"><rect class="box ros" x="130" y="70" width="130" height="52"/>
+        <text x="142" y="92" class="mono">read()</text>
+        <text x="142" y="112" class="small" lang="zh-CN">硬件 → state</text><text x="142" y="112" class="small" lang="en">hw → state</text>
+        <path class="arrow" d="M740 68 L740 52 L195 52 L195 68"/>
+        <text x="290" y="46" class="small" lang="zh-CN">一次读出一份一致的快照</text><text x="290" y="46" class="small" lang="en">one consistent snapshot</text>
+        <path class="arrow" d="M262 96 L278 96"/></g>
+
+      <g data-step="3"><rect class="box ros" x="280" y="70" width="130" height="52"/>
+        <text x="292" y="92" class="mono">update()</text>
+        <text x="292" y="112" class="small" lang="zh-CN">控制器依次算</text><text x="292" y="112" class="small" lang="en">each controller</text>
+        <path class="arrow" d="M345 124 L345 164"/>
+        <rect class="box" x="130" y="166" width="205" height="72"/>
+        <text x="140" y="188" class="mono">joint_state_broadcaster</text>
+        <text x="140" y="208" class="small" lang="zh-CN">读全部 state → /joint_states</text><text x="140" y="208" class="small" lang="en">all states → /joint_states</text>
+        <text x="140" y="226" class="small" lang="zh-CN">不占用任何 command</text><text x="140" y="226" class="small" lang="en">claims no command</text>
+        <rect class="box" x="355" y="166" width="205" height="72"/>
+        <text x="365" y="188" class="mono">diff_drive_controller</text>
+        <text x="365" y="208" class="small" lang="zh-CN">cmd_vel → 两轮 command</text><text x="365" y="208" class="small" lang="en">cmd_vel → two wheel cmds</text>
+        <text x="365" y="226" class="small" lang="zh-CN">积分出 odom 与 tf</text><text x="365" y="226" class="small" lang="en">integrates odom and tf</text>
+        <path class="arrow" d="M412 96 L428 96"/></g>
+
+      <g data-step="4"><rect class="box ros" x="430" y="70" width="130" height="52"/>
+        <text x="442" y="92" class="mono">write()</text>
+        <text x="442" y="112" class="small" lang="zh-CN">command → 硬件</text><text x="442" y="112" class="small" lang="en">command → hw</text>
+        <path class="arrow" d="M562 96 L580 96 L580 200 L598 200"/></g>
+
+      <g data-step="2 4"><rect class="box gz" x="600" y="70" width="280" height="150"/>
+        <text x="612" y="92" class="mono">GazeboSimSystem</text>
+        <text x="612" y="110" class="small" lang="zh-CN">Lab A；真车上换成电机驱动插件</text><text x="612" y="110" class="small" lang="en">Lab A; a motor-driver plugin on a real robot</text>
+        <text x="612" y="132" class="small" lang="zh-CN">state 接口：只读，可共享</text><text x="612" y="132" class="small" lang="en">state interfaces: read, shared</text>
+        <text x="612" y="150" class="mono">*_wheel_joint/position</text>
+        <text x="612" y="166" class="mono">*_wheel_joint/velocity</text>
+        <text x="612" y="188" class="small" lang="zh-CN">command 接口：独占</text><text x="612" y="188" class="small" lang="en">command interfaces: exclusive</text>
+        <text x="612" y="206" class="mono">*_wheel_joint/velocity</text></g>
+
+      <g data-step="5"><text x="20" y="258" class="small" lang="zh-CN">ROS 一侧：执行器的其他线程，非实时</text><text x="20" y="258" class="small" lang="en">ROS side: other executor threads, not real-time</text>
+        <rect class="box" x="20" y="268" width="210" height="50"/>
+        <text x="32" y="288" lang="zh-CN">订阅回调</text><text x="32" y="288" lang="en">subscription callback</text>
+        <text x="32" y="306" class="mono">/cmd_vel</text>
+        <path class="arrow" d="M232 293 L258 293"/>
+        <rect class="box" x="260" y="268" width="180" height="50"/>
+        <text x="272" y="288" class="mono">realtime buffer</text>
+        <text x="272" y="306" class="small" lang="zh-CN">无锁交接，只留最新</text><text x="272" y="306" class="small" lang="en">lock-free, latest only</text>
+        <path class="arrow" d="M442 293 L458 293 L458 240"/>
+        <text x="470" y="288" class="small" lang="zh-CN">服务、参数、日志</text><text x="470" y="288" class="small" lang="en">services, parameters, logs</text>
+        <text x="470" y="306" class="small" lang="zh-CN">都不进实时线程</text><text x="470" y="306" class="small" lang="en">stay off the RT thread</text></g>
+
+      <g data-step="6"><text x="20" y="346" class="small" lang="zh-CN">时间线：每格 T = 10 ms</text><text x="20" y="346" class="small" lang="en">timeline: one cell is T = 10 ms</text>
+        <path class="lane" d="M40 392 L880 392 M60 376 L60 398 M140 376 L140 398 M220 376 L220 398 M300 376 L300 398 M380 376 L380 398 M460 376 L460 398 M540 376 L540 398 M620 376 L620 398 M700 376 L700 398 M780 376 L780 398 M860 376 L860 398"/>
+        <rect class="box ros" x="60" y="378" width="22" height="12"/>
+        <rect class="box ros" x="140" y="378" width="22" height="12"/>
+        <rect class="box ros" x="220" y="378" width="22" height="12"/>
+        <rect class="box ros" x="300" y="378" width="22" height="12"/>
+        <rect class="box" x="380" y="378" width="200" height="12"/>
+        <rect class="box ros" x="620" y="378" width="22" height="12"/>
+        <rect class="box ros" x="700" y="378" width="22" height="12"/>
+        <rect class="box ros" x="780" y="378" width="22" height="12"/>
+        <text x="380" y="368" class="small" style="fill: var(--ink-2)" lang="zh-CN">一个周期做了 25 ms：跳过两个边界，不补跑</text><text x="380" y="368" class="small" style="fill: var(--ink-2)" lang="en">one period took 25 ms: two boundaries skipped, not replayed</text>
+        <text x="368" y="368" class="mono" style="fill: var(--ink-2)">!</text>
+        <text x="380" y="412" class="small" lang="zh-CN">这段时间里轮子一直执行旧命令</text><text x="380" y="412" class="small" lang="en">meanwhile the wheel runs the old command</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) Nav2：从一个目标位姿经行为树、规划器和控制器到 /cmd_vel，以及两张 costmap</h3><h3 lang="en">(b) Nav2: from a goal pose through the behavior tree, planner and controller to /cmd_vel, with the two costmaps</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 430" data-interval="3000"
+         data-captions='["全图：一个导航目标从左上进入 bt_navigator，行为树把它拆成对 planner_server 和 controller_server 的动作调用，两者各查一张 costmap；速度命令经过两级过滤到达图 (a) 的 diff_drive_controller。左边是地图与定位，底部是拉起这一切的 lifecycle_manager。",
+           "第 1 步，目标：RViz2 的 2D Goal Pose 工具或一个 Python 动作客户端向 bt_navigator 发出 NavigateToPose 目标，内容是 map 坐标系里的一个位姿。bt_navigator 接受目标后加载行为树 XML，开始反复 tick 它。",
+           "第 2 步，行为树：每次 tick 从根往下走，每个节点返回 SUCCESS、FAILURE 或 RUNNING。默认树的根是最多重试 6 次的 RecoveryNode，它的第一个孩子是 PipelineSequence：一边以 1 Hz 重新规划，一边持续跟随路径。",
+           "第 3 步，规划：ComputePathToPose 节点是一个动作客户端，调用 planner_server。规划器插件，默认参数里是 NavFn，在 global_costmap 上搜索一条代价最小的路径，返回 map 坐标系里的一串位姿，写进黑板上的 path。",
+           "第 4 步，跟随：FollowPath 节点调用 controller_server。控制器插件，默认参数里是 MPPI，以约 20 Hz 读取 local_costmap 和当前速度，算出下一步的速度命令。规划器每秒更新一次 path，正在运行的 FollowPath 直接换用新路径。",
+           "第 5 步，命令链：controller_server 发出 cmd_vel_nav，velocity_smoother 限制速度和加速度，collision_monitor 在最后一刻按激光数据减速或停车，结果才是 /cmd_vel，交给图 (a) 里的 diff_drive_controller。在 Jazzy 上这一路要设 enable_stamped_cmd_vel 才是 TwistStamped。",
+           "第 6 步，地图与定位：map_server 发布保存好的 /map，global_costmap 的 static 层由它生成。amcl 用这张地图、激光和 odom 估计机器人在地图里的位置，并发布 map → odom 变换。建图阶段由 slam_toolbox 同时承担这两件事。",
+           "第 7 步，恢复：FollowPath 或 ComputePathToPose 失败时，先清一次对应的 costmap 再试；仍然失败，根节点转去 RoundRobin 分支，每次轮流做一种恢复：清两张 costmap、原地转 1.57 rad、等 5 秒、后退 0.30 m，后三种由 behavior_server 执行，然后整棵树重试。6 次都失败，目标以 ABORTED 结束。",
+           "第 8 步，生命周期：这些服务器都是 Phase 4 的 lifecycle 节点。lifecycle_manager 先 configure 全部，再 activate 全部，并用 bond 心跳监视它们；任何一个没有成功进入 active，整个栈就不会开始工作。"]'
+         data-captions-en='["The whole picture: a navigation goal enters bt_navigator at the top left, the behavior tree splits it into action calls to planner_server and controller_server, each of which consults its own costmap, and the velocity command passes two filters before reaching the diff_drive_controller of diagram (a). On the left are the map and localisation, and at the bottom the lifecycle_manager that brings it all up.",
+           "Step 1, the goal: RViz2 with its 2D Goal Pose tool, or a Python action client, sends a NavigateToPose goal to bt_navigator: one pose in the map frame. Having accepted the goal, bt_navigator loads the behavior tree XML and starts ticking it again and again.",
+           "Step 2, the behavior tree: each tick walks down from the root, and every node returns SUCCESS, FAILURE or RUNNING. The root of the default tree is a RecoveryNode with up to 6 retries, and its first child is a PipelineSequence that replans at 1 Hz while it keeps following the path.",
+           "Step 3, planning: the ComputePathToPose node is an action client that calls planner_server. The planner plugin, NavFn in the default parameters, searches the global_costmap for a lowest-cost path and returns a list of poses in the map frame, written to path on the blackboard.",
+           "Step 4, following: the FollowPath node calls controller_server. The controller plugin, MPPI in the default parameters, reads the local_costmap and the current velocity at about 20 Hz and computes the next velocity command. The planner updates path once a second, and the running FollowPath switches to the new path directly.",
+           "Step 5, the command chain: controller_server emits cmd_vel_nav, velocity_smoother limits velocity and acceleration, and collision_monitor slows down or stops at the last moment based on the laser data; only then is it /cmd_vel, handed to the diff_drive_controller of diagram (a). On Jazzy this chain needs enable_stamped_cmd_vel to carry TwistStamped.",
+           "Step 6, map and localisation: map_server publishes the saved /map, from which the static layer of the global_costmap is built. amcl uses this map, the laser and odom to estimate where the robot is on the map and publishes the map → odom transform. While mapping, slam_toolbox does both jobs at once.",
+           "Step 7, recovery: when FollowPath or ComputePathToPose fails, the matching costmap is cleared once and the action retried; if it still fails, the root switches to the RoundRobin branch, which does one recovery per turn: clear both costmaps, spin 1.57 rad in place, wait 5 s, back up 0.30 m, the last three executed by behavior_server, and then the whole tree retries. After 6 failures the goal ends as ABORTED.",
+           "Step 8, lifecycle: all these servers are the lifecycle nodes of Phase 4. lifecycle_manager configures all of them, then activates all of them, and watches them with bond heartbeats; if any one fails to become active, the stack never starts working."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+
+      <g data-step="1"><rect class="box ros" x="20" y="40" width="150" height="56"/>
+        <text x="32" y="62" lang="zh-CN">目标位姿</text><text x="32" y="62" lang="en">goal pose</text>
+        <text x="32" y="82" class="small" lang="zh-CN">RViz2 或 Python 客户端</text><text x="32" y="82" class="small" lang="en">RViz2 or a Python client</text>
+        <path class="arrow" d="M172 68 L198 68"/>
+        <text x="20" y="114" class="small">NavigateToPose</text></g>
+
+      <g data-step="2 7"><rect class="box ros" x="200" y="30" width="250" height="176"/>
+        <text x="212" y="52" class="mono">bt_navigator</text>
+        <text x="212" y="70" class="small" lang="zh-CN">行为树，每次 tick 从根往下</text><text x="212" y="70" class="small" lang="en">behavior tree, ticked from the root</text>
+        <text x="212" y="96" class="mono">RecoveryNode (6)</text>
+        <text x="226" y="116" class="mono">PipelineSequence</text>
+        <text x="240" y="136" class="mono">ComputePathToPose 1 Hz</text>
+        <text x="240" y="156" class="mono">FollowPath</text>
+        <text x="226" y="178" class="mono">RoundRobin</text>
+        <text x="226" y="196" class="small" lang="zh-CN">清 costmap · Spin · Wait · BackUp</text><text x="226" y="196" class="small" lang="en">clear · Spin · Wait · BackUp</text></g>
+
+      <g data-step="3"><rect class="box ros" x="490" y="30" width="170" height="56"/>
+        <text x="502" y="52" class="mono">planner_server</text>
+        <text x="502" y="72" class="small" lang="zh-CN">NavFn：全局路径</text><text x="502" y="72" class="small" lang="en">NavFn: global path</text>
+        <path class="arrow" d="M452 132 L470 132 L470 58 L488 58"/>
+        <path class="arrow" d="M662 58 L698 58"/>
+        <rect class="box" x="700" y="30" width="180" height="90"/>
+        <text x="712" y="52" class="mono">global_costmap</text>
+        <text x="712" y="70" class="small" lang="zh-CN">map 坐标系，整张图</text><text x="712" y="70" class="small" lang="en">map frame, whole map</text>
+        <text x="712" y="88" class="small">static · obstacle</text>
+        <text x="712" y="106" class="small">inflation</text></g>
+
+      <g data-step="4"><rect class="box ros" x="490" y="110" width="170" height="56"/>
+        <text x="502" y="132" class="mono">controller_server</text>
+        <text x="502" y="152" class="small" lang="zh-CN">MPPI · 约 20 Hz</text><text x="502" y="152" class="small" lang="en">MPPI · about 20 Hz</text>
+        <path class="arrow" d="M452 152 L488 152"/>
+        <path class="arrow" d="M662 150 L698 162"/>
+        <rect class="box" x="700" y="136" width="180" height="72"/>
+        <text x="712" y="158" class="mono">local_costmap</text>
+        <text x="712" y="176" class="small" lang="zh-CN">odom 坐标系，随车滚动</text><text x="712" y="176" class="small" lang="en">odom frame, rolling</text>
+        <text x="712" y="194" class="small">voxel · inflation</text></g>
+
+      <g data-step="7"><rect class="box ros" x="490" y="186" width="170" height="48"/>
+        <text x="502" y="206" class="mono">behavior_server</text>
+        <text x="502" y="224" class="small">Spin · BackUp · Wait</text>
+        <path class="arrow" d="M452 196 L488 208"/></g>
+
+      <g data-step="5"><path class="arrow" d="M575 168 L575 180 L680 180 L680 262 L285 262 L285 284"/>
+        <text x="300" y="256" class="small">cmd_vel_nav</text>
+        <rect class="box ros" x="200" y="286" width="170" height="46"/>
+        <text x="212" y="306" class="mono">velocity_smoother</text>
+        <text x="212" y="324" class="small" lang="zh-CN">限速度与加速度</text><text x="212" y="324" class="small" lang="en">limits velocity, accel</text>
+        <path class="arrow" d="M372 309 L398 309"/>
+        <rect class="box ros" x="400" y="286" width="170" height="46"/>
+        <text x="412" y="306" class="mono">collision_monitor</text>
+        <text x="412" y="324" class="small" lang="zh-CN">最后一道安全检查</text><text x="412" y="324" class="small" lang="en">last safety check</text>
+        <path class="arrow" d="M572 309 L638 309"/>
+        <text x="580" y="300" class="small">/cmd_vel</text>
+        <rect class="box ros" x="640" y="286" width="240" height="46"/>
+        <text x="652" y="306" class="mono">diff_drive_controller</text>
+        <text x="652" y="324" class="small" lang="zh-CN">图 (a) 的控制环</text><text x="652" y="324" class="small" lang="en">the loop of diagram (a)</text></g>
+
+      <g data-step="6"><rect class="box" x="20" y="140" width="150" height="50"/>
+        <text x="32" y="162" class="mono">map_server</text>
+        <text x="32" y="180" class="small" lang="zh-CN">发布 /map</text><text x="32" y="180" class="small" lang="en">publishes /map</text>
+        <path class="arrow" d="M95 192 L95 208"/>
+        <rect class="box" x="20" y="210" width="150" height="64"/>
+        <text x="32" y="232" class="mono">amcl</text>
+        <text x="32" y="250" class="small" lang="zh-CN">粒子滤波定位</text><text x="32" y="250" class="small" lang="en">particle filter</text>
+        <text x="32" y="266" class="small" lang="zh-CN">发布 map → odom</text><text x="32" y="266" class="small" lang="en">publishes map → odom</text>
+        <text x="20" y="296" class="small" lang="zh-CN">建图时：slam_toolbox</text><text x="20" y="296" class="small" lang="en">while mapping: slam_toolbox</text></g>
+
+      <g data-step="8"><rect class="box" x="20" y="366" width="860" height="44" style="stroke-dasharray: 5 4"/>
+        <text x="32" y="392" class="mono">lifecycle_manager</text>
+        <text x="200" y="392" class="small" lang="zh-CN">先 configure 全部服务器，再 activate 全部；bond 心跳监视崩溃</text><text x="200" y="392" class="small" lang="en">configures every server, then activates them all; bond heartbeats watch for crashes</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 通过 gz_ros2_control 给 Phase 5 的机器人换上 ros2_control 和 diff_drive_controller</h3><h3 lang="en">Lab A · ros2_control and diff_drive_controller for the Phase 5 robot through gz_ros2_control</h3>
+    <ol>
+      <li><span lang="zh-CN">在宿主上 <code>./lab.sh up</code>，浏览器打开 <code>http://localhost:6080/vnc.html</code>，命令都在 noVNC 桌面的终端里跑，每个终端先 source underlay。建一个新目录，复制 Phase 5 的两个文件，确认要用的包都在（缺 teleop 就装上）：</span><span lang="en">On the host run <code>./lab.sh up</code> and open <code>http://localhost:6080/vnc.html</code> in the browser; run every command in terminals of the noVNC desktop, sourcing the underlay in each. Make a new directory, copy the two Phase 5 files, and confirm the packages you need are there (install teleop if it is missing):</span><pre data-lang="sh">source /opt/ros/jazzy/setup.bash
+mkdir -p /root/ws/p6 &amp;&amp; cd /root/ws/p6
+cp /root/ws/p5/bot.urdf.xacro /root/ws/p5/view.launch.py .
+for p in controller_manager gz_ros2_control diff_drive_controller joint_state_broadcaster \
+         nav2_bringup slam_toolbox teleop_twist_keyboard; do
+  ros2 pkg prefix "$p" &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "ok      $p" || echo "MISSING $p"
+done
+# 只有 teleop 缺时：
+apt-get update &amp;&amp; apt-get install -y ros-jazzy-teleop-twist-keyboard</pre></li>
+      <li><span lang="zh-CN">在 <code>/root/ws/p6/bot.urdf.xacro</code> 里，把 Phase 5 Lab B 加的整个 <code>&lt;xacro:if value="$(arg sim)"&gt;</code> 块换成下面这段。雷达和万向球与 Phase 5 相同；Gazebo 的 DiffDrive 和 JointStatePublisher 两个系统删掉了，换成 <code>&lt;ros2_control&gt;</code> 块和 gz_ros2_control 插件。两个 <code>&lt;remapping&gt;</code> 把控制器的私有话题接到 <code>/cmd_vel</code> 和 <code>/odom</code>，Nav2 默认就用这两个名字（插件元素按 gz_ros2_control 的 Jazzy 文档和 demo，请查文档）：</span><span lang="en">In <code>/root/ws/p6/bot.urdf.xacro</code>, replace the whole <code>&lt;xacro:if value="$(arg sim)"&gt;</code> block added in Phase 5 Lab B with the one below. The lidar and caster are the same as in Phase 5; Gazebo’s DiffDrive and JointStatePublisher systems are gone, replaced by a <code>&lt;ros2_control&gt;</code> block and the gz_ros2_control plugin. The two <code>&lt;remapping&gt;</code> rules connect the controller’s private topics to <code>/cmd_vel</code> and <code>/odom</code>, the names Nav2 uses by default (plugin elements per the gz_ros2_control Jazzy docs and demo; check the docs):</span><pre data-lang="xml" data-file="bot.urdf.xacro">  &lt;xacro:if value="$(arg sim)"&gt;
+    &lt;!-- 硬件：两个轮子关节，各导出一个 velocity command 和两个 state --&gt;
+    &lt;ros2_control name="GazeboSimSystem" type="system"&gt;
+      &lt;hardware&gt;
+        &lt;plugin&gt;gz_ros2_control/GazeboSimSystem&lt;/plugin&gt;
+      &lt;/hardware&gt;
+      &lt;joint name="left_wheel_joint"&gt;
+        &lt;command_interface name="velocity"&gt;
+          &lt;param name="min"&gt;-20&lt;/param&gt;   &lt;!-- rad/s；r = 0.05 m 时约 1 m/s --&gt;
+          &lt;param name="max"&gt;20&lt;/param&gt;
+        &lt;/command_interface&gt;
+        &lt;state_interface name="position"/&gt;
+        &lt;state_interface name="velocity"/&gt;
+      &lt;/joint&gt;
+      &lt;joint name="right_wheel_joint"&gt;
+        &lt;command_interface name="velocity"&gt;
+          &lt;param name="min"&gt;-20&lt;/param&gt;
+          &lt;param name="max"&gt;20&lt;/param&gt;
+        &lt;/command_interface&gt;
+        &lt;state_interface name="position"/&gt;
+        &lt;state_interface name="velocity"/&gt;
+      &lt;/joint&gt;
+    &lt;/ros2_control&gt;
+
+    &lt;!-- 在 Gazebo 进程里创建 controller_manager --&gt;
+    &lt;gazebo&gt;
+      &lt;plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin"&gt;
+        &lt;parameters&gt;/root/ws/p6/controllers.yaml&lt;/parameters&gt;
+        &lt;ros&gt;
+          &lt;remapping&gt;/diff_drive_base_controller/cmd_vel:=/cmd_vel&lt;/remapping&gt;
+          &lt;remapping&gt;/diff_drive_base_controller/odom:=/odom&lt;/remapping&gt;
+        &lt;/ros&gt;
+      &lt;/plugin&gt;
+    &lt;/gazebo&gt;
+
+    &lt;!-- 与 Phase 5 相同：雷达和万向球 --&gt;
+    &lt;gazebo reference="lidar"&gt;
+      &lt;sensor name="lidar" type="gpu_lidar"&gt;
+        &lt;topic&gt;/scan&lt;/topic&gt;
+        &lt;gz_frame_id&gt;lidar&lt;/gz_frame_id&gt;
+        &lt;update_rate&gt;10&lt;/update_rate&gt;
+        &lt;ray&gt;
+          &lt;scan&gt;&lt;horizontal&gt;
+            &lt;samples&gt;360&lt;/samples&gt;&lt;resolution&gt;1&lt;/resolution&gt;
+            &lt;min_angle&gt;-3.14159&lt;/min_angle&gt;&lt;max_angle&gt;3.14159&lt;/max_angle&gt;
+          &lt;/horizontal&gt;&lt;/scan&gt;
+          &lt;range&gt;&lt;min&gt;0.08&lt;/min&gt;&lt;max&gt;8.0&lt;/max&gt;&lt;resolution&gt;0.01&lt;/resolution&gt;&lt;/range&gt;
+        &lt;/ray&gt;
+        &lt;always_on&gt;1&lt;/always_on&gt;
+        &lt;visualize&gt;true&lt;/visualize&gt;
+      &lt;/sensor&gt;
+    &lt;/gazebo&gt;
+    &lt;gazebo reference="caster"&gt;&lt;mu1&gt;0.0&lt;/mu1&gt;&lt;mu2&gt;0.0&lt;/mu2&gt;&lt;/gazebo&gt;
+  &lt;/xacro:if&gt;</pre></li>
+      <li><span lang="zh-CN">写控制器参数。键的写法沿用 gz_ros2_control 的 diff drive demo（<code>/**/</code> 通配命名空间）；轮距和轮半径必须与 URDF 一致（Phase 5：L = 0.23 m，r = 0.05 m）：</span><span lang="en">Write the controller parameters. The key style follows gz_ros2_control’s diff drive demo (<code>/**/</code> matches any namespace); the wheel separation and radius must match the URDF (Phase 5: L = 0.23 m, r = 0.05 m):</span><pre data-lang="yaml" data-file="controllers.yaml">/**/controller_manager:
+  ros__parameters:
+    update_rate: 100            # Hz：T = 10 ms
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+/**/diff_drive_base_controller:
+  ros__parameters:
+    type: diff_drive_controller/DiffDriveController
+    left_wheel_names: ["left_wheel_joint"]
+    right_wheel_names: ["right_wheel_joint"]
+    wheel_separation: 0.23
+    wheel_radius: 0.05
+    odom_frame_id: odom
+    base_frame_id: base_link
+    enable_odom_tf: true        # 由控制器发布 odom → base_link
+    publish_rate: 50.0
+    cmd_vel_timeout: 0.5        # 秒：收不到新命令就停车
+    pose_covariance_diagonal: [0.001, 0.001, 0.0, 0.0, 0.0, 0.01]
+    twist_covariance_diagonal: [0.001, 0.0, 0.0, 0.0, 0.0, 0.01]</pre></li>
+      <li><span lang="zh-CN">写一个房间世界，Lab B 要在里面建图。四个系统与 Phase 5 相同，世界名改成 <code>p6</code>：一个 6 m × 5 m 的房间、一道从南墙伸出的隔墙和一个箱子，机器人从原点出发：</span><span lang="en">Write a room world, in which Lab B builds its map. The four systems are the same as in Phase 5 and the world is named <code>p6</code>: a 6 m × 5 m room, a partition sticking out of the south wall, and a box; the robot starts at the origin:</span><pre data-lang="xml" data-file="world.sdf">&lt;?xml version="1.0"?&gt;
+&lt;!-- world.sdf: a 6 m x 5 m room with a partition and a box, for mapping --&gt;
+&lt;sdf version="1.9"&gt;
+  &lt;world name="p6"&gt;
+    &lt;plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/&gt;
+    &lt;plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/&gt;
+    &lt;plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/&gt;
+    &lt;plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"&gt;
+      &lt;render_engine&gt;ogre2&lt;/render_engine&gt;
+    &lt;/plugin&gt;
+
+    &lt;light type="directional" name="sun"&gt;
+      &lt;cast_shadows&gt;false&lt;/cast_shadows&gt;
+      &lt;pose&gt;0 0 10 0 0 0&lt;/pose&gt;
+      &lt;direction&gt;-0.5 0.1 -0.9&lt;/direction&gt;
+    &lt;/light&gt;
+
+    &lt;model name="ground"&gt;
+      &lt;static&gt;true&lt;/static&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;plane&gt;&lt;normal&gt;0 0 1&lt;/normal&gt;&lt;size&gt;20 20&lt;/size&gt;&lt;/plane&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;plane&gt;&lt;normal&gt;0 0 1&lt;/normal&gt;&lt;size&gt;20 20&lt;/size&gt;&lt;/plane&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;
+    &lt;/model&gt;
+
+    &lt;!-- 房间：x 从 -1.5 到 4.5，y 从 -2.5 到 2.5，墙高 0.5 m、厚 0.1 m --&gt;
+    &lt;model name="wall_north"&gt;&lt;static&gt;true&lt;/static&gt;&lt;pose&gt;1.5 2.5 0.25 0 0 0&lt;/pose&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;6.1 0.1 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;6.1 0.1 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;&lt;/model&gt;
+    &lt;model name="wall_south"&gt;&lt;static&gt;true&lt;/static&gt;&lt;pose&gt;1.5 -2.5 0.25 0 0 0&lt;/pose&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;6.1 0.1 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;6.1 0.1 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;&lt;/model&gt;
+    &lt;model name="wall_west"&gt;&lt;static&gt;true&lt;/static&gt;&lt;pose&gt;-1.5 0 0.25 0 0 0&lt;/pose&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.1 5.1 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.1 5.1 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;&lt;/model&gt;
+    &lt;model name="wall_east"&gt;&lt;static&gt;true&lt;/static&gt;&lt;pose&gt;4.5 0 0.25 0 0 0&lt;/pose&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.1 5.1 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.1 5.1 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;&lt;/model&gt;
+    &lt;!-- 隔墙：x = 1.5，从南墙伸到 y = -0.5；Lab B 的目标点在它背后 --&gt;
+    &lt;model name="partition"&gt;&lt;static&gt;true&lt;/static&gt;&lt;pose&gt;1.5 -1.5 0.25 0 0 0&lt;/pose&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.1 2.0 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.1 2.0 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;&lt;/model&gt;
+    &lt;model name="box"&gt;&lt;static&gt;true&lt;/static&gt;&lt;pose&gt;3.0 1.2 0.25 0 0 0&lt;/pose&gt;
+      &lt;link name="link"&gt;
+        &lt;collision name="c"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.6 0.6 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/collision&gt;
+        &lt;visual name="v"&gt;&lt;geometry&gt;&lt;box&gt;&lt;size&gt;0.6 0.6 0.5&lt;/size&gt;&lt;/box&gt;&lt;/geometry&gt;&lt;/visual&gt;
+      &lt;/link&gt;&lt;/model&gt;
+  &lt;/world&gt;
+&lt;/sdf&gt;</pre></li>
+      <li><span lang="zh-CN">按「仿真器和时钟先起」的顺序启动。和 Phase 5 相比，桥只剩 <code>/clock</code> 和 <code>/scan</code>：<code>/cmd_vel</code>、<code>/odom</code>、<code>/tf</code> 里的 odom → base_link 和 <code>/joint_states</code> 现在都由 Gazebo 进程里的控制器直接在 ROS 一侧发布。生成机器人之后，Gazebo 终端里应当出现 controller_manager 启动的日志：</span><span lang="en">Start in the order “simulator and clock first”. Compared with Phase 5, the bridge carries only <code>/clock</code> and <code>/scan</code>: <code>/cmd_vel</code>, <code>/odom</code>, odom → base_link on <code>/tf</code>, and <code>/joint_states</code> are now published directly on the ROS side by the controllers inside the Gazebo process. After the robot is spawned, the Gazebo terminal should show the controller_manager starting:</span><pre data-lang="sh"># 终端 1
+cd /root/ws/p6 &amp;&amp; gz sim -r world.sdf
+# 终端 2：只桥接时钟和雷达
+ros2 run ros_gz_bridge parameter_bridge \
+  /clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock \
+  /scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan
+# 终端 3：robot_description 里现在带着 ros2_control 块
+cd /root/ws/p6 &amp;&amp; ros2 launch ./view.launch.py sim:=true use_sim_time:=true
+# 终端 4
+ros2 run ros_gz_sim create -world p6 -topic robot_description -name bot -z 0.07</pre></li>
+      <li><span lang="zh-CN">启动两个控制器并检查。<code>spawner</code> 依次调用 load、configure、activate 三个服务；<code>list_hardware_interfaces</code> 里两个 velocity command 接口应当标为 claimed，state 接口可读：</span><span lang="en">Start the two controllers and check them. <code>spawner</code> calls the load, configure and activate services in turn; in <code>list_hardware_interfaces</code> the two velocity command interfaces should show as claimed, and the state interfaces as available:</span><pre data-lang="sh">ros2 run controller_manager spawner joint_state_broadcaster
+ros2 run controller_manager spawner diff_drive_base_controller --param-file /root/ws/p6/controllers.yaml
+ros2 control list_controllers
+ros2 control list_hardware_interfaces
+ros2 param get /controller_manager update_rate
+ros2 topic info -v /cmd_vel          # 订阅者是 diff_drive_base_controller，类型 TwistStamped
+ros2 run tf2_ros tf2_echo odom base_link</pre></li>
+      <li><span lang="zh-CN">用键盘开车。Jazzy 的控制器只收 <code>TwistStamped</code>，所以 teleop 要带 <code>stamped:=true</code>，这正好和 Phase 5 相反；换成 <code>stamped:=false</code> 再试一次，机器人应当不动，也没有报错。开车时在 RViz2（<code>rviz2 --ros-args -p use_sim_time:=true</code>，Fixed Frame 设 <code>odom</code>）里看 RobotModel 和 TF：</span><span lang="en">Drive with the keyboard. Jazzy’s controller accepts only <code>TwistStamped</code>, so teleop needs <code>stamped:=true</code>, the opposite of Phase 5; try again with <code>stamped:=false</code> and the robot should not move, with no error either. While driving, watch RobotModel and TF in RViz2 (<code>rviz2 --ros-args -p use_sim_time:=true</code>, Fixed Frame <code>odom</code>):</span><pre data-lang="sh">ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=true
+# 对照：不带时间戳
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=false</pre></li>
+      <li><span lang="zh-CN">控制器也是 lifecycle 节点。把差速控制器切到 inactive：它放开 command 接口（<code>list_hardware_interfaces</code> 里不再是 claimed），键盘命令不再有效；再切回 active。对照 Phase 4 的状态机：</span><span lang="en">Controllers are lifecycle nodes too. Switch the differential-drive controller to inactive: it releases its command interfaces (no longer claimed in <code>list_hardware_interfaces</code>) and keyboard commands stop working; then switch it back to active. Compare with the state machine of Phase 4:</span><pre data-lang="sh">ros2 control set_controller_state diff_drive_base_controller inactive
+ros2 control list_controllers
+ros2 control list_hardware_interfaces
+ros2 control set_controller_state diff_drive_base_controller active</pre></li>
+      <li><span lang="zh-CN">看 <code>cmd_vel_timeout</code>：停掉 teleop，发<strong>一条</strong>前进命令，同时看 odom 里的线速度。预期（推断）：速度升到约 0.2 m/s，约 0.5 s 后控制器停车，速度回到 0。时间戳全为 0 的消息控制器怎样处理，以你看到的日志为准：</span><span lang="en">Watch <code>cmd_vel_timeout</code>: stop teleop, send <strong>one</strong> forward command, and watch the linear velocity in odom at the same time. Expected (inference): the speed rises to about 0.2 m/s, and about 0.5 s later the controller stops and the speed returns to 0. How the controller treats a message whose time stamp is all zeros is whatever its log says:</span><pre data-lang="sh"># shell 1
+ros2 topic echo /odom --field twist.twist.linear.x
+# shell 2
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/TwistStamped "{twist: {linear: {x: 0.2}}}"</pre></li>
+      <li><span lang="zh-CN">和内核课程交叉：看 Gazebo 服务器进程每个线程的调度类。预期（推断）：全是 <code>TS</code>（普通的 fair 类），没有 <code>FF</code>。这说明仿真里的控制环跑在 Gazebo 的普通线程上、按仿真时间计时，和 Phase 2 里你用 <code>chrt -f 80</code> 抬起来的那个线程不是一回事：</span><span lang="en">Crossover with the kernel course: look at the scheduling class of every thread of the Gazebo server process. Expected (inference): all <code>TS</code> (the ordinary fair class), no <code>FF</code>. That shows the control loop in simulation runs on Gazebo’s ordinary threads, timed in simulation time, and is not the same thing as the thread you raised with <code>chrt -f 80</code> in Phase 2:</span><pre data-lang="sh">pgrep -af 'gz sim'                    # 找出服务器进程的 PID（可能有几个 gz 进程）
+PID=把上面服务器进程的 PID 填在这里
+ps -T -p "$PID" -o spid,cls,rtprio,comm | head -n 25</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 用 slam_toolbox 建图，再让 Nav2 在这张图上导航：RViz2 发目标和 Python 动作客户端</h3><h3 lang="en">Lab B · A map with slam_toolbox, then Nav2 on that map: goals from RViz2 and from a Python action client</h3>
+    <ol>
+      <li><span lang="zh-CN">保持 Lab A 的终端 1–4 和两个控制器运行。复制 slam_toolbox 的默认配置，把机器人坐标系从 <code>base_footprint</code> 改成本课机器人的 <code>base_link</code>：</span><span lang="en">Keep Lab A’s terminals 1–4 and both controllers running. Copy slam_toolbox’s default configuration and change the robot frame from <code>base_footprint</code> to this course robot’s <code>base_link</code>:</span><pre data-lang="sh">cd /root/ws/p6
+cp "$(ros2 pkg prefix slam_toolbox)/share/slam_toolbox/config/mapper_params_online_async.yaml" slam.yaml
+sed -i 's/base_footprint/base_link/' slam.yaml
+grep -E 'odom_frame|map_frame|base_frame|scan_topic|mode:' slam.yaml</pre></li>
+      <li><span lang="zh-CN">终端 5 启动 slam_toolbox，终端 6 启动 RViz2：Fixed Frame 设 <code>map</code>，Add Map（Topic <code>/map</code>）、LaserScan（<code>/scan</code>）、RobotModel 和 TF。终端 7 用键盘慢慢开一整圈，绕过隔墙回到起点。另开一个终端看 map → odom：回环那一刻它应当跳一下，地图跟着对齐：</span><span lang="en">Terminal 5 starts slam_toolbox and terminal 6 starts RViz2: set Fixed Frame to <code>map</code> and Add Map (Topic <code>/map</code>), LaserScan (<code>/scan</code>), RobotModel and TF. In terminal 7, drive slowly with the keyboard for one full lap, round the partition and back to the start. In another terminal watch map → odom: at the moment of the loop closure it should jump, and the map should snap into alignment:</span><pre data-lang="sh"># 终端 5
+ros2 launch slam_toolbox online_async_launch.py slam_params_file:=/root/ws/p6/slam.yaml use_sim_time:=true
+# 终端 6
+rviz2 --ros-args -p use_sim_time:=true
+# 终端 7
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=true
+# 另一个终端
+ros2 run tf2_ros tf2_echo map odom</pre></li>
+      <li><span lang="zh-CN">保存地图，然后<strong>停掉 slam_toolbox</strong>（终端 5 按 Ctrl+C）和这个 RViz2。保存得到 <code>room.yaml</code> 和 <code>room.pgm</code>；YAML 里记着分辨率、原点和占据阈值：</span><span lang="en">Save the map, then <strong>stop slam_toolbox</strong> (Ctrl+C in terminal 5) and this RViz2. Saving gives <code>room.yaml</code> and <code>room.pgm</code>; the YAML records the resolution, origin and occupancy thresholds:</span><pre data-lang="sh">ros2 run nav2_map_server map_saver_cli -f /root/ws/p6/room
+cat /root/ws/p6/room.yaml
+ls -l /root/ws/p6/room.pgm</pre></li>
+      <li><span lang="zh-CN">生成 Nav2 参数：从你安装的默认参数出发，把 <code>base_footprint</code> 换成 <code>base_link</code>，并在发布或接收速度命令的节点上打开 <code>enable_stamped_cmd_vel</code>，让整条命令链和 Jazzy 的 <code>diff_drive_controller</code> 一样用 <code>TwistStamped</code>。节点列表按 2026-10-31 的 <code>jazzy</code> 源码，请查文档；你的参数文件里没有的节点会被跳过：</span><span lang="en">Generate the Nav2 parameters: start from your installed defaults, replace <code>base_footprint</code> with <code>base_link</code>, and turn on <code>enable_stamped_cmd_vel</code> on the nodes that publish or receive velocity commands, so the whole command chain uses <code>TwistStamped</code> like Jazzy’s <code>diff_drive_controller</code>. The list of nodes follows the <code>jazzy</code> source on 2026-10-31 (check the docs); nodes missing from your parameter file are skipped:</span><pre data-lang="py" data-file="make_params.py"># make_params.py: adapt the installed Nav2 defaults to the course robot
+import subprocess
+
+import yaml
+
+prefix = subprocess.check_output(['ros2', 'pkg', 'prefix', 'nav2_bringup'], text=True).strip()
+src = f'{prefix}/share/nav2_bringup/params/nav2_params.yaml'
+text = open(src).read().replace('base_footprint', 'base_link')   # 本课机器人没有 base_footprint
+params = yaml.safe_load(text)
+
+for node in ['controller_server', 'behavior_server', 'velocity_smoother',
+             'collision_monitor', 'docking_server']:
+    if node in params:
+        params[node]['ros__parameters']['enable_stamped_cmd_vel'] = True
+        print('stamped cmd_vel on', node)
+
+with open('/root/ws/p6/nav2.yaml', 'w') as f:
+    yaml.safe_dump(params, f, sort_keys=False)
+print('wrote /root/ws/p6/nav2.yaml from', src)</pre><pre data-lang="sh">cd /root/ws/p6 &amp;&amp; python3 make_params.py
+grep -n -E 'enable_stamped_cmd_vel|FollowPath:|plugin: "nav2_(mppi|dwb|regulated)' nav2.yaml | head</pre></li>
+      <li><span lang="zh-CN">终端 5 启动 Nav2（定位加导航），终端 6 用 Nav2 自带的 RViz2 配置。<code>bringup_launch.py</code> 的 <code>use_composition</code> 默认为真，全部服务器装进一个组件容器（Phase 4 Lab B 的那种）。确认生命周期状态和命令链：</span><span lang="en">Terminal 5 starts Nav2 (localisation plus navigation) and terminal 6 uses Nav2’s own RViz2 configuration. <code>bringup_launch.py</code> has <code>use_composition</code> true by default, so all servers are loaded into one component container (the kind from Phase 4 Lab B). Confirm the lifecycle states and the command chain:</span><pre data-lang="sh"># 终端 5
+ros2 launch nav2_bringup bringup_launch.py map:=/root/ws/p6/room.yaml \
+  params_file:=/root/ws/p6/nav2.yaml use_sim_time:=True
+# 终端 6
+ros2 launch nav2_bringup rviz_launch.py use_sim_time:=True
+# 另一个终端
+ros2 lifecycle get /map_server
+ros2 lifecycle get /planner_server
+ros2 component list
+ros2 topic info -v /cmd_vel     # 发布者 collision_monitor、订阅者 diff_drive_base_controller，类型都应是 TwistStamped</pre></li>
+      <li><span lang="zh-CN">给 AMCL 初始位姿：在 RViz2 里用 2D Pose Estimate，在机器人所在处（原点，朝 +x）拖一个箭头。粒子云应当收拢到机器人周围，<code>tf2_echo map odom</code> 开始有输出。如果机器人不动，先用 <code>ros2 topic info -v /cmd_vel</code> 查类型：这是本实验最可能出错的地方（概念 4 的提示）。MPPI 在软件渲染的容器里很吃 CPU，若控制明显跟不上，可以把 <code>FollowPath</code> 换成 RPP 插件再试（插件名与参数请查文档）：</span><span lang="en">Give AMCL an initial pose: in RViz2 use 2D Pose Estimate and drag an arrow where the robot is (the origin, facing +x). The particle cloud should gather around the robot, and <code>tf2_echo map odom</code> starts producing output. If the robot does not move later, first check the types with <code>ros2 topic info -v /cmd_vel</code>: this is the most likely failure in this lab (the hint in concept 4). MPPI is CPU-hungry in a software-rendered container; if control clearly falls behind, try swapping <code>FollowPath</code> for the RPP plugin (check the docs for the plugin name and parameters):</span><pre data-lang="sh">ros2 run tf2_ros tf2_echo map odom
+ros2 topic echo --once /amcl_pose</pre></li>
+      <li><span lang="zh-CN">从 RViz2 发目标：用 2D Goal Pose（或 Nav2 面板的 Nav2 Goal）点在隔墙背后，大约 (3.0, −1.5)。看全局路径怎样绕过隔墙的北端、local costmap 怎样跟着机器人滚动、膨胀区怎样让路径离墙一段距离；途中可以在 Gazebo 里往路径上放一个箱子，看路径每秒一次的重规划：</span><span lang="en">Send a goal from RViz2: with 2D Goal Pose (or Nav2 Goal in the Nav2 panel), click behind the partition at about (3.0, −1.5). Watch how the global path goes round the north end of the partition, how the local costmap rolls along with the robot, and how the inflation zone keeps the path some distance from the walls; on the way you can drop a box onto the path in Gazebo and watch the once-a-second replanning:</span><pre data-lang="sh">ros2 topic hz /cmd_vel           # 约等于 controller_frequency
+ros2 topic echo --once /plan --field header</pre></li>
+      <li><span lang="zh-CN">写一个 Python 动作客户端。它发出 <code>NavigateToPose</code> 目标，每秒打印一次剩余距离和恢复次数，最后打印结果状态（4 是 SUCCEEDED，6 是 ABORTED）。结果消息的字段随版本变化，所以这里整条打印：</span><span lang="en">Write a Python action client. It sends a <code>NavigateToPose</code> goal, prints the remaining distance and the recovery count once a second, and finally prints the result status (4 is SUCCEEDED, 6 is ABORTED). The result message’s fields change between versions, so it is printed whole:</span><pre data-lang="py" data-file="nav_goal.py"># nav_goal.py: send one NavigateToPose goal and follow its feedback
+import math
+import sys
+
+import rclpy
+from action_msgs.msg import GoalStatus
+from nav2_msgs.action import NavigateToPose
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from rclpy.utilities import remove_ros_args
+
+
+class NavGoal(Node):
+    def __init__(self):
+        super().__init__('nav_goal')
+        self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+
+    def run(self, x, y, yaw):
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = x
+        goal.pose.pose.position.y = y
+        goal.pose.pose.orientation.z = math.sin(yaw / 2.0)   # 绕 z 轴的四元数
+        goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
+
+        self.get_logger().info('waiting for navigate_to_pose ...')
+        self.client.wait_for_server()
+        sent = self.client.send_goal_async(goal, feedback_callback=self.on_feedback)
+        rclpy.spin_until_future_complete(self, sent)
+        handle = sent.result()
+        if not handle.accepted:
+            self.get_logger().error('goal rejected')
+            return
+        done = handle.get_result_async()
+        rclpy.spin_until_future_complete(self, done)
+        res = done.result()
+        ok = res.status == GoalStatus.STATUS_SUCCEEDED
+        self.get_logger().info(f'status {res.status} ({"SUCCEEDED" if ok else "not succeeded"}): {res.result}')
+
+    def on_feedback(self, msg):
+        fb = msg.feedback
+        self.get_logger().info(
+            f'{fb.distance_remaining:.2f} m left, {fb.number_of_recoveries} recoveries',
+            throttle_duration_sec=1.0)
+
+
+def main():
+    rclpy.init(args=sys.argv)
+    x, y, yaw = (float(v) for v in remove_ros_args(sys.argv)[1:4])
+    node = NavGoal()
+    node.run(x, y, yaw)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()</pre></li>
+      <li><span lang="zh-CN">先发一个能到达的目标，再发一个到不了的目标（房间外很远处，地图之外）。预期（推断）：第一个以状态 4 结束；第二个规划失败，反馈里的恢复次数逐渐增加，机器人可能原地转、等待、后退，最后以状态 6 结束。对照动画 (b) 的第 7 步，数一数恢复了几次：</span><span lang="en">First send a reachable goal, then an unreachable one (far outside the room, off the map). Expected (inference): the first ends with status 4; the second fails to plan, the recovery count in the feedback climbs, the robot may spin, wait and back up, and it finally ends with status 6. Count the recoveries against step 7 of diagram (b):</span><pre data-lang="sh">cd /root/ws/p6
+python3 nav_goal.py 3.0 -1.5 0.0 --ros-args -p use_sim_time:=true
+python3 nav_goal.py 0.0 0.0 3.14 --ros-args -p use_sim_time:=true
+python3 nav_goal.py 10.0 0.0 0.0 --ros-args -p use_sim_time:=true   # 地图之外</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 里 <code>ros2 control list_controllers</code> 和 <code>list_hardware_interfaces</code> 的输出（含切到 inactive 之后的一份）、<code>ros2 topic info -v /cmd_vel</code> 的输出、<code>stamped:=false</code> 时机器人不动的说明、<code>cmd_vel_timeout</code> 实验里 odom 速度的几行，以及 Gazebo 线程调度类的输出；Lab B 里 <code>room.yaml</code> 的内容和 <code>room.pgm</code> 的截图、回环前后 <code>tf2_echo map odom</code> 的两行、Nav2 启动后的 <code>ros2 component list</code>、RViz2 里绕过隔墙的路径截图、<code>nav_goal.py</code> 三次运行的最后一行，以及你用自己的话写的「一个目标从 RViz2 到轮子转动，经过了哪些节点和哪几个周期性的循环」（10 行以内）。</div>
+    <div class="note" lang="en">Deliverables: from Lab A, the output of <code>ros2 control list_controllers</code> and <code>list_hardware_interfaces</code> (including one after switching to inactive), the output of <code>ros2 topic info -v /cmd_vel</code>, a note on the robot not moving with <code>stamped:=false</code>, a few lines of odom velocity from the <code>cmd_vel_timeout</code> experiment, and the scheduling classes of the Gazebo threads; from Lab B, the contents of <code>room.yaml</code> and a screenshot of <code>room.pgm</code>, two lines of <code>tf2_echo map odom</code> from before and after the loop closure, <code>ros2 component list</code> after Nav2 starts, a screenshot of the path round the partition in RViz2, the last line of each of the three <code>nav_goal.py</code> runs, and your own account of “which nodes and which periodic loops a goal passes through from RViz2 to a turning wheel” (10 lines or fewer).</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/phase-6">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 真车上 controller_manager 以 100 Hz 运行。某个周期因为一次缺页做了 25 ms。在 Jazzy 的默认设置下，接下来会发生什么？</p>
+      <p lang="en">1. On a real robot the controller_manager runs at 100 Hz. One period takes 25 ms because of a page fault. With Jazzy’s default settings, what happens next?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">controller_manager 立刻连跑两个周期，把错过的 update 补回来</span><span lang="en">The controller_manager immediately runs two periods back to back to make up the missed updates</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">打印 overrun 警告，跳过错过的周期边界；这段时间里硬件一直执行旧命令，下一次 update 收到的周期变长</span><span lang="en">It logs an overrun warning and skips the missed period boundaries; meanwhile the hardware keeps executing the old command, and the next update receives a longer period</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">controller_manager 把超时的控制器停用，直到有人手动重新激活</span><span lang="en">The controller_manager deactivates the controller that overran until someone reactivates it by hand</span></label>
+      <div class="why" hidden><span lang="zh-CN"><code>overruns.manage</code> 默认为真时，循环发现下一个截止时间已过，就把截止时间向后推过错过的周期，并打印警告。a 错：连跑追赶只在关掉 overrun 处理时出现，而且补跑的几次也无法撤回那 25 ms 里没有反馈的事实。c 错：控制器被停用的条件是 <code>update</code> 返回错误，不是运行时间超时。</span><span lang="en">With <code>overruns.manage</code> at its default of true, the loop sees that the next deadline has passed, moves the deadline past the missed periods, and logs a warning. a is wrong: back-to-back catch-up only happens with overrun handling turned off, and catch-up runs cannot undo the 25 ms without feedback anyway. c is wrong: a controller is deactivated when its <code>update</code> returns an error, not when a period runs long.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 把 inflation 层从 global costmap 里去掉，只留 static 和 obstacle 层，规划器把机器人当作一个点。最可能出现什么？</p>
+      <p lang="en">2. You remove the inflation layer from the global costmap, keeping only the static and obstacle layers, and the planner treats the robot as a point. What is most likely to happen?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">激光噪声不再被平滑，障碍物在 costmap 里闪烁</span><span lang="en">Laser noise is no longer smoothed, and obstacles flicker in the costmap</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">规划变慢，因为要搜索的自由格子变多了</span><span lang="en">Planning gets slower, because there are more free cells to search</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">路径紧贴墙角、甚至从比机器人还窄的缝里穿过，因为地图里不再有机器人的尺寸</span><span lang="en">Paths hug corners and even pass through gaps narrower than the robot, because the map no longer carries the robot’s size</span></label>
+      <div class="why" hidden><span lang="zh-CN">膨胀把机器人的半径搬进地图（构型空间），并在外面加一段递减的代价让路径离墙。去掉它，一个点能过的缝在规划器看来都能过。a 错：膨胀不处理传感器噪声，标记和清除是 obstacle 层的事。b 错：自由格子多少对搜索时间有影响，但这不是主要后果，主要后果是路径不安全。</span><span lang="en">Inflation moves the robot’s radius into the map (configuration space) and adds a decreasing cost beyond it to keep paths away from walls. Without it, any gap a point can pass looks passable to the planner. a is wrong: inflation does not deal with sensor noise; marking and clearing belong to the obstacle layer. b is wrong: the number of free cells does affect search time, but that is not the main consequence; the main one is unsafe paths.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 关于 AMCL 和 slam_toolbox，哪一句是对的？</p>
+      <p lang="en">3. Which statement about AMCL and slam_toolbox is right?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">AMCL 拿着一张固定的地图，只估计机器人当前的位姿；slam_toolbox 同时估计地图和整条轨迹，回环时会改写过去的位姿</span><span lang="en">AMCL takes a fixed map and estimates only the robot’s current pose; slam_toolbox estimates the map and the whole trajectory together, and rewrites past poses at a loop closure</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">两者估计的东西相同，AMCL 只是更快但更不准的建图算法</span><span lang="en">Both estimate the same thing; AMCL is just a faster but less accurate mapping algorithm</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">同时运行两者更稳，AMCL 修正 slam_toolbox 的位姿，slam_toolbox 修正 AMCL 的地图</span><span lang="en">Running both at once is more robust: AMCL corrects slam_toolbox’s pose, and slam_toolbox corrects AMCL’s map</span></label>
+      <div class="why" hidden><span lang="zh-CN">AMCL 是在已知地图上的粒子滤波定位，状态只有位姿；slam_toolbox 是基于图的 SLAM，状态是全部节点的位姿，地图从它们画出。b 错：AMCL 根本不建图。c 错：两者都发布 map → odom，同时运行时同一条 tf 边有两个作者，查到的变换会来回跳。</span><span lang="en">AMCL is particle-filter localisation on a known map, and its state is only the pose; slam_toolbox is graph-based SLAM whose state is every node’s pose, with the map drawn from them. b is wrong: AMCL builds no map at all. c is wrong: both publish map → odom, so running both gives one tf edge two authors and lookups jump back and forth.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 机器人按默认行为树导航时，一个箱子突然挡住了路，<code>FollowPath</code> 失败。接下来最先发生的是什么？</p>
+      <p lang="en">4. While the robot navigates with the default behavior tree, a box suddenly blocks the way and <code>FollowPath</code> fails. What happens first?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">bt_navigator 立即以 ABORTED 结束目标，由客户端决定要不要重发</span><span lang="en">bt_navigator ends the goal as ABORTED at once and leaves it to the client to resend</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">FollowPath 的局部恢复先清空 local costmap 再试一次；仍失败，根上的 RecoveryNode 才轮流执行清图、原地转、等待、后退中的一种，然后整体重试</span><span lang="en">FollowPath’s local recovery first clears the local costmap and tries again; only if that fails does the root RecoveryNode run one of clear, spin, wait or back up in turn, then retry everything</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">controller_server 自己决定原地旋转，不经过行为树</span><span lang="en">controller_server decides on its own to spin in place, without the behavior tree</span></label>
+      <div class="why" hidden><span lang="zh-CN">默认树有两级恢复：每个动作外面一个只重试一次、先清对应 costmap 的 RecoveryNode，最外层一个最多重试 6 次、用 RoundRobin 轮流选恢复动作的 RecoveryNode。a 错：只有 6 次重试都失败才 ABORTED。c 错：控制器只算速度，什么时候脱困、怎样脱困由行为树决定，旋转由 behavior_server 执行。</span><span lang="en">The default tree has two levels of recovery: around each action, a RecoveryNode that retries once after clearing the matching costmap; at the top, a RecoveryNode with up to 6 retries that picks recoveries in turn through RoundRobin. a is wrong: the goal is ABORTED only after all 6 retries fail. c is wrong: the controller only computes velocities; when and how to recover is the behavior tree’s decision, and spinning is executed by behavior_server.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://control.ros.org/jazzy/doc/getting_started/getting_started.html">ros2_control Getting Started</a> · <a href="https://control.ros.org/jazzy/doc/ros2_control/controller_manager/doc/userdoc.html">controller_manager</a> · <a href="https://control.ros.org/jazzy/doc/ros2_controllers/diff_drive_controller/doc/userdoc.html">diff_drive_controller</a> · <a href="https://control.ros.org/jazzy/doc/gz_ros2_control/doc/index.html">gz_ros2_control</a> <span class="lvl" lang="zh-CN">官方文档，入门到中级，概念 1、2、3、动画 (a) 与 Lab A：架构、实时线程参数、差速控制器的接口与参数、Gazebo 插件</span><span class="lvl" lang="en">Official docs, beginner to intermediate, concepts 1, 2 and 3, diagram (a) and Lab A: the architecture, the real-time thread parameters, the differential-drive controller’s interfaces and parameters, the Gazebo plugin</span></li>
+    <li><a href="https://github.com/ros-controls/ros2_control/tree/jazzy">ros2_control (jazzy)</a> · <a href="https://github.com/ros-controls/ros2_controllers/tree/jazzy">ros2_controllers (jazzy)</a> · <a href="https://github.com/ros-controls/gz_ros2_control/tree/jazzy">gz_ros2_control (jazzy)</a> <span class="lvl" lang="zh-CN">源码，进阶：<code>controller_manager/src/ros2_control_node.cpp</code> 与 <code>sleeping_policies.cpp</code> 的主循环和 overrun 处理，<code>gz_ros2_control_plugin.cpp</code> 的 PreUpdate、PostUpdate，<code>gz_ros2_control_demos</code> 的 diff drive 例子</span><span class="lvl" lang="en">Source, advanced: the main loop and overrun handling in <code>controller_manager/src/ros2_control_node.cpp</code> and <code>sleeping_policies.cpp</code>, PreUpdate and PostUpdate in <code>gz_ros2_control_plugin.cpp</code>, the diff drive example in <code>gz_ros2_control_demos</code></span></li>
+    <li><a href="https://docs.nav2.org/jazzy/getting_started/navigation_concepts/">Nav2 Navigation Concepts</a> · <a href="https://docs.nav2.org/jazzy/getting_started/nav2_behavior_trees/detailed_behavior_tree_walkthrough/detailed_behavior_tree_walkthrough/">Detailed Behavior Tree Walkthrough</a> · <a href="https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/core_servers/configuring_lifecycle_manager/">Lifecycle Manager</a> <span class="lvl" lang="zh-CN">官方文档，中级，概念 4、5、7 与动画 (b)：服务器、行为树、状态估计、生命周期管理</span><span class="lvl" lang="en">Official docs, intermediate, concepts 4, 5 and 7 and diagram (b): servers, behavior trees, state estimation, lifecycle management</span></li>
+    <li><a href="https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/core_servers/costmap_2d/">Costmap 2D</a> · <a href="https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/core_servers/costmap_2d/costmap_plugins/inflation/">Inflation Layer</a> · <a href="https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/others/configuring_amcl/">AMCL</a> <span class="lvl" lang="zh-CN">官方参数参考，中级，概念 6、7：每一层和 AMCL 的全部参数</span><span class="lvl" lang="en">Official parameter reference, intermediate, concepts 6 and 7: every parameter of each layer and of AMCL</span></li>
+    <li><a href="https://docs.nav2.org/jazzy/tutorials/general_tutorials/navigation2_with_slam/navigation2_with_slam/">Navigating while Mapping (SLAM)</a> · <a href="https://docs.nav2.org/jazzy/configuration_and_development/simple_commander_api/simple_commander_api/">Simple Commander API</a> · <a href="https://docs.nav2.org/jazzy/configuration_and_development/migration_guides/jazzy/Jazzy/">Jazzy to the next distro migration</a> <span class="lvl" lang="zh-CN">官方教程与迁移指南，Lab B：建图加导航、Python 的高层导航接口（可以替代 Lab B 的手写客户端）、<code>TwistStamped</code> 默认值的变化</span><span class="lvl" lang="en">Official tutorials and migration guide, Lab B: mapping plus navigation, a high-level Python navigation API (an alternative to Lab B’s hand-written client), the change of the <code>TwistStamped</code> default</span></li>
+    <li><a href="https://github.com/ros-navigation/navigation2/tree/jazzy">navigation2 (jazzy)</a> · <a href="https://github.com/SteveMacenski/slam_toolbox/tree/jazzy">slam_toolbox (jazzy)</a> · <a href="https://www.behaviortree.dev/">BehaviorTree.CPP</a> <span class="lvl" lang="zh-CN">源码，进阶：<code>nav2_bringup/params/nav2_params.yaml</code>、<code>nav2_bt_navigator/behavior_trees/</code>、<code>nav2_costmap_2d</code> 的膨胀与代价值、slam_toolbox 的配置与 launch 文件、行为树库本身</span><span class="lvl" lang="en">Source, advanced: <code>nav2_bringup/params/nav2_params.yaml</code>, <code>nav2_bt_navigator/behavior_trees/</code>, inflation and cost values in <code>nav2_costmap_2d</code>, slam_toolbox’s configuration and launch files, and the behavior tree library itself</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Writing-an-Action-Server-Client/Py.html">Writing an action server and client (Python)</a> <span class="lvl" lang="zh-CN">官方教程，入门，Lab B 第 8 步：<code>ActionClient</code>、反馈回调和结果</span><span class="lvl" lang="en">Official tutorial, beginner, Lab B step 8: <code>ActionClient</code>, the feedback callback and the result</span></li>
+    <li><a href="https://arxiv.org/abs/2003.00368">Macenski et al., The Marathon 2: A Navigation System</a> · <a href="https://joss.theoj.org/papers/10.21105/joss.02783">Macenski &amp; Jambrecic, SLAM Toolbox</a> <span class="lvl" lang="zh-CN">论文，进阶：Nav2 的设计动机（行为树、lifecycle、插件化）与 slam_toolbox 的设计；作者是两个项目的主要维护者</span><span class="lvl" lang="en">Papers, advanced: the design motivation of Nav2 (behavior trees, lifecycle, plugins) and the design of slam_toolbox; the authors are the main maintainers of both projects</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Lentin Joseph &amp; Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025（7 月）. <span class="lvl">讲 ros2_control、Gazebo 仿真与 Nav2 的章节，对应概念 1–4、6 与两个实验；基于 Jazzy，本页的主要参考书</span></li>
+    <li lang="en">Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025 (July). <span class="lvl">The chapters on ros2_control, Gazebo simulation and Nav2; match concepts 1–4 and 6 and both labs; based on Jazzy, and the main book for this page</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025（6 月）, ISBN 9781032851501（第 1 版 2022, ISBN 9781032267203）. <span class="lvl">讲行为树和导航的章节，对应概念 4、5；作者也是 Nav2 行为树相关工作的参与者</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025 (June), ISBN 9781032851501 (1st ed. 2022, ISBN 9781032267203). <span class="lvl">The chapters on behavior trees and navigation; match concepts 4 and 5; the author has also taken part in work around Nav2’s behavior trees</span></li>
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024（11 月）, ISBN 9781835881408. <span class="lvl">讲机器人描述、TF 与 Gazebo 仿真的章节，作为 Lab A 的背景复习；本页作者没有确认书中是否覆盖 ros2_control 或 Nav2</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024 (November), ISBN 9781835881408. <span class="lvl">The chapters on the robot description, TF and Gazebo simulation, as background review for Lab A; the author of this page has not confirmed whether the book covers ros2_control or Nav2</span></li>
+    <li lang="zh-CN">Morgan Quigley, Brian Gerkey &amp; William D. Smart, 《Programming Robots with ROS》, O’Reilly, 2015. <span class="lvl">讲建图与导航的章节，对应概念 6、7 的背景；全书基于 ROS 1（gmapping、amcl、move_base），costmap、粒子滤波定位和「规划加局部控制」的思路仍然适用，但命令和包名与本页不同</span></li>
+    <li lang="en">Morgan Quigley, Brian Gerkey &amp; William D. Smart, <em>Programming Robots with ROS</em>, O’Reilly, 2015. <span class="lvl">The chapters on maps and navigation; background for concepts 6 and 7; the whole book is ROS 1 (gmapping, amcl, move_base), so the ideas of costmaps, particle-filter localisation and “planning plus local control” still apply, but commands and package names differ from this page</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-5-tf2-urdf-simulation/index.html">← Phase 5 · TF2, URDF &amp; Simulation</a>
+    <a href="../phase-7-tooling-testing-deployment/index.html">Phase 7 · Tooling, Testing &amp; Deployment →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
