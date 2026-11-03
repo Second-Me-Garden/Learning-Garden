@@ -7,7 +7,7 @@ window.LG_TOPICS = {
     { id: "kernel-engineering", path: "topics/kernel-engineering/index.html", status: "ready",
       title: { "zh-CN": "Kernel Engineering", en: "Kernel Engineering" },
       line: { "zh-CN": "OS 内核：进程、内存、并发、驱动、调试、安全；Linux 为载体，XNU 对照，目标 Apple。", en: "The OS kernel: processes, memory, concurrency, drivers, debugging, security; Linux as the vehicle, XNU side by side, aimed at Apple." } },
-    { id: "ros2", path: "topics/ros2/index.html", status: "planned",
+    { id: "ros2", path: "topics/ros2/index.html", status: "ready",
       title: { "zh-CN": "ROS 2", en: "ROS 2" },
       line: { "zh-CN": "机器人中间件：节点、话题、执行器、实时性；Gazebo 仿真实验。", en: "Robot middleware: nodes, topics, executors, real-time behaviour; labs in Gazebo." } },
     { id: "parallel-programming", path: "topics/parallel-programming/index.html", status: "planned",
