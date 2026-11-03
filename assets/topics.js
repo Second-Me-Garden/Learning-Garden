@@ -13,7 +13,7 @@ window.LG_TOPICS = {
     { id: "parallel-programming", path: "topics/parallel-programming/index.html", status: "ready",
       title: { "zh-CN": "并行编程", en: "Parallel Programming" },
       line: { "zh-CN": "CPU 上的并行：线程、锁、内存模型、OpenMP、SIMD、性能测量。", en: "Parallelism on the CPU: threads, locks, memory models, OpenMP, SIMD, measurement." } },
-    { id: "gpu-cuda", path: "topics/gpu-cuda/index.html", status: "planned",
+    { id: "gpu-cuda", path: "topics/gpu-cuda/index.html", status: "ready",
       title: { "zh-CN": "GPU 编程与 CUDA", en: "GPU Programming with CUDA" },
       line: { "zh-CN": "CUDA 执行模型、内存层次、GEMM、带宽与剖析；云端 GPU 实验，Metal 作本地对照。", en: "The CUDA execution model, memory hierarchy, GEMMs, bandwidth and profiling; labs on a cloud GPU, Metal as the local counterpart." } },
     { id: "llm-inference-kernels", path: "topics/llm-inference-kernels/index.html", status: "planned",
