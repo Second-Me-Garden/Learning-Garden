@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 3 · Middleware &amp; QoS · ROS 2</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">ROS 2</a>
+    <span class="crumb current" aria-current="page">Phase 3 · Middleware &amp; QoS</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 3 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 3 / 8 · about 1–2 weeks</p>
+  <h1>Middleware and QoS <span class="en" lang="zh-CN">中间件与 QoS：DDS 与 RTPS、rmw 与三种中间件、发现、QoS 策略与兼容规则、大消息、SROS2 安全</span><span class="en" lang="en">DDS and RTPS, rmw and three middlewares, discovery, QoS policies and compatibility, large messages, SROS2 security</span></h1>
+  <p class="lede" lang="zh-CN">Phase 0 已经把一次 <code>publish()</code> 从节点追到了内核的 UDP socket，也用 <code>ss</code> 数过端口。这一阶段打开中间那两层：DDS 里的 participant、DataWriter、DataReader 是什么，发现报文里到底装了什么，两个端点凭什么判定「能连」或「不能连」；然后逐条讲 QoS 策略和它们的兼容规则——「话题名、类型都对，就是收不到」这类问题，多半就出在这里；最后讲大消息怎么走共享内存、换中间件要改什么，以及 SROS2 加密了什么、没加密什么。实验里你会亲手制造一次 QoS 不兼容、换一次中间件、给 talker 和 listener 发证书。</p>
+  <p class="lede" lang="en">Phase 0 already followed one <code>publish()</code> from the node down to a kernel UDP socket and counted the ports with <code>ss</code>. This phase opens the two layers in the middle: what a DDS participant, DataWriter and DataReader are, what discovery packets actually carry, and on what grounds two endpoints decide that they can or cannot connect. Then it goes through the QoS policies one by one with their compatibility rules — this is where most “the name and type are right but nothing arrives” problems come from. Finally it covers how large messages travel through shared memory, what it takes to switch middleware, and what SROS2 encrypts and what it does not. In the labs you will cause a QoS incompatibility on purpose, switch the middleware once, and issue certificates to talker and listener.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出 DDS 的 participant、topic、DataWriter、DataReader 分别对应 ROS 2 里的什么，以及为什么一个进程只建一个 participant。</li>
+      <li lang="en">Say what a DDS participant, topic, DataWriter and DataReader correspond to in ROS 2, and why one process creates only one participant.</li>
+      <li lang="zh-CN">讲清发现的两步（SPDP、SEDP）各交换什么信息，并能用 <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code>、<code>ROS_STATIC_PEERS</code> 或 Fast DDS discovery server 改变发现方式。</li>
+      <li lang="en">Explain what the two steps of discovery (SPDP, SEDP) each exchange, and change how discovery works with <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code>, <code>ROS_STATIC_PEERS</code> or the Fast DDS discovery server.</li>
+      <li lang="zh-CN">按「提供 ≥ 请求」判断任意一对发布者和订阅者的 QoS 能否匹配，并用 <code>ros2 topic info -v</code> 找出不匹配的那一项。</li>
+      <li lang="en">Decide, by “offered ≥ requested”, whether any publisher and subscription pair matches on QoS, and use <code>ros2 topic info -v</code> to find the policy that does not.</li>
+      <li lang="zh-CN">解释传感器话题为什么用 best effort，地图和 <code>/tf_static</code> 为什么用 transient_local。</li>
+      <li lang="en">Explain why sensor topics use best effort, and why maps and <code>/tf_static</code> use transient_local.</li>
+      <li lang="zh-CN">用 <code>RMW_IMPLEMENTATION</code> 把 Fast DDS 换成 Cyclone DDS，并说出换的时候哪些东西会变、哪些不变。</li>
+      <li lang="en">Switch from Fast DDS to Cyclone DDS with <code>RMW_IMPLEMENTATION</code>, and say what changes and what does not when you do.</li>
+      <li lang="zh-CN">建一个 SROS2 keystore 和两个 enclave，让 talker 和 listener 在 Enforce 模式下通信，并用抓包说明哪些内容被加密了。</li>
+      <li lang="en">Create an SROS2 keystore and two enclaves, have talker and listener communicate in Enforce mode, and show with a packet capture what was encrypted.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../lab-setup/index.html">实验环境</a> 的容器能用 <code>./lab.sh up</code> 和 <code>./lab.sh shell</code> 进入；容器里默认 <code>ROS_DOMAIN_ID=42</code>、<code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>。</li>
+    <li lang="en">The container from <a href="../lab-setup/index.html">Lab environment</a> starts with <code>./lab.sh up</code> and opens with <code>./lab.sh shell</code>; inside it the defaults are <code>ROS_DOMAIN_ID=42</code> and <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>.</li>
+    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0</a> 的概念 4（分层结构）和 Lab B（端口公式、多播组、<code>ss -ulpn</code>）：本页直接在那上面接着讲，不再重复端口怎么算。</li>
+    <li lang="en">Concept 4 (the layer stack) and Lab B (the port formula, the multicast group, <code>ss -ulpn</code>) of <a href="../phase-0-foundations/index.html">Phase 0</a>: this page builds directly on them and does not repeat how ports are computed.</li>
+    <li lang="zh-CN"><a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1</a> 的发布者与订阅者：你见过 <code>create_publisher(…, 10)</code> 里的那个 10，这一阶段讲它到底是什么。</li>
+    <li lang="en">Publishers and subscriptions from <a href="../phase-1-nodes-topics-services-actions/index.html">Phase 1</a>: you have seen the 10 in <code>create_publisher(…, 10)</code>; this phase explains what it really is.</li>
+    <li lang="zh-CN">一点网络基础：UDP 不保证送达和顺序，TCP 保证；多播是一份报文发给一个组地址。</li>
+    <li lang="en">A little networking: UDP guarantees neither delivery nor order and TCP guarantees both; multicast is one packet sent to a group address.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. DDS 与 RTPS：participant、topic、DataWriter、DataReader</h3><h3 lang="en">1. DDS and RTPS: participant, topic, DataWriter, DataReader</h3>
+  <p lang="zh-CN"><strong>DDS</strong>（Data Distribution Service）是 OMG 的标准，规定了一套「以数据为中心的发布订阅」API 和语义；<strong>RTPS</strong>（Real-Time Publish-Subscribe，也叫 DDSI-RTPS）是另一份 OMG 标准，规定线上的报文格式。所以 Fast DDS 和 Cyclone DDS 是两家不同的 DDS 实现，但线上说的都是 RTPS。DDS 里有四个要认识的对象：</p>
+  <p lang="en"><strong>DDS</strong> (Data Distribution Service) is an OMG standard that defines an API and semantics for “data-centric publish-subscribe”; <strong>RTPS</strong> (Real-Time Publish-Subscribe, also called DDSI-RTPS) is a separate OMG standard that defines the packet format on the wire. So Fast DDS and Cyclone DDS are two different DDS implementations, but both speak RTPS on the wire. DDS has four objects to know:</p>
+  <ul>
+    <li lang="zh-CN"><strong>DomainParticipant</strong>：加入一个 domain（即 <code>ROS_DOMAIN_ID</code>）的入口。它拥有发现协议的状态、一组 socket（Phase 0 里数过的那些端口）和几个后台线程。</li>
+    <li lang="en"><strong>DomainParticipant</strong>: the entry point for joining one domain (the <code>ROS_DOMAIN_ID</code>). It owns the discovery protocol state, a set of sockets (the ports you counted in Phase 0) and several background threads.</li>
+    <li lang="zh-CN"><strong>Topic</strong>：名字加类型。ROS 话题 <code>/chatter</code> 在 DDS 里叫 <code>rt/chatter</code>，类型名大致是 <code>std_msgs::msg::dds_::String_</code>；服务被拆成请求和应答两个 DDS 话题（前缀 <code>rq/</code> 和 <code>rr/</code>）。用 Wireshark 抓包时你看到的是这些名字。</li>
+    <li lang="en"><strong>Topic</strong>: a name plus a type. The ROS topic <code>/chatter</code> is called <code>rt/chatter</code> in DDS, with a type name of approximately <code>std_msgs::msg::dds_::String_</code>; a service is split into two DDS topics, request and reply (prefixes <code>rq/</code> and <code>rr/</code>). These are the names you see in a Wireshark capture.</li>
+    <li lang="zh-CN"><strong>DataWriter</strong>：ROS 的一个 publisher 在底下就是一个 DataWriter。它有自己的发送历史（QoS 里的 history 和 depth 就是这个缓冲区的大小），可靠模式下重传也从这里取。</li>
+    <li lang="en"><strong>DataWriter</strong>: a ROS publisher is a DataWriter underneath. It keeps its own send history (the QoS history and depth are the size of this buffer), and in reliable mode retransmissions are taken from it.</li>
+    <li lang="zh-CN"><strong>DataReader</strong>：ROS 的一个 subscription 就是一个 DataReader，有自己的接收队列。DDS 的接收线程把数据放进这个队列，再通知 rmw 唤醒你的执行器（Phase 2）。</li>
+    <li lang="en"><strong>DataReader</strong>: a ROS subscription is a DataReader with its own receive queue. The DDS receive thread puts data into this queue and then notifies rmw to wake your executor (Phase 2).</li>
+  </ul>
+  <p lang="zh-CN"><strong>为什么一个进程只建一个 participant</strong>：participant 很重。每个 participant 要周期性地发自己的发现报文、要被网络上所有其他 participant 记住、要占两个单播端口和若干线程。早期的 ROS 2 每个节点一个 participant，一个组合了几十个节点的进程会在网络上冒出几十个 participant，发现流量和内存按平方增长。从 Foxy 起，rmw 改为每个上下文（通常就是每个进程）一个 participant，节点只是一个 ROS 层面的概念：哪个节点拥有哪些 writer 和 reader，由 rmw 另外发布在一个内部话题（<code>ros_discovery_info</code>）上，<code>ros2 node list</code> 读的就是它。</p>
+  <p lang="en"><strong>Why one participant per process</strong>: a participant is heavy. Each one sends its own discovery packets periodically, must be remembered by every other participant on the network, and takes two unicast ports and several threads. Early ROS 2 created one participant per node, so a process composing dozens of nodes would put dozens of participants on the network, and discovery traffic and memory grew quadratically. Since Foxy, rmw creates one participant per context (usually one per process), and a node is only a ROS-level concept: which node owns which writers and readers is published by rmw separately on an internal topic (<code>ros_discovery_info</code>), and that is what <code>ros2 node list</code> reads.</p>
+  <div class="note" lang="zh-CN">RTPS 把一条消息拆成几种子报文（submessage）：<code>DATA</code>（或大消息分片后的 <code>DATA_FRAG</code>）装数据，<code>HEARTBEAT</code> 是 writer 告诉 reader「我手里有第几号到第几号」，<code>ACKNACK</code> 是 reader 回答「我收到了哪些、缺哪些」，<code>GAP</code> 表示「这几号不会再有了」。概念 4 的可靠性就是这几种子报文的来回。</div>
+  <div class="note" lang="en">RTPS splits a message into several kinds of submessage: <code>DATA</code> (or <code>DATA_FRAG</code> for a fragmented large message) carries data; <code>HEARTBEAT</code> is the writer telling readers “I hold sequence numbers so-and-so to so-and-so”; <code>ACKNACK</code> is the reader answering “these I have, these are missing”; <code>GAP</code> says “these numbers will never come”. The reliability of concept 4 is exactly the exchange of these submessages.</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ROS 2 架构与 DDS 中间件的章节；官方设计文章 <a href="https://design.ros2.org/articles/ros_on_dds.html">ROS on DDS</a>（为什么选 DDS、ROS 概念怎么映射到 DDS）。</p>
+  <p lang="en">Further reading: the chapters on ROS 2 architecture and the DDS middleware in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>; the official design article <a href="https://design.ros2.org/articles/ros_on_dds.html">ROS on DDS</a> (why DDS was chosen and how ROS concepts map onto it).</p>
+
+  <h3 lang="zh-CN">2. rmw 层与三种中间件</h3><h3 lang="en">2. The rmw layer and the three middlewares</h3>
+  <p lang="zh-CN">Phase 0 讲过 rmw 是一套 C 接口、实现可替换。这里补上三件事：实现各是什么、序列化在哪里做、混用会怎样。Jazzy 上可用的三个实现（2026-10-31 按 Jazzy 文档核对）：</p>
+  <p lang="en">Phase 0 said rmw is a C interface with swappable implementations. Here are three more things: what each implementation is, where serialization happens, and what happens when you mix them. The three implementations available on Jazzy (checked against the Jazzy docs on 2026-10-31):</p>
+  <ul>
+    <li lang="zh-CN"><code>rmw_fastrtps_cpp</code>：<strong>默认</strong>，基于 eProsima Fast DDS，装 ROS 2 时就有。同一台机器上的进程之间默认可以走共享内存传输，跨机器走 UDP。</li>
+    <li lang="en"><code>rmw_fastrtps_cpp</code>: the <strong>default</strong>, based on eProsima Fast DDS, installed with ROS 2. Between processes on the same host it can use a shared-memory transport by default; across hosts it uses UDP.</li>
+    <li lang="zh-CN"><code>rmw_cyclonedds_cpp</code>：基于 Eclipse Cyclone DDS，包名 <code>ros-jazzy-rmw-cyclonedds-cpp</code>，设 <code>RMW_IMPLEMENTATION=rmw_cyclonedds_cpp</code> 使用。也是 RTPS。</li>
+    <li lang="en"><code>rmw_cyclonedds_cpp</code>: based on Eclipse Cyclone DDS, package <code>ros-jazzy-rmw-cyclonedds-cpp</code>, used by setting <code>RMW_IMPLEMENTATION=rmw_cyclonedds_cpp</code>. Also RTPS.</li>
+    <li lang="zh-CN"><code>rmw_zenoh_cpp</code>：基于 Eclipse Zenoh，包名 <code>ros-jazzy-rmw-zenoh-cpp</code>。它<strong>不是 DDS</strong>，线上说的是 Zenoh 协议；默认要先启动它的路由器 <code>rmw_zenohd</code> 才能发现彼此。它在 Jazzy 上的支持等级、默认传输和配置方式，请查官方文档。</li>
+    <li lang="en"><code>rmw_zenoh_cpp</code>: based on Eclipse Zenoh, package <code>ros-jazzy-rmw-zenoh-cpp</code>. It is <strong>not DDS</strong> and speaks the Zenoh protocol on the wire; by default its router <code>rmw_zenohd</code> must be running before nodes can find each other. For its support tier on Jazzy, its default transport and its configuration, check the official docs.</li>
+  </ul>
+  <p lang="zh-CN"><strong>序列化在哪里</strong>：你的消息在内存里是一个 C++ 结构体或 Python 对象。每个消息包在构建时由 rosidl 生成若干份 <strong>typesupport</strong> 代码，rmw 实现用它把结构体编码成 <strong>CDR</strong> 字节（DDS 标准的编码格式），再交给中间件库；接收方反过来解码。所以序列化发生在 rmw 和中间件的交界处，在 rcl 之下、在 socket 之上。Python 节点在这里还多一次从 Python 对象到 C 结构的转换，这是 rclpy 处理大消息比 rclcpp 慢的原因之一。</p>
+  <p lang="en"><strong>Where serialization happens</strong>: in memory your message is a C++ struct or a Python object. When each message package is built, rosidl generates several pieces of <strong>typesupport</strong> code; the rmw implementation uses one of them to encode the struct into <strong>CDR</strong> bytes (the encoding defined by the DDS standard) and hands them to the middleware library, and the receiver decodes in reverse. So serialization happens at the boundary between rmw and the middleware, below rcl and above the socket. A Python node also pays an extra conversion from the Python object to the C struct here, which is one reason rclpy handles large messages more slowly than rclcpp.</p>
+  <p lang="zh-CN"><strong>混用会怎样</strong>：节点代码和 <code>.msg</code> 定义不变，换的是这个进程链接的库。但同一个系统里最好所有进程用同一个 rmw：Fast DDS 和 Cyclone DDS 都说 RTPS，跨厂商通信有时能通，但官方文档明确说不保证；Zenoh 和 DDS 之间根本不通。换 rmw 后还要重启 <code>ros2 daemon</code>，否则命令行还在用旧的那个。</p>
+  <p lang="en"><strong>What happens when you mix them</strong>: node code and <code>.msg</code> definitions stay the same; what changes is the library the process links. But in one system all processes should use the same rmw: Fast DDS and Cyclone DDS both speak RTPS, and cross-vendor communication sometimes works, but the official docs say plainly that it is not guaranteed; Zenoh and DDS do not talk to each other at all. After switching rmw, also restart <code>ros2 daemon</code>, or the command line keeps using the old one.</p>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 DDS 中间件与 rmw 的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Different-Middleware-Vendors.html">Different ROS 2 middleware vendors</a> 与 <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Working-with-multiple-RMW-implementations.html">Working with multiple RMW implementations</a>。</p>
+  <p lang="en">Further reading: the chapters on the DDS middleware and rmw in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Different-Middleware-Vendors.html">Different ROS 2 middleware vendors</a> and <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Working-with-multiple-RMW-implementations.html">Working with multiple RMW implementations</a>.</p>
+
+  <h3 lang="zh-CN">3. 发现：发现报文里装了什么，怎么改变发现方式</h3><h3 lang="en">3. Discovery: what discovery packets carry, and how to change discovery</h3>
+  <p lang="zh-CN">RTPS 的 simple discovery 分两步，两步装的东西不同：</p>
+  <p lang="en">RTPS simple discovery has two steps, and they carry different things:</p>
+  <ol>
+    <li lang="zh-CN"><strong>SPDP（participant 发现）</strong>：每个 participant 周期性地发一条「我在这里」，内容是 participant 的 GUID 前缀、协议版本和厂商 ID、它在哪些地址和端口上收发现报文和用户数据（locator）、租约时长（lease duration：这么久没听到我，就当我不在了）。默认发到多播组 239.255.0.1 的发现端口。这一步之后，双方知道对方存在、怎么联系对方，但还不知道对方有什么话题。</li>
+    <li lang="en"><strong>SPDP (participant discovery)</strong>: each participant periodically sends an “I am here”, containing its GUID prefix, the protocol version and vendor ID, the addresses and ports (locators) where it receives discovery and user data, and its lease duration (if you hear nothing from me for this long, treat me as gone). By default it goes to the discovery port of multicast group 239.255.0.1. After this step, each side knows the other exists and how to reach it, but not yet which topics it has.</li>
+    <li lang="zh-CN"><strong>SEDP（endpoint 发现）</strong>：participant 之间用单播、而且是<strong>可靠</strong>的方式交换各自的每个 writer 和 reader：GUID、DDS 话题名（<code>rt/chatter</code>）、类型名，以及<strong>全部 QoS</strong>。匹配就在收到 SEDP 的那一刻、在本地判定：名字和类型一样、QoS 兼容（概念 5），就把对方加为匹配的端点，之后数据直接发过去。</li>
+    <li lang="en"><strong>SEDP (endpoint discovery)</strong>: participants exchange, over unicast and <strong>reliably</strong>, every writer and reader they have: GUID, DDS topic name (<code>rt/chatter</code>), type name and <strong>all QoS</strong>. Matching is decided locally the moment SEDP arrives: same name and type and compatible QoS (concept 5), and the other side is added as a matched endpoint, after which data is sent straight to it.</li>
+  </ol>
+  <p lang="zh-CN">所以发现流量的大小大致与「participant 数 × 端点数」相关，每个 participant 都记着所有别人的所有端点。几个机器人、上百个话题的系统，光发现就能吃掉可观的带宽和内存，Wi-Fi 下多播还常常丢。ROS 2 给了几种改变发现方式的办法：</p>
+  <p lang="en">So the volume of discovery traffic grows roughly with “participants × endpoints”, and every participant remembers every endpoint of everyone else. In a system with several robots and hundreds of topics, discovery alone can use noticeable bandwidth and memory, and multicast over Wi-Fi is often lost. ROS 2 offers several ways to change how discovery works:</p>
+  <ul>
+    <li lang="zh-CN"><code>ROS_AUTOMATIC_DISCOVERY_RANGE</code>（Jazzy）：<code>SUBNET</code>（默认，多播能到的都发现）、<code>LOCALHOST</code>（只在本机，实验容器用的就是它）、<code>OFF</code>（不自动发现）、<code>SYSTEM_DEFAULT</code>（不改中间件自己的设置）。旧名 <code>ROS_LOCALHOST_ONLY</code> 从 Iron 起弃用，见实验环境页概念 4。</li>
+    <li lang="en"><code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> (Jazzy): <code>SUBNET</code> (the default: discover everything multicast reaches), <code>LOCALHOST</code> (this host only; the lab container uses it), <code>OFF</code> (no automatic discovery), <code>SYSTEM_DEFAULT</code> (leave the middleware’s own settings alone). The old name <code>ROS_LOCALHOST_ONLY</code> is deprecated since Iron; see concept 4 of the lab environment page.</li>
+    <li lang="zh-CN"><code>ROS_STATIC_PEERS</code>：用分号分隔的 IP 或主机名列表，直接单播给这些对端，不依赖多播。可以和上面的范围一起用，例如范围设 <code>LOCALHOST</code>，再把另一台机器人的地址写进静态对端。</li>
+    <li lang="en"><code>ROS_STATIC_PEERS</code>: a semicolon-separated list of IPs or hostnames that discovery unicasts to directly, without relying on multicast. It combines with the range above, for example range <code>LOCALHOST</code> plus the address of another robot as a static peer.</li>
+    <li lang="zh-CN"><strong>Fast DDS discovery server</strong>（只适用于 Fast DDS）：启动一个服务器 <code>fastdds discovery -i 0</code>，每个进程设 <code>ROS_DISCOVERY_SERVER=127.0.0.1:11811</code>（11811 是 Fast DDS discovery server 的默认端口，Jazzy 教程 2026-10-31 核对）。participant 只向服务器报到，服务器只把每个 participant 需要的端点转给它，不再人人记住人人。代价是多了一个要运维的进程；命令行工具要看到全图还需额外配置（super client，查官方教程）。</li>
+    <li lang="en"><strong>Fast DDS discovery server</strong> (Fast DDS only): start a server with <code>fastdds discovery -i 0</code> and set <code>ROS_DISCOVERY_SERVER=127.0.0.1:11811</code> in each process (11811 is the default discovery server port, checked against the Jazzy tutorial on 2026-10-31). Participants report only to the server, and the server forwards to each participant only the endpoints it needs, so not everyone remembers everyone. The cost is one more process to operate; for the command-line tools to see the whole graph you need extra setup (a super client; see the official tutorial).</li>
+  </ul>
+  <div class="note" lang="zh-CN">以上两个环境变量只对 DDS 的 rmw 起作用：Jazzy 文档写明 rmw_zenoh 不支持 <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> 和 <code>ROS_STATIC_PEERS</code>，Zenoh 的发现范围要在它自己的配置里设。</div>
+  <div class="note" lang="en">The two environment variables above apply only to the DDS rmw implementations: the Jazzy docs state that rmw_zenoh does not support <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> or <code>ROS_STATIC_PEERS</code>; Zenoh’s discovery scope is set in its own configuration.</div>
+  <div class="note" lang="zh-CN">容器里 <code>LOCALHOST</code> 的「本机」是容器的网络命名空间。Lab B 会在一个 shell 里临时改成 <code>SUBNET</code>，好在 <code>eth0</code> 上看到多播；那个网段是 Docker Desktop 虚拟机里的桥接网络，一般不会直接到达你的局域网（推断，取决于 Docker Desktop 的网络实现）。</div>
+  <div class="note" lang="en">Inside the container, “this host” for <code>LOCALHOST</code> is the container’s network namespace. Lab B temporarily switches one shell to <code>SUBNET</code> to see multicast on <code>eth0</code>; that subnet is a bridge network inside the Docker Desktop VM and normally does not reach your LAN directly (inference; it depends on Docker Desktop’s networking).</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 DDS 发现与多机通信的部分；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Improved-Dynamic-Discovery.html">Improved Dynamic Discovery</a> 与 <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Discovery-Server/Discovery-Server.html">Using Fast DDS Discovery Server</a>。</p>
+  <p lang="en">Further reading: the parts of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on DDS discovery and multi-machine communication; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Improved-Dynamic-Discovery.html">Improved Dynamic Discovery</a> and <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Discovery-Server/Discovery-Server.html">Using Fast DDS Discovery Server</a>.</p>
+
+  <h3 lang="zh-CN">4. QoS 策略：每一条在机制上是什么</h3><h3 lang="en">4. QoS policies: what each one is, mechanically</h3>
+  <p lang="zh-CN">QoS（Quality of Service）是附在每个 publisher 和 subscription 上的一组策略，经 SEDP 告诉对方。<code>create_publisher(topic, 10)</code> 里的 10 是「默认 profile，history depth 10」的简写。逐条看：</p>
+  <p lang="en">QoS (Quality of Service) is a set of policies attached to each publisher and subscription and announced to the other side through SEDP. The 10 in <code>create_publisher(topic, 10)</code> is shorthand for “the default profile with history depth 10”. Policy by policy:</p>
+  <ul>
+    <li lang="zh-CN"><strong>Reliability</strong>：<code>reliable</code> 时，writer 把发出去的样本留在历史里，周期性发 HEARTBEAT；reader 用 ACKNACK 报告缺哪几号，writer 重传。<code>best_effort</code> 时，发一次就算，丢了就丢了，没有确认和重传。</li>
+    <li lang="en"><strong>Reliability</strong>: with <code>reliable</code>, the writer keeps sent samples in its history and sends HEARTBEATs periodically; the reader reports missing numbers with ACKNACK and the writer retransmits. With <code>best_effort</code>, each sample is sent once; if it is lost, it is lost, with no acknowledgement and no retransmission.</li>
+    <li lang="zh-CN"><strong>History 与 depth</strong>：<code>keep_last</code> 加 depth N 表示 writer 和 reader 各自最多留最新的 N 个样本，满了就丢最旧的；<code>keep_all</code> 表示尽量都留（受资源上限约束）。depth 同时决定了可靠模式下最多能补发多少，以及订阅者处理慢时会丢多少。</li>
+    <li lang="en"><strong>History and depth</strong>: <code>keep_last</code> with depth N means the writer and the reader each keep at most the newest N samples and drop the oldest when full; <code>keep_all</code> means keep everything as far as resource limits allow. Depth also sets how much can be resent in reliable mode, and how much is dropped when a subscriber is slow.</li>
+    <li lang="zh-CN"><strong>Durability</strong>：<code>volatile</code> 时，后加入的订阅者只能收到加入之后发的数据。<code>transient_local</code> 时，writer 把最后 depth 个样本留着，新的 reader 一匹配就补发给它——<code>/tf_static</code>、<code>/robot_description</code>、地图服务器发布的地图都这样，因为它们只发一次或很少发。</li>
+    <li lang="en"><strong>Durability</strong>: with <code>volatile</code>, a late-joining subscriber receives only data sent after it joined. With <code>transient_local</code>, the writer keeps the last depth samples and sends them to each new reader as soon as it matches — <code>/tf_static</code>, <code>/robot_description</code> and the map published by the map server work this way, because they are published once or rarely.</li>
+    <li lang="zh-CN"><strong>Deadline</strong>：约定的最大样本间隔。publisher 承诺「至少每 T 发一次」，subscription 要求「至少每 T 收到一次」；超时双方各自收到一个 deadline missed 事件。它不让数据变快，只是让你知道迟了。</li>
+    <li lang="en"><strong>Deadline</strong>: an agreed maximum interval between samples. The publisher promises “at least once every T”, the subscription requires “at least once every T”; when it is exceeded, each side receives a deadline-missed event. It does not make data faster; it only tells you it is late.</li>
+    <li lang="zh-CN"><strong>Lifespan</strong>：样本的保质期。超过这个时长还没交付的样本直接丢弃，不会再交给新加入的订阅者，避免 transient_local 补发一条早已过时的数据。</li>
+    <li lang="en"><strong>Lifespan</strong>: the shelf life of a sample. A sample not delivered within this time is discarded and never handed to a late joiner, so transient_local does not replay data that is long out of date.</li>
+    <li lang="zh-CN"><strong>Liveliness 与 lease duration</strong>：publisher 怎样证明自己还活着。<code>automatic</code> 由中间件代为声明（进程活着就算）；<code>manual_by_topic</code> 要应用自己发布或显式声明才算。超过 lease duration 没有声明，订阅者收到 liveliness changed 事件。</li>
+    <li lang="en"><strong>Liveliness and lease duration</strong>: how a publisher proves it is still alive. With <code>automatic</code> the middleware asserts it on your behalf (the process being alive is enough); with <code>manual_by_topic</code> the application must publish or assert explicitly. With no assertion within the lease duration, the subscriber receives a liveliness-changed event.</li>
+  </ul>
+  <p lang="zh-CN"><strong>为什么传感器用 best effort</strong>：一台 10 Hz 的激光雷达，下一帧 100 ms 后就到。如果用 reliable，一帧在 Wi-Fi 上丢了，writer 要等 reader 的 ACKNACK 再重传，这期间新帧也在排队；重传到的是一帧已经过时的扫描，还挤占了新帧的带宽。对控制和避障来说，「最新的那一帧」比「每一帧都到」重要。所以 sensor-data profile 是 best effort、depth 5：丢就丢，留几帧缓冲就够。反过来，指令、地图、参数这类丢一条就出错的数据用 reliable。</p>
+  <p lang="en"><strong>Why sensors use best effort</strong>: a 10 Hz lidar delivers the next scan 100 ms later. With reliable, if one scan is lost over Wi-Fi, the writer must wait for the reader’s ACKNACK before resending, while new scans queue up behind it; what finally arrives is an outdated scan that also took bandwidth from the fresh ones. For control and obstacle avoidance, “the newest scan” matters more than “every scan arrives”. So the sensor-data profile is best effort with depth 5: if a sample is lost, it is lost, and a few samples of buffer are enough. Conversely, data where one lost message causes errors — commands, maps, parameters — uses reliable.</p>
+  <div class="note" lang="zh-CN">deadline、lifespan、liveliness 三项在各个 rmw 上的支持程度不同（例如是否支持某种 liveliness kind、事件是否都会触发），请查你用的 rmw 的文档；本页实验只用 reliability、durability 和 depth，这三项在三种 rmw 上都有。</div>
+  <div class="note" lang="en">Support for deadline, lifespan and liveliness differs between rmw implementations (for example which liveliness kinds are supported and whether every event fires); check the docs of the rmw you use. The labs on this page use only reliability, durability and depth, which all three rmw implementations have.</div>
+  <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲话题通信与传感器数据的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Quality-of-Service-Settings.html">Quality of Service settings</a> 与设计文章 <a href="https://design.ros2.org/articles/qos.html">ROS QoS policies</a>。</p>
+  <p lang="en">Further reading: the chapters on topic communication and sensor data in Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>; the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Quality-of-Service-Settings.html">Quality of Service settings</a> and the design article <a href="https://design.ros2.org/articles/qos.html">ROS QoS policies</a>.</p>
+
+  <h3 lang="zh-CN">5. 兼容规则：提供 ≥ 请求，以及 <code>ros2 topic info -v</code></h3><h3 lang="en">5. Compatibility: offered ≥ requested, and <code>ros2 topic info -v</code></h3>
+  <p lang="zh-CN">DDS 把 QoS 看成一份合同：publisher <strong>提供</strong>（offered），subscription <strong>请求</strong>（requested）。只有提供的不比请求的差，两端才会匹配（DDS 叫 Request vs Offered，RxO）。会影响匹配的几项：</p>
+  <p lang="en">DDS treats QoS as a contract: the publisher <strong>offers</strong> and the subscription <strong>requests</strong>. The two endpoints match only when what is offered is no worse than what is requested (DDS calls this Request vs Offered, RxO). The policies that affect matching:</p>
+  <ul>
+    <li lang="zh-CN">Reliability：reliable 发布者 + best effort 订阅者 → <strong>匹配</strong>，按 best effort 交付（订阅者不发 ACKNACK）。best effort 发布者 + reliable 订阅者 → <strong>不匹配</strong>，发布者给不了它要的保证。</li>
+    <li lang="en">Reliability: reliable publisher + best-effort subscription → <strong>match</strong>, delivered best effort (the subscriber sends no ACKNACK). Best-effort publisher + reliable subscription → <strong>no match</strong>; the publisher cannot give the guarantee it asks for.</li>
+    <li lang="zh-CN">Durability：transient_local 发布者 + volatile 订阅者 → <strong>匹配</strong>，只收新数据。volatile 发布者 + transient_local 订阅者 → <strong>不匹配</strong>，发布者根本没留历史。</li>
+    <li lang="en">Durability: transient_local publisher + volatile subscription → <strong>match</strong>, new data only. Volatile publisher + transient_local subscription → <strong>no match</strong>; the publisher keeps no history at all.</li>
+    <li lang="zh-CN">Deadline：发布者承诺的周期必须 ≤ 订阅者要求的周期。Liveliness：发布者的 kind 必须不弱于订阅者要求的，lease duration 必须 ≤ 订阅者要求的。</li>
+    <li lang="en">Deadline: the period the publisher promises must be ≤ the period the subscription requires. Liveliness: the publisher’s kind must be no weaker than requested, and its lease duration must be ≤ the requested one.</li>
+    <li lang="zh-CN">History、depth、lifespan <strong>不影响</strong>匹配，它们只是各端自己的缓冲行为。</li>
+    <li lang="en">History, depth and lifespan <strong>do not</strong> affect matching; they only govern each endpoint’s own buffering.</li>
+  </ul>
+  <p lang="zh-CN"><strong>不匹配时会发生什么</strong>：不报错、不断开，只是这对端点永远不连，数据一条也不过去。两端各自收到一个 incompatible QoS 事件，rclcpp 和 rclpy 默认把它打成一条警告日志，大意是「发现了一个 QoS 不兼容的发布者 / 订阅者，最后一个不兼容的策略是 RELIABILITY」（措辞以实际输出为准）。排查顺序：<code>ros2 topic list</code> 确认名字，<code>ros2 topic info -v</code> 列出每个端点的节点名、GID 和完整 QoS——不兼容的端点照样会列出来，因为 SEDP 已经交换过了，只是没匹配上。</p>
+  <p lang="en"><strong>What happens on a mismatch</strong>: no error and no disconnection; the pair simply never connects and not one message gets through. Each side receives an incompatible-QoS event, which rclcpp and rclpy log as a warning by default, roughly “a publisher / subscription with incompatible QoS was discovered; the last incompatible policy was RELIABILITY” (go by the actual wording). The order to investigate: confirm the name with <code>ros2 topic list</code>, then <code>ros2 topic info -v</code>, which lists every endpoint with its node name, GID and full QoS — incompatible endpoints are still listed, because SEDP has already exchanged them; they just did not match.</p>
+  <div class="note" lang="zh-CN"><code>ros2 topic echo</code> 从 <code>sensor_data</code> 配置出发（best effort、volatile），只有话题上每个发布者都提供 reliable 或 transient_local 时才切过去。要匹配一组混合的发布者，就显式传 <code>--qos-reliability</code> 和 <code>--qos-durability</code>。所以 Lab A 里每次都显式给出 <code>--qos-reliability</code> 和 <code>--qos-durability</code>，不靠默认值。</div>
+  <div class="note" lang="en"><code>ros2 topic echo</code> starts from the <code>sensor_data</code> profile (best effort, volatile). It switches to reliable or transient_local only when every publisher on the topic offers it. To match a mixed set, pass <code>--qos-reliability</code> and <code>--qos-durability</code> explicitly. That is why Lab A always gives <code>--qos-reliability</code> and <code>--qos-durability</code> explicitly instead of relying on the defaults.</div>
+  <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲话题的章节（发布者、订阅者与队列大小）；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Quality-of-Service-Settings.html">Quality of Service settings</a> 里的 QoS compatibilities 表。</p>
+  <p lang="en">Further reading: the chapter on topics in Renard, <em>ROS 2 From Scratch</em> (publishers, subscribers and queue size); the QoS compatibilities tables in the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Quality-of-Service-Settings.html">Quality of Service settings</a>.</p>
+
+  <h3 lang="zh-CN">6. 大消息：共享内存传输与 loaned messages</h3><h3 lang="en">6. Large messages: shared-memory transport and loaned messages</h3>
+  <p lang="zh-CN">一帧 1080p 的 RGB 图像约 6 MB，一帧点云也常是几 MB。走 UDP 时，一条消息要被拆成几千个 <code>DATA_FRAG</code>，每片都要过一遍内核网络栈，丢一片整条作废（best effort）或要补发（reliable）；接收 socket 缓冲区不够大时丢得更多（缓冲区调优见 Phase 7）。同一台机器上有两条更短的路：</p>
+  <p lang="en">One 1080p RGB image is about 6 MB, and a point cloud is often several MB too. Over UDP, one message is split into thousands of <code>DATA_FRAG</code> pieces, each passing through the kernel network stack; losing one piece voids the whole message (best effort) or forces a resend (reliable), and a receive socket buffer that is too small loses even more (buffer tuning is in Phase 7). On one host there are two shorter paths:</p>
+  <ul>
+    <li lang="zh-CN"><strong>共享内存传输</strong>：Fast DDS 在同一台机器的进程之间默认可以用共享内存段（在 <code>/dev/shm</code> 下）代替 UDP 传用户数据。数据仍然被序列化、仍然从 writer 拷贝到共享段，但不经过网络栈，也不分片。这就是实验环境给容器配 <code>shm_size: "4g"</code> 的原因；Phase 0 Lab B 里你在 <code>/dev/shm</code> 看到的文件就是它。</li>
+    <li lang="en"><strong>Shared-memory transport</strong>: between processes on the same host, Fast DDS can by default use a shared-memory segment (under <code>/dev/shm</code>) instead of UDP for user data. The data is still serialized and still copied from the writer into the segment, but it skips the network stack and is not fragmented. That is why the lab environment gives the container <code>shm_size: "4g"</code>; the files you saw in <code>/dev/shm</code> in Phase 0 Lab B are this transport.</li>
+    <li lang="zh-CN"><strong>Loaned messages</strong>：rclcpp 的 <code>borrow_loaned_message()</code> 向中间件「借」一块它自己管理的内存，你直接把数据写在里面再发布，省掉从你的缓冲区到中间件缓冲区的那次拷贝；中间件支持时，配合共享内存可以做到接收方直接读同一块内存（零拷贝）。限制很多：通常只适用于定长（plain）的消息类型，<code>publisher-&gt;can_loan_messages()</code> 返回 false 时会退回普通路径。哪些 rmw、哪些类型、需要什么配置，请查文档。</li>
+    <li lang="en"><strong>Loaned messages</strong>: rclcpp’s <code>borrow_loaned_message()</code> “borrows” a block of memory managed by the middleware; you write the data directly into it and publish, saving the copy from your buffer into the middleware’s; where the middleware supports it, combined with shared memory the receiver can read the very same memory (zero copy). There are many limits: it usually applies only to fixed-size (plain) message types, and when <code>publisher-&gt;can_loan_messages()</code> returns false it falls back to the normal path. Which rmw, which types and what configuration are needed: check the docs.</li>
+  </ul>
+  <p lang="zh-CN">还有第三条路完全绕开中间件：同一进程里的节点用进程内通信，直接传指针。那是 Phase 4 组合（composition）的内容。</p>
+  <p lang="en">A third path bypasses the middleware entirely: nodes in the same process use intra-process communication and pass pointers directly. That belongs to composition in Phase 4.</p>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 DDS 中间件与性能的部分；官方 <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Configure-ZeroCopy-loaned-messages.html">Configure Zero Copy Loaned Messages</a> 与 <a href="https://docs.ros.org/en/jazzy/How-To-Guides/DDS-tuning.html">DDS tuning information</a>。</p>
+  <p lang="en">Further reading: the parts of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on the DDS middleware and performance; the official <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Configure-ZeroCopy-loaned-messages.html">Configure Zero Copy Loaned Messages</a> and <a href="https://docs.ros.org/en/jazzy/How-To-Guides/DDS-tuning.html">DDS tuning information</a>.</p>
+
+  <h3 lang="zh-CN">7. SROS2：keystore、enclave，以及它加密什么、不加密什么</h3><h3 lang="en">7. SROS2: keystores, enclaves, and what it encrypts and what it does not</h3>
+  <p lang="zh-CN">SROS2 是一套工具和约定，把 DDS-Security 规范里的插件（认证、访问控制、加密）用到 ROS 2 上。三个名词：</p>
+  <p lang="en">SROS2 is a set of tools and conventions that applies the plugins of the DDS-Security specification (authentication, access control, cryptography) to ROS 2. Three terms:</p>
+  <ul>
+    <li lang="zh-CN"><strong>keystore</strong>：一个目录，里面有充当 CA 的密钥和证书，以及每个 enclave 的材料。<code>ros2 security create_keystore demo_keystore</code> 创建它。</li>
+    <li lang="en"><strong>keystore</strong>: a directory holding the keys and certificates that act as the CA, plus the material for each enclave. <code>ros2 security create_keystore demo_keystore</code> creates it.</li>
+    <li lang="zh-CN"><strong>enclave</strong>：一个安全身份，对应一个 participant，也就是一个进程（一个进程里的所有节点共用它）。<code>ros2 security create_enclave demo_keystore /talker_listener/talker</code> 为它生成私钥、由 CA 签发的身份证书、签过名的 governance（这个 domain 里哪些要保护、保护到什么程度）和 permissions（这个身份能发布和订阅哪些话题）。</li>
+    <li lang="en"><strong>enclave</strong>: one security identity, corresponding to one participant, that is, one process (all nodes in a process share it). <code>ros2 security create_enclave demo_keystore /talker_listener/talker</code> generates its private key, an identity certificate signed by the CA, a signed governance document (what in this domain is protected and how strongly) and a permissions document (which topics this identity may publish and subscribe to).</li>
+    <li lang="zh-CN"><strong>环境变量</strong>：<code>ROS_SECURITY_KEYSTORE</code> 指向 keystore，<code>ROS_SECURITY_ENABLE=true</code> 打开，<code>ROS_SECURITY_STRATEGY=Enforce</code> 表示找不到合法的安全材料就拒绝启动（另一个取值 Permissive 会退回不加密运行）。进程用 <code>--ros-args --enclave /talker_listener/talker</code> 选身份，或用 <code>ROS_SECURITY_ENCLAVE_OVERRIDE</code> 强制指定。</li>
+    <li lang="en"><strong>Environment variables</strong>: <code>ROS_SECURITY_KEYSTORE</code> points at the keystore, <code>ROS_SECURITY_ENABLE=true</code> turns security on, and <code>ROS_SECURITY_STRATEGY=Enforce</code> means refuse to start without valid security material (the other value, Permissive, falls back to running unsecured). A process picks its identity with <code>--ros-args --enclave /talker_listener/talker</code>, or <code>ROS_SECURITY_ENCLAVE_OVERRIDE</code> forces one.</li>
+  </ul>
+  <p lang="zh-CN"><strong>它保护什么</strong>：两个 participant 先用证书互相认证（双方都由同一个 CA 签发，才算自己人），再协商出会话密钥；之后按 governance 的设定，用户数据、SEDP 的端点信息等被加密或签名，没有证书的 participant 匹配不上任何受保护的端点；permissions 限制每个身份能碰的话题。效果是：局域网上的旁观者抓到的是密文，冒充的节点连不进来。</p>
+  <p lang="en"><strong>What it protects</strong>: two participants first authenticate each other with certificates (both must be signed by the same CA to be trusted), then agree on session keys; after that, as the governance document specifies, user data and SEDP endpoint information are encrypted or signed, and a participant without a certificate cannot match any protected endpoint; permissions limit which topics each identity may touch. The effect: an onlooker on the LAN captures ciphertext, and an impostor node cannot get in.</p>
+  <p lang="zh-CN"><strong>它不保护什么</strong>：</p>
+  <p lang="en"><strong>What it does not protect</strong>:</p>
+  <ul>
+    <li lang="zh-CN">SPDP 的「我在这里」仍是明文，因为认证要先知道对方存在。旁观者仍能看到有几个 participant、它们的 IP 和端口；从报文的大小和频率还能推断出大致的通信模式。</li>
+    <li lang="en">The SPDP “I am here” stays in the clear, since authentication first needs to know the peer exists. An onlooker can still see how many participants there are and their IPs and ports, and can infer a rough traffic pattern from packet sizes and rates.</li>
+    <li lang="zh-CN">私钥是 keystore 里的普通文件。能读这台机器文件系统的人就能拿到身份；SROS2 不管文件权限，也不管机器本身被攻破。</li>
+    <li lang="en">Private keys are ordinary files in the keystore. Anyone who can read the machine’s file system can take the identity; SROS2 does not manage file permissions or protect a compromised machine.</li>
+    <li lang="zh-CN">持有合法证书的节点发什么内容，它不检查。它也不防拒绝服务：有人往发现端口灌流量，节点照样被拖慢。</li>
+    <li lang="en">It does not check what a node with a valid certificate sends. Nor does it prevent denial of service: someone flooding the discovery port still slows the nodes down.</li>
+    <li lang="zh-CN">同一进程内的进程内通信不经过 DDS，不在它的范围内；Zenoh 有自己的一套安全机制，不是 DDS-Security（查 rmw_zenoh 文档）。</li>
+    <li lang="en">Intra-process communication inside one process does not go through DDS and is outside its scope; Zenoh has its own security mechanism, which is not DDS-Security (see the rmw_zenoh docs).</li>
+  </ul>
+  <div class="note" lang="zh-CN">governance 里默认对哪些部分加密、哪些只签名，由 <code>sros2</code> 生成的模板决定，本页没有逐项核对；Lab B 用抓包直接看结果，以你看到的为准。</div>
+  <div class="note" lang="en">Which parts the default governance encrypts and which it only signs is decided by the template that <code>sros2</code> generates, and this page has not checked it item by item; Lab B looks at the result directly with a packet capture, and what you see is what counts.</div>
+  <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ROS 2 基础与 DDS 的章节中关于安全的部分（如有）；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Security.html">About security</a>、教程 <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Security/Introducing-ros2-security.html">Setting up security</a> 与设计文章 <a href="https://design.ros2.org/articles/ros2_dds_security.html">ROS 2 DDS-Security integration</a>。</p>
+  <p lang="en">Further reading: the material on security within the chapters on ROS 2 fundamentals and DDS in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em> (where present); the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Security.html">About security</a>, the tutorial <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Security/Introducing-ros2-security.html">Setting up security</a> and the design article <a href="https://design.ros2.org/articles/ros2_dds_security.html">ROS 2 DDS-Security integration</a>.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：QoS 策略 ↔ 默认 profile ↔ 传感器数据 profile</h2><h2 id="compare-en" lang="en">Comparison: QoS policy ↔ default profile ↔ sensor-data profile</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">策略</span><span lang="en">Policy</span></th><th><span lang="zh-CN">默认 profile（<code>rclcpp::QoS(10)</code>）</span><span lang="en">Default profile (<code>rclcpp::QoS(10)</code>)</span></th><th><span lang="zh-CN">传感器数据 profile（<code>rclcpp::SensorDataQoS()</code>，rclpy <code>qos_profile_sensor_data</code>）</span><span lang="en">Sensor-data profile (<code>rclcpp::SensorDataQoS()</code>, rclpy <code>qos_profile_sensor_data</code>)</span></th><th><span lang="zh-CN">影响匹配吗</span><span lang="en">Affects matching?</span></th></tr>
+    <tr><td>Reliability</td><td><span lang="zh-CN">reliable：确认与重传</span><span lang="en">reliable: acknowledgement and resend</span></td><td><span lang="zh-CN">best effort：发一次，丢了不补</span><span lang="en">best effort: sent once, losses not resent</span></td><td><span lang="zh-CN">是：best effort 发布者配不上 reliable 订阅者</span><span lang="en">yes: a best-effort publisher cannot serve a reliable subscription</span></td></tr>
+    <tr><td>Durability</td><td><span lang="zh-CN">volatile</span><span lang="en">volatile</span></td><td><span lang="zh-CN">volatile</span><span lang="en">volatile</span></td><td><span lang="zh-CN">是：volatile 发布者配不上 transient_local 订阅者</span><span lang="en">yes: a volatile publisher cannot serve a transient_local subscription</span></td></tr>
+    <tr><td>History</td><td><span lang="zh-CN">keep last</span><span lang="en">keep last</span></td><td><span lang="zh-CN">keep last</span><span lang="en">keep last</span></td><td><span lang="zh-CN">否</span><span lang="en">no</span></td></tr>
+    <tr><td>Depth</td><td>10</td><td>5</td><td><span lang="zh-CN">否</span><span lang="en">no</span></td></tr>
+    <tr><td>Deadline</td><td><span lang="zh-CN">default：中间件默认值，通常不限</span><span lang="en">default: the middleware default, usually unbounded</span></td><td><span lang="zh-CN">default：中间件默认值，通常不限</span><span lang="en">default: the middleware default, usually unbounded</span></td><td><span lang="zh-CN">是：承诺周期须 ≤ 要求周期；各 rmw 支持查文档</span><span lang="en">yes: promised period must be ≤ required; per-rmw support, check the docs</span></td></tr>
+    <tr><td>Lifespan</td><td><span lang="zh-CN">default：中间件默认值，通常不限</span><span lang="en">default: the middleware default, usually unbounded</span></td><td><span lang="zh-CN">default：中间件默认值，通常不限</span><span lang="en">default: the middleware default, usually unbounded</span></td><td><span lang="zh-CN">否；各 rmw 支持查文档</span><span lang="en">no; per-rmw support, check the docs</span></td></tr>
+    <tr><td>Liveliness</td><td><span lang="zh-CN">系统默认</span><span lang="en">system default</span></td><td><span lang="zh-CN">系统默认</span><span lang="en">system default</span></td><td><span lang="zh-CN">是：kind 不弱于、lease 不长于要求；各 rmw 支持查文档</span><span lang="en">yes: kind no weaker, lease no longer than requested; per-rmw support, check the docs</span></td></tr>
+    <tr><td><span lang="zh-CN">典型用途</span><span lang="en">Typical use</span></td><td><span lang="zh-CN"><code>/cmd_vel</code>、状态、日志；配 transient_local 后用于 <code>/tf_static</code>、地图</span><span lang="en"><code>/cmd_vel</code>, status, logs; with transient_local, <code>/tf_static</code> and maps</span></td><td><span lang="zh-CN"><code>/scan</code>、图像、点云、IMU</span><span lang="en"><code>/scan</code>, images, point clouds, IMU</span></td><td><span lang="zh-CN">订阅传感器话题时用传感器 profile，两种发布者都能匹配</span><span lang="en">subscribe to sensors with the sensor profile, so either kind of publisher matches</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 发现与 QoS 匹配：一对能连，一对不能</h3><h3 lang="en">(a) Discovery and QoS matching: one pair connects, one does not</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：四个进程，各是一个 participant。上面一对是 reliable 发布者和 best effort 订阅者，下面一对反过来。中间是发现的两步，底部是 ros2 topic info -v 看到的样子。按「播放」一步一步看。",
+           "第 1 步，SPDP：每个 participant 周期性地发一条我在这里，内容是 GUID 前缀、厂商 ID、收数据的地址和端口、租约时长。默认发到多播 239.255.0.1；实验容器设了 LOCALHOST，只在本机发。",
+           "第 2 步，SEDP：participant 之间用可靠的单播交换各自的 writer 和 reader，内容是 DDS 话题名 rt/scan、类型名，以及完整的 QoS。匹配就在收到这些信息时、在本地判定。",
+           "第 3 步，上面一对：发布者提供 RELIABLE，订阅者只请求 BEST_EFFORT。提供不比请求差，所以匹配，数据按 best effort 交付，订阅者不回 ACKNACK。",
+           "第 4 步，下面一对：发布者只提供 BEST_EFFORT，订阅者请求 RELIABLE。发布者给不了这个保证，所以永不匹配，一条数据也不过去；两端各收到一个 incompatible QoS 事件，日志里有一条警告。",
+           "第 5 步，排查：ros2 topic info -v /scan 仍会列出所有四个端点和它们的 QoS，因为 SEDP 已经交换过了。逐项对比 Reliability 和 Durability，就能找到不匹配的那一项。"]'
+         data-captions-en='["The whole picture: four processes, each one participant. The top pair is a reliable publisher with a best-effort subscription; the bottom pair is the reverse. Discovery in two steps sits in the middle, and the bottom shows what ros2 topic info -v reports. Press Play to go step by step.",
+           "Step 1, SPDP: each participant periodically sends an I am here, carrying its GUID prefix, vendor ID, the addresses and ports where it receives data, and its lease duration. By default it goes to multicast 239.255.0.1; the lab container sets LOCALHOST, so it stays on this host.",
+           "Step 2, SEDP: participants exchange their writers and readers over reliable unicast: the DDS topic name rt/scan, the type name and the full QoS. Matching is decided locally when this information arrives.",
+           "Step 3, the top pair: the publisher offers RELIABLE and the subscription requests only BEST_EFFORT. What is offered is no worse than what is requested, so they match; data is delivered best effort and the subscriber sends no ACKNACK.",
+           "Step 4, the bottom pair: the publisher offers only BEST_EFFORT and the subscription requests RELIABLE. The publisher cannot give that guarantee, so they never match and not one message gets through; each side receives an incompatible QoS event and a warning is logged.",
+           "Step 5, troubleshooting: ros2 topic info -v /scan still lists all four endpoints with their QoS, because SEDP has already exchanged them. Compare Reliability and Durability line by line to find the policy that does not match."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="24" class="small" lang="zh-CN">发布端</text><text x="30" y="24" class="small" lang="en">Publisher side</text>
+      <text x="330" y="24" class="small" lang="zh-CN">发现与匹配</text><text x="330" y="24" class="small" lang="en">Discovery and matching</text>
+      <text x="625" y="24" class="small" lang="zh-CN">订阅端</text><text x="625" y="24" class="small" lang="en">Subscriber side</text>
+      <line x1="290" y1="30" x2="290" y2="340" class="lane"/>
+      <line x1="610" y1="30" x2="610" y2="340" class="lane"/>
+
+      <rect class="box ros" x="25" y="40" width="255" height="90"/>
+      <text x="38" y="62" class="mono" lang="zh-CN">进程 A · participant</text><text x="38" y="62" class="mono" lang="en">Process A · participant</text>
+      <text x="38" y="86" class="mono">DataWriter rt/scan</text>
+      <text x="38" y="110" class="small" lang="zh-CN">提供 RELIABLE · VOLATILE</text><text x="38" y="110" class="small" lang="en">offers RELIABLE · VOLATILE</text>
+
+      <rect class="box ros" x="620" y="40" width="255" height="90"/>
+      <text x="633" y="62" class="mono" lang="zh-CN">进程 B · participant</text><text x="633" y="62" class="mono" lang="en">Process B · participant</text>
+      <text x="633" y="86" class="mono">DataReader rt/scan</text>
+      <text x="633" y="110" class="small" lang="zh-CN">请求 BEST_EFFORT · VOLATILE</text><text x="633" y="110" class="small" lang="en">requests BEST_EFFORT · VOLATILE</text>
+
+      <rect class="box ros" x="25" y="245" width="255" height="90"/>
+      <text x="38" y="267" class="mono" lang="zh-CN">进程 C · participant</text><text x="38" y="267" class="mono" lang="en">Process C · participant</text>
+      <text x="38" y="291" class="mono">DataWriter rt/scan</text>
+      <text x="38" y="315" class="small" lang="zh-CN">提供 BEST_EFFORT · VOLATILE</text><text x="38" y="315" class="small" lang="en">offers BEST_EFFORT · VOLATILE</text>
+
+      <rect class="box ros" x="620" y="245" width="255" height="90"/>
+      <text x="633" y="267" class="mono" lang="zh-CN">进程 D · participant</text><text x="633" y="267" class="mono" lang="en">Process D · participant</text>
+      <text x="633" y="291" class="mono">DataReader rt/scan</text>
+      <text x="633" y="315" class="small" lang="zh-CN">请求 RELIABLE · VOLATILE</text><text x="633" y="315" class="small" lang="en">requests RELIABLE · VOLATILE</text>
+
+      <g data-step="1"><rect class="box" x="300" y="148" width="145" height="82"/>
+        <text x="312" y="170" class="mono">1. SPDP</text>
+        <text x="312" y="190" class="small" lang="zh-CN">我在这里：GUID、</text><text x="312" y="190" class="small" lang="en">I am here: GUID,</text>
+        <text x="312" y="206" class="small" lang="zh-CN">locator、租约</text><text x="312" y="206" class="small" lang="en">locators, lease</text>
+        <text x="312" y="222" class="small">239.255.0.1</text>
+        <path class="arrow" d="M200 132 L305 160"/>
+        <path class="arrow" d="M200 243 L305 218"/></g>
+
+      <g data-step="2"><rect class="box" x="455" y="148" width="145" height="82"/>
+        <text x="467" y="170" class="mono">2. SEDP</text>
+        <text x="467" y="190" class="small" lang="zh-CN">单播、可靠</text><text x="467" y="190" class="small" lang="en">unicast, reliable</text>
+        <text x="467" y="206" class="small" lang="zh-CN">话题名、类型</text><text x="467" y="206" class="small" lang="en">topic name, type</text>
+        <text x="467" y="222" class="small" lang="zh-CN">完整 QoS</text><text x="467" y="222" class="small" lang="en">full QoS</text>
+        <path class="arrow" d="M595 160 L700 132"/>
+        <path class="arrow" d="M595 218 L700 243"/></g>
+
+      <g data-step="3"><path class="arrow flow" d="M282 92 L616 92"/>
+        <text x="305" y="80" class="small" lang="zh-CN">提供 ≥ 请求：匹配，按 best effort 交付</text><text x="305" y="80" class="small" lang="en">offered ≥ requested: match, best effort</text>
+        <text x="305" y="112" class="small" lang="zh-CN">订阅者不回 ACKNACK</text><text x="305" y="112" class="small" lang="en">the subscriber sends no ACKNACK</text></g>
+
+      <g data-step="4"><path d="M282 290 L440 290 M460 290 L616 290" style="stroke: var(--ink-2); stroke-width: 1.8; stroke-dasharray: 5 5; fill: none"/>
+        <text x="443" y="295" class="mono" style="fill: var(--ink-2)">✕</text>
+        <text x="305" y="278" class="small" style="fill: var(--ink-2)" lang="zh-CN">提供 &lt; 请求：永不匹配，无数据</text><text x="305" y="278" class="small" style="fill: var(--ink-2)" lang="en">offered &lt; requested: never matches</text>
+        <text x="305" y="312" class="small" lang="zh-CN">两端各收到 incompatible QoS 事件</text><text x="305" y="312" class="small" lang="en">both sides get an incompatible QoS event</text></g>
+
+      <g data-step="5"><rect class="box ros" x="25" y="352" width="850" height="60"/>
+        <text x="38" y="374" class="mono">$ ros2 topic info -v /scan</text>
+        <text x="38" y="396" class="small" lang="zh-CN">Publisher count: 2 · Subscription count: 2 · 每个端点列出节点名、GID 与 Reliability、Durability、History (Depth)……</text><text x="38" y="396" class="small" lang="en">Publisher count: 2 · Subscription count: 2 · each endpoint lists node name, GID, Reliability, Durability, History (Depth)…</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) rmw 层：一套接口，三种中间件，序列化与线上格式在哪</h3><h3 lang="en">(b) The rmw layer: one API, three middlewares, where serialization and the wire sit</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：上面是所有节点共用的 rcl 和 rmw 接口，中间三列是 Jazzy 上可用的三个 rmw 实现，下面是它们各自的线上格式和内核。按「播放」从接口一路走到线上。",
+           "第 1 步，rmw 接口：rcl 只调用这一套 C 函数（创建 publisher、发布、等待、查询 graph）。进程启动时按 RMW_IMPLEMENTATION 加载一个实现库；没设时 Jazzy 用 rmw_fastrtps_cpp。",
+           "第 2 步，序列化：消息在内存里是结构体或 Python 对象。rmw 实现用 rosidl 生成的 typesupport 代码把它编码成 CDR 字节，交给中间件库。序列化就在 rmw 和中间件的交界处。",
+           "第 3 步，rmw_fastrtps_cpp：默认实现，底下是 Fast DDS。同机进程之间默认可以走 /dev/shm 共享内存，跨机器走 RTPS over UDP；Fast DDS discovery server 只适用于它。",
+           "第 4 步，rmw_cyclonedds_cpp：底下是 Cyclone DDS，包 ros-jazzy-rmw-cyclonedds-cpp。线上同样是 RTPS over UDP，端口公式与 Phase 0 相同。",
+           "第 5 步，rmw_zenoh_cpp：底下是 Zenoh，包 ros-jazzy-rmw-zenoh-cpp。它不是 DDS，线上说 Zenoh 协议；默认要先启动路由器 rmw_zenohd 才能发现彼此。默认传输与支持等级请查文档。",
+           "第 6 步，线上与内核：三者最后都落到内核的 socket 或共享内存。Fast DDS 和 Cyclone DDS 都说 RTPS，跨厂商有时能通但不保证；Zenoh 和 DDS 之间不通。所以一个系统里所有进程用同一个 rmw。"]'
+         data-captions-en='["The whole picture: at the top, the rcl and rmw interface shared by every node; in the middle, the three rmw implementations available on Jazzy; at the bottom, their wire formats and the kernel. Press Play to walk from the interface to the wire.",
+           "Step 1, the rmw interface: rcl calls only this set of C functions (create a publisher, publish, wait, query the graph). At start-up the process loads one implementation library according to RMW_IMPLEMENTATION; when it is unset, Jazzy uses rmw_fastrtps_cpp.",
+           "Step 2, serialization: in memory a message is a struct or a Python object. The rmw implementation uses typesupport code generated by rosidl to encode it into CDR bytes and hands them to the middleware library. Serialization sits at the boundary between rmw and the middleware.",
+           "Step 3, rmw_fastrtps_cpp: the default, with Fast DDS underneath. Between processes on one host it can use /dev/shm shared memory by default; across hosts it uses RTPS over UDP. The Fast DDS discovery server applies only here.",
+           "Step 4, rmw_cyclonedds_cpp: Cyclone DDS underneath, package ros-jazzy-rmw-cyclonedds-cpp. On the wire it is also RTPS over UDP, with the same port formula as in Phase 0.",
+           "Step 5, rmw_zenoh_cpp: Zenoh underneath, package ros-jazzy-rmw-zenoh-cpp. It is not DDS and speaks the Zenoh protocol on the wire; by default the router rmw_zenohd must be running before nodes can find each other. Check the docs for its default transport and support tier.",
+           "Step 6, the wire and the kernel: all three end up in kernel sockets or shared memory. Fast DDS and Cyclone DDS both speak RTPS, and cross-vendor traffic sometimes works but is not guaranteed; Zenoh and DDS do not talk to each other. So every process in one system uses the same rmw."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="25" y="12" width="850" height="30"/>
+      <text x="38" y="32" class="mono" lang="zh-CN">用户节点 → rclcpp / rclpy → rcl（节点代码不随 rmw 改变）</text><text x="38" y="32" class="mono" lang="en">user node → rclcpp / rclpy → rcl (node code does not change with rmw)</text>
+
+      <g data-step="1"><rect class="box ros" x="25" y="52" width="850" height="40"/>
+        <text x="38" y="70" class="mono" lang="zh-CN">rmw 接口（C API）</text><text x="38" y="70" class="mono" lang="en">rmw interface (C API)</text>
+        <text x="38" y="86" class="small" lang="zh-CN">创建 publisher、发布、等待、查询 graph · 按 RMW_IMPLEMENTATION 加载一个实现</text><text x="38" y="86" class="small" lang="en">create publisher, publish, wait, query graph · loads one implementation per RMW_IMPLEMENTATION</text></g>
+
+      <g data-step="2"><rect class="box" x="25" y="102" width="850" height="40"/>
+        <text x="38" y="120" class="mono" lang="zh-CN">序列化：结构体 → CDR 字节</text><text x="38" y="120" class="mono" lang="en">serialization: struct → CDR bytes</text>
+        <text x="38" y="136" class="small" lang="zh-CN">rosidl 生成的 typesupport，由 rmw 实现调用，位于 rmw 与中间件库的交界处</text><text x="38" y="136" class="small" lang="en">typesupport generated by rosidl, called by the rmw implementation, at the rmw and middleware boundary</text></g>
+
+      <g data-step="3"><rect class="box ros" x="25" y="152" width="270" height="110"/>
+        <text x="38" y="174" class="mono">rmw_fastrtps_cpp</text>
+        <text x="38" y="194" class="small" lang="zh-CN">Jazzy 默认</text><text x="38" y="194" class="small" lang="en">the Jazzy default</text>
+        <text x="38" y="216" class="mono">Fast DDS</text>
+        <text x="38" y="236" class="small" lang="zh-CN">同机：/dev/shm 共享内存</text><text x="38" y="236" class="small" lang="en">same host: /dev/shm shared memory</text>
+        <text x="38" y="252" class="small" lang="zh-CN">可用 discovery server</text><text x="38" y="252" class="small" lang="en">discovery server available</text></g>
+
+      <g data-step="4"><rect class="box ros" x="315" y="152" width="270" height="110"/>
+        <text x="328" y="174" class="mono">rmw_cyclonedds_cpp</text>
+        <text x="328" y="194" class="small">ros-jazzy-rmw-cyclonedds-cpp</text>
+        <text x="328" y="216" class="mono">Cyclone DDS</text>
+        <text x="328" y="236" class="small" lang="zh-CN">同样是 RTPS</text><text x="328" y="236" class="small" lang="en">also RTPS</text>
+        <text x="328" y="252" class="small" lang="zh-CN">端口公式同 Phase 0</text><text x="328" y="252" class="small" lang="en">port formula as in Phase 0</text></g>
+
+      <g data-step="5"><rect class="box ros" x="605" y="152" width="270" height="110"/>
+        <text x="618" y="174" class="mono">rmw_zenoh_cpp</text>
+        <text x="618" y="194" class="small">ros-jazzy-rmw-zenoh-cpp</text>
+        <text x="618" y="216" class="mono">Zenoh</text>
+        <text x="618" y="236" class="small" lang="zh-CN">不是 DDS</text><text x="618" y="236" class="small" lang="en">not DDS</text>
+        <text x="618" y="252" class="small" lang="zh-CN">需先启动路由器 rmw_zenohd</text><text x="618" y="252" class="small" lang="en">router rmw_zenohd runs first</text></g>
+
+      <g data-step="6"><rect class="box" x="25" y="276" width="270" height="50"/>
+        <text x="38" y="297" class="mono">RTPS / UDP · SHM</text>
+        <text x="38" y="316" class="small" lang="zh-CN">跨机 UDP，同机共享内存</text><text x="38" y="316" class="small" lang="en">UDP across hosts, SHM on one host</text>
+        <rect class="box" x="315" y="276" width="270" height="50"/>
+        <text x="328" y="297" class="mono">RTPS / UDP</text>
+        <text x="328" y="316" class="small" lang="zh-CN">与左列同协议，互通不保证</text><text x="328" y="316" class="small" lang="en">same protocol as left; interop not guaranteed</text>
+        <rect class="box" x="605" y="276" width="270" height="50"/>
+        <text x="618" y="297" class="mono" lang="zh-CN">Zenoh 协议</text><text x="618" y="297" class="mono" lang="en">Zenoh protocol</text>
+        <text x="618" y="316" class="small" lang="zh-CN">与 DDS 节点不互通；传输查文档</text><text x="618" y="316" class="small" lang="en">no traffic with DDS nodes; transport: see docs</text>
+        <path d="M296 301 L314 301" style="stroke: var(--ink-3); stroke-width: 2; fill: none"/>
+        <text x="590" y="306" class="mono" style="fill: var(--ink-2)">✕</text>
+        <rect class="box linux" x="25" y="340" width="850" height="68"/>
+        <text x="38" y="362" class="mono" lang="zh-CN">Linux 内核</text><text x="38" y="362" class="mono" lang="en">Linux kernel</text>
+        <text x="38" y="382" class="small" lang="zh-CN">UDP 与 TCP socket、IP 多播、/dev/shm 共享内存段、DDS 和 Zenoh 的后台线程</text><text x="38" y="382" class="small" lang="en">UDP and TCP sockets, IP multicast, /dev/shm segments, DDS and Zenoh background threads</text>
+        <text x="38" y="400" class="small" lang="zh-CN">一个系统里所有进程用同一个 rmw</text><text x="38" y="400" class="small" lang="en">every process in one system uses the same rmw</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 制造 QoS 不兼容，再换一次中间件</h3><h3 lang="en">Lab A · Cause QoS incompatibilities, then switch the middleware</h3>
+    <ol>
+      <li><span lang="zh-CN">进入容器，开三个 shell（宿主机上三次 <code>./lab.sh shell</code>），每个都先 source underlay。确认当前用的是默认 rmw：</span><span lang="en">Enter the container and open three shells (<code>./lab.sh shell</code> three times on the host), sourcing the underlay in each. Confirm that the default rmw is in use:</span><pre data-lang="sh">source /opt/ros/jazzy/setup.bash
+printenv RMW_IMPLEMENTATION          # 空：用默认的 rmw_fastrtps_cpp
+ros2 doctor --report | grep -i middleware</pre></li>
+      <li><span lang="zh-CN">best effort 发布者 + reliable 订阅者：shell 1 发布，shell 2 用 reliable 订阅。应当<strong>收不到</strong>任何消息，并在 shell 2 看到一条 incompatible QoS 警告：</span><span lang="en">Best-effort publisher + reliable subscription: publish in shell 1 and subscribe reliably in shell 2. You should receive <strong>nothing</strong>, and see an incompatible-QoS warning in shell 2:</span><pre data-lang="sh"># shell 1
+ros2 topic pub -r 2 --qos-reliability best_effort /qos_demo std_msgs/msg/String "{data: hello}"
+# shell 2
+ros2 topic echo --qos-reliability reliable /qos_demo</pre></li>
+      <li><span lang="zh-CN">在 shell 3 看两端的 QoS，找出不匹配的那一项。两个端点都在列表里：</span><span lang="en">In shell 3, look at the QoS of both endpoints and find the policy that does not match. Both endpoints are in the list:</span><pre data-lang="sh">ros2 topic info -v /qos_demo         # 对比两个端点的 Reliability</pre></li>
+      <li><span lang="zh-CN">把 shell 2 换成 best effort，消息立刻出现；再把 shell 1 换成 reliable、shell 2 保持 best effort，也能收到——这就是「提供 ≥ 请求」：</span><span lang="en">Switch shell 2 to best effort and messages appear at once; then switch shell 1 to reliable while shell 2 stays best effort, and messages still arrive — this is “offered ≥ requested”:</span><pre data-lang="sh"># shell 2
+ros2 topic echo --qos-reliability best_effort /qos_demo
+# shell 1（Ctrl+C 后重新发布）
+ros2 topic pub -r 2 --qos-reliability reliable /qos_demo std_msgs/msg/String "{data: hello}"</pre></li>
+      <li><span lang="zh-CN">durability 与迟到的订阅者：shell 1 每 5 秒发一条、transient_local、depth 5；等半分钟后再启动订阅者。transient_local 订阅者一启动就立刻收到积存的几条，volatile 订阅者要等下一条：</span><span lang="en">Durability and a late subscriber: in shell 1 publish once every 5 seconds with transient_local and depth 5; wait half a minute before starting a subscriber. A transient_local subscriber immediately receives the stored samples on start; a volatile one waits for the next sample:</span><pre data-lang="sh"># shell 1
+ros2 topic pub -r 0.2 --qos-reliability reliable --qos-durability transient_local --qos-depth 5 \
+  /latched std_msgs/msg/String "{data: map v1}"
+# 30 秒后，shell 2
+ros2 topic echo --qos-reliability reliable --qos-durability transient_local /latched
+# 再试 volatile
+ros2 topic echo --qos-reliability reliable --qos-durability volatile /latched</pre></li>
+      <li><span lang="zh-CN">反过来：shell 1 用 volatile 发布、shell 2 用 transient_local 订阅，应当不匹配。用 <code>ros2 topic info -v /latched</code> 确认是 Durability 这一项：</span><span lang="en">The reverse: publish volatile in shell 1 and subscribe transient_local in shell 2; they should not match. Confirm with <code>ros2 topic info -v /latched</code> that Durability is the policy:</span><pre data-lang="sh"># shell 1
+ros2 topic pub -r 1 --qos-reliability reliable --qos-durability volatile /latched std_msgs/msg/String "{data: map v2}"
+# shell 2
+ros2 topic echo --qos-reliability reliable --qos-durability transient_local /latched</pre></li>
+      <li><span lang="zh-CN">换中间件：装 Cyclone DDS 的 rmw，在两个 shell 里都设 <code>RMW_IMPLEMENTATION</code>，跑 talker 和 listener。命令行也要用同一个 rmw，所以先停掉旧的 daemon：</span><span lang="en">Switch middleware: install the Cyclone DDS rmw, set <code>RMW_IMPLEMENTATION</code> in both shells, and run talker and listener. The command line must use the same rmw too, so stop the old daemon first:</span><pre data-lang="sh">apt-get update &amp;&amp; apt-get install -y ros-jazzy-rmw-cyclonedds-cpp
+ros2 daemon stop
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp      # 两个 shell 都设
+ros2 run demo_nodes_cpp talker                     # shell 1
+ros2 run demo_nodes_cpp listener                   # shell 2
+ros2 doctor --report | grep -i middleware          # shell 3，也先 export
+ss -ulpn | grep -E 'talker|listener'               # 端口仍按 Phase 0 的公式</pre></li>
+      <li><span lang="zh-CN">可选：shell 1 改回默认（<code>unset RMW_IMPLEMENTATION</code>）跑 talker、shell 2 保持 Cyclone 跑 listener，记下能不能通。官方说跨厂商不保证，所以无论结果如何都只是这一次的观察。</span><span lang="en">Optional: switch shell 1 back to the default (<code>unset RMW_IMPLEMENTATION</code>) and run the talker, keep shell 2 on Cyclone for the listener, and note whether they talk. The docs say cross-vendor traffic is not guaranteed, so whatever happens is an observation of this run only.</span></li>
+      <li><span lang="zh-CN">可选，Zenoh：装包，先在一个 shell 里启动路由器，再在另外两个 shell 里设 <code>RMW_IMPLEMENTATION=rmw_zenoh_cpp</code> 跑 talker 和 listener。不启动路由器时它们默认找不到彼此。路由器的端口和配置以 rmw_zenoh 文档为准：</span><span lang="en">Optional, Zenoh: install the package, start the router in one shell, then set <code>RMW_IMPLEMENTATION=rmw_zenoh_cpp</code> in two other shells and run talker and listener. Without the router they do not find each other by default. Go by the rmw_zenoh docs for the router’s port and configuration:</span><pre data-lang="sh">apt-get install -y ros-jazzy-rmw-zenoh-cpp
+ros2 run rmw_zenoh_cpp rmw_zenohd                  # shell 1：路由器
+RMW_IMPLEMENTATION=rmw_zenoh_cpp ros2 run demo_nodes_cpp talker     # shell 2
+RMW_IMPLEMENTATION=rmw_zenoh_cpp ros2 run demo_nodes_cpp listener   # shell 3
+ss -tlpn | grep zenohd                             # 路由器在听哪个 TCP 端口</pre></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · SROS2 证书，看端口与多播，抓包对比明文和密文</h3><h3 lang="en">Lab B · SROS2 certificates, ports and multicast, plaintext versus ciphertext in a capture</h3>
+    <ol>
+      <li><span lang="zh-CN">回到默认 rmw，确认 <code>ros2 security</code> 可用，装好抓包工具（容器里默认是 root）。如果 <code>ros2 security</code> 不存在，就是缺 <code>ros-jazzy-sros2</code> 包：</span><span lang="en">Go back to the default rmw, confirm that <code>ros2 security</code> is available, and install the capture tools (the container runs as root by default). If <code>ros2 security</code> is missing, the <code>ros-jazzy-sros2</code> package is not installed:</span><pre data-lang="sh">unset RMW_IMPLEMENTATION; ros2 daemon stop
+ros2 security --help
+apt-get install -y tcpdump iproute2</pre></li>
+      <li><span lang="zh-CN">先看不加密时的样子。为了让用户数据走 UDP 而不是共享内存（否则抓不到），在两个 shell 里只开 UDP 传输。Jazzy 带的是 Fast DDS 2.14，支持 <code>FASTDDS_BUILTIN_TRANSPORTS</code>。但只有 rmw 让内置传输保持打开时，Fast DDS 才读这个变量；实验环境默认的 LOCALHOST 会关掉内置传输并加上共享内存，所以这一步同时把发现范围改成 SUBNET（依据源码，未实际运行）：</span><span lang="en">First see what unsecured traffic looks like. To make user data travel over UDP rather than shared memory (otherwise you capture nothing), enable only the UDP transport in both shells. Jazzy ships Fast DDS 2.14, which supports <code>FASTDDS_BUILTIN_TRANSPORTS</code>. Fast DDS reads it only when the rmw leaves the builtin transports on; the lab’s LOCALHOST default turns them off and adds shared memory, so this step also switches discovery to SUBNET (from source, not executed):</span><pre data-lang="sh">export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET FASTDDS_BUILTIN_TRANSPORTS=UDPv4   # 两个 shell 都设
+ros2 run demo_nodes_cpp talker                     # shell 1
+tcpdump -ni any -A -c 40 udp | grep -a 'Hello World'  # shell 2：明文可见</pre></li>
+      <li><span lang="zh-CN">建 keystore 和两个 enclave，看看每个 enclave 里有什么（文件名以实际输出为准）：</span><span lang="en">Create the keystore and two enclaves, and see what each enclave contains (go by the actual file names):</span><pre data-lang="sh">mkdir -p ~/sros2_demo &amp;&amp; cd ~/sros2_demo
+ros2 security create_keystore demo_keystore
+ros2 security create_enclave demo_keystore /talker_listener/talker
+ros2 security create_enclave demo_keystore /talker_listener/listener
+ls demo_keystore/enclaves/talker_listener/talker
+# 大致：cert.pem key.pem governance.p7s permissions.p7s identity_ca.cert.pem permissions_ca.cert.pem</pre></li>
+      <li><span lang="zh-CN">在 shell 1 和 shell 2 都打开安全，用各自的 enclave 启动。listener 应当照常收到消息：</span><span lang="en">Turn security on in both shell 1 and shell 2 and start each with its own enclave. The listener should receive messages as usual:</span><pre data-lang="sh">export ROS_SECURITY_KEYSTORE=~/sros2_demo/demo_keystore
+export ROS_SECURITY_ENABLE=true
+export ROS_SECURITY_STRATEGY=Enforce
+ros2 run demo_nodes_cpp talker --ros-args --enclave /talker_listener/talker       # shell 1
+ros2 run demo_nodes_cpp listener --ros-args --enclave /talker_listener/listener   # shell 2</pre></li>
+      <li><span lang="zh-CN">在 shell 3 抓包：再也找不到 <code>Hello World</code>。但 SPDP 报文还在，里面能看到 participant 的信息；数一数报文的大小和间隔，旁观者仍能看出「每秒一条、长度差不多」：</span><span lang="en">Capture in shell 3: <code>Hello World</code> can no longer be found. But the SPDP packets are still there and still show participant information; count the packet sizes and intervals, and an onlooker can still tell “one message per second, about the same length”:</span><pre data-lang="sh">tcpdump -ni any -A -c 40 udp | grep -a 'Hello World'   # 无输出
+tcpdump -ni any -c 20 udp                              # 只看长度和时间</pre></li>
+      <li><span lang="zh-CN">负面测试：在 shell 3 设好同样的三个安全变量，但启动 listener 时不给 enclave，或者指向一个不存在的 enclave。Enforce 模式下它应当拒绝启动，记下报错原文。再把 <code>ROS_SECURITY_STRATEGY</code> 改成 <code>Permissive</code> 试一次，看它是否退回不加密运行、能不能收到受保护的 talker：</span><span lang="en">Negative test: set the same three security variables in shell 3, but start a listener with no enclave or with one that does not exist. In Enforce mode it should refuse to start; record the exact error. Then set <code>ROS_SECURITY_STRATEGY</code> to <code>Permissive</code> and try again, to see whether it falls back to running unsecured and whether it can receive from the protected talker:</span><pre data-lang="sh">ros2 run demo_nodes_cpp listener --ros-args --enclave /no/such/enclave
+ROS_SECURITY_STRATEGY=Permissive ros2 run demo_nodes_cpp listener --ros-args --enclave /no/such/enclave</pre></li>
+      <li><span lang="zh-CN">命令行也是一个 participant：在一个没开安全的 shell 里 <code>ros2 node list</code>，看能不能看到受保护的节点；再给它一个 enclave，用 <code>ROS_SECURITY_ENCLAVE_OVERRIDE</code> 强制指定后重试。create_enclave 默认生成的 permissions 允许哪些话题，请查 sros2 文档：</span><span lang="en">The command line is a participant too: run <code>ros2 node list</code> in a shell without security and see whether the protected nodes are visible; then give it an enclave, force it with <code>ROS_SECURITY_ENCLAVE_OVERRIDE</code> and try again. Which topics the default permissions from create_enclave allow: check the sros2 docs:</span><pre data-lang="sh">ros2 daemon stop
+ros2 node list --no-daemon                          # 未开安全
+ros2 security create_enclave ~/sros2_demo/demo_keystore /cli
+ROS_SECURITY_ENCLAVE_OVERRIDE=/cli ros2 node list --no-daemon   # 已 export 三个安全变量</pre></li>
+      <li><span lang="zh-CN">看端口与多播：停掉所有节点，在一个 shell 里把发现范围临时改成 <code>SUBNET</code>，启动 talker，看它绑定的端口和加入的多播组。实验容器的 domain 是 42，按 Phase 0 的公式，发现多播端口是 7400 + 250 × 42 = 17900，第一个 participant 的单播是 17910、17911：</span><span lang="en">Ports and multicast: stop all nodes, temporarily switch the discovery range to <code>SUBNET</code> in one shell, start the talker, and look at the ports it binds and the multicast groups it joins. The lab container’s domain is 42, so by the Phase 0 formula the discovery multicast port is 7400 + 250 × 42 = 17900, and the first participant’s unicast ports are 17910 and 17911:</span><pre data-lang="sh">unset ROS_SECURITY_ENABLE FASTDDS_BUILTIN_TRANSPORTS
+ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET ros2 run demo_nodes_cpp talker &gt; /dev/null &amp;
+sleep 2
+ss -ulpn | grep talker                             # 期望 17900、17910、17911 附近
+ip maddr show dev eth0 | grep 239.255.0.1
+tcpdump -ni eth0 -c 5 host 239.255.0.1             # SPDP 多播，大约每几秒一次
+kill %1
+ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST ros2 run demo_nodes_cpp talker &gt; /dev/null &amp;
+sleep 2
+tcpdump -ni eth0 -c 5 host 239.255.0.1             # 对比：LOCALHOST 下 eth0 上应当没有（以实际为准）
+kill %1</pre></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 里两次不兼容时 <code>ros2 topic info -v</code> 的输出（标出不匹配的那一项）和那条警告原文、transient_local 订阅者启动时一次收到几条、Cyclone DDS 下 <code>ros2 doctor</code> 的中间件一行；Lab B 里加密前后两次 <code>grep 'Hello World'</code> 的结果、Enforce 和 Permissive 两次负面测试的输出、<code>SUBNET</code> 下 <code>ss -ulpn</code> 的端口（标出公式里的哪一项），以及你用自己的话写的「SROS2 挡住了什么、没挡住什么」（10 行以内）。</div>
+    <div class="note" lang="en">Deliverables: from Lab A, the <code>ros2 topic info -v</code> output for both incompatibilities (mark the mismatched policy) with the exact warning text, how many samples the transient_local subscriber received at start, and the middleware line of <code>ros2 doctor</code> under Cyclone DDS; from Lab B, the results of the two <code>grep 'Hello World'</code> runs before and after encryption, the output of the Enforce and Permissive negative tests, the <code>ss -ulpn</code> ports under <code>SUBNET</code> (mark which term of the formula each is), and your own explanation of “what SROS2 stopped and what it did not” (10 lines or fewer).</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="ros2/phase-3">
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">1. 一个激光雷达驱动用 reliable 发布 <code>/scan</code>，你的节点用 sensor-data profile（best effort）订阅。会怎样？</p>
+      <p lang="en">1. A lidar driver publishes <code>/scan</code> as reliable, and your node subscribes with the sensor-data profile (best effort). What happens?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">能匹配，数据按 best effort 交付，丢了的帧不会为这个订阅者重传</span><span lang="en">They match; data is delivered best effort, and lost scans are not resent to this subscriber</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">不匹配，因为两端的 reliability 不一样</span><span lang="en">They do not match, because the two reliability settings differ</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">能匹配，而且订阅者会自动升级成 reliable，每一帧都保证送到</span><span lang="en">They match, and the subscriber is automatically upgraded to reliable so every scan is guaranteed</span></label>
+      <div class="why" hidden><span lang="zh-CN">规则是提供 ≥ 请求：reliable 的发布者能满足只要求 best effort 的订阅者，交付按订阅者要求的 best effort 进行。b 把「不同」当成了「不兼容」，只有反过来（best effort 发布者、reliable 订阅者）才不匹配。c 错在 QoS 不会被自动升级，订阅者请求的是什么就按什么交付。</span><span lang="en">The rule is offered ≥ requested: a reliable publisher can serve a subscription that asks only for best effort, and delivery follows the best effort the subscription requested. b treats “different” as “incompatible”; only the reverse (best-effort publisher, reliable subscription) fails to match. c is wrong because QoS is never upgraded automatically; delivery follows what the subscription requested.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 地图服务器启动时发布一次 <code>/map</code>。RViz2 晚一分钟才打开，要让它立刻看到地图，需要什么？</p>
+      <p lang="en">2. The map server publishes <code>/map</code> once at start-up. RViz2 opens a minute later. What is needed for it to see the map at once?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">把两端的 depth 都调到 100，历史够长就能补发</span><span lang="en">Raise depth to 100 on both sides; a long enough history allows the resend</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">发布者用 transient_local 就够了，订阅者保持 volatile</span><span lang="en">transient_local on the publisher is enough, with the subscription left volatile</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">发布者和订阅者都用 transient_local（并且 reliable），新订阅者匹配时发布者补发留存的样本</span><span lang="en">transient_local (and reliable) on both publisher and subscription, so the publisher sends its stored samples when the new subscription matches</span></label>
+      <div class="why" hidden><span lang="zh-CN">只有订阅者也请求 transient_local，发布者才会把留存的样本补发给它。b 能匹配，但 volatile 订阅者只收加入之后的数据，而地图不会再发。a 错在 depth 只决定留多少，volatile 时根本不会补发给迟到的订阅者。</span><span lang="en">The publisher sends stored samples to a subscription only when that subscription also requests transient_local. b matches, but a volatile subscription receives only data sent after it joined, and the map is not published again. a is wrong because depth only sets how much is kept; with volatile, nothing is replayed to a late joiner.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 话题名、类型都对，<code>ros2 topic echo</code> 却一条也收不到，日志里有一条 incompatible QoS 警告。下一步最有用的命令是？</p>
+      <p lang="en">3. Topic name and type are right, but <code>ros2 topic echo</code> receives nothing, and there is an incompatible-QoS warning in the log. What is the most useful next command?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN"><code>ros2 node list</code>，确认发布者节点还在</span><span lang="en"><code>ros2 node list</code>, to confirm the publisher node is still there</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN"><code>ros2 topic info -v</code>，逐项对比两个端点的 Reliability 和 Durability</span><span lang="en"><code>ros2 topic info -v</code>, comparing the Reliability and Durability of the two endpoints line by line</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">换一个 <code>ROS_DOMAIN_ID</code>，避开其他机器的干扰</span><span lang="en">Change <code>ROS_DOMAIN_ID</code> to avoid interference from other machines</span></label>
+      <div class="why" hidden><span lang="zh-CN">警告说明发现已经成功、端点也交换过了，只是 QoS 不兼容；<code>ros2 topic info -v</code> 会列出两端的完整 QoS，直接看出是哪一项。a 只能说明节点在，看不到 QoS。c 换 domain 会让两端彼此看不见，问题只会更多。</span><span lang="en">The warning means discovery succeeded and the endpoints were exchanged, but the QoS is incompatible; <code>ros2 topic info -v</code> lists the full QoS of both sides and shows the policy directly. a only shows the node exists, not its QoS. c, changing the domain, would make the two sides invisible to each other and add a problem.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. talker 和 listener 都在 Enforce 模式下用 SROS2 运行。同一局域网上的旁观者抓包，<strong>仍然</strong>能得到什么？</p>
+      <p lang="en">4. Talker and listener both run under SROS2 in Enforce mode. What can an onlooker capturing on the same LAN <strong>still</strong> learn?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">有几个 participant、它们的 IP 和端口，以及报文的大小和频率</span><span lang="en">How many participants there are, their IPs and ports, and the size and rate of packets</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">什么都得不到，SROS2 把所有报文包括发现都加密了</span><span lang="en">Nothing; SROS2 encrypts every packet including discovery</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">消息内容 <code>Hello World</code>，因为 SROS2 只做认证、不做加密</span><span lang="en">The message content <code>Hello World</code>, because SROS2 only authenticates and does not encrypt</span></label>
+      <div class="why" hidden><span lang="zh-CN">SPDP 的「我在这里」必须是明文，对方才能知道你存在并开始认证，所以 participant 的存在、地址和端口是可见的，流量模式也看得出来。b 忽略了这一点。c 错在 SROS2 按 governance 会加密用户数据，Lab B 里加密后 <code>grep</code> 找不到 Hello World。</span><span lang="en">The SPDP “I am here” must be in the clear so that peers learn you exist and can start authentication, so participants, their addresses and ports are visible, and so is the traffic pattern. b ignores this. c is wrong because SROS2 encrypts user data as the governance document specifies; in Lab B, after encryption, <code>grep</code> no longer finds Hello World.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Quality-of-Service-Settings.html">Quality of Service settings</a> · <a href="https://design.ros2.org/articles/qos.html">ROS QoS policies</a> <span class="lvl" lang="zh-CN">官方，概念 4、5、对照表与动画 (a)：每条策略、默认 profile、兼容表与 QoS 事件</span><span class="lvl" lang="en">Official, concepts 4 and 5, the table and diagram (a): each policy, the predefined profiles, the compatibility tables and QoS events</span></li>
+    <li><a href="https://design.ros2.org/articles/ros_on_dds.html">ROS on DDS</a> · <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Different-Middleware-Vendors.html">Different ROS 2 middleware vendors</a> · <a href="https://docs.ros.org/en/jazzy/How-To-Guides/Working-with-multiple-RMW-implementations.html">Working with multiple RMW implementations</a> <span class="lvl" lang="zh-CN">设计文章与官方，概念 1、2 与动画 (b)：ROS 到 DDS 的映射、可选中间件、混用的限制</span><span class="lvl" lang="en">Design article and official docs, concepts 1 and 2 and diagram (b): the ROS to DDS mapping, available middlewares, limits of mixing them</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Improved-Dynamic-Discovery.html">Improved Dynamic Discovery</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Discovery-Server/Discovery-Server.html">Using Fast DDS Discovery Server</a> <span class="lvl" lang="zh-CN">官方教程，概念 3：发现范围、静态对端、discovery server</span><span class="lvl" lang="en">Official tutorials, concept 3: discovery range, static peers, the discovery server</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/How-To-Guides/Configure-ZeroCopy-loaned-messages.html">Configure Zero Copy Loaned Messages</a> · <a href="https://docs.ros.org/en/jazzy/How-To-Guides/DDS-tuning.html">DDS tuning information</a> <span class="lvl" lang="zh-CN">官方，概念 6：loaned messages 与大消息调优，进阶</span><span class="lvl" lang="en">Official, concept 6: loaned messages and tuning for large messages, advanced</span></li>
+    <li><a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Security.html">About security</a> · <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Security/Introducing-ros2-security.html">Setting up security</a> · <a href="https://design.ros2.org/articles/ros2_dds_security.html">ROS 2 DDS-Security integration</a> · <a href="https://github.com/ros2/sros2">github.com/ros2/sros2</a> <span class="lvl" lang="zh-CN">官方与源码，概念 7 与 Lab B：keystore、enclave、环境变量、governance 与 permissions 模板</span><span class="lvl" lang="en">Official docs and source, concept 7 and Lab B: keystores, enclaves, environment variables, the governance and permissions templates</span></li>
+    <li><a href="https://github.com/ros2/rmw_zenoh">github.com/ros2/rmw_zenoh</a> · <a href="https://fast-dds.docs.eprosima.com/">Fast DDS documentation</a> <span class="lvl" lang="zh-CN">中间件自己的文档，进阶：Zenoh 路由器与配置、Fast DDS 传输与共享内存</span><span class="lvl" lang="en">The middlewares’ own docs, advanced: the Zenoh router and configuration, Fast DDS transports and shared memory</span></li>
+    <li>Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em> <span class="lvl" lang="zh-CN">中级，基于 Jazzy，DDS 中间件与 ROS 2 架构的章节适合配合本阶段</span><span class="lvl" lang="en">Intermediate, based on Jazzy; its chapters on the DDS middleware and ROS 2 architecture pair well with this phase</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Lentin Joseph &amp; Jonathan Cacace, 《Mastering ROS 2 for Robotics Programming》, 4th ed., Packt, 2025（7 月）. <span class="lvl">讲 ROS 2 架构、DDS 中间件、发现与多机通信的章节，对应概念 1、2、3、6；书中如有安全相关内容，对应概念 7；基于 Jazzy</span></li>
+    <li lang="en">Lentin Joseph &amp; Jonathan Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, 4th ed., Packt, 2025 (July). <span class="lvl">The chapters on ROS 2 architecture, the DDS middleware, discovery and multi-machine communication; match concepts 1, 2, 3 and 6; any security material in the book matches concept 7; based on Jazzy</span></li>
+    <li lang="zh-CN">Francisco Martín Rico, 《A Concise Introduction to Robot Programming with ROS2》, 2nd ed., Chapman &amp; Hall/CRC, 2025（6 月）, ISBN 9781032851501（第 1 版 2022, ISBN 9781032267203）. <span class="lvl">讲话题通信、传感器数据与 QoS 的章节，对应概念 4</span></li>
+    <li lang="en">Francisco Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, 2nd ed., Chapman &amp; Hall/CRC, 2025 (June), ISBN 9781032851501 (1st ed. 2022, ISBN 9781032267203). <span class="lvl">The chapters on topic communication, sensor data and QoS; match concept 4</span></li>
+    <li lang="zh-CN">Edouard Renard, 《ROS 2 From Scratch》, 1st ed., Packt, 2024（11 月）, ISBN 9781835881408. <span class="lvl">讲话题、发布者与订阅者的章节，对应概念 5 的入门背景；基于 Jazzy</span></li>
+    <li lang="en">Edouard Renard, <em>ROS 2 From Scratch</em>, 1st ed., Packt, 2024 (November), ISBN 9781835881408. <span class="lvl">The chapter on topics, publishers and subscribers; introductory background for concept 5; based on Jazzy</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-2-executors-and-timing/index.html">← Phase 2 · Executors &amp; Timing</a>
+    <a href="../phase-4-launch-lifecycle-composition/index.html">Phase 4 · Launch, Lifecycle &amp; Composition →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

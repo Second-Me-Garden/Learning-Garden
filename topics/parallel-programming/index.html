@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Parallel Programming · Learning Garden</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script src="../../assets/theme.js"></script>
+<script src="../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../index.html"><span class="mark" aria-hidden="true"><img src="../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <span class="crumb current" aria-current="page">Parallel Programming</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <h1>Parallel Programming</h1>
+  <p class="lede" lang="zh-CN">目标：在你面前这台多核机器上写出正确、可测量地更快的共享内存并行程序——从线程和锁，到让它们正确的内存模型，到无锁结构、OpenMP 和 NEON——每一步都用数字说话，并且看得见硬件和内核在底下做什么。实验直接在 Mac 上做：这里测的就是这台机器。</p>
+  <p class="lede" lang="en">Goal: write correct, measurably faster shared-memory parallel programs on the multicore machine in front of you, from threads and locks, to the memory model that makes them correct, to lock-free structures, OpenMP and NEON, with numbers at every step and the hardware and the kernel beneath it in view. The labs run on the Mac itself: the machine being measured is the one you are sitting at.</p>
+
+  <div class="note" lang="zh-CN">
+    读者画像：会 C、看得懂 C++；做过或正在做 Kernel Engineering。每个 phase 大约 1–2 周（每天 1–2 小时）。实验机器是 Apple Silicon Mac（本页的数字来自一台 M5：4 个性能核 + 6 个能效核，128 字节缓存行）；先看「实验环境」。
+  </div>
+  <div class="note" lang="en">
+    Reader: knows C, can read C++; has done or is doing Kernel Engineering. Each phase is about 1–2 weeks at 1–2 hours a day. The lab machine is an Apple Silicon Mac (the numbers on these pages come from an M5: 4 performance plus 6 efficiency cores, 128-byte cache lines); start with the lab environment page.
+  </div>
+
+  <h2 lang="zh-CN">路线图</h2><h2 lang="en">Roadmap</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 300" data-interval="1400"
+         data-captions='["全图：八个阶段，左侧打基础，中间把程序做对，右侧把程序做快。点「播放」逐步点亮。",
+           "Phase 0 基础：为什么并行、Amdahl 与 Gustafson、核与缓存、伪共享、怎样测量。",
+           "Phase 1 线程与操作系统：pthreads、std::thread、GCD、线程的一生、QoS 与调度。",
+           "Phase 2 共享内存与同步：数据竞争、互斥锁、条件变量、自旋锁、死锁与优先级反转、TSan。",
+           "Phase 3 内存模型与原子：acquire/release、seq_cst、栅栏、CAS 与 ABA、ARM64 的弱序。",
+           "Phase 4 无锁结构：进度保证、Treiber 栈、MS 队列、hazard pointer 与 RCU、seqlock。",
+           "Phase 5 结构化并行：OpenMP 的 parallel for、调度与规约、任务；GCD；工作窃取。",
+           "Phase 6 SIMD 与数据并行：NEON intrinsics、自动向量化、AoS 与 SoA、Accelerate、roofline。",
+           "Phase 7 性能测量与作品项目：基准方法、sample 与 spindump、内核虚拟机里的 perf、作品项目。"]'
+         data-captions-en='["The whole picture: eight phases, foundations on the left, correctness in the middle, speed on the right. Press Play to light them up one by one.",
+           "Phase 0 Foundations: why parallel, Amdahl and Gustafson, cores and caches, false sharing, how to measure.",
+           "Phase 1 Threads and the OS: pthreads, std::thread, GCD, the life of a thread, QoS and scheduling.",
+           "Phase 2 Shared memory and synchronization: data races, mutexes, condition variables, spinlocks, deadlock and priority inversion, TSan.",
+           "Phase 3 Memory models and atomics: acquire and release, seq_cst, fences, CAS and ABA, the weak ordering of ARM64.",
+           "Phase 4 Lock-free structures: progress guarantees, the Treiber stack, the MS queue, hazard pointers and RCU, seqlocks.",
+           "Phase 5 Structured parallelism: OpenMP parallel for, schedules and reductions, tasks; GCD; work stealing.",
+           "Phase 6 SIMD and data parallelism: NEON intrinsics, auto-vectorization, AoS versus SoA, Accelerate, the roofline.",
+           "Phase 7 Measuring performance and the capstone: benchmark method, sample and spindump, perf in the kernel VM, the capstone project."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="28" class="small" lang="zh-CN">基础</text><text x="20" y="28" class="small" lang="en">Foundations</text>
+      <text x="320" y="28" class="small" lang="zh-CN">做对（正确性）</text><text x="320" y="28" class="small" lang="en">Correctness</text>
+      <text x="600" y="28" class="small" lang="zh-CN">做快（速度）</text><text x="600" y="28" class="small" lang="en">Speed</text>
+      <line x1="300" y1="15" x2="300" y2="250" class="lane"/>
+      <line x1="580" y1="15" x2="580" y2="250" class="lane"/>
+
+      <g data-step="1"><rect class="box" x="20" y="50" width="120" height="60"/><text x="30" y="74">Phase 0</text><text x="30" y="94" class="small">Foundations</text></g>
+      <g data-step="2"><rect class="box" x="160" y="50" width="120" height="60"/><text x="170" y="74">Phase 1</text><text x="170" y="94" class="small">Threads · OS</text></g>
+      <path data-step="2" class="arrow" d="M140 80 L160 80"/>
+
+      <path data-step="3" class="arrow" d="M280 80 L320 80"/>
+      <g data-step="3"><rect class="box" x="320" y="50" width="120" height="60"/><text x="330" y="74">Phase 2</text><text x="330" y="94" class="small">Sync · Locks</text></g>
+      <g data-step="4"><rect class="box" x="450" y="50" width="120" height="60"/><text x="460" y="74">Phase 3</text><text x="460" y="94" class="small">Memory model</text></g>
+      <path data-step="4" class="arrow" d="M440 80 L450 80"/>
+      <path data-step="5" class="arrow" d="M510 110 L510 140 L380 140 L380 160"/>
+      <g data-step="5"><rect class="box" x="320" y="160" width="120" height="60"/><text x="330" y="184">Phase 4</text><text x="330" y="204" class="small">Lock-free</text></g>
+
+      <path data-step="6" class="arrow" d="M440 190 L665 190 L665 110"/>
+      <g data-step="6"><rect class="box" x="600" y="50" width="130" height="60"/><text x="610" y="74">Phase 5</text><text x="610" y="94" class="small">OpenMP · GCD</text></g>
+      <g data-step="7"><rect class="box" x="750" y="50" width="130" height="60"/><text x="760" y="74">Phase 6</text><text x="760" y="94" class="small">SIMD · NEON</text></g>
+      <path data-step="7" class="arrow" d="M730 80 L750 80"/>
+      <path data-step="8" class="arrow" d="M815 110 L815 160"/>
+      <g data-step="8"><rect class="box par" x="750" y="160" width="130" height="60"/><text x="760" y="184">Phase 7</text><text x="760" y="204" class="small">Measure · Capstone</text></g>
+
+      <text x="20" y="270" class="small" lang="zh-CN">每个阶段：目标 → 核心概念 → 对照表 → 动画 → 实验（在本机跑，附实测数字）→ 自测 → 资料 → 参考书目</text><text x="20" y="270" class="small" lang="en">Each phase: goals → core concepts → comparison → diagrams → labs (run on this Mac, with measured numbers) → quiz → resources → bibliography</text>
+    </svg>
+  </div>
+
+  <section class="setup" data-setup="par" lang="zh-CN">
+    <div class="setup-text">
+      <h2>实验环境</h2>
+      <p>实验就在这台 Mac 上做：测的是它的核、缓存和内存带宽。要装的只有 Homebrew 的 libomp（OpenMP 运行时）；sample、spindump、dtrace 系统自带；需要 perf 的地方借用 Kernel Engineering 的 Linux 虚拟机。开始 Phase 0 之前先把环境页过一遍。</p>
+      <p class="setup-ready">实验环境已建好。<a href="lab-setup/index.html">查看说明</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">设置实验环境</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="par"> 我已建好</label>
+    </div>
+  </section>
+  <section class="setup" data-setup="par" lang="en">
+    <div class="setup-text">
+      <h2>Lab environment</h2>
+      <p>The labs run on this Mac: its cores, caches and memory bandwidth are what gets measured. The only install is Homebrew's libomp (the OpenMP runtime); sample, spindump and dtrace come with the system; where perf is needed, the Kernel Engineering Linux VM is borrowed. Go through the environment page before Phase 0.</p>
+      <p class="setup-ready">Lab environment is ready. <a href="lab-setup/index.html">Open the guide</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">Set up the lab</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="par"> Done</label>
+    </div>
+  </section>
+
+  <h2 lang="zh-CN">阶段</h2><h2 lang="en">Phases</h2>
+  <ol class="phases">
+    <li data-phase="par/phase-0"><span class="n">0</span><span><span class="t"><a href="phase-0-foundations/index.html">Foundations</a></span><br><span class="d" lang="zh-CN">为什么并行、Amdahl 与 Gustafson、核与缓存行、伪共享、测量方法</span><span class="d" lang="en">Why parallel, Amdahl and Gustafson, cores and cache lines, false sharing, how to measure</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-1"><span class="n">1</span><span><span class="t"><a href="phase-1-threads-and-the-os/index.html">Threads &amp; the OS</a></span><br><span class="d" lang="zh-CN">pthreads、std::thread、GCD、线程的一生、上下文切换、QoS 与线程池</span><span class="d" lang="en">pthreads, std::thread, GCD, the life of a thread, context switches, QoS and thread pools</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-2"><span class="n">2</span><span><span class="t"><a href="phase-2-synchronization/index.html">Shared Memory &amp; Synchronization</a></span><br><span class="d" lang="zh-CN">数据竞争、互斥锁、条件变量、自旋锁、死锁、优先级反转、TSan</span><span class="d" lang="en">Data races, mutexes, condition variables, spinlocks, deadlock, priority inversion, TSan</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-3"><span class="n">3</span><span><span class="t"><a href="phase-3-memory-model-and-atomics/index.html">Memory Models &amp; Atomics</a></span><br><span class="d" lang="zh-CN">C++20 内存模型、acquire/release、栅栏、CAS 与 ABA、ARM64 弱序</span><span class="d" lang="en">The C++20 memory model, acquire and release, fences, CAS and ABA, the weak ordering of ARM64</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-4"><span class="n">4</span><span><span class="t"><a href="phase-4-lock-free-structures/index.html">Lock-free &amp; Wait-free Structures</a></span><br><span class="d" lang="zh-CN">进度保证、Treiber 栈、MS 队列、hazard pointer、RCU、seqlock</span><span class="d" lang="en">Progress guarantees, the Treiber stack, the MS queue, hazard pointers, RCU, seqlocks</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-5"><span class="n">5</span><span><span class="t"><a href="phase-5-structured-parallelism/index.html">Structured Parallelism</a></span><br><span class="d" lang="zh-CN">OpenMP、GCD、fork-join、调度与规约、任务、工作窃取</span><span class="d" lang="en">OpenMP, GCD, fork-join, schedules and reductions, tasks, work stealing</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-6"><span class="n">6</span><span><span class="t"><a href="phase-6-simd/index.html">SIMD &amp; Data Parallelism</a></span><br><span class="d" lang="zh-CN">NEON intrinsics、自动向量化、AoS 与 SoA、Accelerate、roofline</span><span class="d" lang="en">NEON intrinsics, auto-vectorization, AoS versus SoA, Accelerate, the roofline</span></span><span class="st"></span></li>
+    <li data-phase="par/phase-7"><span class="n">7</span><span><span class="t"><a href="phase-7-measurement-and-capstone/index.html">Measuring Performance &amp; the Capstone</a></span><br><span class="d" lang="zh-CN">基准方法、sample 与 spindump、内核虚拟机里的 perf、作品项目</span><span class="d" lang="en">Benchmark method, sample and spindump, perf in the kernel VM, the capstone project</span></span><span class="st"></span></li>
+  </ol>
+
+  <section class="related" data-related="parallel-programming" data-root="../../"></section>
+</div>
+<script src="../../assets/diagram.js"></script>
+<script src="../../assets/progress.js"></script>
+<script src="../../assets/topics.js"></script>
+<script src="../../assets/related.js"></script>
+</body>
+</html>

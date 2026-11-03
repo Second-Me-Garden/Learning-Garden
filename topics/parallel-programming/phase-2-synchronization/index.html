@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 2 · Shared Memory &amp; Synchronization · Parallel Programming</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">Parallel Programming</a>
+    <span class="crumb current" aria-current="page">Phase 2 · Shared Memory &amp; Synchronization</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 2 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 2 / 8 · about 1–2 weeks</p>
+  <h1>Shared Memory &amp; Synchronization <span class="en" lang="zh-CN">共享内存与同步：数据竞争、互斥锁、自旋锁、读写锁、死锁与优先级反转</span><span class="en" lang="en">Data races, mutexes, spinlocks, reader-writer locks, deadlock and priority inversion</span></h1>
+  <p class="lede" lang="zh-CN">两个线程同时对一个普通的 <code>long</code> 做 <code>++</code>，四个线程各加 100 万次，在这台 M5 上只剩约 100 万到 160 万。这不是「偶尔算错」，而是 C++ 标准里的未定义行为。这一阶段先说清数据竞争的准确定义，再把三种修法（锁、原子、各算各的）放到 TSan 和秒表下面；然后量一把锁在 1 到 20 个线程下各要付多少：<code>std::mutex</code>、手写的自旋锁和 <code>os_unfair_lock</code> 谁赢、谁在超额订阅时崩溃、为什么。最后是锁带来的两类新故障：死锁和优先级反转。</p>
+  <p class="lede" lang="en">Two threads run <code>++</code> on a plain <code>long</code> at the same time; with four threads adding a million times each, only about 1.0 to 1.6 million survive on this M5. This is not “occasionally wrong arithmetic”; it is undefined behaviour in the C++ standard. This phase first gives the exact definition of a data race, then puts three fixes (a lock, an atomic, each thread counting on its own) under TSan and a stopwatch; then it measures what one lock costs from 1 to 20 threads: whether <code>std::mutex</code>, a hand-written spinlock or <code>os_unfair_lock</code> wins, which one collapses when oversubscribed, and why. Last come the two new failures that locks bring: deadlock and priority inversion.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">按 C++ 标准的定义判断一段代码有没有数据竞争，并解释为什么它是未定义行为，而不只是「结果可能不对」。</li>
+      <li lang="en">Decide whether a piece of code has a data race by the C++ standard’s definition, and explain why it is undefined behaviour rather than merely “the result may be wrong”.</li>
+      <li lang="zh-CN">用 <code>-fsanitize=thread</code> 找到一个竞争，并用互斥锁、原子操作和每线程局部和三种方法修好它，说出三者的代价差别。</li>
+      <li lang="en">Find a race with <code>-fsanitize=thread</code>, fix it three ways with a mutex, an atomic and per-thread partial sums, and state how their costs differ.</li>
+      <li lang="zh-CN">说出一把互斥锁在无争用和有争用时分别做什么：用户态的一条原子指令，以及在 Linux 上的 futex、在 macOS 上的 psynch 与 ulock 里睡眠。</li>
+      <li lang="en">Say what a mutex does uncontended and contended: one atomic instruction in user space, and sleeping in a futex on Linux or in psynch and ulock on macOS.</li>
+      <li lang="zh-CN">用实测数据解释自旋锁什么时候不吃亏、为什么在线程多于核时崩溃，以及读写锁什么时候才划算。</li>
+      <li lang="en">Use measured data to explain when a spinlock costs nothing extra, why it collapses when there are more threads than cores, and when a reader-writer lock pays off.</li>
+      <li lang="zh-CN">用统一的加锁顺序或 <code>std::scoped_lock</code> 避免死锁，并说清优先级反转是怎样发生的、优先级继承怎样解决它。</li>
+      <li lang="en">Avoid deadlock with one lock order or <code>std::scoped_lock</code>, and explain how priority inversion happens and how priority inheritance solves it.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>：缓存行与伪共享、「预热 + 中位数」的测量方法。Lab B 的锁和计数器都按 128 字节对齐，原因就在那里。</li>
+    <li lang="en"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>: cache lines and false sharing, and measuring with warm-up and the median. Lab B aligns every lock and counter to 128 bytes for the reasons given there.</li>
+    <li lang="zh-CN"><a href="../phase-1-threads-and-the-os/index.html">Phase 1 · Threads &amp; the OS</a>：线程怎样创建、怎样被调度，QoS 类，以及线程多于核时会发生什么。</li>
+    <li lang="en"><a href="../phase-1-threads-and-the-os/index.html">Phase 1 · Threads &amp; the OS</a>: how threads are created and scheduled, QoS classes, and what happens when there are more threads than cores.</li>
+    <li lang="zh-CN"><a href="../lab-setup/index.html">实验环境</a> 里的 TSan 冒烟测试：知道本机 TSan 报告竞争后以 134 退出，设 <code>TSAN_OPTIONS=abort_on_error=0</code> 后以 66 退出。</li>
+    <li lang="en">The TSan smoke test in <a href="../lab-setup/index.html">Lab environment</a>: you know that on this Mac TSan exits with 134 after reporting a race, and with 66 when <code>TSAN_OPTIONS=abort_on_error=0</code> is set.</li>
+    <li lang="zh-CN">内核一侧的锁（spinlock、mutex、futex、turnstile）见 Kernel Engineering <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Phase 3 · Concurrency &amp; IPC</a>；本页概念 2、3、6 都会链过去，先读不是必须的。</li>
+    <li lang="en">The kernel side of locking (spinlocks, mutexes, futexes, turnstiles) is in Kernel Engineering <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Phase 3 · Concurrency &amp; IPC</a>; concepts 2, 3 and 6 on this page link there, and reading it first is not required.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 数据竞争：标准的定义，以及为什么是未定义行为</h3><h3 lang="en">1. Data races: the standard’s definition, and why they are undefined behaviour</h3>
+  <p lang="zh-CN">C++ 标准（[intro.races]）的原话是：如果一次程序执行包含两个<strong>可能并发</strong>的<strong>冲突</strong>操作，其中至少一个不是原子操作，并且两者之间没有 <strong>happens-before</strong> 关系，这次执行就含有数据竞争；任何数据竞争都导致未定义行为。三个词逐个拆开：</p>
+  <p lang="en">The C++ standard ([intro.races]) says: the execution of a program contains a data race if it contains two <strong>potentially concurrent</strong> <strong>conflicting</strong> actions, at least one of which is not atomic, and neither <strong>happens before</strong> the other; any such data race results in undefined behaviour. Take the terms one at a time:</p>
+  <ul>
+    <li lang="zh-CN"><strong>冲突</strong>：两个操作访问同一个内存位置，并且至少一个是写。两个线程同时只读同一个变量不冲突，没有竞争。</li>
+    <li lang="en"><strong>Conflicting</strong>: two actions access the same memory location and at least one of them is a write. Two threads only reading the same variable at once do not conflict, so there is no race.</li>
+    <li lang="zh-CN"><strong>不是原子操作</strong>：对 <code>std::atomic</code> 的读写互相之间永远不构成数据竞争，哪怕用的是 <code>memory_order_relaxed</code>。</li>
+    <li lang="en"><strong>Not atomic</strong>: reads and writes of a <code>std::atomic</code> never form a data race with each other, even with <code>memory_order_relaxed</code>.</li>
+    <li lang="zh-CN"><strong>没有 happens-before</strong>：同一个线程里的先后、对同一把锁的解锁与随后的加锁、线程创建与 <code>join</code>，都会建立 happens-before。持有同一把锁的两段代码因此不会竞争。Phase 3 会把这个关系讲完整。</li>
+    <li lang="en"><strong>No happens-before</strong>: program order within one thread, an unlock of a mutex followed by a later lock of the same mutex, and thread creation and <code>join</code> all establish happens-before. Two pieces of code holding the same lock therefore cannot race. Phase 3 covers this relation in full.</li>
+  </ul>
+  <p lang="zh-CN"><strong>为什么是未定义行为，而不只是「结果不对」</strong>：标准允许编译器假设没有数据竞争，于是它可以把一个普通变量留在寄存器里不写回、把两次读合并成一次、把一个循环里的读提到循环外。<code>while (!done) {}</code> 里的普通 <code>bool done</code> 可能被读一次就永远不再读，循环永远不退出。在硬件一侧，一个没有对齐的或者比一个字更宽的写可能被另一个线程看到一半（撕裂）。Lab A 的汇编显示，<code>-O2</code> 下 <code>++counter</code> 是 <code>ldr</code>、<code>add</code>、<code>str</code> 三条指令：两个线程都读到 5、都写回 6，一次加法就丢了。丢加法只是这一次编译恰好产生的症状，标准对结果什么都不保证。</p>
+  <p lang="en"><strong>Why undefined behaviour, not merely “a wrong result”</strong>: the standard lets the compiler assume there are no data races, so it may keep a plain variable in a register without writing it back, merge two reads into one, or hoist a read out of a loop. With a plain <code>bool done</code>, <code>while (!done) {}</code> may read it once and never again, and the loop never exits. On the hardware side, a write that is misaligned or wider than a word may be seen half-done by another thread (tearing). Lab A’s assembly shows that at <code>-O2</code> <code>++counter</code> is three instructions, <code>ldr</code>, <code>add</code> and <code>str</code>: both threads read 5, both write back 6, and one increment is lost. The lost increment is only the symptom this particular build happens to produce; the standard guarantees nothing about the result.</p>
+  <p lang="zh-CN"><strong>数据竞争与竞态条件（race condition）不是一回事</strong>：竞态条件是指结果依赖线程执行的先后，比如「先检查余额、再扣款」两步各自加了锁，但两步之间被别的线程插进来。它可以完全没有数据竞争，TSan 也查不出来，要靠把两步放进同一个临界区来修。</p>
+  <p lang="en"><strong>A data race is not the same as a race condition</strong>: a race condition means the result depends on the order in which threads run, for example “check the balance, then debit” where each step takes the lock on its own but another thread slips in between them. It can have no data race at all, TSan cannot find it, and the fix is to put both steps in one critical section.</p>
+  <p lang="zh-CN"><strong>TSan 怎样找到竞争</strong>：<code>-fsanitize=thread</code> 在每次内存访问处插桩，给每个线程维护一个向量时钟，记录锁、原子操作、线程创建和 join 建立的先后关系；它发现两次访问同一地址、至少一次是写、而且两者之间没有先后关系时就报告，报告里给出两处访问的源码行。它只报告这次运行里<em>真的发生过</em>的访问，所以要让测试跑到有竞争的代码路径。</p>
+  <p lang="en"><strong>How TSan finds races</strong>: <code>-fsanitize=thread</code> instruments every memory access and keeps a vector clock per thread, recording the ordering that locks, atomics, thread creation and join establish; when it sees two accesses to one address, at least one a write, with no ordering between them, it reports them with both source lines. It reports only accesses that <em>actually happened</em> in this run, so the test has to reach the racy code path.</p>
+  <p lang="zh-CN">延伸阅读：Williams《C++ Concurrency in Action》中讲线程间共享数据的一章（竞态条件、用互斥锁保护共享数据）和讲 C++ 内存模型与原子操作的一章；McKenney 第 5 章「Counting」开头的 5.1「Why Isn’t Concurrent Counting Trivial?」。</p>
+  <p lang="en">Further reading: the chapter on sharing data between threads in Williams, <em>C++ Concurrency in Action</em> (race conditions, protecting shared data with mutexes), and its chapter on the C++ memory model and atomic operations; McKenney, Chapter 5, “Counting”, opening with 5.1, “Why Isn’t Concurrent Counting Trivial?”.</p>
+
+  <h3 lang="zh-CN">2. 互斥锁：无争用时做什么，有争用时做什么</h3><h3 lang="en">2. Mutexes: what they do uncontended and what they do contended</h3>
+  <p lang="zh-CN">一把互斥锁（mutex）保证同一时刻只有一个线程在临界区里。它的设计分两条路：</p>
+  <p lang="en">A mutex guarantees that only one thread at a time is inside the critical section. Its design has two paths:</p>
+  <ul>
+    <li lang="zh-CN"><strong>快速路径（无争用）</strong>：锁字里写着「空闲」，加锁就是一条带 acquire 语义的原子比较交换，解锁是一条 release 写，全程不进内核。Lab B 实测：只有一个线程时，<code>std::mutex</code> 一次加锁加解锁约 3.7 ns，<code>os_unfair_lock</code> 约 2.2 ns。</li>
+    <li lang="en"><strong>The fast path (uncontended)</strong>: the lock word says “free”, locking is one atomic compare-and-swap with acquire semantics and unlocking is one release store, and the kernel is never entered. Measured in Lab B: with a single thread, one lock-plus-unlock of <code>std::mutex</code> costs about 3.7 ns and of <code>os_unfair_lock</code> about 2.2 ns.</li>
+    <li lang="zh-CN"><strong>慢速路径（有争用）</strong>：拿不到锁的线程不该原地空转烧掉一个核，而是请内核让自己睡眠，直到持有者解锁时把它叫醒。Linux 上 glibc 的 pthread mutex 用 <code>futex(FUTEX_WAIT)</code> 睡、<code>FUTEX_WAKE</code> 唤醒，内核只在锁字仍是「被占用」时才让它睡，避免丢失唤醒。</li>
+    <li lang="en"><strong>The slow path (contended)</strong>: a thread that cannot get the lock should not burn a core spinning; it asks the kernel to put it to sleep until the holder unlocks and wakes it. On Linux, glibc’s pthread mutex sleeps with <code>futex(FUTEX_WAIT)</code> and wakes with <code>FUTEX_WAKE</code>, and the kernel lets it sleep only if the lock word still says “taken”, which avoids lost wakeups.</li>
+  </ul>
+  <p lang="zh-CN"><strong>macOS 上的慢速路径</strong>（用 <code>sample</code> 在本机抓到的调用栈，2026-10-31）：<code>std::mutex</code> 底下是 pthread mutex，争用时走 <code>_pthread_mutex_firstfit_lock_slow</code> → <code>__psynch_mutexwait</code>，解锁走 <code>__psynch_mutexdrop</code>；<code>os_unfair_lock</code> 争用时走 <code>_os_unfair_lock_lock_slow</code> → <code>__ulock_wait2</code>，解锁走 <code>__ulock_wake</code>。函数名里的 <code>firstfit</code> 说明本机默认的 mutex 策略是「先到先得」：刚解锁的线程可以立刻再拿到锁，而不是交给排队最久的人（<code>pthread.h</code> 里有 <code>PTHREAD_MUTEX_POLICY_FIRSTFIT_NP</code> 和 <code>PTHREAD_MUTEX_POLICY_FAIRSHARE_NP</code> 两种）。psynch 和 ulock 在内核里怎样排队、怎样借用 turnstile 做优先级继承，本页只给大致图景：内核按锁地址找到等待队列，把线程挂上去并让出 CPU；细节见 Kernel Phase 3 概念 1 和概念 8。</p>
+  <p lang="en"><strong>The slow path on macOS</strong> (call stacks captured with <code>sample</code> on this Mac, 2026-10-31): <code>std::mutex</code> sits on a pthread mutex, which under contention goes through <code>_pthread_mutex_firstfit_lock_slow</code> → <code>__psynch_mutexwait</code> and unlocks through <code>__psynch_mutexdrop</code>; <code>os_unfair_lock</code> under contention goes through <code>_os_unfair_lock_lock_slow</code> → <code>__ulock_wait2</code> and unlocks through <code>__ulock_wake</code>. The <code>firstfit</code> in the function names shows that this Mac’s default mutex policy is “first fit”: a thread that has just unlocked may take the lock straight back instead of handing it to whoever has waited longest (<code>pthread.h</code> defines both <code>PTHREAD_MUTEX_POLICY_FIRSTFIT_NP</code> and <code>PTHREAD_MUTEX_POLICY_FAIRSHARE_NP</code>). How psynch and ulock queue waiters in the kernel and borrow turnstiles for priority inheritance is given here only as a rough picture (approximate): the kernel finds a wait queue by the lock’s address, puts the thread on it and gives up the CPU; the details are in Kernel Phase 3, concepts 1 and 8.</p>
+  <p lang="zh-CN"><strong>条件变量</strong>：锁只管「互斥」，不管「等某件事发生」。<code>std::condition_variable</code> 的 <code>wait(lock, pred)</code> 原子地放锁并睡眠，被唤醒后重新拿锁再检查条件。必须带谓词或写成循环：标准允许虚假唤醒（spurious wakeup），而且 <code>notify</code> 发生在 <code>wait</code> 之前时通知会丢，只有被锁保护的状态变量记得住它。Lab B 用条件变量做一道起跑门，让所有线程同时开跑。<strong>信号量</strong>是带计数的版本：C++20 的 <code>std::counting_semaphore</code> 在本机可以编译运行（2026-10-31 实测），GCD 里对应 <code>dispatch_semaphore</code>。</p>
+  <p lang="en"><strong>Condition variables</strong>: a lock only provides mutual exclusion, not “wait until something happens”. <code>std::condition_variable</code>’s <code>wait(lock, pred)</code> atomically releases the lock and sleeps, and after waking it retakes the lock and checks the condition again. It must have a predicate or sit in a loop: the standard allows spurious wakeups, and a <code>notify</code> that happens before the <code>wait</code> is lost; only the state variable protected by the lock remembers it. Lab B uses a condition variable as a starting gate so that every thread starts at the same moment. A <strong>semaphore</strong> is the counting version: C++20’s <code>std::counting_semaphore</code> compiles and runs on this Mac (tested 2026-10-31), and in GCD the counterpart is <code>dispatch_semaphore</code>.</p>
+  <p lang="zh-CN">延伸阅读：Bos《Rust Atomics and Locks》第 8 章「Operating System Primitives」（POSIX、Linux 的 Futex 和 Priority Inheritance Futex Operations、macOS 的 os_unfair_lock 三节）和第 9 章「Building Our Own Locks」中的「Mutex」「Condition Variable」两节；Williams 中讲同步并发操作的一章（条件变量、future）。</p>
+  <p lang="en">Further reading: Bos, <em>Rust Atomics and Locks</em>, Chapter 8, “Operating System Primitives” (the POSIX section, the Linux sections “Futex” and “Priority Inheritance Futex Operations”, and the macOS section “os_unfair_lock”), and the “Mutex” and “Condition Variable” sections of Chapter 9, “Building Our Own Locks”; the chapter on synchronizing concurrent operations in Williams (condition variables, futures).</p>
+
+  <h3 lang="zh-CN">3. 自旋锁：为什么不争用时不吃亏，超额订阅时崩溃</h3><h3 lang="en">3. Spinlocks: why they cost nothing extra uncontended and collapse when oversubscribed</h3>
+  <p lang="zh-CN">自旋锁拿不到锁时不睡，原地反复检查。Lab B 的实现是 test-and-test-and-set：先用一次原子交换（<code>std::atomic_flag::test_and_set</code>，本机编译成 <code>swpab</code>）抢锁，失败后只<em>读</em>这一位（<code>test</code>），等它变回空闲再抢，这样等待者大部分时间在读自己 L1 里的一份副本，不会不停地写那条缓存行。解锁是一条 release 写（<code>stlrb</code>）。</p>
+  <p lang="en">A spinlock does not sleep when the lock is taken; it keeps checking in place. Lab B implements test-and-test-and-set: it grabs the lock with one atomic exchange (<code>std::atomic_flag::test_and_set</code>, compiled to <code>swpab</code> on this Mac), and on failure it only <em>reads</em> the flag (<code>test</code>) until it looks free before trying again, so waiters spend most of their time reading a copy in their own L1 instead of writing the cache line over and over. Unlocking is one release store (<code>stlrb</code>).</p>
+  <ul>
+    <li lang="zh-CN"><strong>教科书的说法</strong>：自旋锁没有睡眠和唤醒的簿记，临界区很短、每个等待者都独占一个核时，转几圈比进一次内核便宜。<strong>本机实测</strong>：只有一个线程时，手写自旋锁 3.6–4.2 ns，与 <code>std::mutex</code> 的 3.7 ns 相当，比 <code>os_unfair_lock</code> 的 2.2 ns 还慢。原因是三者的无争用路径都只是一两条原子指令，没有谁进内核。所以「自旋锁无争用时最快」的前提，是对手锁的快速路径更重；在 macOS 用户态这个前提不成立。</li>
+    <li lang="en"><strong>The textbook argument</strong>: a spinlock has no sleep-and-wake bookkeeping, so when the critical section is very short and every waiter has a core to itself, spinning a few times is cheaper than one trip into the kernel. <strong>Measured on this Mac</strong>: with a single thread, the hand-written spinlock costs 3.6–4.2 ns, the same as <code>std::mutex</code> at 3.7 ns and slower than <code>os_unfair_lock</code> at 2.2 ns. The reason is that all three uncontended paths are one or two atomic instructions and none of them enters the kernel. So “a spinlock is fastest uncontended” assumes the rival lock has a heavier fast path, and in macOS user space that assumption does not hold.</li>
+    <li lang="zh-CN"><strong>有争用时</strong>：一把共享锁、10 个线程，自旋锁每次加解锁 108.9 ns，<code>std::mutex</code> 13.5 ns，<code>os_unfair_lock</code> 10.3 ns。每次解锁，所有在读这一行的等待者的副本都作废，随后一起来抢，这一行在核之间来回搬运（Phase 0 的伪共享，只是这次是真共享）。睡眠的锁让等待者离场，只剩持有者在跑；加上 firstfit 和 unfair 允许刚解锁的线程立刻再拿锁，大多数加解锁都发生在同一个核的缓存里。这一解释是从测量推断的。</li>
+    <li lang="en"><strong>Under contention</strong>: with one shared lock and 10 threads, one lock-plus-unlock costs 108.9 ns with the spinlock, 13.5 ns with <code>std::mutex</code> and 10.3 ns with <code>os_unfair_lock</code>. Each unlock invalidates the copies of every waiter reading the line, and they all rush in, so the line travels between cores (Phase 0’s false sharing, except that this time the sharing is real). A sleeping lock takes the waiters off the cores and leaves the holder running alone; and because firstfit and unfair let the thread that just unlocked take the lock straight back, most lock-unlock pairs happen in one core’s cache. This explanation is inferred from the measurements.</li>
+    <li lang="zh-CN"><strong>超额订阅时</strong>：20 个线程跑在 10 个核上，自旋锁涨到 181.6 ns，两把睡眠锁仍在 13–15 ns。持锁线程被调度器换下时，其他线程会在它回来之前把整个时间片都花在空转上，而它们占着的核恰恰是持有者回来需要的。<code>sample</code> 也印证了这一点：自旋锁的运行里，内核等待调用一次都没有出现，等待者一直在用户态转。</li>
+    <li lang="en"><strong>When oversubscribed</strong>: with 20 threads on 10 cores, the spinlock rises to 181.6 ns while both sleeping locks stay at 13–15 ns. When the scheduler takes the holder off its core, the other threads spend their whole time slices spinning until it comes back, and the cores they occupy are exactly what the holder needs to return. <code>sample</code> confirms it: in the spinlock run not a single kernel wait call appears, and the waiters keep spinning in user space.</li>
+  </ul>
+  <p lang="zh-CN"><strong>为什么内核里的自旋锁没有这个问题</strong>：Linux 的 <code>spin_lock</code> 和 XNU 的 <code>lck_spin_lock</code> 持锁时关抢占，持有者不会被换下，所以等待者最多等完一个很短的临界区；代价是持锁时不许睡眠。用户态做不到关抢占，这正是 macOS 弃用 <code>OSSpinLock</code> 的原因：SDK 的 <code>libkern/OSSpinLockDeprecated.h</code> 写明这些接口不应再使用，尤其当不同优先级的线程可能争用同一把锁时，并让人改用 <code>&lt;os/lock.h&gt;</code>。内核一侧的细节见 Kernel Engineering <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Phase 3 · Concurrency &amp; IPC</a> 概念 1。</p>
+  <p lang="en"><strong>Why spinlocks in the kernel do not have this problem</strong>: Linux’s <code>spin_lock</code> and XNU’s <code>lck_spin_lock</code> disable preemption while the lock is held, so the holder cannot be taken off its core and a waiter waits at most for one short critical section; the price is that the holder may not sleep. User space cannot disable preemption, which is exactly why macOS deprecated <code>OSSpinLock</code>: the SDK header <code>libkern/OSSpinLockDeprecated.h</code> says these interfaces should no longer be used, particularly where threads of differing priorities may contend on the same lock, and points to <code>&lt;os/lock.h&gt;</code> instead. The kernel side is in Kernel Engineering <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Phase 3 · Concurrency &amp; IPC</a>, concept 1.</p>
+  <p lang="zh-CN">延伸阅读：Bos 第 4 章「Building Our Own Spin Lock」；Herlihy 等《The Art of Multiprocessor Programming》中讲自旋锁与争用的一章（TAS、TTAS、退避、队列锁）；McKenney 第 7 章「Locking」的 7.3「Locking Implementation Issues」。</p>
+  <p lang="en">Further reading: Bos, Chapter 4, “Building Our Own Spin Lock”; the chapter on spin locks and contention in Herlihy et al., <em>The Art of Multiprocessor Programming</em> (TAS, TTAS, backoff, queue locks); McKenney, Chapter 7, “Locking”, section 7.3, “Locking Implementation Issues”.</p>
+
+  <h3 lang="zh-CN">4. 读写锁、锁粒度与护航效应</h3><h3 lang="en">4. Reader-writer locks, lock granularity and convoying</h3>
+  <p lang="zh-CN"><strong>读写锁</strong>允许多个读者同时进入，写者独占。C++17 的 <code>std::shared_mutex</code> 用 <code>std::shared_lock</code> 读、<code>std::unique_lock</code> 或 <code>std::lock_guard</code> 写。它并不免费：本机 libc++ 的头文件 <code>&lt;shared_mutex&gt;</code> 里，<code>__shared_mutex_base</code> 由一把 <code>mutex</code>、两个 <code>condition_variable</code> 和一个状态字组成，所以每次 <code>lock_shared</code> 都要先拿那把内部 mutex 改读者计数。Lab B 的只读测试（2026-10-31）：</p>
+  <p lang="en">A <strong>reader-writer lock</strong> lets several readers in at once and gives a writer exclusive access. C++17’s <code>std::shared_mutex</code> reads with <code>std::shared_lock</code> and writes with <code>std::unique_lock</code> or <code>std::lock_guard</code>. It is not free: in this Mac’s libc++ header <code>&lt;shared_mutex&gt;</code>, <code>__shared_mutex_base</code> consists of one <code>mutex</code>, two <code>condition_variable</code>s and a state word, so every <code>lock_shared</code> first takes that internal mutex to change the reader count. Lab B’s read-only test (2026-10-31):</p>
+  <ul>
+    <li lang="zh-CN">临界区只读 1 个 <code>long</code>：<code>shared_mutex</code> 在每种线程数下都比 <code>std::mutex</code> 慢，10 线程时 11.0 ms 对 5.4 ms。</li>
+    <li lang="en">A critical section that reads 1 <code>long</code>: <code>shared_mutex</code> is slower than <code>std::mutex</code> at every thread count, 11.0 ms against 5.4 ms at 10 threads.</li>
+    <li lang="zh-CN">读 512 个 <code>long</code>（4 KiB）：两者差不多，读者计数那条缓存行上的争用抵消了并发读的收益。</li>
+    <li lang="en">Reading 512 <code>long</code>s (4 KiB): the two are about equal, because contention on the cache line holding the reader count cancels the gain from reading concurrently.</li>
+    <li lang="zh-CN">读 16384 个 <code>long</code>（128 KiB）：<code>shared_mutex</code> 在 4 线程时 10.8 ms，<code>std::mutex</code> 76.7 ms，快 7 倍。临界区足够长，读者真的同时在读，读写锁才划算。</li>
+    <li lang="en">Reading 16384 <code>long</code>s (128 KiB): at 4 threads <code>shared_mutex</code> takes 10.8 ms and <code>std::mutex</code> 76.7 ms, 7 times faster. Only when the critical section is long enough for readers really to read at the same time does a reader-writer lock pay off.</li>
+  </ul>
+  <p lang="zh-CN"><strong>锁粒度</strong>：一把大锁保护所有数据（粗粒度）简单、不会死锁，但所有线程排成一队；每个桶、每个对象一把锁（细粒度）能并行，但锁多了要操心顺序（概念 5），而且每把锁本身都要付概念 2 的那几纳秒。最好的锁是不需要的锁：Lab A 的第三种修法让每个线程只加自己的局部和，最后再合并，完全没有共享，因而也没有同步的代价。McKenney 把这种做法叫作分区（partitioning）。</p>
+  <p lang="en"><strong>Lock granularity</strong>: one big lock over all the data (coarse-grained) is simple and cannot deadlock, but every thread queues behind it; one lock per bucket or per object (fine-grained) allows parallelism, but more locks mean worrying about order (concept 5), and every lock still costs the few nanoseconds of concept 2. The best lock is the one you do not need: Lab A’s third fix has each thread add only to its own partial sum and combines them at the end, so nothing is shared and there is no synchronization cost. McKenney calls this partitioning.</p>
+  <p lang="zh-CN"><strong>护航效应（lock convoy）</strong>：若一把锁严格先来先得地交给排队最久的线程，而那个线程还在睡眠、要等内核唤醒，那么每次交接都要付一次唤醒的延迟，期间锁空着，所有线程排成一列慢慢挪，就像车队跟着最慢的车。firstfit 和 unfair 的设计正是为了避开它：让正在运行的线程直接拿走锁。代价是公平性：<code>&lt;os/lock.h&gt;</code> 的注释写明，名字里的 unfair 指不保证获取顺序，刚解锁的线程可能在被唤醒的等待者之前再次拿到锁，这对性能常常有利，但等待者可能饿死。</p>
+  <p lang="en"><strong>Lock convoys</strong>: if a lock is handed strictly first-come-first-served to the thread that has waited longest, and that thread is asleep and must wait for the kernel to wake it, then every hand-off pays one wake-up latency while the lock sits idle, and all the threads crawl along in a column like cars behind the slowest one. The firstfit and unfair designs exist to avoid this: the thread that is already running takes the lock. The price is fairness: the comment in <code>&lt;os/lock.h&gt;</code> says that “unfair” means no attempt at fair acquisition order, so a thread that has just unlocked may take the lock again before a woken waiter gets the chance; this is often good for performance, but waiters may starve.</p>
+  <p lang="zh-CN">延伸阅读：McKenney 第 6 章「Partitioning and Synchronization Design」（6.3「Synchronization Granularity」）和第 7 章的 7.2「Types of Locks」（含 Reader-Writer Locks）；Bos 第 9 章的「Reader-Writer Lock」一节（避免写者忙等、避免写者饿死）。</p>
+  <p lang="en">Further reading: McKenney, Chapter 6, “Partitioning and Synchronization Design” (6.3, “Synchronization Granularity”), and section 7.2 of Chapter 7, “Types of Locks” (including Reader-Writer Locks); the “Reader-Writer Lock” section of Bos, Chapter 9 (avoiding busy-looping writers and writer starvation).</p>
+
+  <h3 lang="zh-CN">5. 死锁与加锁顺序</h3><h3 lang="en">5. Deadlock and lock ordering</h3>
+  <p lang="zh-CN">死锁需要四个条件同时成立（Coffman 条件）：互斥（资源一次只能给一个线程）、持有并等待（拿着一把锁去等另一把）、不可抢占（锁不能被强行收回）、循环等待（T1 等 T2 手里的锁，T2 又等 T1 手里的锁）。前三条是锁的本性，能打破的通常是第四条。</p>
+  <p lang="en">Deadlock needs four conditions at once (the Coffman conditions): mutual exclusion (a resource goes to one thread at a time), hold and wait (holding one lock while waiting for another), no preemption (a lock cannot be taken away by force) and circular wait (T1 waits for a lock T2 holds while T2 waits for a lock T1 holds). The first three are the nature of locks; the one you can usually break is the fourth.</p>
+  <ul>
+    <li lang="zh-CN"><strong>全局加锁顺序</strong>：给所有锁规定一个顺序（按层级、按地址、按 ID），每个线程都按这个顺序拿。这样等待关系永远只朝一个方向，不可能成环。动画 (b) 就是这个对比。</li>
+    <li lang="en"><strong>A global lock order</strong>: give all locks one order (by level, by address, by ID) and have every thread take them in that order. The waits then always point one way and can never form a cycle. Diagram (b) shows this contrast.</li>
+    <li lang="zh-CN"><strong><code>std::scoped_lock</code></strong>（C++17）一次拿多把锁，用一个避免死锁的算法，所以参数顺序写反了也不会死锁。本机实测：两个线程分别以 <code>(a, b)</code> 和 <code>(b, a)</code> 的顺序用它，每次都正常结束；换成两个按相反顺序的 <code>std::lock_guard</code> 并在中间停 10 ms，每次都卡死。</li>
+    <li lang="en"><strong><code>std::scoped_lock</code></strong> (C++17) takes several locks at once with a deadlock-avoidance algorithm, so even arguments written in the opposite order do not deadlock. Measured on this Mac: two threads using it with <code>(a, b)</code> and <code>(b, a)</code> finish every time; with two <code>std::lock_guard</code>s in opposite order and a 10 ms pause in between, it hangs every time.</li>
+    <li lang="zh-CN"><strong>持锁时别调用你不了解的代码</strong>：回调、虚函数、别人的库都可能在里面拿另一把锁，顺序就不在你手里了。</li>
+    <li lang="en"><strong>Do not call code you do not know while holding a lock</strong>: a callback, a virtual function or someone else’s library may take another lock inside, and the order is no longer in your hands.</li>
+  </ul>
+  <p lang="zh-CN"><strong>怎样认出死锁</strong>：程序卡住但 CPU 占用为零。本机对卡死的程序做 <code>sample</code>，两个线程都停在 <code>__psynch_mutexwait</code>，<code>ps</code> 报告的 CPU 时间是 0:00.00（2026-10-31）。TSan 在 Linux 上有锁顺序反转（lock-order-inversion）的检测，但本机实测没有报：同样倒序加锁、未卡死的程序，带 <code>-fsanitize=thread</code> 运行，即使设 <code>TSAN_OPTIONS=detect_deadlocks=1</code> 也没有任何输出、退出码 0。在 Mac 上不要指望 TSan 帮你找死锁。Linux 内核里对应的工具是 lockdep，见 Kernel Phase 3。</p>
+  <p lang="en"><strong>How to recognise a deadlock</strong>: the program hangs at zero CPU use. Running <code>sample</code> on the hung program on this Mac shows both threads in <code>__psynch_mutexwait</code>, and <code>ps</code> reports a CPU time of 0:00.00 (2026-10-31). TSan has lock-order-inversion detection on Linux, but on this Mac it reported nothing: a program with the same inverted order that did not hang, run under <code>-fsanitize=thread</code>, printed nothing and exited 0, even with <code>TSAN_OPTIONS=detect_deadlocks=1</code>. On a Mac, do not count on TSan to find deadlocks. The Linux kernel’s counterpart tool is lockdep; see Kernel Phase 3.</p>
+  <p lang="zh-CN">延伸阅读：McKenney 第 7 章「Locking」的 7.1「Staying Alive」（Deadlock、Livelock and Starvation、Unfairness、Inefficiency 四小节）和 7.2.4「Scoped Locking」；Williams 中讲线程间共享数据的一章里关于避免死锁的部分（<code>std::lock</code>、锁层级）。</p>
+  <p lang="en">Further reading: McKenney, Chapter 7, “Locking”, section 7.1, “Staying Alive” (the four subsections Deadlock, Livelock and Starvation, Unfairness, Inefficiency) and 7.2.4, “Scoped Locking”; the part on avoiding deadlock in Williams’ chapter on sharing data between threads (<code>std::lock</code>, lock hierarchies).</p>
+
+  <h3 lang="zh-CN">6. 优先级反转与优先级继承</h3><h3 lang="en">6. Priority inversion and priority inheritance</h3>
+  <p lang="zh-CN">三个线程，优先级高 H、中 M、低 L。L 拿着锁；H 想要这把锁，只好等 L；这时 M 就绪，它比 L 优先级高，于是抢走 L 的核一直跑。结果 H 实际上在等 M，一个和锁毫不相干的中优先级线程。最著名的例子是 1997 年火星探路者号（Mars Pathfinder）反复重启，修法是在 VxWorks 里打开那把互斥锁的优先级继承。在 macOS 上，「优先级」主要就是 QoS 类：一个 <code>QOS_CLASS_USER_INTERACTIVE</code> 的界面线程等一个 <code>QOS_CLASS_BACKGROUND</code> 线程手里的锁，正是这种局面。</p>
+  <p lang="en">Three threads with high, medium and low priority: H, M and L. L holds the lock; H wants it and has to wait for L; then M becomes runnable, it outranks L, and it takes L’s core and keeps running. H is now in effect waiting for M, a medium-priority thread that has nothing to do with the lock. The best-known case is the Mars Pathfinder rover resetting repeatedly in 1997, fixed by turning on priority inheritance for that mutex in VxWorks. On macOS, “priority” is mostly the QoS class: a <code>QOS_CLASS_USER_INTERACTIVE</code> UI thread waiting for a lock held by a <code>QOS_CLASS_BACKGROUND</code> thread is exactly this situation.</p>
+  <ul>
+    <li lang="zh-CN"><strong>优先级继承</strong>：H 开始等锁时，系统把 L 的优先级临时提到 H 的水平，M 就抢不走 L 的核；L 放锁时恢复原优先级，H 拿到锁。做到这一点的前提是<strong>系统知道谁持有这把锁</strong>。</li>
+    <li lang="en"><strong>Priority inheritance</strong>: when H starts waiting for the lock, the system temporarily raises L to H’s level, so M cannot take L’s core; when L releases the lock, it drops back and H gets the lock. The precondition is that <strong>the system knows who holds the lock</strong>.</li>
+    <li lang="zh-CN"><code>os_unfair_lock</code> 满足这个前提：<code>&lt;os/lock.h&gt;</code> 的注释写明，锁里的值包含线程所有权信息，系统可以用它尝试解决优先级反转。内核一侧借 turnstile 把等待者的优先级借给持有者，见 Kernel Phase 3 概念 1、概念 8。</li>
+    <li lang="en"><code>os_unfair_lock</code> meets the precondition: the comment in <code>&lt;os/lock.h&gt;</code> says the value stored in the lock contains thread ownership information that the system may use to attempt to resolve priority inversions. On the kernel side, a turnstile lends the waiter’s priority to the holder; see Kernel Phase 3, concepts 1 and 8.</li>
+    <li lang="zh-CN">自旋锁不满足：锁字里只有「占用 / 空闲」一位，内核不知道该提谁；而且高优先级的等待者在空转，反而占着低优先级持有者需要的核。这是 <code>OSSpinLock</code> 被弃用的直接原因。</li>
+    <li lang="en">A spinlock does not: its lock word holds only one bit, taken or free, so the kernel does not know whom to boost; and the high-priority waiter is spinning, occupying the very core the low-priority holder needs. That is the direct reason <code>OSSpinLock</code> was deprecated.</li>
+    <li lang="zh-CN">POSIX 的做法是互斥锁属性 <code>PTHREAD_PRIO_INHERIT</code>（本机 <code>pthread.h</code> 里有这个宏）；Linux 上它落到 PI futex（<code>FUTEX_LOCK_PI</code>，见 <code>futex(2)</code>）和内核的 rt_mutex。本机的默认 pthread mutex 是否做继承，以下是读源码的结论，没有实测：默认属性是 <code>PTHREAD_PRIO_NONE</code>（libpthread 的 <code>types_internal.h</code>），但 XNU 的 psynch 把普通 mutex 的等待者挂在一个以持有者为 inheritor 的 turnstile 上（<code>kern_synch.c</code>），所以有争用时等待者很可能把优先级推给持有者。</li>
+    <li lang="en">The POSIX route is the mutex attribute <code>PTHREAD_PRIO_INHERIT</code> (the macro exists in this Mac’s <code>pthread.h</code>); on Linux it maps to PI futexes (<code>FUTEX_LOCK_PI</code>, see <code>futex(2)</code>) and the kernel’s rt_mutex. Whether this Mac’s default pthread mutex does inheritance comes from reading the source, not from measurement: the default attribute is <code>PTHREAD_PRIO_NONE</code> (libpthread’s <code>types_internal.h</code>), yet XNU’s psynch parks plain-mutex waiters on a turnstile with the owner as inheritor (<code>kern_synch.c</code>), so contended waiters likely push their priority onto the holder.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：Bos 第 8 章 Linux 部分的「Priority Inheritance Futex Operations」和 macOS 部分的「os_unfair_lock」；McKenney 第 7 章 7.1.3「Unfairness」。</p>
+  <p lang="en">Further reading: “Priority Inheritance Futex Operations” in the Linux part of Bos, Chapter 8, and “os_unfair_lock” in its macOS part; McKenney, Chapter 7, section 7.1.3, “Unfairness”.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：mutex ↔ 自旋锁 ↔ 读写锁 ↔ 原子操作</h2><h2 id="compare-en" lang="en">Comparison: mutex ↔ spinlock ↔ RW lock ↔ atomic</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">这件事</span><span lang="en">Item</span></th><th><span lang="zh-CN">互斥锁（<code>std::mutex</code>、<code>os_unfair_lock</code>）</span><span lang="en">Mutex (<code>std::mutex</code>, <code>os_unfair_lock</code>)</span></th><th><span lang="zh-CN">自旋锁</span><span lang="en">Spinlock</span></th><th><span lang="zh-CN">读写锁（<code>std::shared_mutex</code>）</span><span lang="en">RW lock (<code>std::shared_mutex</code>)</span></th><th><span lang="zh-CN">原子操作（<code>std::atomic</code>）</span><span lang="en">Atomic (<code>std::atomic</code>)</span></th></tr>
+    <tr><td><span lang="zh-CN">拿不到时</span><span lang="en">When it cannot proceed</span></td><td><span lang="zh-CN">在内核里睡眠：本机 psynch 或 ulock，Linux 上 futex</span><span lang="en">Sleeps in the kernel: psynch or ulock here, futex on Linux</span></td><td><span lang="zh-CN">原地空转，占着核</span><span lang="en">Spins in place, holding a core</span></td><td><span lang="zh-CN">读者可以同时进入；写者和被写者挡住的读者睡眠</span><span lang="en">Readers enter together; a writer, and readers blocked by one, sleep</span></td><td><span lang="zh-CN">不存在「拿不到」：一条读改写指令（本机 <code>ldadd</code>）</span><span lang="en">There is no “cannot proceed”: one read-modify-write instruction (<code>ldadd</code> here)</span></td></tr>
+    <tr><td><span lang="zh-CN">本机无争用代价</span><span lang="en">Uncontended cost here</span></td><td><span lang="zh-CN">每次加解锁 3.7 ns；<code>os_unfair_lock</code> 2.2 ns</span><span lang="en">3.7 ns per lock and unlock; 2.2 ns for <code>os_unfair_lock</code></span></td><td><span lang="zh-CN">3.6–4.2 ns，不比 mutex 快</span><span lang="en">3.6–4.2 ns, no faster than a mutex</span></td><td><span lang="zh-CN">1 线程只读时比 <code>std::mutex</code> 慢约 30 %</span><span lang="en">About 30 % slower than <code>std::mutex</code> for one reader</span></td><td><span lang="zh-CN">约 1.6 ns 一次（Phase 0 Lab B，计数器各占一行）</span><span lang="en">About 1.6 ns each (Phase 0 Lab B, one counter per line)</span></td></tr>
+    <tr><td><span lang="zh-CN">10 线程抢一把</span><span lang="en">10 threads on one</span></td><td><span lang="zh-CN">13.5 ns；<code>os_unfair_lock</code> 10.3 ns</span><span lang="en">13.5 ns; 10.3 ns for <code>os_unfair_lock</code></span></td><td><span lang="zh-CN">108.9 ns</span><span lang="en">108.9 ns</span></td><td><span lang="zh-CN">只读、临界区 128 KiB 时 4 线程比 mutex 快 7 倍；临界区短时更慢</span><span lang="en">Read-only with a 128 KiB section: 7 times faster than a mutex at 4 threads; slower when the section is short</span></td><td><span lang="zh-CN">4 线程共 400 万次：55.6 ms（Lab A）</span><span lang="en">4 threads, 4 million in total: 55.6 ms (Lab A)</span></td></tr>
+    <tr><td><span lang="zh-CN">20 线程、10 个核</span><span lang="en">20 threads, 10 cores</span></td><td><span lang="zh-CN">13.0 ns；<code>os_unfair_lock</code> 14.8 ns</span><span lang="en">13.0 ns; 14.8 ns for <code>os_unfair_lock</code></span></td><td><span lang="zh-CN">181.6 ns：持有者被换下时别人在空转</span><span lang="en">181.6 ns: others spin while the holder is off its core</span></td><td><span lang="zh-CN">本页未测</span><span lang="en">Not measured here</span></td><td><span lang="zh-CN">本页未测</span><span lang="en">Not measured here</span></td></tr>
+    <tr><td><span lang="zh-CN">临界区里可以阻塞吗</span><span lang="en">May the critical section block</span></td><td><span lang="zh-CN">可以，但会拖住所有等待者</span><span lang="en">Yes, but it holds up every waiter</span></td><td><span lang="zh-CN">不应该：等待者会一直空转</span><span lang="en">It should not: waiters keep spinning</span></td><td><span lang="zh-CN">可以，同 mutex</span><span lang="en">Yes, as with a mutex</span></td><td><span lang="zh-CN">没有临界区，只有一次读改写</span><span lang="en">No critical section, only one read-modify-write</span></td></tr>
+    <tr><td><span lang="zh-CN">优先级反转</span><span lang="en">Priority inversion</span></td><td><span lang="zh-CN"><code>os_unfair_lock</code> 记录持有者，系统可以继承优先级；默认 pthread mutex 读源码看很可能经 turnstile 继承，未实测</span><span lang="en"><code>os_unfair_lock</code> records the owner so the system can pass priority; the default pthread mutex likely inherits through a turnstile, from source, not measured</span></td><td><span lang="zh-CN">无法继承，所以 <code>OSSpinLock</code> 被弃用</span><span lang="en">No inheritance possible, which is why <code>OSSpinLock</code> was deprecated</span></td><td><span lang="zh-CN">libc++ 的实现建立在一把 mutex 上</span><span lang="en">libc++ builds it on one mutex</span></td><td><span lang="zh-CN">不涉及：没有等待</span><span lang="en">Not applicable: nothing waits</span></td></tr>
+    <tr><td><span lang="zh-CN">适合</span><span lang="en">Best for</span></td><td><span lang="zh-CN">默认选择</span><span lang="en">The default choice</span></td><td><span lang="zh-CN">用户态几乎没有；内核里关抢占的短临界区</span><span lang="en">Almost nothing in user space; short sections in the kernel with preemption off</span></td><td><span lang="zh-CN">读远多于写，而且读的临界区长</span><span lang="en">Reads far outnumber writes, and read sections are long</span></td><td><span lang="zh-CN">单个计数器或标志；几个变量要一起改时不够用</span><span lang="en">A single counter or flag; not enough when several variables change together</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 两个线程抢着给一个计数器加 1，然后加上锁</h3><h3 lang="en">(a) Two threads racing to add 1 to a counter, then under a lock</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：上半部分没有锁，下半部分用 std::mutex。每一行是一个线程或内存里的 counter，从左到右是时间。-O2 下 ++counter 是 ldr、add、str 三条指令。按播放逐步看。",
+           "1. T1 执行 ldr：从内存读到 counter = 5，放进自己的寄存器。",
+           "2. T1 还没写回，T2 也执行 ldr，读到的同样是 5。两个线程手里是同一个旧值。",
+           "3. T1 加 1 写回 6，T2 也加 1 写回 6。两次加法只留下一次：counter 是 6，本该是 7。Lab A 里 4 个线程各加 100 万次，最后只剩约 100 万到 160 万。",
+           "4. 加上锁：T1 先拿到锁，读 5、写 6、解锁，三条指令成为一个整体。T2 拿不到锁，在内核里睡眠（本机走 psynch，Linux 上是 futex），不占用核。",
+           "5. T1 解锁时把 T2 唤醒。T2 拿到锁，读到的是 6，写回 7，结果正确。代价是时间：Lab A 里加锁的版本中位数 72.9 ms，没有锁的版本约 3 ms。"]'
+         data-captions-en='["The whole picture: the top half has no lock, the bottom half uses std::mutex. Each row is a thread or the counter in memory, and time runs from left to right. At -O2, ++counter is three instructions: ldr, add and str. Press Play to step through.",
+           "1. T1 runs ldr: it reads counter = 5 from memory into its own register.",
+           "2. Before T1 writes back, T2 also runs ldr and reads the same 5. Both threads now hold the same stale value.",
+           "3. T1 adds 1 and writes back 6; T2 adds 1 and writes back 6 too. Of two additions only one is left: counter is 6 when it should be 7. In Lab A, with 4 threads adding a million times each, only about 1.0 to 1.6 million remain.",
+           "4. With a lock: T1 gets the lock first, reads 5, writes 6 and unlocks, so the three instructions become one unit. T2 cannot get the lock and sleeps in the kernel (psynch on this Mac, futex on Linux), using no core.",
+           "5. T1 wakes T2 when it unlocks. T2 gets the lock, reads 6 and writes back 7: the result is right. The price is time: in Lab A the locked version has a median of 72.9 ms, against about 3 ms without a lock."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="24" lang="zh-CN">没有锁：两个线程同时 ++counter</text><text x="30" y="24" lang="en">No lock: two threads run ++counter at once</text>
+      <path class="arrow" d="M130 190 L600 190"/>
+      <text x="606" y="194" class="small" lang="zh-CN">时间</text><text x="606" y="194" class="small" lang="en">time</text>
+      <text x="30" y="66" class="mono">T1</text>
+      <text x="30" y="110" class="mono">counter</text>
+      <text x="30" y="154" class="mono">T2</text>
+      <path class="lane" d="M130 105 L600 105"/>
+
+      <!-- step 1: T1 reads 5 -->
+      <g data-step="1"><rect class="box par" x="130" y="44" width="110" height="34"/><text x="142" y="66" class="mono">ldr → 5</text>
+        <text x="185" y="98" class="mono" text-anchor="middle">5</text></g>
+      <!-- step 2: T2 reads 5 -->
+      <g data-step="2"><rect class="box par" x="250" y="132" width="110" height="34"/><text x="262" y="154" class="mono">ldr → 5</text>
+        <text x="305" y="98" class="mono" text-anchor="middle">5</text></g>
+      <!-- step 3: both store 6 -->
+      <g data-step="3"><rect class="box par" x="370" y="44" width="110" height="34"/><text x="382" y="66" class="mono">add, str 6</text>
+        <rect class="box par" x="490" y="132" width="110" height="34"/><text x="502" y="154" class="mono">add, str 6</text>
+        <text x="425" y="98" class="mono" text-anchor="middle">6</text><text x="545" y="98" class="mono" text-anchor="middle">6</text>
+        <text x="640" y="92" style="fill: var(--ink-2)" lang="zh-CN">✕ 结果 6，应为 7</text><text x="640" y="92" style="fill: var(--ink-2)" lang="en">✕ result 6, should be 7</text>
+        <text x="640" y="114" class="small" lang="zh-CN">一次加法丢了</text><text x="640" y="114" class="small" lang="en">one increment is lost</text>
+        <text x="640" y="136" class="small" lang="zh-CN">Lab A：4×100 万次只剩约 100–160 万</text><text x="640" y="136" class="small" lang="en">Lab A: 4 × 1 M adds leave about 1.0–1.6 M</text></g>
+
+      <line x1="20" y1="208" x2="880" y2="208" class="lane"/>
+      <text x="30" y="232" lang="zh-CN">有锁：std::mutex 把 ldr、add、str 变成一个整体</text><text x="30" y="232" lang="en">With a lock: std::mutex makes ldr, add, str one unit</text>
+      <text x="30" y="272" class="mono">T1</text>
+      <text x="30" y="316" class="mono">counter</text>
+      <text x="30" y="360" class="mono">T2</text>
+      <path class="lane" d="M130 311 L620 311"/>
+
+      <!-- step 4: T1 under the lock, T2 sleeping -->
+      <g data-step="4"><rect class="box" x="130" y="250" width="240" height="34"/><text x="142" y="272" class="mono">lock; ldr 5; str 6; unlock</text>
+        <text x="140" y="304" class="mono">5</text><text x="360" y="304" class="mono">6</text>
+        <rect class="box linux" x="130" y="338" width="240" height="34"/><text x="142" y="360" lang="zh-CN">等锁：在内核里睡眠</text><text x="142" y="360" lang="en">waits: asleep in the kernel</text>
+        <text x="142" y="392" class="small" lang="zh-CN">本机 __psynch_mutexwait · Linux futex</text><text x="142" y="392" class="small" lang="en">here __psynch_mutexwait · Linux futex</text></g>
+      <!-- step 5: T2 after the wake-up -->
+      <g data-step="5"><path class="arrow" d="M372 280 C 384 300, 384 330, 382 352"/>
+        <text x="392" y="330" class="small" lang="zh-CN">唤醒</text><text x="392" y="330" class="small" lang="en">wake</text>
+        <rect class="box" x="400" y="338" width="240" height="34"/><text x="412" y="360" class="mono">lock; ldr 6; str 7; unlock</text>
+        <text x="620" y="304" class="mono">7</text>
+        <text x="660" y="300" lang="zh-CN">结果 7，正确</text><text x="660" y="300" lang="en">result 7, correct</text>
+        <text x="660" y="322" class="small" lang="zh-CN">Lab A：72.9 ms，无锁约 3 ms</text><text x="660" y="322" class="small" lang="en">Lab A: 72.9 ms, about 3 ms unlocked</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 倒序加锁造成的死锁，以及统一顺序之后</h3><h3 lang="en">(b) A deadlock from inverted lock order, then the ordered version</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：左边两个线程按相反的顺序拿两把锁，右边两个线程按同一个顺序拿。实线箭头从锁指向持有它的线程，流动的虚线从线程指向它在等的锁。按播放逐步看。",
+           "1. T1 拿到 mutex A。",
+           "2. 几乎同时，T2 拿到 mutex B。到这里一切正常，每个线程手里各有一把锁。",
+           "3. T1 接着要 B，B 在 T2 手里；T2 接着要 A，A 在 T1 手里。等待关系成了一个环，谁也不会放手：死锁。本机对卡死的程序做 sample，两个线程都停在 __psynch_mutexwait，CPU 时间为 0。",
+           "4. 右边：规定所有线程都先拿 A、再拿 B。T1 拿到 A；T2 也要先拿 A，于是在 A 上等，但它手里什么也没拿，不会挡住任何人。",
+           "5. T1 拿到 B，做完后放掉两把锁；T2 再依次拿 A 和 B。等待只朝一个方向，不可能成环。std::scoped_lock(a, b) 用避免死锁的算法一次拿两把，参数顺序写反也不会卡死。"]'
+         data-captions-en='["The whole picture: on the left two threads take two locks in opposite order; on the right both take them in the same order. A solid arrow points from a lock to the thread holding it, and a flowing dashed line points from a thread to the lock it is waiting for. Press Play to step through.",
+           "1. T1 takes mutex A.",
+           "2. Almost at the same moment, T2 takes mutex B. So far all is well: each thread holds one lock.",
+           "3. T1 now wants B, which T2 holds; T2 now wants A, which T1 holds. The waits form a cycle and neither will let go: deadlock. Running sample on the hung program on this Mac shows both threads in __psynch_mutexwait with zero CPU time.",
+           "4. On the right, every thread must take A before B. T1 gets A; T2 also has to take A first, so it waits on A, but it holds nothing and blocks nobody.",
+           "5. T1 takes B, finishes and releases both locks; then T2 takes A and B in turn. The waits point only one way, so no cycle can form. std::scoped_lock(a, b) takes both at once with a deadlock-avoidance algorithm, so even arguments in the opposite order do not hang."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="26" lang="zh-CN">倒序：T1 先 A 后 B，T2 先 B 后 A</text><text x="30" y="26" lang="en">Inverted: T1 takes A then B, T2 B then A</text>
+      <text x="470" y="26" lang="zh-CN">统一顺序：两个线程都先 A 后 B</text><text x="470" y="26" lang="en">One order: both threads take A, then B</text>
+      <line x1="450" y1="40" x2="450" y2="400" class="lane"/>
+      <rect class="box" x="60" y="60" width="120" height="44"/><text x="120" y="87" class="mono" text-anchor="middle">mutex A</text>
+      <rect class="box" x="280" y="60" width="120" height="44"/><text x="340" y="87" class="mono" text-anchor="middle">mutex B</text>
+      <rect class="box" x="60" y="250" width="120" height="44"/><text x="120" y="277" class="mono" text-anchor="middle">T1</text>
+      <rect class="box" x="280" y="250" width="120" height="44"/><text x="340" y="277" class="mono" text-anchor="middle">T2</text>
+      <rect class="box" x="500" y="60" width="120" height="44"/><text x="560" y="87" class="mono" text-anchor="middle">mutex A</text>
+      <rect class="box" x="720" y="60" width="120" height="44"/><text x="780" y="87" class="mono" text-anchor="middle">mutex B</text>
+      <rect class="box" x="500" y="250" width="120" height="44"/><text x="560" y="277" class="mono" text-anchor="middle">T2</text>
+      <rect class="box" x="720" y="250" width="120" height="44"/><text x="780" y="277" class="mono" text-anchor="middle">T1</text>
+
+      <!-- step 1: T1 holds A -->
+      <g data-step="1"><path class="arrow" d="M100 106 L100 246"/>
+        <text x="94" y="180" class="small" text-anchor="end" lang="zh-CN">持有</text><text x="94" y="180" class="small" text-anchor="end" lang="en">holds</text></g>
+      <!-- step 2: T2 holds B -->
+      <g data-step="2"><path class="arrow" d="M360 106 L360 246"/>
+        <text x="366" y="180" class="small" lang="zh-CN">持有</text><text x="366" y="180" class="small" lang="en">holds</text></g>
+      <!-- step 3: each waits for the other -->
+      <g data-step="3"><path class="arrow flow" d="M170 248 L300 108"/>
+        <path class="arrow flow" d="M290 248 L160 108"/>
+        <text x="230" y="230" class="small" text-anchor="middle" lang="zh-CN">等待</text><text x="230" y="230" class="small" text-anchor="middle" lang="en">waits</text>
+        <text x="40" y="336" style="fill: var(--ink-2)" lang="zh-CN">✕ 互相等待，成环：死锁</text><text x="40" y="336" style="fill: var(--ink-2)" lang="en">✕ each waits for the other, a cycle: deadlock</text>
+        <text x="40" y="360" class="small" lang="zh-CN">实测：两个线程都在 __psynch_mutexwait</text><text x="40" y="360" class="small" lang="en">measured: both threads in __psynch_mutexwait</text>
+        <text x="40" y="380" class="small" lang="zh-CN">CPU 时间 0:00.00，永远不会结束</text><text x="40" y="380" class="small" lang="en">CPU time 0:00.00, never finishes</text></g>
+      <!-- step 4: T1 holds A, T2 waits for A holding nothing -->
+      <g data-step="4"><path class="arrow" d="M604 106 L736 246"/>
+        <text x="680" y="166" class="small" lang="zh-CN">持有</text><text x="680" y="166" class="small" lang="en">holds</text>
+        <path class="arrow flow" d="M540 248 L540 108"/>
+        <text x="534" y="180" class="small" text-anchor="end" lang="zh-CN">等 A</text><text x="534" y="180" class="small" text-anchor="end" lang="en">waits for A</text>
+        <text x="470" y="336" class="small" lang="zh-CN">T2 在 A 上等，但手里什么也没拿</text><text x="470" y="336" class="small" lang="en">T2 waits on A while holding nothing</text></g>
+      <!-- step 5: T1 takes B, then T2 proceeds -->
+      <g data-step="5"><path class="arrow" d="M800 106 L800 246"/>
+        <text x="806" y="180" class="small" lang="zh-CN">持有</text><text x="806" y="180" class="small" lang="en">holds</text>
+        <text x="470" y="360" class="small" lang="zh-CN">T1 拿到 B、做完、放锁；T2 再依次拿 A、B</text><text x="470" y="360" class="small" lang="en">T1 gets B, finishes, unlocks; then T2 takes A, B</text>
+        <text x="470" y="380" class="small" lang="zh-CN">等待只朝一个方向，不可能成环</text><text x="470" y="380" class="small" lang="en">waits point one way, so no cycle can form</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 用 TSan 找到一个竞争，用三种方法修好它</h3><h3 lang="en">Lab A · Find a race with TSan and fix it three ways</h3>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>race.cpp</code>。4 个线程各对计数器加 100 万次；命令行参数选择做法：<code>race</code> 对普通 <code>long</code> 直接 <code>++</code>，<code>mutex</code> 用 <code>std::lock_guard</code> 加锁，<code>atomic</code> 用 <code>fetch_add</code>，<code>local</code> 让每个线程加自己的一格、最后再合并（每格相隔 128 字节，原因见 Phase 0 的伪共享）：</span><span lang="en">Save the program below as <code>race.cpp</code>. Four threads each add a million times to a counter; the command-line argument picks the method: <code>race</code> does a plain <code>++</code> on an ordinary <code>long</code>, <code>mutex</code> locks with <code>std::lock_guard</code>, <code>atomic</code> uses <code>fetch_add</code>, and <code>local</code> has each thread add to its own slot and combines them at the end (slots 128 bytes apart, for the false-sharing reason in Phase 0):</span><pre data-lang="cpp" data-file="race.cpp">// race.cpp: 4 threads add to one counter; mode picks the fix
+// usage: ./race race | mutex | atomic | local
+#include &lt;atomic&gt;
+#include &lt;chrono&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstring&gt;
+#include &lt;mutex&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+
+constexpr int THREADS = 4;
+constexpr long ITERS = 1'000'000;
+
+long counter = 0;                    // shared, plain long: racy in mode "race"
+std::mutex m;                        // fix 1
+std::atomic&lt;long&gt; acounter{0};       // fix 2
+
+int main(int argc, char** argv) {
+  const char* mode = argc &gt; 1 ? argv[1] : "race";
+  std::vector&lt;long&gt; partial(THREADS * 16, 0);   // fix 3: one slot per thread, 128 bytes apart
+  auto t0 = std::chrono::steady_clock::now();
+  {
+    std::vector&lt;std::jthread&gt; pool;
+    for (int t = 0; t &lt; THREADS; ++t)
+      pool.emplace_back([&amp;, t] {
+        for (long i = 0; i &lt; ITERS; ++i) {
+          if (!std::strcmp(mode, "race")) ++counter;
+          else if (!std::strcmp(mode, "mutex")) { std::lock_guard g(m); ++counter; }
+          else if (!std::strcmp(mode, "atomic")) acounter.fetch_add(1, std::memory_order_relaxed);
+          else partial[t * 16] += 1;
+        }
+      });
+  }
+  double ms = std::chrono::duration&lt;double, std::milli&gt;(std::chrono::steady_clock::now() - t0).count();
+  long total = counter + acounter.load();
+  for (int t = 0; t &lt; THREADS; ++t) total += partial[t * 16];
+  std::printf("%-6s total=%8ld expected=%ld  %7.2f ms\n", mode, total, THREADS * ITERS, ms);
+}</pre></li>
+      <li><span lang="zh-CN">不带 TSan 编译，跑三次。四百万次加法每次都丢掉一大半，而且每次丢的不一样（实验 Mac，Apple clang 21，2026-10-31）：</span><span lang="en">Build without TSan and run it three times. Of four million additions, more than half are lost every time, and a different number each time (lab Mac, Apple clang 21, 2026-10-31):</span><pre data-lang="sh">$ clang++ -std=c++20 -O2 race.cpp -o race_plain
+$ for i in 1 2 3; do ./race_plain race; done
+race   total= 1563740 expected=4000000     4.29 ms
+race   total= 1551935 expected=4000000     4.27 ms
+race   total= 1568299 expected=4000000     4.18 ms</pre></li>
+      <li><span lang="zh-CN">看汇编，确认 <code>++counter</code> 是三条指令。第 941–943 行是 <code>race</code> 分支，第 979–981 行是 <code>mutex</code> 分支（同样三条，但夹在 <code>lock</code> 和 <code>unlock</code> 的调用之间），第 986 行的 <code>ldadd</code> 是 <code>atomic</code> 分支：一条 ARMv8.1 LSE 原子加法指令。行号随编译器版本变化：</span><span lang="en">Read the assembly and confirm that <code>++counter</code> is three instructions. Lines 941–943 are the <code>race</code> branch, lines 979–981 the <code>mutex</code> branch (the same three, but between the <code>lock</code> and <code>unlock</code> calls), and the <code>ldadd</code> on line 986 is the <code>atomic</code> branch: one ARMv8.1 LSE atomic add instruction. Line numbers change with the compiler version:</span><pre data-lang="sh">$ clang++ -std=c++20 -O2 -S race.cpp -o race.s
+$ grep -n -A2 'ldr.*_counter@PAGEOFF' race.s; grep -n 'ldadd	x' race.s
+178:	ldr	x8, [x8, _counter@PAGEOFF]
+179-Lloh4:
+180-	adrp	x9, _acounter@PAGE
+--
+941:	ldr	x8, [x26, _counter@PAGEOFF]
+942-	add	x8, x8, #1
+943-	str	x8, [x26, _counter@PAGEOFF]
+--
+979:	ldr	x8, [x26, _counter@PAGEOFF]
+980-	add	x8, x8, #1
+981-	str	x8, [x26, _counter@PAGEOFF]
+986:	ldadd	x27, x8, [x28]</pre></li>
+      <li><span lang="zh-CN">带 TSan 编译并运行 <code>race</code>。TSan 指出两个线程在第 27 行（<code>++counter</code>）对同一个 8 字节的全局变量 <code>counter</code> 写，且两次写之间没有先后关系；随后进程以 134 退出：</span><span lang="en">Build with TSan and run <code>race</code>. TSan reports that two threads write the same 8-byte global <code>counter</code> at line 27 (<code>++counter</code>) with no ordering between the writes; then the process exits with 134:</span><pre data-lang="sh">$ clang++ -std=c++20 -g -O1 -fsanitize=thread race.cpp -o race_tsan
+$ ./race_tsan race; echo "exit=$?"
+==================
+WARNING: ThreadSanitizer: data race (pid=26262)
+  Write of size 8 at 0x000100900040 by thread T4:
+    #0 main::$_0::operator()() const race.cpp:27 (race_tsan:arm64+0x1000011c8)
+    …
+  Previous write of size 8 at 0x000100900040 by thread T1:
+    #0 main::$_0::operator()() const race.cpp:27 (race_tsan:arm64+0x1000011c8)
+    …
+  Location is global 'counter' at 0x000100900040 (race_tsan+0x100008040)
+  Thread T4 (tid=6880233, running) created by main thread at:
+    #0 pthread_create &lt;null&gt; (libclang_rt.tsan_osx_dynamic.dylib:arm64e+0x33bac)
+    …
+SUMMARY: ThreadSanitizer: data race race.cpp:27 in main::$_0::operator()() const
+==================
+race   total=  762046 expected=4000000   160.44 ms
+ThreadSanitizer: reported 1 warnings
+exit=134
+# 2026-10-31 实验机输出（… 处省略了 libc++ 内部的栈帧）</pre></li>
+      <li><span lang="zh-CN">用同一个 TSan 版本跑三种修法。三者都得到 4000000，没有警告，退出码 0。TSan 下的时间不能当性能数据（TSan 让 <code>mutex</code> 慢了 20 倍）：</span><span lang="en">Run the three fixes with the same TSan build. All three reach 4000000 with no warning and exit status 0. Times under TSan are not performance data (TSan makes <code>mutex</code> 20 times slower):</span><pre data-lang="sh">$ for m in mutex atomic local; do ./race_tsan $m; echo "exit=$?"; done
+mutex  total= 4000000 expected=4000000  1525.68 ms
+exit=0
+atomic total= 4000000 expected=4000000   181.66 ms
+exit=0
+local  total= 4000000 expected=4000000    51.18 ms
+exit=0</pre></li>
+      <li><span lang="zh-CN">回到不带 TSan 的版本，每种做法预热一次后跑 7 次。下面是把 7 次运行整理成的汇总，不是程序的原样输出（2026-10-31，本机）：</span><span lang="en">Go back to the build without TSan and run each method 7 times after one warm-up. Below is a summary compiled from the 7 runs, not the program’s raw output (2026-10-31, this Mac):</span><pre>mode    median    min     max    (ms, 7 runs after 1 warm-up, no TSan)
+race      2.95    2.59    6.77   total wrong every time
+mutex    72.85   66.92   77.76
+atomic   55.57   55.50   58.62
+local     8.31    2.86    8.33</pre>
+        <span lang="zh-CN">读懂结果。<code>mutex</code> 和 <code>atomic</code> 都对，但都慢了 20 倍上下：四个线程每做一次加法都要争同一条缓存行，<code>mutex</code> 还要多付一次加锁和解锁。<code>local</code> 也对，而且和错误的 <code>race</code> 一样只要几毫秒，因为四个线程根本不共享任何东西；它在 2.9 ms 和 8.3 ms 两档之间跳，主要是创建线程和调度放置的差别（从测量推断）。结论：修数据竞争的第一选择是不共享，其次是原子操作，锁留给几个变量必须一起改的时候。</span><span lang="en">Read the results. <code>mutex</code> and <code>atomic</code> are both correct, but both are about 20 times slower: for every addition the four threads fight over the same cache line, and <code>mutex</code> also pays for a lock and an unlock. <code>local</code> is correct too, and takes only a few milliseconds like the wrong <code>race</code>, because the four threads share nothing at all; it jumps between two levels, 2.9 ms and 8.3 ms, mostly because of thread creation and where the scheduler places the threads (inferred from the measurements). Conclusion: the first choice for fixing a data race is not to share, the second is an atomic, and a lock is for when several variables must change together.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 锁的争用随线程数怎样变化</h3><h3 lang="en">Lab B · How lock contention changes with the thread count</h3>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>contend.cpp</code>。每次运行一共做 200 万次「加锁、计数器加 1、解锁」，平均分给 T 个线程。<code>shared</code> 时所有线程用同一把锁和同一个计数器（有争用）；<code>private</code> 时每个线程有自己的锁和计数器（无争用），各占一条 128 字节的行。一个 <code>std::condition_variable</code> 做起跑门：所有线程都停在门口后才开始计时。三种锁是 <code>std::mutex</code>、用 <code>std::atomic_flag</code> 写的 test-and-test-and-set 自旋锁、<code>&lt;os/lock.h&gt;</code> 的 <code>os_unfair_lock</code>：</span><span lang="en">Save the program below as <code>contend.cpp</code>. Each run does 2 million “lock, add 1 to the counter, unlock” in total, split evenly across T threads. With <code>shared</code> every thread uses the same lock and counter (contended); with <code>private</code> each thread has its own lock and counter (uncontended), each in its own 128-byte line. A <code>std::condition_variable</code> is the starting gate: timing begins only once every thread is waiting at the gate. The three locks are <code>std::mutex</code>, a test-and-test-and-set spinlock built from <code>std::atomic_flag</code>, and <code>os_unfair_lock</code> from <code>&lt;os/lock.h&gt;</code>:</span><pre data-lang="cpp" data-file="contend.cpp">// contend.cpp: lock/unlock throughput for std::mutex, a spinlock and os_unfair_lock
+// usage: ./contend shared   (all threads use one lock)   ./contend private   (one lock per thread)
+//        an optional third word runs one lock only: ./contend shared unfair
+#include &lt;os/lock.h&gt;
+#include &lt;algorithm&gt;
+#include &lt;atomic&gt;
+#include &lt;chrono&gt;
+#include &lt;condition_variable&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstring&gt;
+#include &lt;mutex&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+
+struct Spin {                                     // test-and-test-and-set spinlock
+  std::atomic_flag f;                             // C++20: starts clear
+  void lock() {
+    while (f.test_and_set(std::memory_order_acquire))
+      while (f.test(std::memory_order_relaxed)) {}  // spin on a read, not on writes
+  }
+  void unlock() { f.clear(std::memory_order_release); }
+};
+struct Unfair {
+  os_unfair_lock l = OS_UNFAIR_LOCK_INIT;
+  void lock() { os_unfair_lock_lock(&amp;l); }
+  void unlock() { os_unfair_lock_unlock(&amp;l); }
+};
+template &lt;class L&gt; struct alignas(128) Slot { L lock; long count = 0; };  // one line each
+
+constexpr long OPS = 2'000'000;                   // total lock/unlock pairs per run
+
+template &lt;class L&gt; double run_once(int T, bool shared) {
+  std::vector&lt;Slot&lt;L&gt;&gt; slots(T);
+  std::mutex gm; std::condition_variable cv; bool go = false; int ready = 0;
+  std::chrono::steady_clock::time_point t0;
+  {
+    std::vector&lt;std::jthread&gt; pool;
+    for (int t = 0; t &lt; T; ++t)
+      pool.emplace_back([&amp;, t] {
+        Slot&lt;L&gt;&amp; s = slots[shared ? 0 : t];
+        { std::unique_lock g(gm); ++ready; cv.notify_all(); cv.wait(g, [&amp;] { return go; }); }
+        for (long i = 0; i &lt; OPS / T; ++i) { s.lock.lock(); ++s.count; s.lock.unlock(); }
+      });
+    std::unique_lock g(gm);
+    cv.wait(g, [&amp;] { return ready == T; });       // every thread is parked at the gate
+    t0 = std::chrono::steady_clock::now();
+    go = true;
+    cv.notify_all();
+  }                                               // jthreads join here
+  double ns = std::chrono::duration&lt;double, std::nano&gt;(std::chrono::steady_clock::now() - t0).count();
+  long sum = 0; for (auto&amp; s : slots) sum += s.count;
+  if (sum != OPS / T * T) std::puts("count mismatch");
+  return ns / (OPS / T * T);                      // wall ns per lock/unlock pair, all threads together
+}
+
+template &lt;class L&gt; void bench(const char* name, bool shared) {
+  std::printf("%-7s", name);
+  for (int T : {1, 2, 4, 8, 10, 20}) {
+    run_once&lt;L&gt;(T, shared);                       // warm-up
+    std::vector&lt;double&gt; v;
+    for (int r = 0; r &lt; 7; ++r) v.push_back(run_once&lt;L&gt;(T, shared));
+    std::sort(v.begin(), v.end());
+    std::printf(" %7.1f", v[3]);
+  }
+  std::puts("");
+}
+
+int main(int argc, char** argv) {
+  bool shared = !(argc &gt; 1 &amp;&amp; std::strcmp(argv[1], "private") == 0);
+  std::printf("%s lock, wall ns per lock+unlock, median of 7\nlock    T=1     T=2     T=4     T=8    T=10    T=20\n",
+              shared ? "one shared" : "one private");
+  const char* only = argc &gt; 2 ? argv[2] : "";
+  if (!*only || !std::strcmp(only, "mutex"))  bench&lt;std::mutex&gt;("mutex", shared);
+  if (!*only || !std::strcmp(only, "spin"))   bench&lt;Spin&gt;("spin", shared);
+  if (!*only || !std::strcmp(only, "unfair")) bench&lt;Unfair&gt;("unfair", shared);
+}</pre></li>
+      <li><span lang="zh-CN">编译，先跑无争用，再跑有争用。表里每格是「墙钟时间 ÷ 总次数」，即所有线程合起来平均每完成一次加解锁要多少纳秒；T = 20 时线程数是核数的两倍。<code>shared</code> 一次运行约 9 秒（2026-10-31 实测）：</span><span lang="en">Build it, run the uncontended case, then the contended one. Each cell is “wall time ÷ total operations”, the nanoseconds per completed lock-and-unlock for all threads together; at T = 20 there are twice as many threads as cores. The <code>shared</code> run takes about 9 seconds (measured 2026-10-31):</span><pre data-lang="sh">$ clang++ -std=c++20 -O2 contend.cpp -o contend
+$ ./contend private
+one private lock, wall ns per lock+unlock, median of 7
+lock    T=1     T=2     T=4     T=8    T=10    T=20
+mutex       3.7     1.9     1.0     0.7     0.7     0.7
+spin        4.2     2.2     1.2     0.7     0.6     0.6
+unfair      2.2     1.2     0.6     0.5     0.5     0.5
+$ ./contend shared
+one shared lock, wall ns per lock+unlock, median of 7
+lock    T=1     T=2     T=4     T=8    T=10    T=20
+mutex       3.7     8.0    12.6    13.2    13.5    13.0
+spin        3.6    20.6    28.0    78.5   108.9   181.6
+unfair      2.2    17.5    15.6    11.1    10.3    14.8</pre></li>
+      <li><span lang="zh-CN">读懂 <code>private</code>。没有争用时，理想情况是 T 个线程把时间压到 1/T，三种锁都接近：从 T = 1 到 T = 4 几乎正好减半再减半。T = 1 那一列就是三种锁的无争用代价：<code>os_unfair_lock</code> 2.2 ns，<code>std::mutex</code> 3.7 ns，自旋锁 4.2 ns。手写自旋锁在这里没有任何优势（概念 3）。</span><span lang="en">Read <code>private</code>. Without contention the ideal is that T threads cut the time to 1/T, and all three locks come close: from T = 1 to T = 4 the time halves and halves again almost exactly. The T = 1 column is each lock’s uncontended cost: 2.2 ns for <code>os_unfair_lock</code>, 3.7 ns for <code>std::mutex</code>, 4.2 ns for the spinlock. The hand-written spinlock has no advantage at all here (concept 3).</span></li>
+      <li><span lang="zh-CN">读懂 <code>shared</code>。一把锁同一时刻只能有一个持有者，所以最好的情况是时间不随 T 变。两把睡眠锁从 T = 4 起稳定在 10–15 ns；自旋锁随 T 一路上涨，10 线程 108.9 ns，20 线程 181.6 ns，比 <code>os_unfair_lock</code> 慢 12 倍。T = 2 时 <code>std::mutex</code>（8.0 ns）反而比 <code>os_unfair_lock</code>（17.5 ns）快，本页没有找到确切原因，记作待查。</span><span lang="en">Read <code>shared</code>. A lock has one holder at a time, so the best case is a time that does not change with T. From T = 4 on, both sleeping locks settle at 10–15 ns; the spinlock climbs with T, to 108.9 ns at 10 threads and 181.6 ns at 20, 12 times slower than <code>os_unfair_lock</code>. At T = 2, <code>std::mutex</code> (8.0 ns) is faster than <code>os_unfair_lock</code> (17.5 ns); this page found no definite reason, so treat it as an open question.</span></li>
+      <li><span lang="zh-CN">用 <code>sample</code> 看等待者去了哪里。第三个参数只跑一种锁；在它运行时采 1 秒：</span><span lang="en">Use <code>sample</code> to see where the waiters go. The third argument runs one lock only; sample it for 1 second while it runs:</span><pre data-lang="sh">$ ./contend shared unfair &gt; /dev/null &amp; sleep 0.3; sample $! 1 -file s_unfair.txt &gt; /dev/null 2&gt;&amp;1; wait
+$ grep -c -E "__ulock_wait2|__psynch_mutexwait" s_unfair.txt
+158
+$ grep -m3 -E "__ulock_wait2|__ulock_wake|__psynch_mutexwait|__psynch_mutexdrop" s_unfair.txt
+  12 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x183659d9c]
+  6 __ulock_wake  (in libsystem_kernel.dylib) + 8  [0x18364dbc8]
+  9 __ulock_wait2  (in libsystem_kernel.dylib) + 8  [0x183659d9c]
+# 同样做 mutex 和 spin（文件名换成 s_mutex.txt、s_spin.txt）。2026-10-31 实测：
+#   s_mutex.txt  149 行，例如  17 __psynch_mutexwait  /  5 __psynch_mutexdrop
+#   s_spin.txt     0 行：自旋的等待者从不进内核
+# 行首的数字是该栈帧被采到的次数；前面的树形缩进字符已省略</pre>
+        <span lang="zh-CN"><code>os_unfair_lock</code> 的等待者在 <code>__ulock_wait2</code> 里睡，<code>std::mutex</code> 的在 <code>__psynch_mutexwait</code> 里睡，自旋锁一次内核等待都没有：它的等待者全程在用户态占着核。</span><span lang="en"><code>os_unfair_lock</code> waiters sleep in <code>__ulock_wait2</code>, <code>std::mutex</code> waiters in <code>__psynch_mutexwait</code>, and the spinlock has not a single kernel wait: its waiters hold their cores in user space the whole time.</span></li>
+      <li><span lang="zh-CN">最后量读写锁。把下面的程序存成 <code>rw.cpp</code>：只有读者，每次在锁内读 1、512 或 16384 个 <code>long</code>，比较 <code>std::mutex</code> 和 <code>std::shared_mutex</code>：</span><span lang="en">Finally, measure the reader-writer lock. Save the program below as <code>rw.cpp</code>: readers only, each reading 1, 512 or 16384 <code>long</code>s inside the lock, comparing <code>std::mutex</code> with <code>std::shared_mutex</code>:</span><pre data-lang="cpp" data-file="rw.cpp">// rw.cpp: readers only, std::mutex versus std::shared_mutex, three critical-section lengths
+#include &lt;algorithm&gt;
+#include &lt;chrono&gt;
+#include &lt;cstdio&gt;
+#include &lt;mutex&gt;
+#include &lt;shared_mutex&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+
+long table[16384];                                // 128 KiB the readers scan
+
+template &lt;class M, bool Shared&gt; double run_once(int T, int words, long ops) {
+  M m;
+  std::vector&lt;long&gt; sink(T * 16);
+  auto t0 = std::chrono::steady_clock::now();
+  {
+    std::vector&lt;std::jthread&gt; pool;
+    for (int t = 0; t &lt; T; ++t)
+      pool.emplace_back([&amp;, t] {
+        long s = 0;
+        for (long i = 0; i &lt; ops / T; ++i) {
+          if constexpr (Shared) { std::shared_lock g(m); for (int w = 0; w &lt; words; ++w) s += table[w]; }
+          else                  { std::lock_guard g(m);  for (int w = 0; w &lt; words; ++w) s += table[w]; }
+        }
+        sink[t * 16] = s;
+      });
+  }
+  return std::chrono::duration&lt;double, std::milli&gt;(std::chrono::steady_clock::now() - t0).count();
+}
+
+template &lt;class M, bool Shared&gt; void bench(const char* name, int words, long ops) {
+  std::printf("%-13s %5d %6ld", name, words, ops);
+  for (int T : {1, 2, 4, 8, 10}) {
+    run_once&lt;M, Shared&gt;(T, words, ops);           // warm-up
+    std::vector&lt;double&gt; v;
+    for (int r = 0; r &lt; 7; ++r) v.push_back(run_once&lt;M, Shared&gt;(T, words, ops));
+    std::sort(v.begin(), v.end());
+    std::printf(" %7.2f", v[3]);
+  }
+  std::puts("");
+}
+
+int main() {
+  for (int i = 0; i &lt; 16384; ++i) table[i] = i;
+  std::puts("readers only, wall ms per run, median of 7\nlock          words  reads     T=1     T=2     T=4     T=8    T=10");
+  for (int words : {1, 512, 16384}) {
+    long ops = words == 16384 ? 40'000 : 400'000;
+    bench&lt;std::mutex, false&gt;("mutex", words, ops);
+    bench&lt;std::shared_mutex, true&gt;("shared_mutex", words, ops);
+  }
+}</pre>
+        <span lang="zh-CN">预期输出（实验 Mac，2026-10-31 实测，单位是一次运行的毫秒数）：</span><span lang="en">Expected output (measured on the lab Mac on 2026-10-31; the unit is milliseconds per run):</span><pre data-lang="sh">$ clang++ -std=c++20 -O2 rw.cpp -o rw &amp;&amp; ./rw
+readers only, wall ms per run, median of 7
+lock          words  reads     T=1     T=2     T=4     T=8    T=10
+mutex             1 400000    2.43    2.86    3.78    5.35    5.36
+shared_mutex      1 400000    3.20    5.89    7.87   10.91   11.01
+mutex           512 400000   12.91   29.26   29.58   37.09   37.34
+shared_mutex    512 400000   13.16   22.64   30.84   41.88   41.79
+mutex         16384  40000   36.95   50.30   76.66   87.14   88.89
+shared_mutex  16384  40000   36.14   19.82   10.82   26.02   27.84</pre>
+        <span lang="zh-CN">临界区短时 <code>shared_mutex</code> 更慢：每个读者都要拿内部那把 mutex 改读者计数（概念 4）。只有读 128 KiB 这么长的临界区，读者才真的并发，4 线程时快了 7 倍。8 和 10 线程又变慢，很可能是多出的线程落到了 L1 只有 64 KB 的 E 核上（推断）。</span><span lang="en">With a short critical section <code>shared_mutex</code> is slower: every reader takes the internal mutex to change the reader count (concept 4). Only with a section as long as reading 128 KiB do readers really run concurrently, 7 times faster at 4 threads. At 8 and 10 threads it slows down again, most likely because the extra threads land on E cores whose L1 is only 64 KB (inferred).</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 你机器上的三次错误结果、TSan 报告的 SUMMARY 行、三种修法在 TSan 下的干净运行，以及四种做法不带 TSan 的中位数；Lab B 的两张表（<code>private</code> 和 <code>shared</code>）、三份 <code>sample</code> 的等待调用计数、<code>rw</code> 的输出，以及 10 行以内的解释：为什么自旋锁在 20 线程时最慢、为什么 <code>shared_mutex</code> 只在长临界区里赢。</div>
+    <div class="note" lang="en">Deliverables: from Lab A, the three wrong results on your machine, the SUMMARY line of the TSan report, the clean runs of the three fixes under TSan, and the medians of the four methods without TSan; from Lab B, both tables (<code>private</code> and <code>shared</code>), the wait-call counts from the three <code>sample</code> files, the output of <code>rw</code>, and an explanation in 10 lines or fewer of why the spinlock is slowest at 20 threads and why <code>shared_mutex</code> wins only with long critical sections.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="par/phase-2">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 下面哪一种按 C++ 标准构成数据竞争？三种情况都没有加锁。</p>
+      <p lang="en">1. Which of these is a data race by the C++ standard? None of the three uses a lock.</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">两个线程同时读同一个普通的 <code>int</code>，没有人写它</span><span lang="en">Two threads read the same plain <code>int</code> at once, and nobody writes it</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">一个线程把普通的 <code>bool done</code> 设为 true，另一个线程在循环里读它</span><span lang="en">One thread sets a plain <code>bool done</code> to true while another reads it in a loop</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">两个线程同时对同一个 <code>std::atomic&lt;long&gt;</code> 做 <code>fetch_add(1, memory_order_relaxed)</code></span><span lang="en">Two threads both call <code>fetch_add(1, memory_order_relaxed)</code> on the same <code>std::atomic&lt;long&gt;</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">数据竞争要求两个访问冲突（至少一个是写）、至少一个不是原子操作、且没有 happens-before。b 一写一读、都不是原子、没有同步，是竞争，编译器甚至可以把读提到循环外让循环永不结束。a 两个都是读，不冲突；c 两个都是原子操作，即使是 relaxed 也不构成数据竞争。</span><span lang="en">A data race needs conflicting accesses (at least one a write), at least one non-atomic, and no happens-before. In b one writes and one reads, neither is atomic and nothing synchronizes them, so it is a race; the compiler may even hoist the read out of the loop so it never ends. In a both are reads, so they do not conflict; in c both are atomic operations, which never form a data race, even with relaxed order.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">2. Lab B 里一把共享锁、20 个线程跑在 10 个核上，自旋锁每次 181.6 ns，<code>os_unfair_lock</code> 14.8 ns。主要原因是什么？</p>
+      <p lang="en">2. In Lab B, with one shared lock and 20 threads on 10 cores, the spinlock takes 181.6 ns per operation and <code>os_unfair_lock</code> 14.8 ns. What is the main reason?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">持锁线程被调度器换下时，其他线程把时间片花在空转上，还占着持有者回来需要的核</span><span lang="en">When the holder is taken off its core, the other threads spend their time slices spinning and occupy the cores the holder needs to come back</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">自旋锁每次加锁都要进一次内核</span><span lang="en">The spinlock enters the kernel on every lock</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN"><code>os_unfair_lock</code> 用了更快的原子指令</span><span lang="en"><code>os_unfair_lock</code> uses a faster atomic instruction</span></label>
+      <div class="why" hidden><span lang="zh-CN">自旋锁恰恰从不进内核：<code>sample</code> 里它的内核等待调用是 0。无争用时三者的原子指令代价都在 2–4 ns，差别不在指令上。差别在于等待者做什么：睡眠锁的等待者在 <code>__ulock_wait2</code> 里睡、让出核，自旋锁的等待者一直空转，线程多于核时持有者被换下，所有人一起空等。</span><span lang="en">The spinlock in fact never enters the kernel: its count of kernel wait calls in <code>sample</code> is 0. Uncontended, all three spend 2–4 ns on atomic instructions, so the difference is not the instruction. It is what waiters do: a sleeping lock’s waiters sleep in <code>__ulock_wait2</code> and give up the core, while a spinlock’s waiters keep spinning, and with more threads than cores the holder is taken off its core and everyone waits for nothing.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">3. T1 先锁 <code>a</code> 再锁 <code>b</code>，T2 先锁 <code>b</code> 再锁 <code>a</code>，程序偶尔卡死，CPU 占用为零。哪个修法是对的？</p>
+      <p lang="en">3. T1 locks <code>a</code> then <code>b</code>, T2 locks <code>b</code> then <code>a</code>, and the program sometimes hangs at zero CPU use. Which fix is right?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">把两把锁都换成自旋锁，这样等待者不会睡着</span><span lang="en">Replace both locks with spinlocks so the waiters never fall asleep</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">在 T2 拿两把锁之间加一个短暂的 <code>sleep</code>，让 T1 先完成</span><span lang="en">Add a short <code>sleep</code> in T2 between taking the two locks so that T1 finishes first</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">让两个线程按同一个顺序加锁，或者都用 <code>std::scoped_lock(a, b)</code> 一次拿两把</span><span lang="en">Make both threads lock in the same order, or have both take the two locks at once with <code>std::scoped_lock(a, b)</code></span></label>
+      <div class="why" hidden><span lang="zh-CN">死锁来自循环等待；统一顺序让等待只朝一个方向，<code>std::scoped_lock</code> 用避免死锁的算法一次拿多把，两者都打破了环。换成自旋锁不打破环，只是把「睡着等」变成「转着等」，CPU 还会被烧满；加 <code>sleep</code> 只改变时机，概念 5 里描述的死锁测试正是在两次加锁之间停了 10 ms 才每次必卡。</span><span lang="en">Deadlock comes from circular wait; one lock order makes the waits point one way, and <code>std::scoped_lock</code> takes several locks at once with a deadlock-avoidance algorithm, and both break the cycle. Spinlocks do not break the cycle; they only turn “waiting asleep” into “waiting while spinning” and burn the CPU as well. A <code>sleep</code> only changes the timing; the deadlock test described in concept 5 hung every time precisely because it paused 10 ms between the two locks.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 一个高 QoS 的界面线程在等一个 background QoS 线程手里的锁，同时几个中等 QoS 的线程在忙。为什么 <code>os_unfair_lock</code> 能缓解这种情况，而自旋锁不能？</p>
+      <p lang="en">4. A high-QoS UI thread waits for a lock held by a background-QoS thread while several medium-QoS threads are busy. Why can <code>os_unfair_lock</code> ease this and a spinlock cannot?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN"><code>os_unfair_lock</code> 是公平锁，按排队顺序把锁交给等待者</span><span lang="en"><code>os_unfair_lock</code> is fair and hands the lock to waiters in queue order</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">锁里记着持有者是谁，内核可以把等待者的优先级借给持有者，让它不被中等线程抢走核</span><span lang="en">The lock records who holds it, so the kernel can lend the waiter’s priority to the holder and stop medium threads from taking its core</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN"><code>os_unfair_lock</code> 无争用时比自旋锁快一倍</span><span lang="en"><code>os_unfair_lock</code> is twice as fast as a spinlock uncontended</span></label>
+      <div class="why" hidden><span lang="zh-CN">优先级继承的前提是知道持有者：<code>&lt;os/lock.h&gt;</code> 写明锁值包含线程所有权信息，系统可用它尝试解决优先级反转；自旋锁只有一位「占用」，内核不知道该提谁。a 错在相反：名字里的 unfair 正是说它不保证顺序。c 是真的测量结果（2.2 对 4.2 ns），但无争用速度与优先级反转无关。</span><span lang="en">Priority inheritance requires knowing the holder: <code>&lt;os/lock.h&gt;</code> says the lock value contains thread ownership information that the system may use to attempt to resolve priority inversions, whereas a spinlock has only a “taken” bit, so the kernel does not know whom to boost. a is the opposite of the truth: “unfair” in the name means it does not guarantee order. c is a real measurement (2.2 against 4.2 ns), but uncontended speed has nothing to do with priority inversion.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://eel.is/c++draft/intro.races">C++ working draft: [intro.races] Data races</a> <span class="lvl" lang="zh-CN">标准原文，概念 1：数据竞争与 happens-before 的定义（2026-10-31 可访问）</span><span class="lvl" lang="en">The standard text, concept 1: the definitions of data race and happens-before (reachable on 2026-10-31)</span></li>
+    <li><a href="https://clang.llvm.org/docs/ThreadSanitizer.html">Clang: ThreadSanitizer</a> · <a href="https://github.com/google/sanitizers/wiki/ThreadSanitizerDeadlockDetector">sanitizers wiki: ThreadSanitizerDeadlockDetector</a> <span class="lvl" lang="zh-CN">官方文档，Lab A：TSan 的用法和选项；死锁检测的说明，平台支持请查文档</span><span class="lvl" lang="en">Official docs, Lab A: how to use TSan and its options; the deadlock detector, whose platform support you should check in the docs</span></li>
+    <li><a href="https://en.cppreference.com/w/cpp/thread/mutex">cppreference: std::mutex</a> · <a href="https://en.cppreference.com/w/cpp/thread/condition_variable">condition_variable</a> · <a href="https://en.cppreference.com/w/cpp/thread/shared_mutex">shared_mutex</a> · <a href="https://en.cppreference.com/w/cpp/thread/scoped_lock">scoped_lock</a> · <a href="https://en.cppreference.com/w/cpp/atomic/atomic_flag">atomic_flag</a> · <a href="https://en.cppreference.com/w/cpp/thread/counting_semaphore">counting_semaphore</a> <span class="lvl" lang="zh-CN">参考，两个实验用到的标准库接口</span><span class="lvl" lang="en">Reference: the standard-library interfaces used in both labs</span></li>
+    <li><a href="https://developer.apple.com/documentation/os/os_unfair_lock">Apple: os_unfair_lock</a> · <a href="https://github.com/apple-oss-distributions/libpthread">apple-oss-distributions/libpthread</a> · <a href="https://github.com/apple-oss-distributions/libplatform">libplatform</a> <span class="lvl" lang="zh-CN">官方文档与源码，概念 2、6：pthread mutex（psynch）和 os_unfair_lock（ulock）的用户态实现；SDK 头文件 <code>&lt;os/lock.h&gt;</code> 的注释同样权威</span><span class="lvl" lang="en">Official docs and source, concepts 2 and 6: the user-space implementations of the pthread mutex (psynch) and os_unfair_lock (ulock); the comments in the SDK header <code>&lt;os/lock.h&gt;</code> are just as authoritative</span></li>
+    <li><a href="https://man7.org/linux/man-pages/man2/futex.2.html">futex(2)</a> · <a href="https://www.akkadia.org/drepper/futex.pdf">Ulrich Drepper, Futexes Are Tricky</a> <span class="lvl" lang="zh-CN">Linux 一侧，进阶：futex 的语义、PI futex，以及用 futex 正确实现 mutex 有多难</span><span class="lvl" lang="en">The Linux side, advanced: futex semantics, PI futexes, and how hard it is to build a correct mutex on a futex</span></li>
+    <li><a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Engineering · Phase 3 · Concurrency &amp; IPC</a> <span class="lvl" lang="zh-CN">本站，内核一侧：spinlock、mutex、turnstile 优先级继承、futex 与 ulock、lockdep</span><span class="lvl" lang="en">This site, the kernel side: spinlocks, mutexes, turnstile priority inheritance, futex and ulock, lockdep</span></li>
+    <li><a href="https://mara.nl/atomics/os-primitives.html">Mara Bos, Rust Atomics and Locks, Chapter 8</a> · <a href="https://mara.nl/atomics/building-locks.html">Chapter 9</a> <span class="lvl" lang="zh-CN">免费在线，中级：操作系统提供的等待原语，以及从零写 mutex、条件变量和读写锁；用 Rust 写，原理通用</span><span class="lvl" lang="en">Free online, intermediate: the waiting primitives operating systems provide, and building a mutex, condition variable and reader-writer lock from scratch; written in Rust, but the principles carry over</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Anthony Williams, 《C++ Concurrency in Action》, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">讲线程间共享数据的一章对应概念 1、4、5（竞态条件、<code>std::mutex</code>、锁粒度、避免死锁、<code>std::lock</code>）；讲同步并发操作的一章对应概念 2 的条件变量；讲内存模型与原子类型的一章对应 Lab A 的 <code>atomic</code> 修法</span></li>
+    <li lang="en">Anthony Williams, <em>C++ Concurrency in Action</em>, 2nd ed., Manning, 2019, ISBN 9781617294693. <span class="lvl">The chapter on sharing data between threads matches concepts 1, 4 and 5 (race conditions, <code>std::mutex</code>, lock granularity, avoiding deadlock, <code>std::lock</code>); the chapter on synchronizing concurrent operations matches the condition variables of concept 2; the chapter on the memory model and atomic types matches Lab A’s <code>atomic</code> fix</span></li>
+    <li lang="zh-CN">Maurice Herlihy, Nir Shavit, Victor Luchangco &amp; Michael Spear, 《The Art of Multiprocessor Programming》, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">讲互斥的一章对应概念 1–2（互斥的正式定义、死锁与饥饿）；讲自旋锁与争用的一章对应概念 3 和 Lab B（TAS、TTAS、退避）；讲管程与阻塞同步的一章对应概念 2、4（条件变量、读写锁）</span></li>
+    <li lang="en">Maurice Herlihy, Nir Shavit, Victor Luchangco &amp; Michael Spear, <em>The Art of Multiprocessor Programming</em>, 2nd ed., Morgan Kaufmann, 2020, ISBN 9780124159501. <span class="lvl">The chapter on mutual exclusion matches concepts 1–2 (the formal definition of mutual exclusion, deadlock and starvation); the chapter on spin locks and contention matches concept 3 and Lab B (TAS, TTAS, backoff); the chapter on monitors and blocking synchronization matches concepts 2 and 4 (condition variables, reader-writer locks)</span></li>
+    <li lang="zh-CN">Paul E. McKenney, 《Is Parallel Programming Hard, And, If So, What Can You Do About It?》, release v2026.06.21a, 免费（CC BY-SA）. <span class="lvl">第 5 章「Counting」对应 Lab A；第 6 章「Partitioning and Synchronization Design」对应概念 4；第 7 章「Locking」对应概念 3–6（7.1「Staying Alive」：死锁、活锁与饥饿、不公平；7.2「Types of Locks」；7.3「Locking Implementation Issues」）· 「免费在线」<a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/">kernel.org/pub/linux/kernel/people/paulmck/perfbook</a></span></li>
+    <li lang="en">Paul E. McKenney, <em>Is Parallel Programming Hard, And, If So, What Can You Do About It?</em>, release v2026.06.21a, free (CC BY-SA). <span class="lvl">Chapter 5, “Counting”, matches Lab A; Chapter 6, “Partitioning and Synchronization Design”, matches concept 4; Chapter 7, “Locking”, matches concepts 3–6 (7.1, “Staying Alive”: deadlock, livelock and starvation, unfairness; 7.2, “Types of Locks”; 7.3, “Locking Implementation Issues”) · free online: <a href="https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/">kernel.org/pub/linux/kernel/people/paulmck/perfbook</a></span></li>
+    <li lang="zh-CN">Mara Bos, 《Rust Atomics and Locks》, O’Reilly, 2023, ISBN 9781098119447. <span class="lvl">第 4 章「Building Our Own Spin Lock」对应概念 3；第 8 章「Operating System Primitives」（Futex、Priority Inheritance Futex Operations、os_unfair_lock）对应概念 2、6；第 9 章「Building Our Own Locks」（Mutex、Condition Variable、Reader-Writer Lock）对应概念 2、4 · 「免费在线」<a href="https://mara.nl/atomics/">mara.nl/atomics</a></span></li>
+    <li lang="en">Mara Bos, <em>Rust Atomics and Locks</em>, O’Reilly, 2023, ISBN 9781098119447. <span class="lvl">Chapter 4, “Building Our Own Spin Lock”, matches concept 3; Chapter 8, “Operating System Primitives” (Futex, Priority Inheritance Futex Operations, os_unfair_lock), matches concepts 2 and 6; Chapter 9, “Building Our Own Locks” (Mutex, Condition Variable, Reader-Writer Lock), matches concepts 2 and 4 · free online: <a href="https://mara.nl/atomics/">mara.nl/atomics</a></span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-1-threads-and-the-os/index.html">← Phase 1 · Threads &amp; the OS</a>
+    <a href="../phase-3-memory-model-and-atomics/index.html">Phase 3 · Memory Models &amp; Atomics →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ROS 2 · Learning Garden</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script src="../../assets/theme.js"></script>
+<script src="../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../index.html"><span class="mark" aria-hidden="true"><img src="../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <span class="crumb current" aria-current="page">ROS 2</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <h1>ROS 2</h1>
+  <p class="lede" lang="zh-CN">目标：把机器人中间件学到能独立搭一套小型机器人软件栈——从第一个 node，到一台在 Gazebo 里建图、导航的仿真机器人——并且始终看得见它脚下的操作系统：线程、调度、socket、驱动。版本钉在 ROS 2 Jazzy Jalisco（LTS，2024-05 至 2029-05）+ Gazebo Harmonic；把命令里的发行版名换成 lyrical 就是最新的 LTS。</p>
+  <p class="lede" lang="en">Goal: learn robot middleware well enough to build a small robot stack on your own, from a first node to a simulated robot that maps and navigates in Gazebo, while always keeping the operating system beneath it in view: threads, scheduling, sockets, drivers. Pinned to ROS 2 Jazzy Jalisco (LTS, May 2024 to May 2029) with Gazebo Harmonic; swap the distribution name in the commands for lyrical and you are on the newest LTS.</p>
+
+  <div class="note" lang="zh-CN">
+    读者画像：会 Python、看得懂 C++、用得惯 Linux 命令行；做过或正在做 Kernel Engineering。每个 phase 大约 1–2 周（每天 1–2 小时）。所有实验在 Apple Silicon Mac 上的 Linux 客体机里做，先看「实验环境」。
+  </div>
+  <div class="note" lang="en">
+    Reader: knows Python, can read C++, is at home on the Linux command line; has done or is doing Kernel Engineering. Each phase is about 1–2 weeks at 1–2 hours a day. Every lab runs in a Linux guest on an Apple Silicon Mac; start with the lab environment page.
+  </div>
+
+  <h2 lang="zh-CN">路线图</h2><h2 lang="en">Roadmap</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 300" data-interval="1400"
+         data-captions='["八个阶段：左侧打基础，中间看清中间件与程序结构，右侧把一台仿真机器人跑起来。点「播放」逐步点亮。",
+           "Phase 0 基础：ROS 2 是什么、分层栈（node → rcl → rmw → DDS → 内核）、workspace 与 colcon、ros2 命令行。",
+           "Phase 1 节点、话题、服务、动作：graph、消息接口、参数；rclcpp 与 rclpy 并排。",
+           "Phase 2 执行器、回调与时序：spin、executor、callback group、抖动与实时；线程就是内核任务。",
+           "Phase 3 中间件与 QoS：DDS、rmw、发现、QoS 策略与匹配、共享内存、SROS2。",
+           "Phase 4 Launch、参数、生命周期与组合：launch 文件、managed node 状态机、component 与进程内通信。",
+           "Phase 5 TF2、机器人描述与仿真：坐标系、tf 树、URDF、Gazebo Harmonic 与 ros_gz。",
+           "Phase 6 控制与导航：ros2_control 的控制环、Nav2 的行为树与代价地图、slam_toolbox。",
+           "Phase 7 工具链、测试与部署：rqt、bag、tracing、测试金字塔、Docker 部署、作品项目。"]'
+         data-captions-en='["Eight phases: foundations on the left, middleware and program structure in the middle, a running simulated robot on the right. Press Play to light them up one by one.",
+           "Phase 0 Foundations: what ROS 2 is, the layer stack (node, rcl, rmw, DDS, kernel), workspaces and colcon, the ros2 command line.",
+           "Phase 1 Nodes, topics, services, actions: the graph, message interfaces, parameters; rclcpp and rclpy side by side.",
+           "Phase 2 Executors, callbacks, timing: spin, executors, callback groups, jitter and real time; a thread is a kernel task.",
+           "Phase 3 Middleware and QoS: DDS, rmw, discovery, QoS policies and matching, shared memory, SROS2.",
+           "Phase 4 Launch, parameters, lifecycle, composition: launch files, the managed-node state machine, components and intra-process delivery.",
+           "Phase 5 TF2, robot description, simulation: frames, the tf tree, URDF, Gazebo Harmonic and ros_gz.",
+           "Phase 6 Control and navigation: the ros2_control loop, Nav2 behavior trees and costmaps, slam_toolbox.",
+           "Phase 7 Tooling, testing, deployment: rqt, bags, tracing, the test pyramid, Docker deployment, the portfolio project."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="28" class="small" lang="zh-CN">基础</text><text x="20" y="28" class="small" lang="en">Foundations</text>
+      <text x="320" y="28" class="small" lang="zh-CN">中间件与程序结构</text><text x="320" y="28" class="small" lang="en">Middleware and structure</text>
+      <text x="600" y="28" class="small" lang="zh-CN">机器人（Gazebo 仿真）</text><text x="600" y="28" class="small" lang="en">The robot (Gazebo simulation)</text>
+      <line x1="300" y1="15" x2="300" y2="290" class="lane"/>
+      <line x1="580" y1="15" x2="580" y2="290" class="lane"/>
+
+      <g data-step="1"><rect class="box" x="20" y="50" width="120" height="60"/><text x="30" y="74">Phase 0</text><text x="30" y="94" class="small">Foundations</text></g>
+      <g data-step="2"><rect class="box" x="160" y="50" width="120" height="60"/><text x="170" y="74">Phase 1</text><text x="170" y="94" class="small">Nodes · Topics</text></g>
+      <path data-step="2" class="arrow" d="M140 80 L160 80"/>
+      <path data-step="3" class="arrow" d="M220 110 L220 140 L80 140 L80 160"/>
+      <g data-step="3"><rect class="box" x="20" y="160" width="120" height="60"/><text x="30" y="184">Phase 2</text><text x="30" y="204" class="small">Executors · Timing</text></g>
+
+      <path data-step="4" class="arrow" d="M140 190 L320 190 L320 110"/>
+      <g data-step="4"><rect class="box" x="320" y="50" width="120" height="60"/><text x="330" y="74">Phase 3</text><text x="330" y="94" class="small">Middleware · QoS</text></g>
+      <g data-step="5"><rect class="box" x="450" y="50" width="120" height="60"/><text x="460" y="74">Phase 4</text><text x="460" y="94" class="small">Launch · Lifecycle</text></g>
+      <path data-step="5" class="arrow" d="M440 80 L450 80"/>
+
+      <path data-step="6" class="arrow" d="M570 80 L600 80"/>
+      <g data-step="6"><rect class="box gz" x="600" y="50" width="130" height="60"/><text x="610" y="74">Phase 5</text><text x="610" y="94" class="small">TF2 · URDF · Sim</text></g>
+      <g data-step="7"><rect class="box gz" x="750" y="50" width="130" height="60"/><text x="760" y="74">Phase 6</text><text x="760" y="94" class="small">Control · Nav2</text></g>
+      <path data-step="7" class="arrow" d="M730 80 L750 80"/>
+      <path data-step="8" class="arrow" d="M815 110 L815 140 L665 140 L665 160"/>
+      <g data-step="8"><rect class="box gz" x="600" y="160" width="130" height="60"/><text x="610" y="184">Phase 7</text><text x="610" y="204" class="small">Tools · Tests · Deploy</text></g>
+
+      <text x="20" y="270" class="small" lang="zh-CN">每个阶段：目标 → 核心概念 → 对照表 → 动画 → 实验 → 自测 → 资料 → 参考书目</text><text x="20" y="270" class="small" lang="en">Each phase: goals → core concepts → comparison → diagrams → labs → quiz → resources → bibliography</text>
+    </svg>
+  </div>
+
+  <section class="setup" data-setup="ros2" lang="zh-CN">
+    <div class="setup-text">
+      <h2>实验环境</h2>
+      <p>所有实验都在 Linux 客体机里做：推荐 Apple Silicon 上的 arm64 Docker 容器（Jazzy 桌面 + Gazebo Harmonic，图形界面从浏览器打开），备选 UTM 里的 Ubuntu 24.04 虚拟机。宿主机只编辑文件、开浏览器。开始 Phase 0 之前先把它建好。</p>
+      <p class="setup-ready">实验环境已建好。<a href="lab-setup/index.html">查看说明</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">设置实验环境</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="ros2"> 我已建好</label>
+    </div>
+  </section>
+  <section class="setup" data-setup="ros2" lang="en">
+    <div class="setup-text">
+      <h2>Lab environment</h2>
+      <p>Every lab runs in a Linux guest: an arm64 Docker container on Apple Silicon is recommended (the Jazzy desktop plus Gazebo Harmonic, with the GUI opened from the browser), and an Ubuntu 24.04 VM in UTM is the fallback. The host only edits files and runs a browser. Set it up before Phase 0.</p>
+      <p class="setup-ready">Lab environment is ready. <a href="lab-setup/index.html">Open the guide</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">Set up the lab</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="ros2"> Done</label>
+    </div>
+  </section>
+
+  <h2 lang="zh-CN">阶段</h2><h2 lang="en">Phases</h2>
+  <ol class="phases">
+    <li data-phase="ros2/phase-0"><span class="n">0</span><span><span class="t"><a href="phase-0-foundations/index.html">Foundations</a></span><br><span class="d" lang="zh-CN">ROS 2 是什么、分层栈直到内核、workspace 与 colcon、ros2 命令行</span><span class="d" lang="en">What ROS 2 is, the layer stack down to the kernel, workspaces and colcon, the ros2 command line</span></span><span class="st"></span></li>
+    <li data-phase="ros2/phase-1"><span class="n">1</span><span><span class="t"><a href="phase-1-nodes-topics-services-actions/index.html">Nodes, Topics, Services &amp; Actions</a></span><br><span class="d" lang="zh-CN">graph、消息接口、服务、动作、参数；rclcpp ↔ rclpy</span><span class="d" lang="en">The graph, message interfaces, services, actions, parameters; rclcpp ↔ rclpy</span></span><span class="st"></span></li>
+    <li data-phase="ros2/phase-2"><span class="n">2</span><span><span class="t"><a href="phase-2-executors-and-timing/index.html">Executors &amp; Timing</a></span><br><span class="d" lang="zh-CN">spin、executor、callback group、抖动与实时；线程就是内核任务</span><span class="d" lang="en">spin, executors, callback groups, jitter and real time; a thread is a kernel task</span></span><span class="st"></span></li>
+    <li data-phase="ros2/phase-3"><span class="n">3</span><span><span class="t"><a href="phase-3-middleware-and-qos/index.html">Middleware &amp; QoS</a></span><br><span class="d" lang="zh-CN">DDS、rmw、发现、QoS 策略与匹配、共享内存、SROS2</span><span class="d" lang="en">DDS, rmw, discovery, QoS policies and matching, shared memory, SROS2</span></span><span class="st"></span></li>
+    <li data-phase="ros2/phase-4"><span class="n">4</span><span><span class="t"><a href="phase-4-launch-lifecycle-composition/index.html">Launch, Lifecycle &amp; Composition</a></span><br><span class="d" lang="zh-CN">launch 文件、参数文件、managed node 状态机、component 与进程内通信</span><span class="d" lang="en">Launch files, parameter files, the managed-node state machine, components and intra-process delivery</span></span><span class="st"></span></li>
+    <li data-phase="ros2/phase-5"><span class="n">5</span><span><span class="t"><a href="phase-5-tf2-urdf-simulation/index.html">TF2, URDF &amp; Simulation</a></span><br><span class="d" lang="zh-CN">坐标系与 tf 树、URDF/xacro、RViz2、Gazebo Harmonic 与 ros_gz</span><span class="d" lang="en">Frames and the tf tree, URDF/xacro, RViz2, Gazebo Harmonic and ros_gz</span></span><span class="st"></span></li>
+    <li data-phase="ros2/phase-6"><span class="n">6</span><span><span class="t"><a href="phase-6-control-and-navigation/index.html">Control &amp; Navigation</a></span><br><span class="d" lang="zh-CN">ros2_control 控制环、Nav2 行为树与代价地图、slam_toolbox</span><span class="d" lang="en">The ros2_control loop, Nav2 behavior trees and costmaps, slam_toolbox</span></span><span class="st"></span></li>
+    <li data-phase="ros2/phase-7"><span class="n">7</span><span><span class="t"><a href="phase-7-tooling-testing-deployment/index.html">Tooling, Testing &amp; Deployment</a></span><br><span class="d" lang="zh-CN">rqt、bag、tracing、测试金字塔、Docker 部署、作品项目</span><span class="d" lang="en">rqt, bags, tracing, the test pyramid, Docker deployment, the portfolio project</span></span><span class="st"></span></li>
+  </ol>
+
+  <section class="related" data-related="ros2" data-root="../../"></section>
+</div>
+<script src="../../assets/diagram.js"></script>
+<script src="../../assets/progress.js"></script>
+<script src="../../assets/topics.js"></script>
+<script src="../../assets/related.js"></script>
+</body>
+</html>
