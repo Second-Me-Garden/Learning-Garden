@@ -138,19 +138,19 @@
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
          data-captions='["全图：用户程序打开 /usr/lib/x.so。左列 Linux，右列 XNU，从上到下是内核里的六个阶段，最后得到一个 fd 回到用户态。",
-           "① 进入内核并把路径拷进来。Linux：openat 系统调用 → do_sys_openat2，getname 用 strncpy_from_user 生成内核里的 struct filename。XNU：open → openat_internal → open1 → vn_open_auth，namei 用 copyinstr 把路径放进 nameidata。之后只用内核副本，避免 TOCTOU。",
-           "② 确定起点。Linux：path_openat → path_init，绝对路径从当前进程 fs 的 root 开始，先以 RCU-walk 模式尝试，不拿锁不加引用。XNU：namei 取进程的根目录或 cwd 的 vnode，交给 lookup() 逐分量处理。",
-           "③ 分量命中缓存（最常见）。Linux：link_path_walk 对 usr、lib 各调一次 walk_component，lookup_fast 在 dcache 中按父 dentry 加名字散列命中。XNU：cache_lookup 在 name cache 中按目录 vnode 加名字命中，直接得到子 vnode。",
-           "④ 分量未命中：问文件系统。Linux：lookup_slow → 父目录 inode 的 i_op 里的 lookup（如 ext4_lookup）读目录块，分配新 dentry 和 inode 并放进缓存；RCU-walk 此时退回 REF-walk。XNU：VNOP_LOOKUP 让文件系统返回 vnode，再 cache_enter 记入 name cache。",
-           "⑤ 每一级都要检查。挂载点：Linux 发现 dentry 被挂载就换到被挂载文件系统的根；XNU 看目录 vnode 的 v_mountedhere。权限：Linux may_lookup → inode_permission 查目录的 x 位；XNU vnode_authorize（kauth）加 MAC Framework 钩子，沙箱在这里拒绝访问。",
-           "⑥ 打开最后一个分量。Linux：do_open → vfs_open 调 f_op 的 open，得到 struct file，fd_install 放进 fd 表。XNU：open1 先 falloc_withinit 分配 fileproc 和 fileglob，再 vn_open_auth → VNOP_OPEN。两边都把 fd 号返回给用户态。"]'
+           "1. 进入内核并把路径拷进来。Linux：openat 系统调用 → do_sys_openat2，getname 用 strncpy_from_user 生成内核里的 struct filename。XNU：open → openat_internal → open1 → vn_open_auth，namei 用 copyinstr 把路径放进 nameidata。之后只用内核副本，避免 TOCTOU。",
+           "2. 确定起点。Linux：path_openat → path_init，绝对路径从当前进程 fs 的 root 开始，先以 RCU-walk 模式尝试，不拿锁不加引用。XNU：namei 取进程的根目录或 cwd 的 vnode，交给 lookup() 逐分量处理。",
+           "3. 分量命中缓存（最常见）。Linux：link_path_walk 对 usr、lib 各调一次 walk_component，lookup_fast 在 dcache 中按父 dentry 加名字散列命中。XNU：cache_lookup 在 name cache 中按目录 vnode 加名字命中，直接得到子 vnode。",
+           "4. 分量未命中：问文件系统。Linux：lookup_slow → 父目录 inode 的 i_op 里的 lookup（如 ext4_lookup）读目录块，分配新 dentry 和 inode 并放进缓存；RCU-walk 此时退回 REF-walk。XNU：VNOP_LOOKUP 让文件系统返回 vnode，再 cache_enter 记入 name cache。",
+           "5. 每一级都要检查。挂载点：Linux 发现 dentry 被挂载就换到被挂载文件系统的根；XNU 看目录 vnode 的 v_mountedhere。权限：Linux may_lookup → inode_permission 查目录的 x 位；XNU vnode_authorize（kauth）加 MAC Framework 钩子，沙箱在这里拒绝访问。",
+           "6. 打开最后一个分量。Linux：do_open → vfs_open 调 f_op 的 open，得到 struct file，fd_install 放进 fd 表。XNU：open1 先 falloc_withinit 分配 fileproc 和 fileglob，再 vn_open_auth → VNOP_OPEN。两边都把 fd 号返回给用户态。"]'
          data-captions-en='["The whole picture: a user program opens /usr/lib/x.so. Linux on the left, XNU on the right; from top to bottom are six stages in the kernel, ending with an fd returned to user mode.",
-           "① Enter the kernel and copy the path in. Linux: the openat system call → do_sys_openat2; getname uses strncpy_from_user to build a struct filename in the kernel. XNU: open → openat_internal → open1 → vn_open_auth; namei uses copyinstr to put the path into nameidata. From then on only the kernel copy is used, avoiding TOCTOU.",
-           "② Set the starting point. Linux: path_openat → path_init; an absolute path starts at the root of the fs of the current process, trying RCU-walk mode first, with no locks and no references. XNU: namei takes the vnode of the process root directory or cwd and hands it to lookup() to process component by component.",
-           "③ The component hits the cache (the most common case). Linux: link_path_walk calls walk_component once each for usr and lib, and lookup_fast hits in the dcache, hashed by parent dentry plus name. XNU: cache_lookup hits in the name cache, hashed by directory vnode plus name, and gets the child vnode directly.",
-           "④ The component misses: ask the filesystem. Linux: lookup_slow → the lookup in the i_op of the parent directory inode (such as ext4_lookup) reads the directory block, allocates a new dentry and inode and puts them in the cache; RCU-walk falls back to REF-walk at this point. XNU: VNOP_LOOKUP has the filesystem return the vnode, and cache_enter records it in the name cache.",
-           "⑤ Every level must be checked. Mount points: when Linux finds that a dentry is mounted on, it moves to the root of the mounted filesystem; XNU looks at v_mountedhere of the directory vnode. Permissions: Linux may_lookup → inode_permission checks the x bit of the directory; XNU vnode_authorize (kauth) plus MAC Framework hooks, where the sandbox denies access.",
-           "⑥ Open the last component. Linux: do_open → vfs_open calls the open in f_op, yielding a struct file, which fd_install puts into the fd table. XNU: open1 first allocates the fileproc and fileglob with falloc_withinit, then vn_open_auth → VNOP_OPEN. Both sides return the fd number to user mode."]'>
+           "1. Enter the kernel and copy the path in. Linux: the openat system call → do_sys_openat2; getname uses strncpy_from_user to build a struct filename in the kernel. XNU: open → openat_internal → open1 → vn_open_auth; namei uses copyinstr to put the path into nameidata. From then on only the kernel copy is used, avoiding TOCTOU.",
+           "2. Set the starting point. Linux: path_openat → path_init; an absolute path starts at the root of the fs of the current process, trying RCU-walk mode first, with no locks and no references. XNU: namei takes the vnode of the process root directory or cwd and hands it to lookup() to process component by component.",
+           "3. The component hits the cache (the most common case). Linux: link_path_walk calls walk_component once each for usr and lib, and lookup_fast hits in the dcache, hashed by parent dentry plus name. XNU: cache_lookup hits in the name cache, hashed by directory vnode plus name, and gets the child vnode directly.",
+           "4. The component misses: ask the filesystem. Linux: lookup_slow → the lookup in the i_op of the parent directory inode (such as ext4_lookup) reads the directory block, allocates a new dentry and inode and puts them in the cache; RCU-walk falls back to REF-walk at this point. XNU: VNOP_LOOKUP has the filesystem return the vnode, and cache_enter records it in the name cache.",
+           "5. Every level must be checked. Mount points: when Linux finds that a dentry is mounted on, it moves to the root of the mounted filesystem; XNU looks at v_mountedhere of the directory vnode. Permissions: Linux may_lookup → inode_permission checks the x bit of the directory; XNU vnode_authorize (kauth) plus MAC Framework hooks, where the sandbox denies access.",
+           "6. Open the last component. Linux: do_open → vfs_open calls the open in f_op, yielding a struct file, which fd_install puts into the fd table. XNU: open1 first allocates the fileproc and fileglob with falloc_withinit, then vn_open_auth → VNOP_OPEN. Both sides return the fd number to user mode."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -210,7 +210,7 @@
         <path class="arrow flow" d="M860 342 C 890 342, 890 57, 862 57"/></g>
 
       <g data-step="3 4"><path class="arrow" d="M420 171 C 440 180, 440 220, 422 228"/>
-        <text x="300" y="390" class="small" lang="zh-CN">③ 命中则跳过 ④；每个分量循环一次 ③–⑤</text><text x="300" y="390" class="small" lang="en">③ on a hit, skip ④; ③–⑤ loop once per component</text></g>
+        <text x="300" y="390" class="small" lang="zh-CN">第 3 步命中则跳过第 4 步；每个分量循环一次第 3–5 步</text><text x="300" y="390" class="small" lang="en">a hit at step 3 skips step 4; steps 3–5 loop once per component</text></g>
     </svg>
   </div>
 
@@ -218,19 +218,19 @@
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2400"
          data-captions='["全图：read(fd, buf, 4096) 读一个还不在内存里的文件页。左列 Linux（ext4 + virtio-blk），右列 XNU（APFS + NVMe）。从上往下走到设备，再沿虚线回到用户态。",
-           "① 系统调用进入 VFS。Linux：ksys_read → vfs_read → f_op 的 read_iter（ext4_file_read_iter 落到通用的 generic_file_read_iter）。XNU：read → dofileread → vn_read → VNOP_READ，APFS 把读交给通用的 cluster_read（大致路径，APFS 闭源）。",
-           "② 先查缓存。Linux：filemap_read → filemap_get_pages 在 inode 的 address_space（xarray）里找 folio。XNU：cluster_read 在 vnode 的 UBC（ubc_info 关联的 vm_object）里找页。命中就直接跳到 ⑥，不碰磁盘——绝大多数 read 都在这里结束。",
-           "③ 未命中：确定在磁盘哪里。Linux：触发预读，a_ops 的 readahead 让 ext4 把文件偏移映射到 extent，组装 bio。XNU：cluster_io 通过 VNOP_BLOCKMAP 问 APFS 文件偏移对应的设备块，用 UPL 锁住目标页，生成 buf_t。",
-           "④ 进入块层并下发给驱动。Linux：submit_bio → blk-mq 软件队列合并成 request → 硬件队列 → virtio_queue_rq（实机 NVMe 是 nvme_queue_rq）。XNU：VNOP_STRATEGY → spec_strategy（这里做后台 I/O 节流）→ IOKit 存储栈 → NVMe 控制器驱动。",
-           "⑤ 设备 DMA 把数据写进那些页，然后发中断。Linux：驱动完成 request → bio_endio，folio 标记 uptodate 并解锁，唤醒在页上等待的读者。XNU：buf_biodone，提交 UPL，页成为有效页，唤醒读者。",
-           "⑥ 拷回用户态并返回。Linux：copy_to_user 拷到 buf，read 返回字节数。XNU：uiomove → copyout。写路径对称但不等设备：write 只把页标脏就返回，回写线程（Linux）或 cluster_push / pageout（XNU）稍后下发；要立刻落盘就用 fsync，在 macOS 上还要 F_FULLFSYNC。"]'
+           "1. 系统调用进入 VFS。Linux：ksys_read → vfs_read → f_op 的 read_iter（ext4_file_read_iter 落到通用的 generic_file_read_iter）。XNU：read → dofileread → vn_read → VNOP_READ，APFS 把读交给通用的 cluster_read（大致路径，APFS 闭源）。",
+           "2. 先查缓存。Linux：filemap_read → filemap_get_pages 在 inode 的 address_space（xarray）里找 folio。XNU：cluster_read 在 vnode 的 UBC（ubc_info 关联的 vm_object）里找页。命中就直接跳到第 6 步，不碰磁盘——绝大多数 read 都在这里结束。",
+           "3. 未命中：确定在磁盘哪里。Linux：触发预读，a_ops 的 readahead 让 ext4 把文件偏移映射到 extent，组装 bio。XNU：cluster_io 通过 VNOP_BLOCKMAP 问 APFS 文件偏移对应的设备块，用 UPL 锁住目标页，生成 buf_t。",
+           "4. 进入块层并下发给驱动。Linux：submit_bio → blk-mq 软件队列合并成 request → 硬件队列 → virtio_queue_rq（实机 NVMe 是 nvme_queue_rq）。XNU：VNOP_STRATEGY → spec_strategy（这里做后台 I/O 节流）→ IOKit 存储栈 → NVMe 控制器驱动。",
+           "5. 设备 DMA 把数据写进那些页，然后发中断。Linux：驱动完成 request → bio_endio，folio 标记 uptodate 并解锁，唤醒在页上等待的读者。XNU：buf_biodone，提交 UPL，页成为有效页，唤醒读者。",
+           "6. 拷回用户态并返回。Linux：copy_to_user 拷到 buf，read 返回字节数。XNU：uiomove → copyout。写路径对称但不等设备：write 只把页标脏就返回，回写线程（Linux）或 cluster_push / pageout（XNU）稍后下发；要立刻落盘就用 fsync，在 macOS 上还要 F_FULLFSYNC。"]'
          data-captions-en='["The whole picture: read(fd, buf, 4096) reads a file page that is not yet in memory. Linux (ext4 + virtio-blk) on the left, XNU (APFS + NVMe) on the right. Go top to bottom down to the device, then follow the dashed line back to user mode.",
-           "① The system call enters the VFS. Linux: ksys_read → vfs_read → the read_iter in f_op (ext4_file_read_iter falls through to the generic generic_file_read_iter). XNU: read → dofileread → vn_read → VNOP_READ; APFS hands the read to the generic cluster_read (approximate path; APFS is closed source).",
-           "② Check the cache first. Linux: filemap_read → filemap_get_pages looks for the folio in the address_space (xarray) of the inode. XNU: cluster_read looks for the page in the UBC of the vnode (the vm_object linked from ubc_info). On a hit it jumps straight to ⑥ without touching the disk — the vast majority of reads end here.",
-           "③ Miss: find where it is on disk. Linux: readahead is triggered, and the readahead in a_ops has ext4 map the file offset to an extent and assemble a bio. XNU: cluster_io asks APFS through VNOP_BLOCKMAP for the device block of the file offset, locks the target pages with a UPL, and builds a buf_t.",
-           "④ Enter the block layer and dispatch to the driver. Linux: submit_bio → the blk-mq software queue merges it into a request → hardware queue → virtio_queue_rq (nvme_queue_rq on real NVMe hardware). XNU: VNOP_STRATEGY → spec_strategy (background I/O throttling happens here) → IOKit storage stack → NVMe controller driver.",
-           "⑤ The device DMAs the data into those pages, then raises an interrupt. Linux: the driver completes the request → bio_endio; the folio is marked uptodate and unlocked, and readers waiting on the page are woken. XNU: buf_biodone; the UPL is committed, the pages become valid, and the readers are woken.",
-           "⑥ Copy back to user mode and return. Linux: copy_to_user copies into buf, and read returns the byte count. XNU: uiomove → copyout. The write path is symmetric but does not wait for the device: write only marks the pages dirty and returns, and the writeback threads (Linux) or cluster_push / pageout (XNU) send them down later; to reach the disk immediately use fsync, and on macOS also F_FULLFSYNC."]'>
+           "1. The system call enters the VFS. Linux: ksys_read → vfs_read → the read_iter in f_op (ext4_file_read_iter falls through to the generic generic_file_read_iter). XNU: read → dofileread → vn_read → VNOP_READ; APFS hands the read to the generic cluster_read (approximate path; APFS is closed source).",
+           "2. Check the cache first. Linux: filemap_read → filemap_get_pages looks for the folio in the address_space (xarray) of the inode. XNU: cluster_read looks for the page in the UBC of the vnode (the vm_object linked from ubc_info). On a hit it jumps straight to step 6 without touching the disk — the vast majority of reads end here.",
+           "3. Miss: find where it is on disk. Linux: readahead is triggered, and the readahead in a_ops has ext4 map the file offset to an extent and assemble a bio. XNU: cluster_io asks APFS through VNOP_BLOCKMAP for the device block of the file offset, locks the target pages with a UPL, and builds a buf_t.",
+           "4. Enter the block layer and dispatch to the driver. Linux: submit_bio → the blk-mq software queue merges it into a request → hardware queue → virtio_queue_rq (nvme_queue_rq on real NVMe hardware). XNU: VNOP_STRATEGY → spec_strategy (background I/O throttling happens here) → IOKit storage stack → NVMe controller driver.",
+           "5. The device DMAs the data into those pages, then raises an interrupt. Linux: the driver completes the request → bio_endio; the folio is marked uptodate and unlocked, and readers waiting on the page are woken. XNU: buf_biodone; the UPL is committed, the pages become valid, and the readers are woken.",
+           "6. Copy back to user mode and return. Linux: copy_to_user copies into buf, and read returns the byte count. XNU: uiomove → copyout. The write path is symmetric but does not wait for the device: write only marks the pages dirty and returns, and the writeback threads (Linux) or cluster_push / pageout (XNU) send them down later; to reach the disk immediately use fsync, and on macOS also F_FULLFSYNC."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -256,7 +256,7 @@
         <text x="492" y="129" class="small" lang="zh-CN">ubc_info → vm_object 里找 vm_page</text><text x="492" y="129" class="small" lang="en">ubc_info → find the vm_page in the vm_object</text></g>
       <g data-step="2"><path class="arrow flow" d="M420 114 C 440 150, 440 300, 422 342"/>
         <path class="arrow flow" d="M860 114 C 880 150, 880 300, 862 342"/>
-        <text x="300" y="390" class="small" lang="zh-CN">② 命中：直接跳到 ⑥</text><text x="300" y="390" class="small" lang="en">② hit: jump straight to ⑥</text></g>
+        <text x="300" y="390" class="small" lang="zh-CN">第 2 步命中：直接跳到第 6 步</text><text x="300" y="390" class="small" lang="en">a hit at step 2 jumps straight to step 6</text></g>
 
       <g data-step="3"><path class="arrow" d="M230 137 L230 149"/><path class="arrow" d="M670 137 L670 149"/>
         <rect class="box linux" x="40" y="149" width="380" height="45"/>

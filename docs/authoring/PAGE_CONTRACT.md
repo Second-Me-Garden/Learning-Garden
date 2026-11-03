@@ -70,8 +70,8 @@ A lab-setup page whose labs run on the host rather than in a VM uses 为什么�
 - The checker requires at least 20 `lang="en"` attributes per lesson and |en − zh| ≤ max(6, 15 %). Pair everything and the counts match on their own.
 - A list item that holds a `<pre>` wraps its two prose halves in `span` pairs before the `<pre>`; the `<pre>` is shared.
 - Table cells pair inside the cell with `span` pairs.
-- SVG labels: paired `<text lang="zh-CN">` and `<text lang="en">` at the same x and y. Keep labels short and at least 11 px in a 900-unit-wide viewBox; a diagram rendered in a 360 px column scales 2.5 ×, so anything smaller is unreadable.
-- Never use circled numbers (①②③) anywhere, including captions. Write `1.` or `Step 1`.
+- SVG labels: paired `<text lang="zh-CN">` and `<text lang="en">` at the same x and y. Keep labels short and at least 11 units in a 900-unit-wide viewBox. On desktop the 928 px diagram column draws them at about 1:1. The SVG in a 390 px phone is only about 330 px wide, which would shrink 11 units to about 4 px, so below 760 px the stepper keeps the SVG at least 720 px wide in a horizontal scroller (11 units at about 8.8 px, 13 at about 10.4 px) and scrolls the lit step into view. A phone reader sees less than half the diagram at once, so any number the reader needs also goes in that step's caption.
+- Never use circled numbers (the glyphs U+2460 to U+2473) anywhere, including captions. Write `1.` or `Step 1`.
 - Never use a single quote or apostrophe inside caption text (captions live in single-quoted attributes). Use `’` only in prose, never in captions.
 
 ## Diagrams
@@ -121,6 +121,8 @@ Four questions, three options each, every wrong option plausible, the explanatio
 Global tokens in `assets/style.css`: `--accent` (sage green), `--linux` (ochre) and `--xnu` (indigo) for the kernel topic, `--ros` (blue) and `--gz` (orange) for ROS 2 and simulation, `--cuda` (plum, #8a3b78 light / #e0a0d2 dark) and `--metal` (slate blue, #4b5f8a / #a3b4d6) for GPU Programming with CUDA. Use them as `th.ros`, `.box.ros`, `style="fill: var(--ros)"`. New topics add their own pair next to these, light and dark values both.
 
 A topic colour carries one fixed meaning, the same on every page of the topic (Designer review, 2026-10-31): in the kernel topic ochre is always Linux and indigo always XNU; in ROS 2 blue is always the ROS 2 graph side (nodes, rcl, rmw, DDS), orange always the Gazebo or hardware side, and ochre the kernel beneath; in GPU Programming with CUDA plum is always the NVIDIA/CUDA side, slate blue always the Apple/Metal side, and ochre the kernel beneath. A comparison table gets coloured `th` cells only when its two sides are those two meanings (URDF ↔ SDF, ROS node ↔ Gazebo plugin); a table of executor kinds, QoS profiles or tools uses plain `th`. A roadmap colours one lane or one destination, not every box. Failures, mismatches and errors are marked by a glyph and `--ink-2` text, never by a hue. The hub card illustration uses the brand green only. If a colour would carry no meaning, leave it out.
+
+A wrong quiz answer is marked ✗ in --ink-2; --warn equals the kernel ochre and is not used.
 
 ## Accuracy
 

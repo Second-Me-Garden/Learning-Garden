@@ -120,17 +120,17 @@
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 420" data-interval="2000"
          data-captions='["全图：上半 EL0 用户态，下半 EL1 内核态；左列 Linux，右列 XNU。按「播放」逐步走。",
-           "① 用户程序调 write()。libc 把系统调用号放进 x8（Linux）/ x16（XNU），参数放进 x0–x2，执行 svc（Linux svc #0 / XNU svc #0x80）。",
-           "② CPU 硬件动作：PC→ELR_EL1，PSTATE→SPSR_EL1，原因（EC=SVC）→ESR_EL1；切到 EL1；跳到 VBAR_EL1 + 0x400（来自 lower EL 的同步异常）。",
-           "③ 入口汇编把 x0–x30、sp、ELR、SPSR 压到内核栈。Linux：entry.S 向量跳到 el0t_64_sync，它展开 kernel_entry 宏保存 pt_regs，再调 el0t_64_sync_handler；XNU：locore.s 的 Lel0_synchronous_vector_64 → fleh_synchronous。",
-           "④ 按号分发。Linux：el0_svc → invoke_syscall → sys_call_table[x8] → __arm64_sys_write。XNU：sleh_synchronous 看 ESR 是 SVC → x16 正数走 unix_syscall（sysent[]），负数走 mach_syscall（mach_trap_table[]）。",
-           "⑤ 处理函数返回，结果写进栈上保存的 x0；入口汇编恢复寄存器；eret：PC←ELR_EL1，PSTATE←SPSR_EL1，回到 EL0 的下一条指令。"]'
+           "1. 用户程序调 write()。libc 把系统调用号放进 x8（Linux）/ x16（XNU），参数放进 x0–x2，执行 svc（Linux svc #0 / XNU svc #0x80）。",
+           "2. CPU 硬件动作：PC→ELR_EL1，PSTATE→SPSR_EL1，原因（EC=SVC）→ESR_EL1；切到 EL1；跳到 VBAR_EL1 + 0x400（来自 lower EL 的同步异常）。",
+           "3. 入口汇编把 x0–x30、sp、ELR、SPSR 压到内核栈。Linux：entry.S 向量跳到 el0t_64_sync，它展开 kernel_entry 宏保存 pt_regs，再调 el0t_64_sync_handler；XNU：locore.s 的 Lel0_synchronous_vector_64 → fleh_synchronous。",
+           "4. 按号分发。Linux：el0_svc → invoke_syscall → sys_call_table[x8] → __arm64_sys_write。XNU：sleh_synchronous 看 ESR 是 SVC → x16 正数走 unix_syscall（sysent[]），负数走 mach_syscall（mach_trap_table[]）。",
+           "5. 处理函数返回，结果写进栈上保存的 x0；入口汇编恢复寄存器；eret：PC←ELR_EL1，PSTATE←SPSR_EL1，回到 EL0 的下一条指令。"]'
          data-captions-en='["Overview: the top half is EL0 user mode, the bottom half EL1 kernel mode; left column Linux, right column XNU. Press Play to step through.",
-           "① The user program calls write(). libc puts the system call number in x8 (Linux) / x16 (XNU) and the arguments in x0–x2, then executes svc (Linux svc #0 / XNU svc #0x80).",
-           "② What the CPU hardware does: PC→ELR_EL1, PSTATE→SPSR_EL1, cause (EC=SVC)→ESR_EL1; switch to EL1; jump to VBAR_EL1 + 0x400 (synchronous exception from a lower EL).",
-           "③ The entry assembly pushes x0–x30, sp, ELR and SPSR onto the kernel stack. Linux: the entry.S vector jumps to el0t_64_sync, which expands the kernel_entry macro to save pt_regs and then calls el0t_64_sync_handler; XNU: Lel0_synchronous_vector_64 in locore.s → fleh_synchronous.",
-           "④ Dispatch by number. Linux: el0_svc → invoke_syscall → sys_call_table[x8] → __arm64_sys_write. XNU: sleh_synchronous sees from ESR that it is an SVC → a positive x16 goes to unix_syscall (sysent[]), a negative one to mach_syscall (mach_trap_table[]).",
-           "⑤ The handler returns and the result is written into the saved x0 on the stack; the entry assembly restores the registers; eret: PC←ELR_EL1, PSTATE←SPSR_EL1, back to the next instruction at EL0."]'>
+           "1. The user program calls write(). libc puts the system call number in x8 (Linux) / x16 (XNU) and the arguments in x0–x2, then executes svc (Linux svc #0 / XNU svc #0x80).",
+           "2. What the CPU hardware does: PC→ELR_EL1, PSTATE→SPSR_EL1, cause (EC=SVC)→ESR_EL1; switch to EL1; jump to VBAR_EL1 + 0x400 (synchronous exception from a lower EL).",
+           "3. The entry assembly pushes x0–x30, sp, ELR and SPSR onto the kernel stack. Linux: the entry.S vector jumps to el0t_64_sync, which expands the kernel_entry macro to save pt_regs and then calls el0t_64_sync_handler; XNU: Lel0_synchronous_vector_64 in locore.s → fleh_synchronous.",
+           "4. Dispatch by number. Linux: el0_svc → invoke_syscall → sys_call_table[x8] → __arm64_sys_write. XNU: sleh_synchronous sees from ESR that it is an SVC → a positive x16 goes to unix_syscall (sysent[]), a negative one to mach_syscall (mach_trap_table[]).",
+           "5. The handler returns and the result is written into the saved x0 on the stack; the entry assembly restores the registers; eret: PC←ELR_EL1, PSTATE←SPSR_EL1, back to the next instruction at EL0."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -275,7 +275,7 @@ grep -n "MACH_TRAP" osfmk/kern/syscall_sw.c | head       # Mach trap 表</pre></
     <li><a href="https://developer.arm.com/documentation/ddi0487/latest">Arm Architecture Reference Manual for A-profile (Arm ARM)</a> <span class="lvl" lang="zh-CN">查手册，D1 章 exception model</span><span class="lvl" lang="en">Reference manual; chapter D1, the exception model</span></li>
     <li><a href="https://developer.arm.com/documentation/102412/latest">Arm — Learn the architecture: AArch64 Exception Model</a> <span class="lvl" lang="zh-CN">入门，比 Arm ARM 友好得多</span><span class="lvl" lang="en">Introductory; far friendlier than the Arm ARM</span></li>
     <li><a href="https://www.kernel.org/doc/html/latest/kbuild/llvm.html">Linux kernel docs — Building with Clang/LLVM</a> <span class="lvl">Lab A</span></li>
-    <li><a href="https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/entry.S">linux/arch/arm64/kernel/entry.S</a> <span class="lvl" lang="zh-CN">源码，动画第 ③ 步</span><span class="lvl" lang="en">Source; step ③ of the diagram</span></li>
+    <li><a href="https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/entry.S">linux/arch/arm64/kernel/entry.S</a> <span class="lvl" lang="zh-CN">源码，动画第 3 步</span><span class="lvl" lang="en">Source; step 3 of the diagram</span></li>
     <li><a href="https://github.com/apple-oss-distributions/xnu">apple-oss-distributions/xnu</a> <span class="lvl" lang="zh-CN">源码；osfmk/arm64/locore.s、sleh.c</span><span class="lvl" lang="en">Source; osfmk/arm64/locore.s, sleh.c</span></li>
     <li><a href="https://kernelnewbies.org/">kernelnewbies.org</a> <span class="lvl" lang="zh-CN">新手社区、术语表</span><span class="lvl" lang="en">Newcomer community, glossary</span></li>
     <li>Robert Love, <em>Linux Kernel Development</em><span lang="zh-CN">（3rd ed.）</span><span lang="en"> (3rd ed.) </span><span class="lvl" lang="zh-CN">全书薄、讲思路，Phase 0–4 的主线读物</span><span class="lvl" lang="en">A thin book about ideas; the main reading for Phases 0–4</span></li>

@@ -147,19 +147,19 @@ Linux user space 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff (256 TB); the k
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
          data-captions='["全图：上方是一个 48-bit 虚拟地址被切成的位段；中间一排是 TTBR 和 L0–L3 四级页表；左下是 TLB 这条捷径，右下是最终物理地址。按「播放」逐步走。",
-           "① 切地址：[47:39] L0 索引、[38:30] L1、[29:21] L2、[20:12] L3，各 9 位（一张表 512 项）；[11:0] 是页内偏移，12 位 = 4 KB。",
-           "② 先看高位：[63:48] 全 0 用 TTBR0_EL1（用户），全 1 用 TTBR1_EL1（内核）；启用 TBI 时看 bit 55。同时 MMU 用 VA 页号 + 当前 ASID 查 TLB——命中就直接得到 PA，后面四步全部跳过。",
-           "③ TLB miss：从 TTBR 取 L0 表物理基址，用 [47:39] 选中一项。它必须是 table 描述符（低两位 0b11），给出 L1 表基址；若无效则 translation fault level 0。",
-           "④ L1：用 [38:30] 选项。table 描述符继续往下；block 描述符（0b01）则直接映射 1 GB，遍历到此结束。",
-           "⑤ L2：用 [29:21] 选项。table 继续；block 则映射 2 MB——这正是 Linux THP 用到的大页。",
-           "⑥ L3：用 [20:12] 选中 page 描述符，检查 AP、UXN/PXN、AF，按 AttrIndx 去 MAIR_EL1 取内存类型；PA = 描述符输出地址 [47:12] 拼上 VA [11:0]。结果回填 TLB，下次同一页直接命中。"]'
+           "1. 切地址：[47:39] L0 索引、[38:30] L1、[29:21] L2、[20:12] L3，各 9 位（一张表 512 项）；[11:0] 是页内偏移，12 位 = 4 KB。",
+           "2. 先看高位：[63:48] 全 0 用 TTBR0_EL1（用户），全 1 用 TTBR1_EL1（内核）；启用 TBI 时看 bit 55。同时 MMU 用 VA 页号 + 当前 ASID 查 TLB——命中就直接得到 PA，后面四步全部跳过。",
+           "3. TLB miss：从 TTBR 取 L0 表物理基址，用 [47:39] 选中一项。它必须是 table 描述符（低两位 0b11），给出 L1 表基址；若无效则 translation fault level 0。",
+           "4. L1：用 [38:30] 选项。table 描述符继续往下；block 描述符（0b01）则直接映射 1 GB，遍历到此结束。",
+           "5. L2：用 [29:21] 选项。table 继续；block 则映射 2 MB——这正是 Linux THP 用到的大页。",
+           "6. L3：用 [20:12] 选中 page 描述符，检查 AP、UXN/PXN、AF，按 AttrIndx 去 MAIR_EL1 取内存类型；PA = 描述符输出地址 [47:12] 拼上 VA [11:0]。结果回填 TLB，下次同一页直接命中。"]'
          data-captions-en='["The whole picture: at the top, a 48-bit virtual address cut into bit fields; in the middle row, the TTBR and the four page-table levels L0–L3; bottom left, the TLB shortcut; bottom right, the final physical address. Press Play to step through.",
-           "① Slice the address: [47:39] is the L0 index, [38:30] L1, [29:21] L2, [20:12] L3, 9 bits each (512 entries per table); [11:0] is the page offset, 12 bits = 4 KB.",
-           "② Look at the top bits first: [63:48] all 0 uses TTBR0_EL1 (user), all 1 uses TTBR1_EL1 (kernel); with TBI enabled, bit 55 decides. At the same time the MMU looks up the TLB with the VA page number + the current ASID — on a hit it gets the PA directly and all four following steps are skipped.",
-           "③ TLB miss: take the physical base of the L0 table from the TTBR and select an entry with [47:39]. It must be a table descriptor (low two bits 0b11), giving the base of the L1 table; if it is invalid, the result is a translation fault at level 0.",
-           "④ L1: select an entry with [38:30]. A table descriptor continues downward; a block descriptor (0b01) maps 1 GB directly, and the walk ends here.",
-           "⑤ L2: select an entry with [29:21]. A table continues; a block maps 2 MB — exactly the huge page that Linux THP uses.",
-           "⑥ L3: [20:12] selects the page descriptor; AP, UXN/PXN and AF are checked, and AttrIndx picks the memory type from MAIR_EL1; PA = the output address [47:12] of the descriptor joined with VA [11:0]. The result is filled back into the TLB, so the next access to the same page hits directly."]'>
+           "1. Slice the address: [47:39] is the L0 index, [38:30] L1, [29:21] L2, [20:12] L3, 9 bits each (512 entries per table); [11:0] is the page offset, 12 bits = 4 KB.",
+           "2. Look at the top bits first: [63:48] all 0 uses TTBR0_EL1 (user), all 1 uses TTBR1_EL1 (kernel); with TBI enabled, bit 55 decides. At the same time the MMU looks up the TLB with the VA page number + the current ASID — on a hit it gets the PA directly and all four following steps are skipped.",
+           "3. TLB miss: take the physical base of the L0 table from the TTBR and select an entry with [47:39]. It must be a table descriptor (low two bits 0b11), giving the base of the L1 table; if it is invalid, the result is a translation fault at level 0.",
+           "4. L1: select an entry with [38:30]. A table descriptor continues downward; a block descriptor (0b01) maps 1 GB directly, and the walk ends here.",
+           "5. L2: select an entry with [29:21]. A table continues; a block maps 2 MB — exactly the huge page that Linux THP uses.",
+           "6. L3: [20:12] selects the page descriptor; AP, UXN/PXN and AF are checked, and AttrIndx picks the memory type from MAIR_EL1; PA = the output address [47:12] of the descriptor joined with VA [11:0]. The result is filled back into the TLB, so the next access to the same page hits directly."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -258,19 +258,19 @@ Linux user space 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff (256 TB); the k
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
          data-captions='["全图：上半 EL0 用户态，下半 EL1 内核态；左列 Linux，右列 XNU。一次读写碰到还没有物理页的地址，看两个内核怎么补上。",
-           "① 用户程序执行 ldr x0, [x1]，x1 指向刚 mmap 出来、从没碰过的匿名页（或 fork 后要写的共享页）。L3 描述符无效（或只读）。",
-           "② MMU 翻译失败 → 同步异常 data abort：硬件把这条 ldr 的地址存进 ELR_EL1、PSTATE 存进 SPSR_EL1，切到 EL1，跳到 VBAR_EL1 + 0x400。",
-           "③ 原因和地址被记下：ESR_EL1.EC = 0x24（来自 lower EL 的 data abort），ISS 里 DFSC 说明是 translation / permission fault 及其级别，WnR 说明读还是写；FAR_EL1 = 出错的 VA。Linux：el0t_64_sync → el0_da；XNU：fleh_synchronous → sleh_synchronous 看到 ESR_EC_DABORT_EL0。",
-           "④ 找区域。Linux：do_mem_abort → do_translation_fault / do_page_fault，在 mm_struct 的 maple tree 里找 VMA 并检查权限。XNU：handle_abort → handle_user_abort → vm_fault，在 vm_map 里查到 vm_map_entry 和它的 vm_object。找不到 → SIGSEGV / EXC_BAD_ACCESS。",
-           "⑤ 拿到物理页。匿名首次访问：分一页清零（读可先映射零页）；文件映射：从 page cache / pager 读，可能要等 I/O；写共享只读页：COW 复制一页。Linux 在 handle_mm_fault → handle_pte_fault 里分派；XNU 在 vm_fault_page 里沿 shadow 链找页或向 pager 要。",
-           "⑥ 写入页表并返回：Linux 设置 PTE（set_pte_at 一类辅助函数）；XNU vm_fault_enter → pmap_enter。然后 eret 回到 ELR_EL1——还是那条 ldr，这次翻译成功，程序毫无察觉。"]'
+           "1. 用户程序执行 ldr x0, [x1]，x1 指向刚 mmap 出来、从没碰过的匿名页（或 fork 后要写的共享页）。L3 描述符无效（或只读）。",
+           "2. MMU 翻译失败 → 同步异常 data abort：硬件把这条 ldr 的地址存进 ELR_EL1、PSTATE 存进 SPSR_EL1，切到 EL1，跳到 VBAR_EL1 + 0x400。",
+           "3. 原因和地址被记下：ESR_EL1.EC = 0x24（来自 lower EL 的 data abort），ISS 里 DFSC 说明是 translation / permission fault 及其级别，WnR 说明读还是写；FAR_EL1 = 出错的 VA。Linux：el0t_64_sync → el0_da；XNU：fleh_synchronous → sleh_synchronous 看到 ESR_EC_DABORT_EL0。",
+           "4. 找区域。Linux：do_mem_abort → do_translation_fault / do_page_fault，在 mm_struct 的 maple tree 里找 VMA 并检查权限。XNU：handle_abort → handle_user_abort → vm_fault，在 vm_map 里查到 vm_map_entry 和它的 vm_object。找不到 → SIGSEGV / EXC_BAD_ACCESS。",
+           "5. 拿到物理页。匿名首次访问：分一页清零（读可先映射零页）；文件映射：从 page cache / pager 读，可能要等 I/O；写共享只读页：COW 复制一页。Linux 在 handle_mm_fault → handle_pte_fault 里分派；XNU 在 vm_fault_page 里沿 shadow 链找页或向 pager 要。",
+           "6. 写入页表并返回：Linux 设置 PTE（set_pte_at 一类辅助函数）；XNU vm_fault_enter → pmap_enter。然后 eret 回到 ELR_EL1——还是那条 ldr，这次翻译成功，程序毫无察觉。"]'
          data-captions-en='["The whole picture: EL0 user mode on top, EL1 kernel mode below; Linux on the left, XNU on the right. A load or store hits an address that has no physical page yet; watch how the two kernels fill it in.",
-           "① The user program executes ldr x0, [x1], where x1 points to an anonymous page that was just mmapped and never touched (or to a shared page that is about to be written after fork). The L3 descriptor is invalid (or read-only).",
-           "② MMU translation fails → synchronous exception, data abort: the hardware saves the address of this ldr in ELR_EL1 and PSTATE in SPSR_EL1, switches to EL1 and jumps to VBAR_EL1 + 0x400.",
-           "③ The cause and the address are recorded: ESR_EL1.EC = 0x24 (data abort from a lower EL); DFSC in the ISS says translation / permission fault and its level, and WnR says read or write; FAR_EL1 = the faulting VA. Linux: el0t_64_sync → el0_da; XNU: fleh_synchronous → sleh_synchronous sees ESR_EC_DABORT_EL0.",
-           "④ Find the region. Linux: do_mem_abort → do_translation_fault / do_page_fault looks up the VMA in the maple tree of the mm_struct and checks permissions. XNU: handle_abort → handle_user_abort → vm_fault finds the vm_map_entry and its vm_object in the vm_map. Not found → SIGSEGV / EXC_BAD_ACCESS.",
-           "⑤ Get a physical page. First access to anonymous memory: allocate a zeroed page (a read can map the zero page first); file mapping: read from the page cache / pager, possibly waiting for I/O; write to a shared read-only page: COW copies one page. Linux dispatches in handle_mm_fault → handle_pte_fault; XNU, in vm_fault_page, follows the shadow chain to find the page or asks the pager.",
-           "⑥ Write the page table and return: Linux sets the PTE (with a set_pte_at style helper); XNU does vm_fault_enter → pmap_enter. Then eret returns to ELR_EL1 — the same ldr, which now translates successfully, and the program notices nothing."]'>
+           "1. The user program executes ldr x0, [x1], where x1 points to an anonymous page that was just mmapped and never touched (or to a shared page that is about to be written after fork). The L3 descriptor is invalid (or read-only).",
+           "2. MMU translation fails → synchronous exception, data abort: the hardware saves the address of this ldr in ELR_EL1 and PSTATE in SPSR_EL1, switches to EL1 and jumps to VBAR_EL1 + 0x400.",
+           "3. The cause and the address are recorded: ESR_EL1.EC = 0x24 (data abort from a lower EL); DFSC in the ISS says translation / permission fault and its level, and WnR says read or write; FAR_EL1 = the faulting VA. Linux: el0t_64_sync → el0_da; XNU: fleh_synchronous → sleh_synchronous sees ESR_EC_DABORT_EL0.",
+           "4. Find the region. Linux: do_mem_abort → do_translation_fault / do_page_fault looks up the VMA in the maple tree of the mm_struct and checks permissions. XNU: handle_abort → handle_user_abort → vm_fault finds the vm_map_entry and its vm_object in the vm_map. Not found → SIGSEGV / EXC_BAD_ACCESS.",
+           "5. Get a physical page. First access to anonymous memory: allocate a zeroed page (a read can map the zero page first); file mapping: read from the page cache / pager, possibly waiting for I/O; write to a shared read-only page: COW copies one page. Linux dispatches in handle_mm_fault → handle_pte_fault; XNU, in vm_fault_page, follows the shadow chain to find the page or asks the pager.",
+           "6. Write the page table and return: Linux sets the PTE (with a set_pte_at style helper); XNU does vm_fault_enter → pmap_enter. Then eret returns to ELR_EL1 — the same ldr, which now translates successfully, and the program notices nothing."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>

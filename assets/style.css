@@ -109,6 +109,10 @@ pre {
   line-height: 1.5;
 }
 code:not(pre code) { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+/* Phones: a long path or identifier in prose breaks instead of widening the page.
+   break-word (not anywhere) leaves min-content alone, so .cmp tables keep their
+   widths and scroll inside .table-wrap. */
+@media (max-width: 760px) { code:not(pre code) { overflow-wrap: break-word; } }
 kbd { background: var(--surface); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 0.85em; }
 img, svg { max-width: 100%; }
 [hidden] { display: none !important; }
@@ -308,6 +312,16 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .diagram { background: var(--surface); border-radius: 10px; padding: 16px 16px 12px; margin: 16px 0 28px; }
 .diagram:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .diagram svg { display: block; width: 100%; height: auto; }
+.diagram-scroll { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
+@media (max-width: 760px) {
+  .diagram { padding: 12px 10px 10px; }
+  .diagram-scroll > svg { min-width: 720px; max-width: none; }
+  .diagram-scroll.can-right { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); }
+  .diagram-scroll.can-left { -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px); mask-image: linear-gradient(90deg, transparent, #000 32px); }
+  .diagram-scroll.can-left.can-right { -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(90deg, transparent, #000 32px, #000 calc(100% - 32px), transparent); }
+}
+@media (prefers-contrast: more) { .diagram-scroll { -webkit-mask-image: none !important; mask-image: none !important; } }
+@media print { .diagram-scroll > svg { min-width: 0 !important; } .diagram-scroll { overflow: visible; -webkit-mask-image: none !important; mask-image: none !important; } }
 .diagram .caption { font-size: 14.5px; color: var(--ink-2); margin: 10px 2px 12px; min-height: 1.6em; max-width: none; }
 .diagram .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .diagram .controls button {
@@ -344,7 +358,13 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .quiz label { display: block; padding: 4px 0; cursor: pointer; }
 .quiz .why { margin-top: 6px; font-size: 14px; color: var(--ink-2); }
 .quiz .result { font-weight: 600; margin-top: 8px; }
-.quiz .ok { color: var(--ok); } .quiz .bad { color: var(--linux); }
+.quiz .q.ok > p::before { content: "✓ "; color: var(--ok); font-weight: 700; }
+.quiz .q.bad > p::before { content: "✗ "; color: var(--ink-2); font-weight: 700; }
+.quiz .q.bad > p { color: var(--ink); }
+.quiz .result.ok { color: var(--ok); }
+.quiz .result.ok::before { content: "✓ "; }
+.quiz .result.bad { color: var(--ink-2); }
+.quiz .result.bad::before { content: "✗ "; }
 .quiz button { font: 500 14px var(--sans); background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
 
 /* Resources */
