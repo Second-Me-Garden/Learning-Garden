@@ -200,12 +200,12 @@ make -C /src/linux M=/lab/share/hello LLVM=1 modules</pre>
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 400" data-interval="2200"
          data-captions='["全图：底部是宿主 Mac，上面三个客体：QEMU Linux VM、构建容器、macOS 客体 VM。按「播放」逐层走，最后看连接线。",
-           "① 宿主 Mac（macOS，SIP 永远开着）：编辑、编译、跑 QEMU 和 UTM、当 lldb 调试器一端、存放实验目录 kernel-lab。",
-           "② QEMU Linux arm64 VM：-M virt，virtio 磁盘 disk.qcow2，自编内核 Image + busybox initramfs。所有 Linux 内核实验和 insmod 都在这里。",
-           "③ 构建容器（Docker Desktop / OrbStack / Lima）：同一个 clang 编内核和模块，产物拷回 kernel-lab。只编不跑，不 insmod。",
-           "④ macOS 客体 VM（UTM Apple Virtualization 或 Tart）：在它的 Recovery 里 csrutil disable、改 boot-args、加载自写 kext。宿主不受影响。",
-           "⑤ 共享目录：kernel-lab/share 通过 9p 挂进 Linux VM（/mnt/share），通过 -v 挂进容器，通过 VirtioFS 共享给 macOS 客体。",
-           "⑥ 调试与回滚：宿主 lldb 经 gdbstub（tcp 1234）调 Linux VM，经 KDP 调 macOS 客体；Linux 用 qemu-img snapshot 回滚，macOS 客体用克隆 VM bundle 代替快照。"]'
+           "1. 宿主 Mac（macOS，SIP 永远开着）：编辑、编译、跑 QEMU 和 UTM、当 lldb 调试器一端、存放实验目录 kernel-lab。",
+           "2. QEMU Linux arm64 VM：-M virt，virtio 磁盘 disk.qcow2，自编内核 Image + busybox initramfs。所有 Linux 内核实验和 insmod 都在这里。",
+           "3. 构建容器（Docker Desktop / OrbStack / Lima）：同一个 clang 编内核和模块，产物拷回 kernel-lab。只编不跑，不 insmod。",
+           "4. macOS 客体 VM（UTM Apple Virtualization 或 Tart）：在它的 Recovery 里 csrutil disable、改 boot-args、加载自写 kext。宿主不受影响。",
+           "5. 共享目录：kernel-lab/share 通过 9p 挂进 Linux VM（/mnt/share），通过 -v 挂进容器，通过 VirtioFS 共享给 macOS 客体。",
+           "6. 调试与回滚：宿主 lldb 经 gdbstub（tcp 1234）调 Linux VM，经 KDP 调 macOS 客体；Linux 用 qemu-img snapshot 回滚，macOS 客体用克隆 VM bundle 代替快照。"]'
          data-captions-en='["Overview: the host Mac at the bottom, three guests above it: the QEMU Linux VM, the build container and the macOS guest VM. Press Play to walk the layers, then the connections.", "1 Host Mac (macOS, SIP always on): editing, building, running QEMU and UTM, the lldb debugger end, and the kernel-lab working directory.", "2 QEMU Linux arm64 VM: -M virt, a virtio disk disk.qcow2, your own kernel Image + a busybox initramfs. Every Linux kernel experiment and every insmod happens here.", "3 Build container (Docker Desktop / OrbStack / Lima): one clang builds both the kernel and modules; the output is copied back to kernel-lab. It builds only — it never runs insmod.", "4 macOS guest VM (UTM Apple Virtualization or Tart): csrutil disable in its Recovery, boot-args changes and loading your own kexts all happen here. The host is untouched.", "5 Shared directory: kernel-lab/share is mounted into the Linux VM over 9p (/mnt/share), into the container with -v, and shared to the macOS guest over VirtioFS.", "6 Debugging and rollback: host lldb reaches the Linux VM through the gdbstub (tcp 1234) and the macOS guest through KDP; Linux rolls back with qemu-img snapshot, the macOS guest by cloning the VM bundle instead of a snapshot."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">

@@ -191,19 +191,19 @@
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 420" data-interval="2200"
          data-captions='["全图：同一颗 CPU 上线程 A 正在运行，要切到线程 B。左列 Linux arm64，右列 XNU arm64，自上而下 6 步。按「播放」逐步走。",
-           "① 定时器中断打断 A（Apple Silicon 上定时器走 FIQ）。Linux：tick 处理（scheduler_tick，6.10 起叫 sched_tick）发现 A 用完了份额，设 TIF_NEED_RESCHED；XNU：quantum 到期，设 AST_PREEMPT。都在中断返回前处理。",
-           "② 调度器选人。Linux：__schedule → pick_next_task，fair 类用 EEVDF 选出 B。XNU：thread_block → thread_select 在 clutch 层级里选出 B，然后 thread_invoke。",
-           "③ 保存 A。因为切换是一次函数调用，只需存 callee-saved：x19–x28、fp、sp、lr。Linux 存进 A 的 thread.cpu_context（cpu_switch_to）；XNU 存进 A 的内核保存区（Switch_context）。",
-           "④ 换内核栈和地址空间：sp 换成 B 的内核栈；若 B 属于另一个地址空间，写 TTBR0_EL1 换用户页表（Linux 的 ASID 在 TTBR1_EL1 高位，免整表 TLB flush）。注意：Linux 实际在 switch_to 之前就在 context_switch 里调 switch_mm_irqs_off；XNU 在 machine_switch_context 里切 pmap（大致路径）。这里为讲解合成一步。",
-           "⑤ 恢复 B：从 B 的保存区载入 x19–x28、fp、sp、lr。Linux 用 msr sp_el0 把 current 指向 B；XNU 更新当前线程指针（TPIDR_EL1，大致路径）。",
-           "⑥ ret：跳到 lr——也就是 B 上次调切换函数时的返回点。B 觉得自己只是从 cpu_switch_to / Switch_context 返回了，一路退回到它的异常出口再 eret 回用户态。新线程的 lr 预先指向 ret_from_fork（Linux）或线程起始桩（XNU）。"]'
+           "1. 定时器中断打断 A（Apple Silicon 上定时器走 FIQ）。Linux：tick 处理（scheduler_tick，6.10 起叫 sched_tick）发现 A 用完了份额，设 TIF_NEED_RESCHED；XNU：quantum 到期，设 AST_PREEMPT。都在中断返回前处理。",
+           "2. 调度器选人。Linux：__schedule → pick_next_task，fair 类用 EEVDF 选出 B。XNU：thread_block → thread_select 在 clutch 层级里选出 B，然后 thread_invoke。",
+           "3. 保存 A。因为切换是一次函数调用，只需存 callee-saved：x19–x28、fp、sp、lr。Linux 存进 A 的 thread.cpu_context（cpu_switch_to）；XNU 存进 A 的内核保存区（Switch_context）。",
+           "4. 换内核栈和地址空间：sp 换成 B 的内核栈；若 B 属于另一个地址空间，写 TTBR0_EL1 换用户页表（Linux 的 ASID 在 TTBR1_EL1 高位，免整表 TLB flush）。注意：Linux 实际在 switch_to 之前就在 context_switch 里调 switch_mm_irqs_off；XNU 在 machine_switch_context 里切 pmap（大致路径）。这里为讲解合成一步。",
+           "5. 恢复 B：从 B 的保存区载入 x19–x28、fp、sp、lr。Linux 用 msr sp_el0 把 current 指向 B；XNU 更新当前线程指针（TPIDR_EL1，大致路径）。",
+           "6. ret：跳到 lr——也就是 B 上次调切换函数时的返回点。B 觉得自己只是从 cpu_switch_to / Switch_context 返回了，一路退回到它的异常出口再 eret 回用户态。新线程的 lr 预先指向 ret_from_fork（Linux）或线程起始桩（XNU）。"]'
          data-captions-en='["The whole picture: thread A is running on a CPU and is about to be switched to thread B. Linux arm64 on the left, XNU arm64 on the right, six steps from top to bottom. Press Play to step through.",
-           "① A timer interrupt interrupts A (on Apple Silicon the timer comes in as an FIQ). Linux: the tick handler (scheduler_tick, called sched_tick from 6.10) finds that A has used up its share and sets TIF_NEED_RESCHED; XNU: the quantum expires and AST_PREEMPT is set. Both are handled before the interrupt returns.",
-           "② The scheduler picks. Linux: __schedule → pick_next_task, and the fair class uses EEVDF to pick B. XNU: thread_block → thread_select picks B in the clutch hierarchy, then thread_invoke.",
-           "③ Save A. Because the switch is a function call, only the callee-saved registers need saving: x19–x28, fp, sp, lr. Linux stores them in thread.cpu_context of A (cpu_switch_to); XNU stores them in the kernel save area of A (Switch_context).",
-           "④ Switch kernel stack and address space: sp becomes the kernel stack of B; if B belongs to another address space, TTBR0_EL1 is written to swap the user page tables (on Linux the ASID sits in the high bits of TTBR1_EL1, avoiding a full TLB flush). Note: Linux actually calls switch_mm_irqs_off in context_switch, before switch_to; XNU switches the pmap in machine_switch_context (approximate path). They are merged into one step here for teaching.",
-           "⑤ Restore B: load x19–x28, fp, sp, lr from the save area of B. Linux points current at B with msr sp_el0; XNU updates the current-thread pointer (TPIDR_EL1, approximate path).",
-           "⑥ ret: jump to lr — the return point from the last time B called the switch function. To B it looks as if it just returned from cpu_switch_to / Switch_context; it unwinds all the way back to its exception exit and erets to user mode. For a new thread, lr points in advance to ret_from_fork (Linux) or to a thread-start stub (XNU)."]'>
+           "1. A timer interrupt interrupts A (on Apple Silicon the timer comes in as an FIQ). Linux: the tick handler (scheduler_tick, called sched_tick from 6.10) finds that A has used up its share and sets TIF_NEED_RESCHED; XNU: the quantum expires and AST_PREEMPT is set. Both are handled before the interrupt returns.",
+           "2. The scheduler picks. Linux: __schedule → pick_next_task, and the fair class uses EEVDF to pick B. XNU: thread_block → thread_select picks B in the clutch hierarchy, then thread_invoke.",
+           "3. Save A. Because the switch is a function call, only the callee-saved registers need saving: x19–x28, fp, sp, lr. Linux stores them in thread.cpu_context of A (cpu_switch_to); XNU stores them in the kernel save area of A (Switch_context).",
+           "4. Switch kernel stack and address space: sp becomes the kernel stack of B; if B belongs to another address space, TTBR0_EL1 is written to swap the user page tables (on Linux the ASID sits in the high bits of TTBR1_EL1, avoiding a full TLB flush). Note: Linux actually calls switch_mm_irqs_off in context_switch, before switch_to; XNU switches the pmap in machine_switch_context (approximate path). They are merged into one step here for teaching.",
+           "5. Restore B: load x19–x28, fp, sp, lr from the save area of B. Linux points current at B with msr sp_el0; XNU updates the current-thread pointer (TPIDR_EL1, approximate path).",
+           "6. ret: jump to lr — the return point from the last time B called the switch function. To B it looks as if it just returned from cpu_switch_to / Switch_context; it unwinds all the way back to its exception exit and erets to user mode. For a new thread, lr points in advance to ret_from_fork (Linux) or to a thread-start stub (XNU)."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -269,17 +269,17 @@
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 420" data-interval="2400"
          data-captions='["全图：左边是 Linux 一个 CPU 的 fair 运行队列（三个可运行任务），右边是 XNU 的优先级带和 clutch 层级。按「播放」看两边各自怎么选出下一个。",
-           "① 起点。Linux：T1、T2、T3 按 vruntime 排在红黑树里（T1=10，T2=16，T3=34）。XNU：优先级 0–127 分 4 个带——96–127 实时、80–95 内核、64–79 保留、0–63 用户（QoS 映射到这里）。",
-           "② 最简单的规则。CFS：永远选最左节点 = 最小 vruntime，即 T1。XNU：先看实时队列，有 RT 线程就直接运行它，不进 clutch 层级；这里没有 RT 线程，继续往下。",
-           "③ EEVDF 先算加权平均 V（按权重算约 23，图中取 V≈23）：lag = V − vruntime ≥ 0 才 eligible，所以 T1、T2 可选，T3 已经多拿了 CPU，不可选。XNU：在 QoS root bucket（FIXPRI、FG、IN、DF、UT、BG）之间按截止时间做 EDF，高 QoS 有 warp 可插队，这里选出 FG。",
-           "④ EEVDF：每个任务的虚拟截止时间 vd = vruntime + slice / 权重；eligible 里 vd 最早的是 T2（28 早于 T1 的 48），所以选 T2——与 CFS 的答案不同。XNU：在 FG 里选 thread group 对应的 clutch bucket，再选 sched_pri 最高的线程（47）。",
-           "⑤ 运行之后。Linux：T2 的 vruntime 按 Δexec × 1024 / 权重增加，重算 vd，放回树里。XNU：timeshare 线程的 sched_pri 随 CPU 使用量衰减；Apple Silicon 上的 Edge 调度器按 QoS、负载和 thread group 的性能推荐把线程放到 P 核或 E 核。"]'
+           "1. 起点。Linux：T1、T2、T3 按 vruntime 排在红黑树里（T1=10，T2=16，T3=34）。XNU：优先级 0–127 分 4 个带——96–127 实时、80–95 内核、64–79 保留、0–63 用户（QoS 映射到这里）。",
+           "2. 最简单的规则。CFS：永远选最左节点 = 最小 vruntime，即 T1。XNU：先看实时队列，有 RT 线程就直接运行它，不进 clutch 层级；这里没有 RT 线程，继续往下。",
+           "3. EEVDF 先算加权平均 V（按权重算约 23，图中取 V≈23）：lag = V − vruntime ≥ 0 才 eligible，所以 T1、T2 可选，T3 已经多拿了 CPU，不可选。XNU：在 QoS root bucket（FIXPRI、FG、IN、DF、UT、BG）之间按截止时间做 EDF，高 QoS 有 warp 可插队，这里选出 FG。",
+           "4. EEVDF：每个任务的虚拟截止时间 vd = vruntime + slice / 权重；eligible 里 vd 最早的是 T2（28 早于 T1 的 48），所以选 T2——与 CFS 的答案不同。XNU：在 FG 里选 thread group 对应的 clutch bucket，再选 sched_pri 最高的线程（47）。",
+           "5. 运行之后。Linux：T2 的 vruntime 按 Δexec × 1024 / 权重增加，重算 vd，放回树里。XNU：timeshare 线程的 sched_pri 随 CPU 使用量衰减；Apple Silicon 上的 Edge 调度器按 QoS、负载和 thread group 的性能推荐把线程放到 P 核或 E 核。"]'
          data-captions-en='["The whole picture: on the left, the fair run queue of one Linux CPU (three runnable tasks); on the right, the XNU priority bands and the clutch hierarchy. Press Play to see how each side picks the next one.",
-           "① Starting point. Linux: T1, T2, T3 sit in a red-black tree ordered by vruntime (T1=10, T2=16, T3=34). XNU: priorities 0–127 are split into 4 bands — 96–127 real-time, 80–95 kernel, 64–79 reserved, 0–63 user (QoS maps here).",
-           "② The simplest rule. CFS: always pick the leftmost node = the smallest vruntime, i.e. T1. XNU: check the real-time queue first; if there is an RT thread, run it directly without entering the clutch hierarchy. There is no RT thread here, so carry on.",
-           "③ EEVDF first computes the weighted average V (about 23 when weighted; the diagram uses V≈23): only lag = V − vruntime ≥ 0 is eligible, so T1 and T2 can be picked, while T3 has already taken extra CPU and cannot. XNU: EDF by deadline across the QoS root buckets (FIXPRI, FG, IN, DF, UT, BG); higher QoS has warp and can jump the queue; FG is picked here.",
-           "④ EEVDF: each task has a virtual deadline vd = vruntime + slice / weight; among the eligible tasks the earliest vd belongs to T2 (28, earlier than 48 for T1), so T2 is picked — a different answer from CFS. XNU: within FG, pick the clutch bucket of the thread group, then the thread with the highest sched_pri (47).",
-           "⑤ After running. Linux: the vruntime of T2 grows by Δexec × 1024 / weight, vd is recomputed, and T2 goes back into the tree. XNU: the sched_pri of a timeshare thread decays with CPU usage; on Apple Silicon the Edge scheduler places threads on P or E cores by QoS, load and the performance recommendation of the thread group."]'>
+           "1. Starting point. Linux: T1, T2, T3 sit in a red-black tree ordered by vruntime (T1=10, T2=16, T3=34). XNU: priorities 0–127 are split into 4 bands — 96–127 real-time, 80–95 kernel, 64–79 reserved, 0–63 user (QoS maps here).",
+           "2. The simplest rule. CFS: always pick the leftmost node = the smallest vruntime, i.e. T1. XNU: check the real-time queue first; if there is an RT thread, run it directly without entering the clutch hierarchy. There is no RT thread here, so carry on.",
+           "3. EEVDF first computes the weighted average V (about 23 when weighted; the diagram uses V≈23): only lag = V − vruntime ≥ 0 is eligible, so T1 and T2 can be picked, while T3 has already taken extra CPU and cannot. XNU: EDF by deadline across the QoS root buckets (FIXPRI, FG, IN, DF, UT, BG); higher QoS has warp and can jump the queue; FG is picked here.",
+           "4. EEVDF: each task has a virtual deadline vd = vruntime + slice / weight; among the eligible tasks the earliest vd belongs to T2 (28, earlier than 48 for T1), so T2 is picked — a different answer from CFS. XNU: within FG, pick the clutch bucket of the thread group, then the thread with the highest sched_pri (47).",
+           "5. After running. Linux: the vruntime of T2 grows by Δexec × 1024 / weight, vd is recomputed, and T2 goes back into the tree. XNU: the sched_pri of a timeshare thread decays with CPU usage; on Apple Silicon the Edge scheduler places threads on P or E cores by QoS, load and the performance recommendation of the thread group."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
