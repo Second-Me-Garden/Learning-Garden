@@ -1,0 +1,880 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 7 · The Stack, Portability and the Capstone · GPU Programming with CUDA</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">GPU Programming with CUDA</a>
+    <span class="crumb current" aria-current="page">Phase 7 · The Stack, Portability and the Capstone</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 7 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 7 / 8 · about 1–2 weeks</p>
+  <h1>The Stack, Portability and the Capstone <span class="en" lang="zh-CN">软件栈、可移植性与作品项目：运行时 API 与驱动 API、PTX 与 SASS、JIT 与 fatbin、<code>-arch</code> 与 <code>-gencode</code>、兼容性与 NGC 容器、HIP/SYCL/Kokkos/Metal、PyTorch 自定义算子与 Triton，以及一个融合 softmax 作品项目</span><span class="en" lang="en">Runtime versus driver API, PTX and SASS, JIT and fatbins, <code>-arch</code> and <code>-gencode</code>, compatibility and the NGC container, HIP, SYCL, Kokkos and Metal, custom PyTorch operators and Triton, and a fused-softmax capstone</span></h1>
+  <p class="lede" lang="zh-CN">前六课都在 kernel 里面；这一课退后一步，看一个 <code>.cu</code> 文件怎样变成能在某一张 GPU 上跑的机器码：<code>nvcc</code> 先产出虚拟指令集 PTX，再产出某一代硬件的 SASS，两者一起装进可执行文件里的 fatbin，驱动在加载时挑一个，必要时现场 JIT。弄清这条链，才说得清「为什么换一张卡就报 no kernel image」「为什么旧驱动跑不了新工具链编出的 PTX」「容器里到底装了什么」。然后看同样的 kernel 怎样搬到 AMD、Intel 和 Apple 上，怎样接进 PyTorch；最后用一个融合 softmax 作品项目把整个专题收束起来。<strong>哪些跑过、哪些没跑过：</strong>CUDA 部分（Lab A）<strong>未运行</strong>，是 2026-10-31 根据 CUDA 13.4 文档（nvcc、PTX ISA 9.4、CUDA Compatibility、编程指南）和 PyTorch 2.15 文档整理的；其中两个 C++ 源文件只在本机用 clang 对照桩头文件做过语法检查。Metal 部分（Lab B）2026-10-31 在这台 Apple M5 上实际运行：4096 × 4096 时，融合版 softmax 比四个 kernel 的未融合版快 2.8 倍，与 Apple 自己的 <code>MPSMatrixSoftMax</code> 持平。</p>
+  <p class="lede" lang="en">The first six phases lived inside the kernel; this one steps back to see how a <code>.cu</code> file becomes machine code that runs on one particular GPU: <code>nvcc</code> first produces PTX, a virtual instruction set, then SASS for one hardware generation, and packs both into a fatbin inside the executable; at load time the driver picks one and, when it has to, JIT-compiles on the spot. With that chain clear you can explain why a different card reports no kernel image, why an older driver cannot run PTX from a newer toolkit, and what a container actually carries. Then the same kernel moves to AMD, Intel and Apple and plugs into PyTorch, and a fused-softmax capstone closes the topic. <strong>What was run and what was not:</strong> the CUDA part (Lab A) is <strong>not run</strong>, assembled on 2026-10-31 from the CUDA 13.4 documentation (nvcc, PTX ISA 9.4, CUDA Compatibility, the programming guide) and the PyTorch 2.15 documentation; two of its C++ source files were only syntax-checked here with clang against stub headers. The Metal part (Lab B) was actually run on this Apple M5 on 2026-10-31: at 4096 × 4096 the fused softmax is 2.8 times as fast as the unfused four-kernel version and level with Apple’s own <code>MPSMatrixSoftMax</code>.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说清运行时 API（<code>cuda*</code>）和驱动 API（<code>cu*</code>）的分工，用驱动 API 加载一个 PTX 文件并启动其中的 kernel。</li>
+      <li lang="en">Explain how the runtime API (<code>cuda*</code>) and the driver API (<code>cu*</code>) divide the work, and load a PTX file and launch a kernel from it with the driver API.</li>
+      <li lang="zh-CN">区分 PTX、SASS、cubin 和 fatbin，用 <code>cuobjdump</code> 看一个可执行文件里装了哪些。</li>
+      <li lang="en">Tell PTX, SASS, cubins and fatbins apart, and use <code>cuobjdump</code> to see which ones an executable carries.</li>
+      <li lang="zh-CN">读懂并写出 <code>-arch</code>、<code>--gpu-architecture</code>/<code>--gpu-code</code> 和 <code>-gencode</code>，预测一个构建在 T4、L4 和未来的 GPU 上各会怎样。</li>
+      <li lang="en">Read and write <code>-arch</code>, <code>--gpu-architecture</code>/<code>--gpu-code</code> and <code>-gencode</code>, and predict what one build does on a T4, an L4 and a future GPU.</li>
+      <li lang="zh-CN">分清二进制兼容、PTX 兼容、小版本兼容和向前兼容，说出 NGC 容器解决了哪一层、没解决哪一层。</li>
+      <li lang="en">Separate binary, PTX, minor-version and forward compatibility, and say which layer an NGC container solves and which it does not.</li>
+      <li lang="zh-CN">概述 HIP、SYCL、Kokkos 和 Metal 各自怎样处理「同一份 kernel 跑在别家硬件上」，以及代价在哪里。</li>
+      <li lang="en">Outline how HIP, SYCL, Kokkos and Metal each handle running the same kernel on other vendors’ hardware, and where the costs are.</li>
+      <li lang="zh-CN">把一个 CUDA kernel 注册成 PyTorch 算子，并说出 Triton 写同一个 kernel 时省掉了什么。</li>
+      <li lang="en">Register a CUDA kernel as a PyTorch operator, and say what Triton saves you when writing the same kernel.</li>
+      <li lang="zh-CN">按规格完成作品项目：一个融合 softmax（或 layer norm、或 n-body），带字节模型、对照库实现的测量和剖析报告。</li>
+      <li lang="en">Complete the capstone to its specification: a fused softmax (or layer norm, or n-body) with a byte model, measurements against a library implementation, and a profiling report.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-3-parallel-patterns/index.html">Phase 3 · Parallel Patterns</a>：树形归约和 warp shuffle。作品项目的 softmax 每行要做两次归约（最大值和求和）。</li>
+    <li lang="en"><a href="../phase-3-parallel-patterns/index.html">Phase 3 · Parallel Patterns</a>: tree reduction and warp shuffles. The capstone’s softmax does two reductions per row (a maximum and a sum).</li>
+    <li lang="zh-CN"><a href="../phase-4-profiling-and-optimization/index.html">Phase 4 · Profiling and Optimization</a>：<code>nsys</code>、<code>ncu</code>、roofline、访存受限。作品项目的剖析报告用的就是那一套。</li>
+    <li lang="en"><a href="../phase-4-profiling-and-optimization/index.html">Phase 4 · Profiling and Optimization</a>: <code>nsys</code>, <code>ncu</code>, the roofline, memory-bound kernels. The capstone’s profiling report uses exactly that toolkit.</li>
+    <li lang="zh-CN"><a href="../phase-6-memory-management/index.html">Phase 6 · Memory Management and Host Integration</a>：分配器、主机与设备的边界、<code>compute-sanitizer</code>。PyTorch 算子要在 PyTorch 的流和分配器里工作。</li>
+    <li lang="en"><a href="../phase-6-memory-management/index.html">Phase 6 · Memory Management and Host Integration</a>: allocators, the host-device boundary, <code>compute-sanitizer</code>. A PyTorch operator has to work inside PyTorch’s streams and allocator.</li>
+    <li lang="zh-CN">Kernel Engineering 的 <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5 · Device Drivers</a>：用户态驱动库与内核模块的分工。驱动 API 和兼容性规则都建立在这个分工上。</li>
+    <li lang="en">Kernel Engineering <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5 · Device Drivers</a>: how a user-mode driver library and a kernel module split the work. The driver API and the compatibility rules both rest on that split.</li>
+    <li lang="zh-CN">按 <a href="../lab-setup/index.html">实验环境</a> 第二层准备好的租用 GPU 机器（容器、<code>ncu</code>、<code>nsys</code>），以及这台 Mac 上的 <code>swiftc</code>。</li>
+    <li lang="en">The rented GPU machine of tier 2 in <a href="../lab-setup/index.html">Lab environment</a> (the container, <code>ncu</code>, <code>nsys</code>), and <code>swiftc</code> on this Mac.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 运行时 API 与驱动 API</h3><h3 lang="en">1. The runtime API and the driver API</h3>
+  <p lang="zh-CN">前六课用的 <code>cudaMalloc</code>、<code>cudaMemcpy</code>、<code>&lt;&lt;&lt; &gt;&gt;&gt;</code> 都属于 <strong>CUDA 运行时 API</strong>（库 <code>cudart</code>，随工具链发布）。编程指南（「CUDA Runtime API and CUDA Driver API」一节，2026-09-10 版）说，运行时建立在更底层的 <strong>驱动 API</strong> 之上；驱动 API 由驱动安装时放到系统里的动态库实现（Linux 上是 <code>libcuda.so</code>），入口都以 <code>cu</code> 开头。两者能做的事基本一样，区别在于谁替你管理什么：</p>
+  <p lang="en">The <code>cudaMalloc</code>, <code>cudaMemcpy</code> and <code>&lt;&lt;&lt; &gt;&gt;&gt;</code> of the first six phases all belong to the <strong>CUDA runtime API</strong> (the <code>cudart</code> library, shipped with the toolkit). The programming guide (“CUDA Runtime API and CUDA Driver API”, edition of 2026-09-10) says the runtime is built on a lower-level <strong>driver API</strong>, implemented in a dynamic library that the driver installation puts on the system (<code>libcuda.so</code> on Linux), with every entry point prefixed <code>cu</code>. The two can do essentially the same things; what differs is who manages what for you:</p>
+  <ul>
+    <li lang="zh-CN"><strong>上下文</strong>：驱动 API 要先 <code>cuInit(0)</code>，再取得一个上下文（context）并设为当前。指南把上下文比作 CPU 上的进程：一切资源都装在里面，各自有独立的地址空间。运行时在第一次调用时隐式建好每个设备的 <strong>primary context</strong>；驱动 API 可以用 <code>cuDevicePrimaryCtxRetain</code> 拿到同一个，两套 API 因此能混用。</li>
+    <li lang="en"><strong>Contexts</strong>: the driver API needs <code>cuInit(0)</code> first, then a context made current. The guide compares a context to a process on the CPU: every resource lives inside it, each with its own address space. The runtime implicitly creates each device’s <strong>primary context</strong> on first use; the driver API can obtain the same one with <code>cuDevicePrimaryCtxRetain</code>, which is why the two APIs can be mixed.</li>
+    <li lang="zh-CN"><strong>模块与启动</strong>：运行时把你的 kernel 编进可执行文件，<code>&lt;&lt;&lt; &gt;&gt;&gt;</code> 在背后找到它。驱动 API 要你显式加载模块（<code>cuModuleLoad</code> 读 PTX 或 cubin 文件），按名字取函数（<code>cuModuleGetFunction</code>），再用 <code>cuLaunchKernel</code> 传参数指针数组启动。指南写明：想在未来架构上运行的程序必须加载 PTX，因为二进制码绑定某一代架构，而 PTX 由驱动在加载时编译。</li>
+    <li lang="en"><strong>Modules and launches</strong>: the runtime compiles your kernels into the executable and <code>&lt;&lt;&lt; &gt;&gt;&gt;</code> finds them behind the scenes. The driver API makes you load a module explicitly (<code>cuModuleLoad</code> reads a PTX or cubin file), fetch the function by name (<code>cuModuleGetFunction</code>), and launch it with <code>cuLaunchKernel</code> and an array of argument pointers. The guide states that an application meant to run on future architectures must load PTX, because binary code is tied to one architecture while PTX is compiled by the driver at load time.</li>
+    <li lang="zh-CN"><strong>什么时候用驱动 API</strong>：指南说大多数程序只用运行时就能达到全部性能；但新接口有时先出现在驱动 API，有些高级接口（例如虚拟内存管理）只在驱动 API 里有。在线编译（NVRTC 生成 PTX，再由 <code>cuModuleLoadData</code> 加载）、语言运行时和 JIT 编译器（Triton 就是一例，推断）也常走这一层。</li>
+    <li lang="en"><strong>When to use the driver API</strong>: the guide says most applications reach full performance with the runtime alone; but new interfaces sometimes appear in the driver API first, and some advanced ones (such as virtual memory management) exist only there. Runtime compilation (NVRTC producing PTX, then <code>cuModuleLoadData</code> loading it), language runtimes and JIT compilers (Triton is one; an inference) also tend to work at this level.</li>
+    <li lang="zh-CN"><strong>两个版本号</strong>：<code>cudaRuntimeGetVersion</code> 返回编译时用的工具链版本（13.4 表示为 13040）；<code>cudaDriverGetVersion</code> 返回驱动支持的最高 CUDA 版本。<code>nvidia-smi</code> 右上角的「CUDA Version」是后者。Lab A 的程序两个都打印，概念 5 解释两者不同时会怎样。</li>
+    <li lang="en"><strong>Two version numbers</strong>: <code>cudaRuntimeGetVersion</code> returns the toolkit version the program was built with (13.4 reads as 13040); <code>cudaDriverGetVersion</code> returns the highest CUDA version the driver supports. The “CUDA Version” in the top-right corner of <code>nvidia-smi</code> is the latter. Lab A’s program prints both, and concept 5 explains what happens when they differ.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书细讲驱动 API；这一节依据 CUDA 编程指南的「CUDA Runtime API and CUDA Driver API」和「The CUDA Driver API」两节以及 Driver API 参考（见资料）。Cheng 等《Professional CUDA C Programming》第 2 章「Managing Devices」讲用运行时 API 查询设备，是运行时这一侧的入门。</p>
+  <p lang="en">Further reading: no book in the bibliography covers the driver API in detail; this section rests on the “CUDA Runtime API and CUDA Driver API” and “The CUDA Driver API” sections of the CUDA programming guide and the Driver API reference (see Resources). Chapter 2 of Cheng et al., <em>Professional CUDA C Programming</em>, “Managing Devices”, introduces the runtime side by querying devices through the runtime API.</p>
+
+  <h3 lang="zh-CN">2. PTX 与 SASS</h3><h3 lang="en">2. PTX and SASS</h3>
+  <p lang="zh-CN"><code>nvcc</code> 的设备端编译分两个阶段（nvcc 文档「GPU Compilation」一章，2026-10-12 版）：</p>
+  <p lang="en"><code>nvcc</code> compiles device code in two stages (the “GPU Compilation” chapter of the nvcc documentation, edition of 2026-10-12):</p>
+  <ol>
+    <li lang="zh-CN"><strong>阶段 1：源代码到 PTX。</strong>PTX（Parallel Thread Execution）是一种虚拟 GPU 的汇编语言，总是以文本形式存在。文档说这个虚拟 GPU「完全由它提供的能力来定义」，名字是 <code>compute_75</code>、<code>compute_89</code> 这样的虚拟架构。PTX ISA 文档（9.4 版，随 CUDA 13.4 和 r615 驱动发布）列出它的目标之一：提供一个跨越多代 GPU 的稳定 ISA。PTX 文件开头的 <code>.version</code> 是 PTX ISA 的版本，<code>.target</code> 是它假定的架构。</li>
+    <li lang="en"><strong>Stage 1: source to PTX.</strong> PTX (Parallel Thread Execution) is the assembly language of a virtual GPU and always exists as text. The documentation says this virtual GPU is “defined entirely by the set of capabilities” it provides, with names such as <code>compute_75</code> and <code>compute_89</code> for the virtual architectures. The PTX ISA document (version 9.4, released with CUDA 13.4 and the r615 driver) lists among its goals a stable ISA that spans multiple GPU generations. The <code>.version</code> line at the top of a PTX file is the PTX ISA version, and <code>.target</code> is the architecture it assumes.</li>
+    <li lang="zh-CN"><strong>阶段 2：PTX 到 SASS。</strong><code>ptxas</code> 把 PTX 编成某一代真实硬件（<code>sm_75</code>、<code>sm_89</code>）的机器码，叫 SASS；装着 SASS 的 ELF 文件叫 cubin。SASS 的指令和编码每一代主版本都不一样，所以 nvcc 文档说，跨主计算能力的二进制兼容没有保证：为 9.0 编的程序不能在 10.0 上跑，反过来也不行。</li>
+    <li lang="en"><strong>Stage 2: PTX to SASS.</strong> <code>ptxas</code> compiles PTX into machine code for one real hardware generation (<code>sm_75</code>, <code>sm_89</code>), called SASS; the ELF file holding SASS is a cubin. SASS instructions and encodings differ with every major version, so the nvcc documentation says binary compatibility is not guaranteed across major compute capabilities: code built for 9.0 does not run on 10.0, nor the reverse.</li>
+  </ol>
+  <p lang="zh-CN">一个规则决定一次编译是否合法：真实架构必须实现了那个虚拟架构。nvcc 文档的建议是<strong>虚拟架构尽量低</strong>（能跑的 GPU 越多）、<strong>真实架构尽量高</strong>（代码越好）。看产物用 CUDA Binary Utilities：<code>cuobjdump -ptx</code> 取出 PTX 文本，<code>cuobjdump -sass</code> 反汇编 SASS，<code>cuobjdump -lelf</code> 和 <code>-lptx</code> 列出可执行文件里嵌了哪些 cubin 和 PTX；<code>nvdisasm</code> 只收 cubin，但输出选项更多。Lab A 第 3 步在作品项目的可执行文件上跑这几条命令。</p>
+  <p lang="en">One rule decides whether a compilation is valid: the real architecture must implement the virtual one. The nvcc documentation advises choosing the <strong>virtual architecture as low as possible</strong> (so more GPUs can run it) and the <strong>real architecture as high as possible</strong> (so the code is better). To look at the output, use the CUDA Binary Utilities: <code>cuobjdump -ptx</code> extracts the PTX text, <code>cuobjdump -sass</code> disassembles the SASS, and <code>cuobjdump -lelf</code> and <code>-lptx</code> list which cubins and PTX an executable embeds; <code>nvdisasm</code> accepts only cubins but offers richer output. Step 3 of Lab A runs these commands on the capstone executable.</p>
+  <p lang="zh-CN">延伸阅读：《Professional CUDA C Programming》第 10 章「Implementation Considerations」里的「CUDA Code Compilation」一节（该书写于 2014 年，架构名已过时，两阶段编译的道理没变）；依据还有 nvcc 文档的「GPU Compilation」、PTX ISA 9.4 的第 1 章和 CUDA Binary Utilities（见资料）。</p>
+  <p lang="en">Further reading: the “CUDA Code Compilation” section of Chapter 10, “Implementation Considerations”, of <em>Professional CUDA C Programming</em> (written in 2014, so the architecture names are dated, but the two-stage reasoning still holds); this section also rests on “GPU Compilation” in the nvcc documentation, Chapter 1 of PTX ISA 9.4, and the CUDA Binary Utilities (see Resources).</p>
+
+  <h3 lang="zh-CN">3. JIT 与 fatbin</h3><h3 lang="en">3. JIT and fatbins</h3>
+  <p lang="zh-CN">两阶段本身并不让程序在未来的 GPU 上跑起来。nvcc 文档说，靠的是另外两个机制：</p>
+  <p lang="en">The two stages on their own do not make a program run on future GPUs. The nvcc documentation names the two mechanisms that do:</p>
+  <ul>
+    <li lang="zh-CN"><strong>JIT（即时编译）</strong>：可执行文件里带 PTX 时，驱动在加载时把它编成当前 GPU 的 SASS。编程指南（「PTX Compatibility」）说，<code>compute_80</code> 的 PTX 可以在运行时 JIT 到 <code>sm_120</code> 这样更新的架构，但只能往<strong>相同或更高</strong>的计算能力编。代价是启动变慢；驱动会把结果存进 compute cache（Linux 默认 <code>~/.nv/ComputeCache</code>，大小由 <code>CUDA_CACHE_MAXSIZE</code> 控制，服务器上默认 1 GiB），驱动升级后缓存自动作废，于是程序能用上新驱动里更好的 JIT 编译器。</li>
+    <li lang="en"><strong>JIT (just-in-time compilation)</strong>: when the executable carries PTX, the driver compiles it at load time into SASS for the GPU at hand. The programming guide (“PTX Compatibility”) says PTX for <code>compute_80</code> can be JIT-compiled at run time to a newer architecture such as <code>sm_120</code>, but only to an <strong>equal or higher</strong> compute capability. The price is a slower start; the driver stores the result in the compute cache (on Linux by default <code>~/.nv/ComputeCache</code>, sized by <code>CUDA_CACHE_MAXSIZE</code>, 1 GiB by default on servers), and the cache is invalidated automatically when the driver is upgraded, so the program picks up the improved JIT compiler of the new driver.</li>
+    <li lang="zh-CN"><strong>fatbin</strong>：同一份设备代码的多个译本装在一个容器里，嵌进主机可执行文件。可以有几个 cubin（每代硬件一个）加一份或几份 PTX。指南的说法：程序运行时，驱动从 fatbin 里为当前 GPU 挑最合适的那一个；有完全匹配的 cubin 就直接用，没有才拿 PTX 去 JIT。</li>
+    <li lang="en"><strong>Fatbins</strong>: several translations of the same device code in one container embedded in the host executable, typically a few cubins (one per hardware generation) plus one or more PTX versions. In the guide’s words, when the program runs the driver picks the best one in the fatbin for the GPU at hand; a matching cubin is used directly, and PTX is JIT-compiled only when there is none.</li>
+    <li lang="zh-CN"><strong>同一主版本内的二进制兼容</strong>：指南写明，在同一个主计算能力内，次版本相同或更高的 GPU 能加载 cubin：为 8.6 编的 cubin 能在 8.6 和 8.9 上跑，不能在 8.0 上跑。所以 <code>sm_75</code> 的 cubin 在 T4（7.5）上直接跑，在 L4（8.9）上不能用，L4 只能靠 PTX。计算能力 10.0 起，同族内的兼容改由驱动在加载时「重新定稿」cubin（off-target finalization），比 PTX JIT 便宜；9.x 及更早的 cubin 不参与。</li>
+    <li lang="en"><strong>Binary compatibility within a major version</strong>: the guide states that within one major compute capability, a GPU whose minor version is equal or higher can load a cubin: a cubin built for 8.6 runs on 8.6 and 8.9 but not on 8.0. So an <code>sm_75</code> cubin runs directly on a T4 (7.5) but is useless on an L4 (8.9), which must rely on PTX. From compute capability 10.0, compatibility within a family is handled by the driver re-finalising the cubin at load time (off-target finalization), which is cheaper than PTX JIT; cubins for 9.x and earlier are not eligible.</li>
+    <li lang="zh-CN"><strong>两个用来验证的环境变量</strong>（编程指南「CUDA Environment Variables」）：<code>CUDA_FORCE_PTX_JIT=1</code> 让驱动忽略所有 cubin、一律 JIT 嵌入的 PTX，用来确认 PTX 真的在、JIT 真的能用；<code>CUDA_DISABLE_PTX_JIT=1</code> 反过来禁止 JIT，没有兼容 cubin 的 kernel 会加载失败，用来确认每个 kernel 都有对口的 cubin。Lab A 第 4 步两个都用。</li>
+    <li lang="en"><strong>Two environment variables for checking</strong> (programming guide, “CUDA Environment Variables”): <code>CUDA_FORCE_PTX_JIT=1</code> makes the driver ignore every cubin and JIT the embedded PTX, which confirms that the PTX is there and that JIT works; <code>CUDA_DISABLE_PTX_JIT=1</code> does the opposite and forbids JIT, so a kernel without a compatible cubin fails to load, which confirms every kernel has a matching cubin. Step 4 of Lab A uses both.</li>
+  </ul>
+  <p lang="zh-CN">Metal 这边的对应物：本专题的每个 Metal 程序都用 <code>makeLibrary(source:)</code> 在运行时从源码编译 kernel，相当于 NVRTC 加 JIT 一步做完（类比，推断）；Apple 的离线编译器 <code>xcrun metal</code> 不在 Command Line Tools 里，所以这里没有对应 fatbin 的离线产物可看。</p>
+  <p lang="en">On the Metal side the counterpart is that every Metal program in this topic compiles its kernels from source at run time with <code>makeLibrary(source:)</code>, roughly NVRTC and JIT in one step (an analogy, an inference); Apple’s offline compiler, <code>xcrun metal</code>, is not part of the Command Line Tools, so there is no offline fatbin-like artefact to inspect here.</p>
+  <p lang="zh-CN">延伸阅读：《Professional CUDA C Programming》第 10 章「CUDA Code Compilation」；依据是 nvcc 文档的「Just-in-Time Compilation」和「Fatbinaries」两节、编程指南的「Cubins and Fatbins」「Binary Compatibility」「PTX Compatibility」以及「CUDA Environment Variables」（见资料）。</p>
+  <p lang="en">Further reading: “CUDA Code Compilation” in Chapter 10 of <em>Professional CUDA C Programming</em>; this rests on the “Just-in-Time Compilation” and “Fatbinaries” sections of the nvcc documentation and the “Cubins and Fatbins”, “Binary Compatibility”, “PTX Compatibility” and “CUDA Environment Variables” sections of the programming guide (see Resources).</p>
+
+  <h3 lang="zh-CN">4. <code>-arch</code>、<code>--gpu-code</code> 与 <code>-gencode</code></h3><h3 lang="en">4. <code>-arch</code>, <code>--gpu-code</code> and <code>-gencode</code></h3>
+  <p lang="zh-CN">三种写法其实是同一件事：告诉 nvcc 阶段 1 用哪个虚拟架构、阶段 2 为哪些真实架构生成 SASS、要不要把 PTX 也放进 fatbin。下面每条都摘自或按 nvcc 文档（「--gpu-architecture」「--generate-code」「NVCC Examples」）的规则展开：</p>
+  <p lang="en">The three spellings say the same thing: which virtual architecture stage 1 uses, which real architectures stage 2 generates SASS for, and whether PTX also goes into the fatbin. Each line below is quoted from, or expanded by the rules of, the nvcc documentation (“--gpu-architecture”, “--generate-code”, “NVCC Examples”):</p>
+  <ul>
+    <li lang="zh-CN"><strong><code>-arch=sm_75</code></strong>：简写。只给真实架构、不给 <code>--gpu-code</code> 时，nvcc 用最接近的虚拟架构，并把它和真实架构都放进去，等价于 <code>--gpu-architecture=compute_75 --gpu-code=sm_75,compute_75</code>：一个 <code>sm_75</code> cubin 加一份 <code>compute_75</code> PTX。本专题每个实验都这样编，所以它们在 L4 上也能跑（靠 JIT）。</li>
+    <li lang="en"><strong><code>-arch=sm_75</code></strong>: the shorthand. Given only a real architecture and no <code>--gpu-code</code>, nvcc uses the closest virtual architecture and embeds both, which is equivalent to <code>--gpu-architecture=compute_75 --gpu-code=sm_75,compute_75</code>: one <code>sm_75</code> cubin plus <code>compute_75</code> PTX. Every lab in this topic builds this way, which is why they also run on an L4 (through JIT).</li>
+    <li lang="zh-CN"><strong>不加任何选项</strong>：文档写明，CUDA 13.4 的 <code>nvcc x.cu</code> 等价于 <code>--gpu-architecture=compute_75 --gpu-code=sm_75,compute_75</code>，因为 Turing 是这个版本支持的最老架构。</li>
+    <li lang="en"><strong>No options at all</strong>: the documentation states that in CUDA 13.4 <code>nvcc x.cu</code> is equivalent to <code>--gpu-architecture=compute_75 --gpu-code=sm_75,compute_75</code>, since Turing is the oldest architecture this release supports.</li>
+    <li lang="zh-CN"><strong><code>--gpu-architecture=compute_75 --gpu-code=compute_75</code></strong>：只放 PTX，不放 SASS，把阶段 2 完全推迟到加载时。能跑的 GPU 最多，每台机器第一次启动都要 JIT。</li>
+    <li lang="en"><strong><code>--gpu-architecture=compute_75 --gpu-code=compute_75</code></strong>: PTX only, no SASS, deferring stage 2 entirely to load time. It runs on the most GPUs, and every machine pays for JIT on first launch.</li>
+    <li lang="zh-CN"><strong><code>-gencode</code>（即 <code>--generate-code</code>）</strong>：前两种写法整次编译只能有一个虚拟架构；<code>-gencode arch=…,code=…</code> 可以重复，每次给一对。<code>--gpu-architecture=X --gpu-code=Y,…</code> 等价于 <code>--generate-code=arch=X,code=Y,…</code>；<code>code</code> 可以写成列表 <code>code=[sm_80,sm_86]</code>；<code>code</code> 是虚拟架构时放的是 PTX。用了不同虚拟架构，设备代码要靠 <code>__CUDA_ARCH__</code> 做条件编译。</li>
+    <li lang="en"><strong><code>-gencode</code> (that is, <code>--generate-code</code>)</strong>: the first two forms allow one virtual architecture per compilation; <code>-gencode arch=…,code=…</code> can be repeated, one pair each time. <code>--gpu-architecture=X --gpu-code=Y,…</code> is equivalent to <code>--generate-code=arch=X,code=Y,…</code>; <code>code</code> may be a list, <code>code=[sm_80,sm_86]</code>; when <code>code</code> is a virtual architecture, PTX is embedded. With several virtual architectures, device code uses <code>__CUDA_ARCH__</code> for conditional compilation.</li>
+  </ul>
+  <p lang="zh-CN">作品项目的发布构建（本页推荐，按上面的规则组合）：为 T4 和 L4 各放一个 SASS，再放一份最低的 PTX 留给未来的 GPU：</p>
+  <p lang="en">The release build for the capstone (this page’s recommendation, combined from the rules above): one SASS each for the T4 and the L4, plus the lowest PTX kept for future GPUs:</p>
+  <pre data-lang="sh" data-file="release build"># 未运行 · not run; assembled from the nvcc documentation (CUDA 13.4) on 2026-10-31
+nvcc -O3 softmax_capstone.cu -o softmax_capstone \
+    -gencode arch=compute_75,code=sm_75 \
+    -gencode arch=compute_89,code=sm_89 \
+    -gencode arch=compute_75,code=compute_75</pre>
+  <p lang="zh-CN">带 <code>a</code> 和 <code>f</code> 后缀的目标（<code>sm_90a</code>、<code>sm_100f</code>）启用架构专属和同族专属的特性（PTX ISA 9.4 的说法）；T4 和 L4 用不到它们，本专题不展开。</p>
+  <p lang="en">Targets with an <code>a</code> or <code>f</code> suffix (<code>sm_90a</code>, <code>sm_100f</code>) enable architecture-specific and family-specific features (PTX ISA 9.4’s terms); the T4 and the L4 have no use for them, and this topic does not go further.</p>
+  <p lang="zh-CN">延伸阅读：《Professional CUDA C Programming》第 10 章「CUDA Code Compilation」；依据是 nvcc 文档的「Options for Steering GPU Code Generation」和「NVCC Examples」两节（见资料）。下面的对照表把四种构建放到三种 GPU 上。</p>
+  <p lang="en">Further reading: “CUDA Code Compilation” in Chapter 10 of <em>Professional CUDA C Programming</em>; this rests on the “Options for Steering GPU Code Generation” and “NVCC Examples” sections of the nvcc documentation (see Resources). The comparison table below puts four builds on three GPUs.</p>
+
+  <h3 lang="zh-CN">5. 兼容性与 NGC 容器</h3><h3 lang="en">5. Compatibility and the NGC container</h3>
+  <p lang="zh-CN">概念 3 讲的是代码和 <strong>GPU</strong> 的兼容；这里讲工具链和 <strong>驱动</strong> 的兼容。CUDA Compatibility 文档（2026-09-09 版）把它分成三种，判断标准是驱动（<code>libcuda.so</code>）比编程序时的运行时新还是旧：</p>
+  <p lang="en">Concept 3 was about compatibility between code and the <strong>GPU</strong>; this one is about the toolkit and the <strong>driver</strong>. The CUDA Compatibility guide (edition of 2026-09-09) splits it three ways, by whether the driver (<code>libcuda.so</code>) is newer or older than the runtime the program was built with:</p>
+  <ul>
+    <li lang="zh-CN"><strong>向后兼容（驱动更新）</strong>：新驱动跑旧工具链编的程序，没有附加条件。这是最常见、最省事的升级方式。</li>
+    <li lang="en"><strong>Backward compatibility (newer driver)</strong>: a newer driver runs programs built with an older toolkit, with no conditions. This is the commonest and simplest way to upgrade.</li>
+    <li lang="zh-CN"><strong>小版本兼容（驱动更旧，主版本相同）</strong>：从 CUDA 11 起，同一主版本内的程序能在不低于最低版本的驱动上跑，CUDA 13.x 要求驱动 ≥ 580。文档列了三条限制：一些同时依赖新工具链和新驱动的功能会返回 <code>cudaErrorCallRequiresNewerDriver</code>；<strong>把设备代码编成 PTX 的程序在旧驱动上不能工作</strong>；必须给 nvcc 指定目标架构（<code>-arch=sm_xx</code>），让 fatbin 里有 SASS。原因可以从 PTX ISA 的发布历史看出来：CUDA 13.0 配 r580 驱动和 PTX ISA 9.0，CUDA 13.4 配 r615 和 PTX ISA 9.4；r580 里的 JIT 编译器不认识 9.4 的 PTX（推断，对应的错误是 <code>cudaErrorUnsupportedPtxVersion</code>：「PTX 由比 CUDA 驱动和 PTX JIT 编译器更新的编译器生成」）。</li>
+    <li lang="en"><strong>Minor-version compatibility (older driver, same major)</strong>: from CUDA 11 on, a program from one major release runs on any driver at or above a minimum, which for CUDA 13.x is ≥ 580. The guide lists three caveats: some features that span both toolkit and driver return <code>cudaErrorCallRequiresNewerDriver</code>; <strong>applications that compile device code to PTX will not work on older drivers</strong>; and the target architecture must be given to nvcc (<code>-arch=sm_xx</code>) so the fatbin carries SASS. The PTX release history shows why: CUDA 13.0 came with the r580 driver and PTX ISA 9.0, CUDA 13.4 with r615 and PTX ISA 9.4, and the JIT compiler inside r580 does not know PTX 9.4 (an inference; the matching error is <code>cudaErrorUnsupportedPtxVersion</code>, “the PTX was generated by a compiler newer than what is supported by the CUDA driver and PTX JIT compiler”).</li>
+    <li lang="zh-CN"><strong>向前兼容（驱动更旧，主版本也更旧）</strong>：装一个 <code>cuda-compat-&lt;主&gt;-&lt;次&gt;</code> 包，例如 <code>cuda-compat-13-4</code>，它带的是 615 驱动的用户态库（<code>libcuda.so</code>、PTX JIT 编译器等），装在 <code>/usr/local/cuda-13.4/compat/</code>，要自己用 <code>LD_LIBRARY_PATH</code> 指过去。文档说它只适用于 NVIDIA 数据中心 GPU、部分 NGC Server Ready 的 RTX 卡和 Jetson；它定义在内核驱动和 CUDA 驱动之间，所以没有小版本兼容的 PTX 限制。</li>
+    <li lang="en"><strong>Forward compatibility (older driver, older major too)</strong>: install a <code>cuda-compat-&lt;major&gt;-&lt;minor&gt;</code> package, such as <code>cuda-compat-13-4</code>, which carries the user-mode libraries of the 615 driver (<code>libcuda.so</code>, the PTX JIT compiler and others) under <code>/usr/local/cuda-13.4/compat/</code>; you point <code>LD_LIBRARY_PATH</code> at it yourself. The guide says it applies only to NVIDIA data-center GPUs, selected NGC Server Ready RTX cards and Jetson boards; it is defined between the kernel driver and the CUDA driver, so the PTX restriction of minor-version compatibility does not apply.</li>
+  </ul>
+  <p lang="zh-CN">文档还提到一个 2026 年的变化：从 CUDA 13.4 起，Linux 驱动不再和工具链打包发布，要单独获取。</p>
+  <p lang="en">The guide also notes a 2026 change: from CUDA 13.4 on, the NVIDIA Linux driver is no longer bundled with the toolkit and must be obtained separately.</p>
+  <p lang="zh-CN"><strong>NGC 容器</strong>：NVIDIA 在 NGC 目录（镜像仓库 <code>nvcr.io</code>）里发布 CUDA 镜像和框架镜像。2026-10-31 读取时，<code>nvcr.io/nvidia/cuda</code> 有 <code>13.4.3-base-ubuntu24.04</code>、<code>13.4.3-runtime-ubuntu24.04</code> 和 <code>13.4.3-devel-ubuntu24.04</code> 等标签（与实验环境页用的 Docker Hub 镜像同名），<code>nvcr.io/nvidia/pytorch</code> 最新的标签是 <code>26.10-py3</code>。容器解决的是<strong>工具链和用户态库</strong>这一层：nvcc、cuBLAS、PyTorch 的版本都钉死在镜像里。它解决不了<strong>驱动</strong>这一层：内核模块装在宿主机上，<code>docker run --gpus all</code> 时由 NVIDIA Container Toolkit 把宿主的驱动接进容器（推断，按 Container Toolkit 的职责；本页没有逐字核对它挂载了哪些文件）。所以容器里程序能不能跑，仍然受上面三条兼容规则约束：镜像里的工具链比宿主驱动新时，要么驱动够新，要么走小版本兼容（只用 SASS），要么在数据中心卡上用 <code>cuda-compat</code>。</p>
+  <p lang="en"><strong>The NGC container</strong>: NVIDIA publishes CUDA images and framework images in the NGC catalog (registry <code>nvcr.io</code>). Read on 2026-10-31, <code>nvcr.io/nvidia/cuda</code> carries tags including <code>13.4.3-base-ubuntu24.04</code>, <code>13.4.3-runtime-ubuntu24.04</code> and <code>13.4.3-devel-ubuntu24.04</code> (the same name as the Docker Hub image the lab environment page uses), and the newest <code>nvcr.io/nvidia/pytorch</code> tag is <code>26.10-py3</code>. A container settles the <strong>toolkit and user-mode library</strong> layer: the versions of nvcc, cuBLAS and PyTorch are pinned in the image. It cannot settle the <strong>driver</strong> layer: the kernel module lives on the host, and with <code>docker run --gpus all</code> the NVIDIA Container Toolkit brings the host’s driver into the container (an inference from the Container Toolkit’s role; this page did not check word for word which files it mounts). So whether a program runs in a container is still governed by the three rules above: when the image’s toolkit is newer than the host driver, either the driver is new enough, or minor-version compatibility applies (SASS only), or <code>cuda-compat</code> is used on a data-center card.</p>
+  <p lang="zh-CN">延伸阅读：参考书目里没有书讲这些兼容规则（书都早于 CUDA 13）；依据是 CUDA Compatibility 文档的「Why CUDA Compatibility」「Minor Version Compatibility」「Forward Compatibility」三节、PTX ISA 9.4 的发布历史表和 NGC 目录页（见资料）。驱动的用户态和内核态分工见 Kernel Engineering Phase 5。</p>
+  <p lang="en">Further reading: no book in the bibliography covers these compatibility rules (every book predates CUDA 13); this rests on the “Why CUDA Compatibility”, “Minor Version Compatibility” and “Forward Compatibility” sections of the CUDA Compatibility guide, the release-history table of PTX ISA 9.4, and the NGC catalog pages (see Resources). The user-mode and kernel-mode split of a driver is in Kernel Engineering Phase 5.</p>
+
+  <h3 lang="zh-CN">6. 可移植性：HIP、SYCL、Kokkos 与 Apple 上的 Metal</h3><h3 lang="en">6. Portability: HIP, SYCL, Kokkos, and Metal on Apple</h3>
+  <p lang="zh-CN">CUDA 只跑在 NVIDIA GPU 上。想让同一份算法跑到别家硬件，有四条常见的路，抽象程度从低到高（概述，各自的细节以官方文档为准）：</p>
+  <p lang="en">CUDA runs only on NVIDIA GPUs. There are four common roads to running the same algorithm on other hardware, from the least abstract to the most (an outline; the details of each are in its official documentation):</p>
+  <ul>
+    <li lang="zh-CN"><strong>HIP（AMD ROCm）</strong>：HIP 文档（7.16.0 版）的定义是「面向 AMD GPU 的 C++ 运行时 API 和 kernel 语言」。它的 API 和 CUDA 一一对照（<code>hipMalloc</code>、<code>hipMemcpy</code>、同样的 <code>&lt;&lt;&lt; &gt;&gt;&gt;</code>），HIPIFY 工具（基于 clang 的 <code>hipify-clang</code> 和基于 Perl 的 <code>hipify-perl</code>）把 CUDA 调用改写成 HIP 调用，hipBLAS、hipFFT 等库对应 cuBLAS、cuFFT。文档同时说明 HIP 不是 CUDA 的直接替代品，移植要预期手工修改和重新调优。warp 宽度就是一处要改的地方：本专题的 kernel 处处假定 32（<code>0xffffffff</code> 掩码、<code>threadIdx.x % 32</code>），而 AMD 部分 GPU 的 wavefront 是 64（推断，按 AMD 架构文档的一般说法，本页未逐型号核对）。</li>
+    <li lang="en"><strong>HIP (AMD ROCm)</strong>: the HIP documentation (version 7.16.0) defines it as “a C++ runtime API and kernel language for AMD GPUs”. Its API mirrors CUDA one for one (<code>hipMalloc</code>, <code>hipMemcpy</code>, the same <code>&lt;&lt;&lt; &gt;&gt;&gt;</code>), the HIPIFY tools (the clang-based <code>hipify-clang</code> and the Perl-based <code>hipify-perl</code>) rewrite CUDA calls as HIP calls, and libraries such as hipBLAS and hipFFT stand in for cuBLAS and cuFFT. The documentation also says HIP is not a drop-in replacement for CUDA, and that porting should expect manual changes and retuning. Warp width is one such change: this topic’s kernels assume 32 everywhere (the <code>0xffffffff</code> mask, <code>threadIdx.x % 32</code>), while some AMD GPUs use 64-wide wavefronts (an inference from AMD’s architecture documentation in general; this page did not check model by model).</li>
+    <li lang="zh-CN"><strong>SYCL（Khronos 标准）</strong>：单源（single-source）的标准 C++ 异构编程模型，当前规范是 SYCL 2020（Khronos 页面 2026-10-31 读取时为第 11 次修订）。kernel 写成 lambda，通过队列提交；实现有 Intel oneAPI 的 DPC++、独立的 AdaptiveCpp 等，Khronos 页面说这些实现除 OpenCL 外还接了多种加速器后端。某个实现能否在 NVIDIA GPU 上跑、怎样跑，要看那个实现的文档（本页没有核对）。</li>
+    <li lang="en"><strong>SYCL (a Khronos standard)</strong>: a single-source, standard-C++ model for heterogeneous programming; the current specification is SYCL 2020 (at revision 11 when the Khronos page was read on 2026-10-31). Kernels are written as lambdas and submitted through queues; implementations include Intel oneAPI’s DPC++ and the independent AdaptiveCpp, and the Khronos page says these add several accelerator back ends besides OpenCL. Whether and how a given implementation runs on NVIDIA GPUs is in that implementation’s documentation (not checked here).</li>
+    <li lang="zh-CN"><strong>Kokkos</strong>：一个 C++ 性能可移植库。Kokkos Core 文档说它提供并行执行和数据管理两类抽象（<code>parallel_for</code> 等并行模式，<code>View</code> 多维数组），后端可以是 CUDA、HIP、SYCL、HPX、OpenMP 和 C++ 线程。你写一次，换后端重新编译；数据布局由 <code>View</code> 按后端决定。代价是离硬件更远：warp shuffle、shared memory 这类细节要通过它的层次并行接口间接表达，或者干脆放弃。</li>
+    <li lang="en"><strong>Kokkos</strong>: a C++ performance-portability library. The Kokkos Core documentation says it provides abstractions for both parallel execution and data management (parallel patterns such as <code>parallel_for</code>, and <code>View</code> multidimensional arrays), with CUDA, HIP, SYCL, HPX, OpenMP and C++ threads as back ends. You write once and rebuild for another back end; <code>View</code> chooses the data layout per back end. The price is distance from the hardware: details such as warp shuffles and shared memory have to be expressed indirectly through its hierarchical-parallelism interface, or given up.</li>
+    <li lang="zh-CN"><strong>Apple 上的 Metal</strong>：没有可移植层，是另一套原生 API，本专题每一课的 Lab B 都在做这件事。术语对照：kernel 函数 ↔ <code>kernel</code> 函数，grid/block/thread ↔ grid/threadgroup/thread，warp ↔ SIMD-group（这台 M5 上 <code>threadExecutionWidth</code> 打印出 32），shared memory ↔ threadgroup memory，<code>__syncthreads</code> ↔ <code>threadgroup_barrier</code>，<code>__shfl_xor_sync</code> 的归约 ↔ <code>simd_max</code>、<code>simd_sum</code>，stream ↔ 命令队列和命令缓冲区，cuBLAS 和 cuDNN 的角色 ↔ Metal Performance Shaders。移植作品项目时，算法和字节模型原样不变，变的只是这些名字和启动方式：Lab B 就是证明。</li>
+    <li lang="en"><strong>Metal on Apple</strong>: no portability layer, just another native API, which is what every Lab B in this topic has done. The term map: kernel function ↔ <code>kernel</code> function, grid/block/thread ↔ grid/threadgroup/thread, warp ↔ SIMD-group (<code>threadExecutionWidth</code> prints 32 on this M5), shared memory ↔ threadgroup memory, <code>__syncthreads</code> ↔ <code>threadgroup_barrier</code>, reductions with <code>__shfl_xor_sync</code> ↔ <code>simd_max</code> and <code>simd_sum</code>, stream ↔ command queue and command buffer, and the role of cuBLAS and cuDNN ↔ Metal Performance Shaders. Porting the capstone leaves the algorithm and the byte model unchanged; only these names and the launch code change, as Lab B shows.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 24 章「Advanced practices and future evolution」和第 25 章「Conclusion and outlook」（按章名对应，本页没有核对其中是否逐一讲到 HIP、SYCL、Kokkos）；《Professional CUDA C Programming》第 8 章的「Using OpenACC」是另一条用指令换可移植性的路。依据是 HIP 7.16.0 文档「What is HIP?」、HIPIFY 文档、Khronos 的 SYCL 页面和 Kokkos Core 文档（见资料）。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 24, “Advanced practices and future evolution”, and Chapter 25, “Conclusion and outlook” (matched by chapter title; this page did not check whether they cover HIP, SYCL and Kokkos one by one); “Using OpenACC” in Chapter 8 of <em>Professional CUDA C Programming</em> is another road, trading control for portability through directives. This rests on “What is HIP?” in the HIP 7.16.0 documentation, the HIPIFY documentation, Khronos’s SYCL page and the Kokkos Core documentation (see Resources).</p>
+
+  <h3 lang="zh-CN">7. 给 PyTorch 写 kernel：自定义算子与 Triton</h3><h3 lang="en">7. Kernels for PyTorch: custom operators and Triton</h3>
+  <p lang="zh-CN">PyTorch 教程「Custom C++ and CUDA Operators」（2.15 版文档，2026-01-20 更新）给出的正式路径分三步：</p>
+  <p lang="en">The PyTorch tutorial “Custom C++ and CUDA Operators” (2.15 documentation, updated 2026-01-20) gives the official path in three steps:</p>
+  <ol>
+    <li lang="zh-CN"><strong>定义和注册。</strong><code>TORCH_LIBRARY(命名空间, m)</code> 里用 <code>m.def("softmax(Tensor x) -&gt; Tensor")</code> 声明算子的 schema；<code>TORCH_LIBRARY_IMPL(命名空间, CUDA, m)</code> 里用 <code>m.impl</code> 把 CUDA 实现挂到 CUDA 分派键上。kernel 要在 PyTorch 当前的流上启动（<code>at::cuda::getCurrentCUDAStream()</code>），输出用 PyTorch 的分配器分配（<code>at::empty</code>），这正是 Phase 5 和 Phase 6 讲过的两件事。之后 Python 里用 <code>torch.ops.命名空间.softmax(x)</code> 调用。</li>
+    <li lang="en"><strong>Define and register.</strong> Inside <code>TORCH_LIBRARY(namespace, m)</code>, <code>m.def("softmax(Tensor x) -&gt; Tensor")</code> declares the operator’s schema; inside <code>TORCH_LIBRARY_IMPL(namespace, CUDA, m)</code>, <code>m.impl</code> attaches the CUDA implementation to the CUDA dispatch key. The kernel must launch on PyTorch’s current stream (<code>at::cuda::getCurrentCUDAStream()</code>) and allocate its output through PyTorch’s allocator (<code>at::empty</code>), the two things Phases 5 and 6 covered. Python then calls it as <code>torch.ops.namespace.softmax(x)</code>.</li>
+    <li lang="zh-CN"><strong>编译。</strong>用 <code>torch.utils.cpp_extension</code>：发布时写 <code>setup.py</code> 用 <code>CUDAExtension</code>，实验时用 <code>load(...)</code> 即时编译。<code>TORCH_CUDA_ARCH_LIST</code> 决定为哪些计算能力生成代码，<code>"7.5+PTX"</code> 表示 <code>sm_75</code> 的 SASS 加一份 PTX：cpp_extension 文档原话是 PTX 能在运行时为任何计算能力 ≥ 7.5 的 GPU 编译，概念 3 的 fatbin 规则在这里原样适用。PyTorch 2.10 起教程推荐用稳定 ABI（<code>STABLE_TORCH_LIBRARY</code>），一个 wheel 跨多个 PyTorch 版本；Lab A 用的是更短的非稳定写法。</li>
+    <li lang="en"><strong>Build.</strong> Use <code>torch.utils.cpp_extension</code>: a <code>setup.py</code> with <code>CUDAExtension</code> for release, or <code>load(...)</code> to build just in time while experimenting. <code>TORCH_CUDA_ARCH_LIST</code> decides which compute capabilities get code, and <code>"7.5+PTX"</code> means <code>sm_75</code> SASS plus PTX; in the cpp_extension documentation’s words, the PTX can be compiled at run time for any GPU with compute capability ≥ 7.5, so concept 3’s fatbin rules apply unchanged. From PyTorch 2.10 the tutorial recommends the stable ABI (<code>STABLE_TORCH_LIBRARY</code>), with one wheel across several PyTorch versions; Lab A uses the shorter non-stable form.</li>
+    <li lang="zh-CN"><strong>让 <code>torch.compile</code> 认得它，并测试。</strong>用 <code>torch.library.register_fake</code> 注册一个只算形状、不算数据的 FakeTensor kernel，<code>torch.compile</code> 才能追踪这个算子；<code>torch.library.opcheck</code> 检查注册是否正确。</li>
+    <li lang="en"><strong>Make <code>torch.compile</code> understand it, and test.</strong> Register a FakeTensor kernel with <code>torch.library.register_fake</code>, which computes shapes but no data, so <code>torch.compile</code> can trace the operator; <code>torch.library.opcheck</code> checks that the registration is correct.</li>
+  </ol>
+  <p lang="zh-CN"><strong>Triton</strong>（概述）：一个嵌在 Python 里的 GPU kernel 语言和编译器。kernel 用 <code>@triton.jit</code> 修饰，每个程序实例（<code>tl.program_id</code>）处理一块数据，按块写 <code>tl.load</code>、<code>tl.max</code>、<code>tl.exp</code>、<code>tl.sum</code>、<code>tl.store</code>；线程怎样分工、哪些数据放进片上存储、warp 内怎样归约，由编译器决定。Triton 官方教程「Fused Softmax」正好是本页作品项目的同一个算法：教程算过，用 PyTorch 原生算子朴素地写 softmax，要从 DRAM 读 5MN + 2M 个元素、写回 3MN + 2M 个，融合成一个 kernel 后只读写各一遍，理论上约快 4 倍；它的融合 kernel 要求一行能放进片上 SRAM。PyTorch 教程「Using User-Defined Triton Kernels with torch.compile」说，用 <code>torch.library.triton_op</code> 和 <code>wrap_triton</code> 包装后，Triton kernel 就是一个能被 <code>torch.compile</code> 看穿的自定义算子。LLM 推理里的融合 kernel（attention、量化 GEMM）大多就是这样写的；那是计划中的 LLM Inference Kernels 专题（以 SGLang 为主线）的内容，本专题到此为止。</p>
+  <p lang="en"><strong>Triton</strong> (an outline): a GPU kernel language and compiler embedded in Python. A kernel is decorated with <code>@triton.jit</code>, each program instance (<code>tl.program_id</code>) handles one block of data, and you write block-wide <code>tl.load</code>, <code>tl.max</code>, <code>tl.exp</code>, <code>tl.sum</code> and <code>tl.store</code>; how threads divide the work, what goes into on-chip storage and how a warp reduces are the compiler’s decisions. Triton’s official tutorial “Fused Softmax” is the very algorithm of this page’s capstone: it works out that a naive softmax from native PyTorch ops reads 5MN + 2M elements from DRAM and writes back 3MN + 2M, while one fused kernel reads and writes each element once, for a theoretical speedup of about 4 times; its fused kernel needs one row to fit in on-chip SRAM. The PyTorch tutorial “Using User-Defined Triton Kernels with torch.compile” says that wrapped with <code>torch.library.triton_op</code> and <code>wrap_triton</code>, a Triton kernel becomes a custom operator that <code>torch.compile</code> can see into. Most fused kernels in LLM inference (attention, quantised GEMMs) are written this way; that belongs to the planned LLM Inference Kernels topic (built around SGLang), and this topic stops here.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 18 章「Deep learning」（按章名对应：深度学习里的 kernel；本页没有核对它是否讲到 PyTorch 算子注册）；参考书目里没有书讲 <code>TORCH_LIBRARY</code> 或 Triton。依据是 PyTorch 的「Custom C++ and CUDA Operators」教程、<code>torch.utils.cpp_extension</code> 文档、「Using User-Defined Triton Kernels with torch.compile」教程和 Triton 的「Fused Softmax」教程（见资料）。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 18, “Deep learning” (matched by chapter title: kernels in deep learning; this page did not check whether it covers registering PyTorch operators); no book in the bibliography covers <code>TORCH_LIBRARY</code> or Triton. This rests on PyTorch’s “Custom C++ and CUDA Operators” tutorial, the <code>torch.utils.cpp_extension</code> documentation, the “Using User-Defined Triton Kernels with torch.compile” tutorial and Triton’s “Fused Softmax” tutorial (see Resources).</p>
+
+  <h3 lang="zh-CN">8. 作品项目的算法：融合与在线 softmax</h3><h3 lang="en">8. The capstone’s algorithm: fusion and online softmax</h3>
+  <p lang="zh-CN">对矩阵 X 的每一行，softmax 是 y<sub>j</sub> = exp(x<sub>j</sub> − m) / d，其中 m 是这一行的最大值（减去它防止 exp 溢出，结果不变），d = Σ exp(x<sub>j</sub> − m)。直接照公式写，是三遍：求 m、求 d、写 y。本页的两个版本：</p>
+  <p lang="en">For each row of a matrix X, softmax is y<sub>j</sub> = exp(x<sub>j</sub> − m) / d, where m is the row’s maximum (subtracted so exp cannot overflow; the result is unchanged) and d = Σ exp(x<sub>j</sub> − m). Written straight from the formula it takes three passes: find m, find d, write y. This page’s two versions:</p>
+  <ul>
+    <li lang="zh-CN"><strong>未融合（四个 kernel）</strong>：<code>row_max</code> 写出 m；<code>exp_sub</code> 把 e = exp(x − m) 整个写回全局内存；<code>row_sum</code> 读 e 得到 d；<code>divide</code> 读 e 写 y。这是把 softmax 拆成几个现成算子时的样子。字节模型：读 x、x、e、e，写 e、y，共 6MN 个 float。</li>
+    <li lang="en"><strong>Unfused (four kernels)</strong>: <code>row_max</code> writes m; <code>exp_sub</code> writes the whole of e = exp(x − m) back to global memory; <code>row_sum</code> reads e to get d; <code>divide</code> reads e and writes y. This is what softmax looks like when composed from ready-made operators. Byte model: read x, x, e, e and write e, y, 6MN floats in all.</li>
+    <li lang="zh-CN"><strong>融合（一个 kernel，每行一个 block）</strong>：用 Milakov 和 Gimelshein（2018）的<strong>在线归一化</strong>，第一遍每个线程同时维护自己看到的最大值 m 和和 d；遇到更大的值 v 时，先把旧的和按 exp(m − m′) 缩放到新的最大值 m′ = max(m, v)，再加上 exp(v − m′)。然后整个 block 用 warp shuffle 和 shared memory 先归约 m，再把每个线程的 d 缩放到全局最大值后求和（Phase 3 的模式）。第二遍再读一次 x，写出 y。字节模型：读 x 两遍、写 y 一遍，共 3MN 个 float；如果一行小到第二遍能从缓存里读，就只有 2MN 次内存访问。</li>
+    <li lang="en"><strong>Fused (one kernel, one block per row)</strong>: using Milakov and Gimelshein’s <strong>online normalizer</strong> (2018), each thread keeps both the maximum m and the sum d of what it has seen in a single first pass; when a larger value v arrives, it first rescales the old sum to the new maximum m′ = max(m, v) by exp(m − m′), then adds exp(v − m′). The block then reduces m with warp shuffles and shared memory, rescales every thread’s d to the global maximum and sums them (Phase 3’s pattern). A second pass reads x again and writes y. Byte model: read x twice, write y once, 3MN floats; if a row is small enough for the second pass to read from cache, only 2MN memory accesses remain.</li>
+  </ul>
+  <p lang="zh-CN">两者都远在 roofline 的访存受限一侧（每个元素只有几次运算），所以时间由搬的字节决定，预测是融合版快 2 到 3 倍。Lab B 在 M5 上量到：4096 列时快 2.8 倍，32768 列时快 2.1 倍，正好落在这两端；动画 (b) 和 Lab B 第 4 步解释为什么。layer norm（每行求均值和方差，再归一化）是同一个形状：同样两次行内归约，同样可以融合，Welford 算法扮演在线 softmax 的角色（推断：本页没有实现 layer norm）。</p>
+  <p lang="en">Both sit far on the memory-bound side of the roofline (a few operations per element), so time is set by bytes moved, and the prediction is that the fused version is 2 to 3 times as fast. Lab B measured on the M5: 2.8 times at 4096 columns and 2.1 times at 32768 columns, right at the two ends; diagram (b) and step 4 of Lab B explain why. Layer norm (mean and variance per row, then normalise) has the same shape: the same two in-row reductions, equally fusable, with Welford’s algorithm in the role of the online softmax (an inference: this page did not implement layer norm).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 10 章「Reduction」（行内归约）和第 18 章「Deep learning」（按章名对应）；《Professional CUDA C Programming》第 5 章的「The Warp Shuffle Instruction」到「Parallel Reduction Using the Warp Shuffle Instruction」几节；Milakov 和 Gimelshein 的原始论文（见资料）。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 10, “Reduction” (in-row reductions), and Chapter 18, “Deep learning” (matched by chapter title); the sections of Chapter 5 of <em>Professional CUDA C Programming</em> from “The Warp Shuffle Instruction” to “Parallel Reduction Using the Warp Shuffle Instruction”; Milakov and Gimelshein’s original paper (see Resources).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：一个构建放到不同的 GPU 和驱动上</h2><h2 id="compare-en" lang="en">Comparison: one build on different GPUs and drivers</h2>
+  <p lang="zh-CN">每一格按概念 3 到 5 引用的 nvcc 文档、编程指南和兼容性文档的规则推出（推断，没有在这些 GPU 上运行）。✕ 表示加载失败。最后一列是「用 CUDA 13.4 编译、在只有 r580 驱动（CUDA 13.0）的 T4 上运行」，也就是小版本兼容。</p>
+  <p lang="en">Each cell is derived from the rules of the nvcc documentation, programming guide and compatibility guide cited in concepts 3 to 5 (an inference; not run on these GPUs). ✕ marks a load failure. The last column is “built with CUDA 13.4, run on a T4 with only the r580 driver (CUDA 13.0)”, that is, minor-version compatibility.</p>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">构建</span><span lang="en">Build</span></th><th><span lang="zh-CN">fatbin 里有什么</span><span lang="en">What the fatbin holds</span></th><th><span lang="zh-CN">T4（cc 7.5）</span><span lang="en">T4 (cc 7.5)</span></th><th><span lang="zh-CN">L4（cc 8.9）</span><span lang="en">L4 (cc 8.9)</span></th><th><span lang="zh-CN">更新的 GPU（如 cc 12.0）</span><span lang="en">A newer GPU (such as cc 12.0)</span></th><th><span lang="zh-CN">T4，r580 驱动</span><span lang="en">T4, r580 driver</span></th></tr>
+    <tr><td><span lang="zh-CN"><code>-arch=sm_75</code></span><span lang="en"><code>-arch=sm_75</code></span></td><td><span lang="zh-CN"><code>sm_75</code> SASS、<code>compute_75</code> PTX</span><span lang="en"><code>sm_75</code> SASS, <code>compute_75</code> PTX</span></td><td><span lang="zh-CN">直接用 SASS</span><span lang="en">Uses the SASS directly</span></td><td><span lang="zh-CN">JIT PTX（主版本不同，SASS 用不了）</span><span lang="en">JIT from PTX (different major, the SASS is unusable)</span></td><td><span lang="zh-CN">JIT PTX</span><span lang="en">JIT from PTX</span></td><td><span lang="zh-CN">用 SASS，能跑</span><span lang="en">Runs on the SASS</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>-arch=sm_89</code></span><span lang="en"><code>-arch=sm_89</code></span></td><td><span lang="zh-CN"><code>sm_89</code> SASS、<code>compute_89</code> PTX</span><span lang="en"><code>sm_89</code> SASS, <code>compute_89</code> PTX</span></td><td><span lang="zh-CN">✕ 无可用映像：PTX 只能往更高的计算能力编</span><span lang="en">✕ No usable image: PTX compiles only to an equal or higher compute capability</span></td><td><span lang="zh-CN">直接用 SASS</span><span lang="en">Uses the SASS directly</span></td><td><span lang="zh-CN">JIT PTX</span><span lang="en">JIT from PTX</span></td><td><span lang="zh-CN">✕ 同第一格</span><span lang="en">✕ As in the T4 column</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>-gencode</code> 两次：<code>compute_75,sm_75</code> 和 <code>compute_89,sm_89</code></span><span lang="en"><code>-gencode</code> twice: <code>compute_75,sm_75</code> and <code>compute_89,sm_89</code></span></td><td><span lang="zh-CN">两个 SASS，没有 PTX</span><span lang="en">Two SASS, no PTX</span></td><td><span lang="zh-CN">直接用 SASS</span><span lang="en">Uses the SASS directly</span></td><td><span lang="zh-CN">直接用 SASS</span><span lang="en">Uses the SASS directly</span></td><td><span lang="zh-CN">✕ 无可用映像：没有 PTX 可 JIT</span><span lang="en">✕ No usable image: no PTX to JIT</span></td><td><span lang="zh-CN">用 SASS，能跑</span><span lang="en">Runs on the SASS</span></td></tr>
+    <tr><td><span lang="zh-CN"><code>--gpu-architecture=compute_75 --gpu-code=compute_75</code></span><span lang="en"><code>--gpu-architecture=compute_75 --gpu-code=compute_75</code></span></td><td><span lang="zh-CN">只有 PTX</span><span lang="en">PTX only</span></td><td><span lang="zh-CN">JIT（每台机器第一次加载时）</span><span lang="en">JIT (on each machine’s first load)</span></td><td><span lang="zh-CN">JIT</span><span lang="en">JIT</span></td><td><span lang="zh-CN">JIT</span><span lang="en">JIT</span></td><td><span lang="zh-CN">✕ r580 的 JIT 不认识 PTX ISA 9.4</span><span lang="en">✕ The JIT of r580 does not know PTX ISA 9.4</span></td></tr>
+    <tr><td><span lang="zh-CN">概念 4 推荐的发布构建</span><span lang="en">The release build recommended in concept 4</span></td><td><span lang="zh-CN">两个 SASS、<code>compute_75</code> PTX</span><span lang="en">Two SASS, <code>compute_75</code> PTX</span></td><td><span lang="zh-CN">直接用 SASS</span><span lang="en">Uses the SASS directly</span></td><td><span lang="zh-CN">直接用 SASS</span><span lang="en">Uses the SASS directly</span></td><td><span lang="zh-CN">JIT PTX</span><span lang="en">JIT from PTX</span></td><td><span lang="zh-CN">用 SASS，能跑</span><span lang="en">Runs on the SASS</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) nvcc → PTX → SASS → 加载时的 JIT</h3><h3 lang="en">(a) nvcc → PTX → SASS → JIT at load time</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 440" data-interval="2600"
+         data-captions='["全图：左边三列是构建时 nvcc 做的事，右边一列是加载时 CUDA 驱动做的事。例子是概念 4 推荐的发布构建：T4 和 L4 各一个 SASS，再加一份 compute_75 的 PTX。按播放逐步看。", "1. 源文件里既有主机代码也有设备代码。nvcc 把两者分开：主机代码交给主机编译器（例如 g++），设备代码走下面的两个阶段。", "2. 阶段 1：设备代码编成 PTX，一种虚拟 GPU 的汇编，总是文本。每个 -gencode 的 arch 跑一次阶段 1，所以这里有 compute_75 和 compute_89 两份。PTX ISA 9.4 随 CUDA 13.4 发布。", "3. 阶段 2：ptxas 把 PTX 编成某一代真实硬件的 SASS，装在 cubin 里。sm_75 的 SASS 只在 cc 7.x 里次版本不低于 5 的 GPU 上能用，sm_89 的只在 8.9 上能用。", "4. 链接：主机代码和 fatbin 合成一个可执行文件。这个 fatbin 里有两个 cubin 和一份 compute_75 的 PTX；compute_89 的 PTX 没有放进来，因为对应的 code 只写了 sm_89。cuobjdump -lelf -lptx 能列出它们。", "5. 在 T4（cc 7.5）上加载：驱动在 fatbin 里找到完全匹配的 sm_75 cubin，直接用，不需要编译。", "6. 在 L4（cc 8.9）上加载：sm_75 的 SASS 主版本不同，不能用；fatbin 里正好有 sm_89 的 cubin，直接用。", "7. 在更新的 GPU（例如 cc 12.0）上加载：两个 cubin 都不匹配，驱动拿 compute_75 的 PTX 现场 JIT 成这张卡的 SASS，并存进 compute cache（Linux 上默认 ~/.nv/ComputeCache），下次启动就不用再编。", "8. 两种失败。fatbin 里没有 PTX 时，更新的 GPU 上没有可用的 kernel 映像。用 CUDA 13.4 编出的 PTX 交给只有 r580 驱动的机器时，旧驱动的 JIT 不认识这么新的 PTX；小版本兼容只保证 SASS 能用。"]'
+         data-captions-en='["The whole picture: the three columns on the left are what nvcc does at build time, the column on the right is what the CUDA driver does at load time. The example is the release build recommended in concept 4: one SASS each for the T4 and the L4, plus compute_75 PTX. Press Play to step through.", "1. The source file holds both host code and device code. nvcc separates them: host code goes to the host compiler (such as g++), and device code goes through the two stages below.", "2. Stage 1: device code becomes PTX, the assembly language of a virtual GPU, always text. Stage 1 runs once per -gencode arch, so there are two copies here, compute_75 and compute_89. PTX ISA 9.4 ships with CUDA 13.4.", "3. Stage 2: ptxas compiles PTX into SASS for one real hardware generation, stored in a cubin. The sm_75 SASS works only on cc 7.x GPUs with a minor version of 5 or more, the sm_89 SASS only on 8.9.", "4. Linking: host code and the fatbin become one executable. This fatbin holds two cubins and the compute_75 PTX; the compute_89 PTX is left out, because its code value names only sm_89. cuobjdump -lelf -lptx lists them.", "5. Loading on a T4 (cc 7.5): the driver finds an exactly matching sm_75 cubin in the fatbin and uses it directly, with no compilation.", "6. Loading on an L4 (cc 8.9): the sm_75 SASS has a different major version and cannot be used; the fatbin happens to hold an sm_89 cubin, used directly.", "7. Loading on a newer GPU (such as cc 12.0): neither cubin matches, so the driver JIT-compiles the compute_75 PTX into SASS for this card on the spot and stores it in the compute cache (by default ~/.nv/ComputeCache on Linux), so the next launch skips the compilation.", "8. Two failures. With no PTX in the fatbin, a newer GPU finds no usable kernel image. PTX built with CUDA 13.4 and given to a machine with only the r580 driver is too new for the JIT of the old driver; minor-version compatibility guarantees only that SASS works."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="16" class="small" lang="zh-CN">构建时 · nvcc</text><text x="30" y="16" class="small" lang="en">Build time · nvcc</text>
+      <text x="690" y="16" class="small" lang="zh-CN">加载时 · CUDA 驱动</text><text x="690" y="16" class="small" lang="en">Load time · CUDA driver</text>
+      <path class="lane" d="M672 24 L672 300"/>
+      <g data-step="1"><rect class="box" x="30" y="44" width="180" height="56"/><text x="42" y="70" class="mono">softmax_capstone.cu</text><text x="42" y="90" class="small" lang="zh-CN">主机代码 + 设备代码</text><text x="42" y="90" class="small" lang="en">host code + device code</text><path class="arrow" d="M120 100 L120 196"/><text x="128" y="150" class="small" lang="zh-CN">主机编译器</text><text x="128" y="150" class="small" lang="en">host compiler</text></g>
+      <g data-step="2"><path class="arrow" d="M210 60 L244 42"/><path class="arrow" d="M210 84 L244 98"/><rect class="box" x="248" y="24" width="190" height="44"/><text x="260" y="51" class="mono">PTX · compute_75</text><rect class="box" x="248" y="80" width="190" height="44"/><text x="260" y="107" class="mono">PTX · compute_89</text><text x="248" y="142" class="small" lang="zh-CN">阶段 1 · 虚拟 ISA，文本</text><text x="248" y="142" class="small" lang="en">Stage 1 · virtual ISA, text</text></g>
+      <g data-step="3"><path class="arrow" d="M438 46 L484 46"/><path class="arrow" d="M438 102 L484 102"/><rect class="box" x="488" y="24" width="168" height="44"/><text x="500" y="51" class="mono">SASS · sm_75</text><rect class="box" x="488" y="80" width="168" height="44"/><text x="500" y="107" class="mono">SASS · sm_89</text><text x="488" y="142" class="small" lang="zh-CN">阶段 2 · ptxas → cubin</text><text x="488" y="142" class="small" lang="en">Stage 2 · ptxas → cubin</text></g>
+      <g data-step="4"><rect class="box" x="30" y="200" width="626" height="96"/><text x="42" y="222" class="small" lang="zh-CN">可执行文件：主机代码 + fatbin</text><text x="42" y="222" class="small" lang="en">The executable: host code + fatbin</text><rect class="box" x="44" y="234" width="140" height="48"/><text x="56" y="263" lang="zh-CN">主机代码</text><text x="56" y="263" lang="en">host code</text><rect class="box" x="200" y="234" width="134" height="48"/><text x="210" y="263" class="mono">sm_75 cubin</text><rect class="box" x="348" y="234" width="134" height="48"/><text x="358" y="263" class="mono">sm_89 cubin</text><rect class="box" x="496" y="234" width="148" height="48"/><text x="506" y="263" class="mono">PTX compute_75</text><text x="30" y="318" class="small">cuobjdump -lelf -lptx softmax_capstone</text></g>
+      <g data-step="5"><path class="arrow" d="M656 236 L686 62"/><rect class="box" x="690" y="30" width="190" height="56"/><text x="702" y="54" lang="zh-CN">T4 · cc 7.5</text><text x="702" y="54" lang="en">T4 · cc 7.5</text><text x="702" y="76" class="small" lang="zh-CN">直接用 sm_75 cubin</text><text x="702" y="76" class="small" lang="en">uses the sm_75 cubin</text></g>
+      <g data-step="6"><path class="arrow" d="M656 248 L686 132"/><rect class="box" x="690" y="104" width="190" height="56"/><text x="702" y="128" lang="zh-CN">L4 · cc 8.9</text><text x="702" y="128" lang="en">L4 · cc 8.9</text><text x="702" y="150" class="small" lang="zh-CN">直接用 sm_89 cubin</text><text x="702" y="150" class="small" lang="en">uses the sm_89 cubin</text></g>
+      <g data-step="7"><path class="arrow" d="M656 262 L686 206"/><rect class="box" x="690" y="178" width="190" height="56"/><text x="702" y="202" lang="zh-CN">更新的 GPU · cc 12.0</text><text x="702" y="202" lang="en">Newer GPU · cc 12.0</text><text x="702" y="224" class="small" lang="zh-CN">JIT：PTX → SASS</text><text x="702" y="224" class="small" lang="en">JIT: PTX → SASS</text><path class="arrow" d="M785 234 L785 250"/><rect class="box" x="690" y="254" width="190" height="44"/><text x="702" y="274" class="small">compute cache</text><text x="702" y="290" class="small">~/.nv/ComputeCache</text></g>
+      <g data-step="8"><text x="30" y="352" style="fill: var(--ink-2)" lang="zh-CN">✕ fatbin 里没有 PTX：更新的 GPU 上没有可用的 kernel 映像（cudaErrorNoKernelImageForDevice）</text><text x="30" y="352" style="fill: var(--ink-2)" lang="en">✕ No PTX in the fatbin: no usable kernel image on a newer GPU (cudaErrorNoKernelImageForDevice)</text><text x="30" y="380" style="fill: var(--ink-2)" lang="zh-CN">✕ CUDA 13.4 的 PTX（ISA 9.4）交给 r580 驱动：旧 JIT 不认识（cudaErrorUnsupportedPtxVersion）</text><text x="30" y="380" style="fill: var(--ink-2)" lang="en">✕ CUDA 13.4 PTX (ISA 9.4) on the r580 driver: the old JIT does not know it (cudaErrorUnsupportedPtxVersion)</text><text x="30" y="408" class="small" lang="zh-CN">小版本兼容只保证 SASS 能用，所以 nvcc 必须带 -arch=sm_xx</text><text x="30" y="408" class="small" lang="en">Minor-version compatibility guarantees only SASS, which is why nvcc needs -arch=sm_xx</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 作品项目 kernel 的数据流：未融合与融合的 softmax</h3><h3 lang="en">(b) The capstone kernel’s data flow: unfused and fused softmax</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 460" data-interval="2600"
+         data-captions='["全图：上面是四个 kernel 的未融合版，中间结果经过全局内存；下面是一个 kernel 的融合版，每行一个 block。条形是字节模型：每次运行搬多少个 float。按播放逐步看。", "1. row_max：每行一个 block，256 个线程跨步读完这一行，用 warp shuffle 和 shared memory 归约出最大值 m，写进长度为 M 的小数组。", "2. exp_sub：每个元素一个线程，读 x 和这一行的 m，把 e = exp(x − m) 整个写回全局内存。e 和 x 一样大，这一次写就是 MN 个 float。", "3. row_sum 读 e 归约出每行的和 d；divide 再读一次 e，除以 d，写出 y。每一步都是一次完整的启动，前一个写完、后一个才读。", "4. 合计：读 x 两次、读 e 两次、写 e 一次、写 y 一次，共 6MN 个 float（m 和 d 只有 M 个，忽略不计）。", "5. 融合版第 1 遍：每个线程跨步读这一行，在寄存器里维护自己的最大值 m 和和 d；遇到更大的值时先把 d 乘 exp(旧 m − 新 m) 再累加。这就是在线 softmax。", "6. 归约：先用 warp shuffle 和 shared memory 求整行的 m，再把每个线程的 d 缩放到这个 m 后求和，得到整行的 d。数据都在片上，不碰全局内存。", "7. 第 2 遍：再读一次 x，写出 exp(x − m) / d。合计读 x 两次、写 y 一次，共 3MN 个 float；一行能留在缓存里时，第二次读不到内存，只剩 2MN。", "8. Lab B 在这台 M5 上实测（2026-10-31，21 次的中位数）：4096 × 4096 时未融合 3.018 ms、融合 1.072 ms、MPSMatrixSoftMax 1.076 ms；1024 × 32768 时依次是 6.230、2.967 和 2.612 ms。T4 上的 CUDA 版没有运行。"]'
+         data-captions-en='["The whole picture: above, the unfused version with four kernels and intermediates through global memory; below, the fused version as one kernel with one block per row. The bars are the byte model: how many floats each run moves. Press Play to step through.", "1. row_max: one block per row, 256 threads stride through the row and reduce it to its maximum m with warp shuffles and shared memory, written to a small array of length M.", "2. exp_sub: one thread per element reads x and the row m and writes the whole of e = exp(x − m) back to global memory. e is as large as x, so this one write is MN floats.", "3. row_sum reads e and reduces each row to its sum d; divide reads e once more, divides by d and writes y. Each step is a full launch, and the next one reads only after the previous one has written.", "4. In total: x read twice, e read twice, e written once and y written once, 6MN floats (m and d are only M each and are ignored).", "5. The first pass of the fused version: each thread strides through the row keeping its own maximum m and sum d in registers; when a larger value arrives, it first multiplies d by exp(old m − new m) and then adds. This is the online softmax.", "6. The reduction: warp shuffles and shared memory give the row maximum m, then every thread rescales its d to that m and the block sums them into the row d. Everything stays on chip, with no global memory involved.", "7. The second pass reads x again and writes exp(x − m) / d. In total x is read twice and y written once, 3MN floats; when a row stays in cache, the second read never reaches memory, leaving 2MN.", "8. Measured by Lab B on this M5 (2026-10-31, median of 21): at 4096 × 4096, unfused 3.018 ms, fused 1.072 ms, MPSMatrixSoftMax 1.076 ms; at 1024 × 32768, 6.230, 2.967 and 2.612 ms in the same order. The CUDA version on a T4 was not run."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="18" class="small" lang="zh-CN">未融合：四个 kernel，中间结果经过全局内存</text><text x="20" y="18" class="small" lang="en">Unfused: four kernels, intermediates through global memory</text>
+      <rect class="box" x="20" y="30" width="56" height="48"/><text x="40" y="60" class="mono">x</text>
+      <g data-step="1"><path class="arrow" d="M76 54 L94 54"/><rect class="box" x="98" y="30" width="128" height="48"/><text x="110" y="59" class="mono">row_max</text><text x="98" y="96" class="small" lang="zh-CN">读 x → m[M]</text><text x="98" y="96" class="small" lang="en">read x → m[M]</text></g>
+      <g data-step="2"><path class="arrow" d="M226 54 L244 54"/><rect class="box" x="248" y="30" width="128" height="48"/><text x="260" y="59" class="mono">exp_sub</text><text x="248" y="96" class="small" lang="zh-CN">读 x、m → 写 e</text><text x="248" y="96" class="small" lang="en">read x, m → write e</text><path class="arrow" d="M376 54 L394 54"/><rect class="box" x="398" y="30" width="96" height="48"/><text x="410" y="59" class="mono">e · M×N</text></g>
+      <g data-step="3"><path class="arrow" d="M494 54 L512 54"/><rect class="box" x="516" y="30" width="128" height="48"/><text x="528" y="59" class="mono">row_sum</text><text x="516" y="96" class="small" lang="zh-CN">读 e → d[M]</text><text x="516" y="96" class="small" lang="en">read e → d[M]</text><path class="arrow" d="M644 54 L662 54"/><rect class="box" x="666" y="30" width="128" height="48"/><text x="678" y="59" class="mono">divide</text><text x="666" y="96" class="small" lang="zh-CN">读 e、d → 写 y</text><text x="666" y="96" class="small" lang="en">read e, d → write y</text><path class="arrow" d="M794 54 L812 54"/><rect class="box" x="816" y="30" width="60" height="48"/><text x="838" y="60" class="mono">y</text></g>
+      <g data-step="4"><rect x="98" y="118" width="600" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="710" y="130" class="mono">6MN</text><text x="98" y="152" class="small" lang="zh-CN">读 x、x、e、e，写 e、y：每次运行 6MN 个 float</text><text x="98" y="152" class="small" lang="en">read x, x, e, e and write e, y: 6MN floats per run</text></g>
+      <path class="lane" d="M20 172 L880 172"/>
+      <text x="20" y="196" class="small" lang="zh-CN">融合：一个 kernel，每行一个 block（256 个线程）</text><text x="20" y="196" class="small" lang="en">Fused: one kernel, one block per row (256 threads)</text>
+      <rect class="box" x="20" y="250" width="56" height="48"/><text x="40" y="280" class="mono">x</text>
+      <rect class="lane" x="98" y="208" width="696" height="132"/><text x="110" y="228" class="mono">softmax_fused</text>
+      <g data-step="5"><path class="arrow" d="M76 274 L110 274"/><rect class="box" x="114" y="240" width="210" height="88"/><text x="126" y="264" lang="zh-CN">第 1 遍：读 x</text><text x="126" y="264" lang="en">Pass 1: read x</text><text x="126" y="288" class="small" lang="zh-CN">每个线程在寄存器里</text><text x="126" y="288" class="small" lang="en">each thread keeps</text><text x="126" y="308" class="small" lang="zh-CN">维护自己的 (m, d)</text><text x="126" y="308" class="small" lang="en">its own (m, d) in registers</text></g>
+      <g data-step="6"><path class="arrow" d="M324 284 L338 284"/><rect class="box" x="342" y="240" width="210" height="88"/><text x="354" y="264" lang="zh-CN">归约整行</text><text x="354" y="264" lang="en">Reduce the row</text><text x="354" y="288" class="small" lang="zh-CN">warp shuffle → shared</text><text x="354" y="288" class="small" lang="en">warp shuffle → shared</text><text x="354" y="308" class="small" lang="zh-CN">→ 整行的 m 和 d</text><text x="354" y="308" class="small" lang="en">→ the row m and d</text></g>
+      <g data-step="7"><path class="arrow" d="M552 284 L566 284"/><rect class="box" x="570" y="240" width="210" height="88"/><text x="582" y="264" lang="zh-CN">第 2 遍：再读 x</text><text x="582" y="264" lang="en">Pass 2: read x again</text><text x="582" y="288" class="small" lang="zh-CN">写 exp(x − m) / d</text><text x="582" y="288" class="small" lang="en">write exp(x − m) / d</text><path class="arrow" d="M794 274 L812 274"/><rect class="box" x="816" y="250" width="60" height="48"/><text x="838" y="280" class="mono">y</text><rect x="98" y="352" width="300" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="410" y="364" class="mono">3MN</text><text x="460" y="364" class="small" lang="zh-CN">一行留在缓存里时 2MN</text><text x="460" y="364" class="small" lang="en">2MN when a row stays in cache</text></g>
+      <g data-step="8"><text x="20" y="400" class="small" lang="zh-CN">这台 M5 上实测（Lab B，2026-10-31，中位数）：4096 × 4096：未融合 3.018 ms · 融合 1.072 ms · MPS 1.076 ms</text><text x="20" y="400" class="small" lang="en">Measured on this M5 (Lab B, 2026-10-31, medians): 4096 × 4096: unfused 3.018 ms · fused 1.072 ms · MPS 1.076 ms</text><text x="20" y="422" class="small" lang="zh-CN">1024 × 32768：未融合 6.230 ms · 融合 2.967 ms · MPS 2.612 ms</text><text x="20" y="422" class="small" lang="en">1024 × 32768: unfused 6.230 ms · fused 2.967 ms · MPS 2.612 ms</text><text x="20" y="444" class="small" style="fill: var(--ink-2)" lang="zh-CN">T4 上的 CUDA 版：未运行，见 Lab A</text><text x="20" y="444" class="small" style="fill: var(--ink-2)" lang="en">The CUDA version on a T4: not run; see Lab A</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 租用的 GPU 机器：构建作品项目，看清软件栈，剖析它，接进 PyTorch</h3><h3 lang="en">Lab A · The rented GPU machine: build the capstone, look through the stack, profile it, plug it into PyTorch</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-10-31。根据 CUDA 13.4 文档（nvcc、PTX ISA 9.4、CUDA Compatibility、编程指南、Driver API 和 Runtime API 参考、CUDA Binary Utilities）、Nsight Compute CLI 文档和 PyTorch 2.15 文档整理。这台 Mac 没有 NVIDIA GPU，也没有租用机器。<code>softmax_kernels.cuh</code> 加 <code>softmax_capstone.cu</code> 只在本机用 clang 的 CUDA 前端对照桩头文件做过语法检查（主机端和 <code>sm_75</code> 设备端都通过），<code>driver_launch.cpp</code> 对照驱动 API 的桩头文件做过语法检查；同一个算法的 Metal 版在 Lab B 里跑过并与 CPU 结果一致。<code>softmax_op.cu</code> 和 <code>softmax_op_test.py</code> 只做过 Python 语法检查，没有对照 PyTorch 头文件编译过。这些程序都没有被 <code>nvcc</code> 编译过，没有在 GPU 上运行过，<code>cuobjdump</code>、<code>ncu</code> 和 <code>nsys</code> 一条也没有跑过。所以这里不给任何数字，只描述你应当看到的形状。</div>
+    <div class="note" lang="en"><strong>Not run</strong>, 2026-10-31. Assembled from the CUDA 13.4 documentation (nvcc, PTX ISA 9.4, CUDA Compatibility, the programming guide, the Driver API and Runtime API references, the CUDA Binary Utilities), the Nsight Compute CLI documentation and the PyTorch 2.15 documentation. This Mac has no NVIDIA GPU and no rented machine. <code>softmax_kernels.cuh</code> with <code>softmax_capstone.cu</code> has only been syntax-checked here with clang’s CUDA front end against stub headers (both the host side and the <code>sm_75</code> device side passed), and <code>driver_launch.cpp</code> against a stub of the driver API header; the Metal version of the same algorithm ran in Lab B and matched the CPU result. <code>softmax_op.cu</code> and <code>softmax_op_test.py</code> have only had a Python syntax check and were never compiled against the PyTorch headers. None of these programs has been compiled by <code>nvcc</code> or run on a GPU, and not one <code>cuobjdump</code>, <code>ncu</code> or <code>nsys</code> command has been run. So this lab gives no numbers, only the shape you should see.</div>
+    <ol>
+      <li><span lang="zh-CN">按实验环境页第二层登录租来的机器，进入 <code>nvidia/cuda:13.4.3-devel-ubuntu24.04</code> 容器（NGC 上同名的是 <code>nvcr.io/nvidia/cuda:13.4.3-devel-ubuntu24.04</code>），先记下驱动和工具链两个版本。<code>nvidia-smi</code> 里的「CUDA Version」是驱动支持的最高版本，<code>nvcc --version</code> 是容器里的工具链；前者不低于后者时是向后兼容，低于后者时就进入概念 5 的小版本兼容：</span><span lang="en">Log in to the rented machine as in tier 2 of the lab environment page and enter the <code>nvidia/cuda:13.4.3-devel-ubuntu24.04</code> container (on NGC the same name is <code>nvcr.io/nvidia/cuda:13.4.3-devel-ubuntu24.04</code>), and first record the two versions. The “CUDA Version” in <code>nvidia-smi</code> is the highest the driver supports, and <code>nvcc --version</code> is the container’s toolkit; when the first is not lower than the second you are in backward compatibility, and when it is lower you are in concept 5’s minor-version compatibility:</span><pre data-lang="sh" data-file="on the rented machine"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+nvidia-smi
+nvcc --version</pre></li>
+      <li><span lang="zh-CN">写出作品项目的两个文件。<code>softmax_kernels.cuh</code> 放两种实现的全部 kernel，第 7 步的 PyTorch 算子也用它；<code>softmax_capstone.cu</code> 在 Lab B 的三个形状上计时，预热 3 次后取 21 次的中位数，并把三行结果和 CPU 上的双精度参考逐个比较：</span><span lang="en">Write the capstone’s two files. <code>softmax_kernels.cuh</code> holds every kernel of both versions and is reused by the PyTorch operator of step 7; <code>softmax_capstone.cu</code> times them on Lab B’s three shapes, taking the median of 21 runs after 3 warm-ups, and compares three rows element by element with a double-precision reference on the CPU:</span><pre data-lang="cpp" data-file="softmax_kernels.cuh">// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// softmax_kernels.cuh: the capstone kernels, shared by softmax_capstone.cu and softmax_op.cu
+#pragma once
+#include &lt;cuda_runtime.h&gt;
+#include &lt;cmath&gt;
+
+constexpr int TB = 256;                                  // threads per block: 8 warps
+
+__device__ float warp_max(float v) { for (int o = 16; o &gt; 0; o &gt;&gt;= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o)); return v; }
+__device__ float warp_sum(float v) { for (int o = 16; o &gt; 0; o &gt;&gt;= 1) v += __shfl_xor_sync(0xffffffffu, v, o); return v; }
+
+// block-wide max or sum; every thread gets the result
+template &lt;bool IsMax&gt; __device__ float block_reduce(float v) {
+    __shared__ float scratch[32];
+    int lane = threadIdx.x % 32, w = threadIdx.x / 32;
+    v = IsMax ? warp_max(v) : warp_sum(v);
+    if (lane == 0) scratch[w] = v;
+    __syncthreads();
+    if (w == 0) {
+        float x = lane &lt; blockDim.x / 32 ? scratch[lane] : (IsMax ? -INFINITY : 0.0f);
+        x = IsMax ? warp_max(x) : warp_sum(x);
+        if (lane == 0) scratch[0] = x;
+    }
+    __syncthreads();
+    float r = scratch[0];
+    __syncthreads();                                     // scratch may be reused right after
+    return r;
+}
+
+// ---- unfused: four kernels ----
+__global__ void row_max(const float* x, float* m, int n) {
+    float v = -INFINITY;
+    for (int j = threadIdx.x; j &lt; n; j += blockDim.x) v = fmaxf(v, x[size_t(blockIdx.x) * n + j]);
+    v = block_reduce&lt;true&gt;(v);
+    if (threadIdx.x == 0) m[blockIdx.x] = v;
+}
+__global__ void exp_sub(const float* x, const float* m, float* e, int n, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i &lt; count) e[i] = expf(x[i] - m[i / n]);
+}
+__global__ void row_sum(const float* e, float* s, int n) {
+    float v = 0.0f;
+    for (int j = threadIdx.x; j &lt; n; j += blockDim.x) v += e[size_t(blockIdx.x) * n + j];
+    v = block_reduce&lt;false&gt;(v);
+    if (threadIdx.x == 0) s[blockIdx.x] = v;
+}
+__global__ void divide(const float* e, const float* s, float* y, int n, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i &lt; count) y[i] = e[i] / s[i / n];
+}
+
+// ---- fused: one block per row; pass 1 keeps a running (max, sum) per thread, pass 2 writes ----
+// extern "C" keeps the name unmangled, so the driver API can find it by name in the PTX
+extern "C" __global__ void softmax_fused(const float* x, float* y, int n) {
+    const float* xr = x + size_t(blockIdx.x) * n;
+    float m = -INFINITY, d = 0.0f;
+    for (int j = threadIdx.x; j &lt; n; j += blockDim.x) {
+        float v = xr[j], m2 = fmaxf(m, v);
+        d = d * expf(m - m2) + expf(v - m2);             // rescale the old sum when the max grows
+        m = m2;
+    }
+    float gm = block_reduce&lt;true&gt;(m);
+    float gd = block_reduce&lt;false&gt;(d * expf(m - gm));
+    float inv = 1.0f / gd;
+    for (int j = threadIdx.x; j &lt; n; j += blockDim.x) y[size_t(blockIdx.x) * n + j] = expf(xr[j] - gm) * inv;
+}</pre><pre data-lang="cpp" data-file="softmax_capstone.cu">// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// softmax_capstone.cu: row-wise softmax over an M x N float matrix, unfused (four kernels, intermediates in global
+// memory) and fused (one block per row, online max and sum, warp shuffles), timed with events against a CPU reference
+// build: nvcc -arch=sm_75 -O3 -lineinfo softmax_capstone.cu -o softmax_capstone
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;vector&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); std::exit(1); } } while (0)
+#include "softmax_kernels.cuh"
+
+int main() {
+    int rt = 0, drv = 0;
+    CHECK(cudaRuntimeGetVersion(&amp;rt)); CHECK(cudaDriverGetVersion(&amp;drv));
+    cudaDeviceProp p; CHECK(cudaGetDeviceProperties(&amp;p, 0));
+    std::printf("device=%s cc=%d.%d runtime=%d driver=%d\n", p.name, p.major, p.minor, rt, drv);
+    const int warm = 3, reps = 21;
+    const int shapes[3][2] = {{4096, 1024}, {4096, 4096}, {1024, 32768}};
+    for (const auto&amp; sh : shapes) {
+        int M = sh[0], N = sh[1];
+        size_t cnt = size_t(M) * N, bytes = cnt * sizeof(float);
+        std::vector&lt;float&gt; hx(cnt), hy(cnt);
+        for (size_t i = 0; i &lt; cnt; ++i) hx[i] = float((i * 37) % 1000) / 100 - 5;   // values in [-5, 5)
+        float *x, *y, *e, *m, *s;
+        CHECK(cudaMalloc(&amp;x, bytes)); CHECK(cudaMalloc(&amp;y, bytes)); CHECK(cudaMalloc(&amp;e, bytes));
+        CHECK(cudaMalloc(&amp;m, M * sizeof(float))); CHECK(cudaMalloc(&amp;s, M * sizeof(float)));
+        CHECK(cudaMemcpy(x, hx.data(), bytes, cudaMemcpyHostToDevice));
+        // CPU reference in double for rows 0, M/2 and M-1
+        const int rows[3] = {0, M / 2, M - 1};
+        std::vector&lt;double&gt; ref(3 * size_t(N));
+        for (int k = 0; k &lt; 3; ++k) {
+            const float* r = &amp;hx[size_t(rows[k]) * N];
+            double mx = -INFINITY, sum = 0;
+            for (int j = 0; j &lt; N; ++j) mx = std::max(mx, double(r[j]));
+            for (int j = 0; j &lt; N; ++j) sum += std::exp(double(r[j]) - mx);
+            for (int j = 0; j &lt; N; ++j) ref[size_t(k) * N + j] = std::exp(double(r[j]) - mx) / sum;
+        }
+        auto max_err = [&amp;]() {
+            CHECK(cudaMemcpy(hy.data(), y, bytes, cudaMemcpyDeviceToHost));
+            double err = 0;
+            for (int k = 0; k &lt; 3; ++k)
+                for (int j = 0; j &lt; N; ++j) err = std::max(err, std::fabs(hy[size_t(rows[k]) * N + j] - ref[size_t(k) * N + j]));
+            CHECK(cudaMemset(y, 0, bytes));
+            return err;
+        };
+        unsigned eb = unsigned((cnt + TB - 1) / TB);
+        auto unfused = [&amp;] {
+            row_max&lt;&lt;&lt;M, TB&gt;&gt;&gt;(x, m, N);
+            exp_sub&lt;&lt;&lt;eb, TB&gt;&gt;&gt;(x, m, e, N, cnt);
+            row_sum&lt;&lt;&lt;M, TB&gt;&gt;&gt;(e, s, N);
+            divide&lt;&lt;&lt;eb, TB&gt;&gt;&gt;(e, s, y, N, cnt);
+        };
+        auto fused = [&amp;] { softmax_fused&lt;&lt;&lt;M, TB&gt;&gt;&gt;(x, y, N); };
+        // byte model per run: unfused reads x, x, e, e and writes e, y (6 MN floats); fused reads x twice, writes y (3 MN)
+        struct Run { const char* name; double gb; };
+        const Run runs[2] = {{"unfused", 6.0 * cnt * 4 / 1e9}, {"fused", 3.0 * cnt * 4 / 1e9}};
+        for (const Run&amp; r : runs) {
+            cudaEvent_t t0, t1;
+            CHECK(cudaEventCreate(&amp;t0)); CHECK(cudaEventCreate(&amp;t1));
+            std::vector&lt;float&gt; ms;
+            for (int it = 0; it &lt; warm + reps; ++it) {
+                CHECK(cudaEventRecord(t0));
+                if (r.name[0] == 'u') unfused(); else fused();
+                CHECK(cudaGetLastError());
+                CHECK(cudaEventRecord(t1));
+                CHECK(cudaEventSynchronize(t1));
+                float t = 0; CHECK(cudaEventElapsedTime(&amp;t, t0, t1));
+                if (it &gt;= warm) ms.push_back(t);
+            }
+            std::sort(ms.begin(), ms.end());
+            float med = ms[ms.size() / 2];
+            std::printf("M=%5d N=%5d %-7s median_ms=%8.3f min=%8.3f max=%8.3f modelGB/s=%6.1f maxErr=%.2e\n",
+                        M, N, r.name, med, ms.front(), ms.back(), r.gb / (med / 1e3), max_err());
+            CHECK(cudaEventDestroy(t0)); CHECK(cudaEventDestroy(t1));
+        }
+        CHECK(cudaFree(x)); CHECK(cudaFree(y)); CHECK(cudaFree(e)); CHECK(cudaFree(m)); CHECK(cudaFree(s));
+    }
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">编译、运行，然后看可执行文件里装了什么：</span><span lang="en">Build and run it, then look at what the executable carries:</span><pre data-lang="sh" data-file="on the rented machine"># 未运行 · not run; assembled from the nvcc documentation and the CUDA Binary Utilities on 2026-10-31
+nvcc -arch=sm_75 -O3 -lineinfo softmax_capstone.cu -o softmax_capstone &amp;&amp; ./softmax_capstone
+cuobjdump -lelf -lptx softmax_capstone              # 嵌了哪些 cubin 和 PTX
+nvcc -arch=sm_75 -ptx softmax_capstone.cu -o softmax.ptx
+grep -m2 -E '^\.(version|target)' softmax.ptx       # PTX ISA 版本和假定的架构
+cuobjdump -sass softmax_capstone | grep -m5 SHFL    # warp shuffle 在 SASS 里的样子</pre><span lang="zh-CN">预期（定性）：第一行打印设备名、<code>cc=7.5</code>、<code>runtime=13040</code> 和驱动版本；每一行的 <code>maxErr</code> 都在 1e-6 以下（Lab B 在 M5 上是 1e-9 量级）；每个形状上 <code>fused</code> 的中位数都比 <code>unfused</code> 短，<code>modelGB/s</code> 接近或高于这张卡的实测拷贝带宽（高于时说明有一部分读从缓存来）。<code>cuobjdump</code> 列出一个 <code>sm_75</code> 的 ELF 和一个 <code>compute_75</code> 的 PTX，与概念 4 说的 <code>-arch=sm_75</code> 的展开一致；PTX 开头应是 <code>.version 9.4</code> 和 <code>.target sm_75</code>（推断，按 PTX ISA 的发布历史表）；SASS 里应能看到 <code>SHFL.BFLY</code> 指令，<code>__shfl_xor_sync</code> 编成的蝶形交换（推断，指令名没有在本页核对）。</span><span lang="en">Expected (qualitative): the first line prints the device name, <code>cc=7.5</code>, <code>runtime=13040</code> and the driver version; every <code>maxErr</code> is below 1e-6 (Lab B gets about 1e-9 on the M5); at every shape the <code>fused</code> median is shorter than the <code>unfused</code> one, and <code>modelGB/s</code> comes near or above the card’s measured copy bandwidth (above it means some reads came from cache). <code>cuobjdump</code> lists one <code>sm_75</code> ELF and one <code>compute_75</code> PTX, matching concept 4’s expansion of <code>-arch=sm_75</code>; the PTX should open with <code>.version 9.4</code> and <code>.target sm_75</code> (an inference from the PTX ISA release-history table); the SASS should contain <code>SHFL.BFLY</code> instructions, the butterfly exchange that <code>__shfl_xor_sync</code> compiles to (an inference; the instruction name was not checked here).</span></li>
+      <li><span lang="zh-CN">把对照表做成实验。编三个变体，用两个环境变量逼驱动表态：</span><span lang="en">Turn the comparison table into an experiment. Build three variants and use the two environment variables to make the driver show its hand:</span><pre data-lang="sh" data-file="on the rented machine"># 未运行 · not run; assembled from the nvcc documentation and the programming guide on 2026-10-31
+nvcc -O3 softmax_capstone.cu -o sm89_only -arch=sm_89
+nvcc -O3 softmax_capstone.cu -o sass_only \
+    -gencode arch=compute_75,code=sm_75 -gencode arch=compute_89,code=sm_89
+nvcc -O3 softmax_capstone.cu -o release \
+    -gencode arch=compute_75,code=sm_75 -gencode arch=compute_89,code=sm_89 \
+    -gencode arch=compute_75,code=compute_75
+./sm89_only                               # T4 上：加载失败
+CUDA_DISABLE_PTX_JIT=1 ./sass_only        # 有 sm_75 cubin：照常运行
+CUDA_FORCE_PTX_JIT=1 ./sass_only          # 没有 PTX 可 JIT：加载失败
+CUDA_FORCE_PTX_JIT=1 ./release            # 忽略 cubin，JIT compute_75 的 PTX：照常运行，第一次启动更慢
+cuobjdump -lelf -lptx release</pre><span lang="zh-CN">预期（定性，推断）：在 T4 上，<code>sm89_only</code> 的第一次启动报 <code>cudaErrorNoKernelImageForDevice</code> 对应的错误信息，由 <code>CHECK(cudaGetLastError())</code> 打印；<code>sass_only</code> 禁止 JIT 时照常运行，强制 JIT 时同样失败；<code>release</code> 强制 JIT 时结果与平时相同，只是第一次运行慢一些，<code>~/.nv/ComputeCache</code> 里多出缓存，第二次运行就快了。<code>cuobjdump</code> 列出两个 ELF 和一个 PTX。如果租到的是 L4，<code>sm89_only</code> 能跑，<code>-arch=sm_75</code> 的那份在 <code>CUDA_DISABLE_PTX_JIT=1</code> 下反而失败。</span><span lang="en">Expected (qualitative, an inference): on a T4, the first launch of <code>sm89_only</code> fails with the message for <code>cudaErrorNoKernelImageForDevice</code>, printed by <code>CHECK(cudaGetLastError())</code>; <code>sass_only</code> runs normally with JIT disabled and fails the same way with JIT forced; <code>release</code> with JIT forced gives the usual results, only the first run is slower, a cache appears under <code>~/.nv/ComputeCache</code>, and the second run is fast again. <code>cuobjdump</code> lists two ELFs and one PTX. If your rented card is an L4, <code>sm89_only</code> runs, and the <code>-arch=sm_75</code> build is the one that fails under <code>CUDA_DISABLE_PTX_JIT=1</code>.</span></li>
+      <li><span lang="zh-CN">不用运行时，直接走驱动 API。下面的程序用 <code>cuModuleLoad</code> 读第 3 步生成的 <code>softmax.ptx</code>，驱动当场 JIT，再用 <code>cuLaunchKernel</code> 启动 <code>softmax_fused</code>（它用 <code>extern "C"</code> 声明，所以能按原名找到）：</span><span lang="en">Skip the runtime and go through the driver API. The program below reads the <code>softmax.ptx</code> of step 3 with <code>cuModuleLoad</code>, the driver JIT-compiles it on the spot, and <code>cuLaunchKernel</code> launches <code>softmax_fused</code> (declared <code>extern "C"</code>, so it can be found by its plain name):</span><pre data-lang="cpp" data-file="driver_launch.cpp">// 未运行 · not run; assembled from the CUDA Driver API reference on 2026-10-31
+// driver_launch.cpp: load softmax.ptx through the driver API (the driver JIT-compiles it for this GPU) and launch
+// softmax_fused once. No nvcc involved at run time and no &lt;&lt;&lt; &gt;&gt;&gt;: this is what the runtime does for you.
+// build: nvcc -arch=sm_75 -ptx softmax_capstone.cu -o softmax.ptx
+//        g++ -O2 driver_launch.cpp -I/usr/local/cuda/include -lcuda -o driver_launch
+#include &lt;cmath&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;vector&gt;
+#include &lt;cuda.h&gt;
+
+#define CU(call) do { CUresult r_ = (call); if (r_ != CUDA_SUCCESS) { const char* s_ = "?"; cuGetErrorString(r_, &amp;s_); \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, s_); std::exit(1); } } while (0)
+
+int main() {
+    const int M = 1024, N = 4096;
+    CU(cuInit(0));
+    int drv = 0; CU(cuDriverGetVersion(&amp;drv));
+    CUdevice dev; CU(cuDeviceGet(&amp;dev, 0));
+    char name[256]; CU(cuDeviceGetName(name, sizeof name, dev));
+    int major = 0, minor = 0;
+    CU(cuDeviceGetAttribute(&amp;major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev));
+    CU(cuDeviceGetAttribute(&amp;minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev));
+    std::printf("device=%s cc=%d.%d driver=%d\n", name, major, minor, drv);
+    CUcontext ctx; CU(cuDevicePrimaryCtxRetain(&amp;ctx, dev)); CU(cuCtxSetCurrent(ctx));   // the runtime's primary context
+    CUmodule mod; CU(cuModuleLoad(&amp;mod, "softmax.ptx"));       // PTX in, SASS for this GPU out (JIT)
+    CUfunction f; CU(cuModuleGetFunction(&amp;f, mod, "softmax_fused"));
+    std::vector&lt;float&gt; hx(size_t(M) * N), hy(size_t(M) * N);
+    for (size_t i = 0; i &lt; hx.size(); ++i) hx[i] = float((i * 37) % 1000) / 100 - 5;
+    CUdeviceptr x, y;
+    CU(cuMemAlloc(&amp;x, hx.size() * 4)); CU(cuMemAlloc(&amp;y, hy.size() * 4));
+    CU(cuMemcpyHtoD(x, hx.data(), hx.size() * 4));
+    int n = N;
+    void* args[] = {&amp;x, &amp;y, &amp;n};
+    CU(cuLaunchKernel(f, M, 1, 1, 256, 1, 1, 0, nullptr, args, nullptr));
+    CU(cuCtxSynchronize());
+    CU(cuMemcpyDtoH(hy.data(), y, hy.size() * 4));
+    double rowsum = 0;
+    for (int j = 0; j &lt; N; ++j) rowsum += hy[j];
+    std::printf("row 0 sums to %.6f (should be 1)\n", rowsum);
+    CU(cuMemFree(x)); CU(cuMemFree(y)); CU(cuModuleUnload(mod)); CU(cuDevicePrimaryCtxRelease(dev));
+    return 0;
+}</pre><pre data-lang="sh" data-file="on the rented machine"># 未运行 · not run; assembled from the CUDA Driver API reference on 2026-10-31
+g++ -O2 driver_launch.cpp -I/usr/local/cuda/include -lcuda -o driver_launch &amp;&amp; ./driver_launch</pre><span lang="zh-CN">预期（定性）：打印设备名、计算能力和驱动版本，以及第 0 行的和，应当非常接近 1。注意它没有链接 <code>cudart</code>，只链接驱动库 <code>libcuda</code>；<code>/usr/local/cuda/include</code> 是 devel 镜像里头文件的常见位置（大致路径）。</span><span lang="en">Expected (qualitative): it prints the device name, compute capability and driver version, and the sum of row 0, which should be very close to 1. Note that it links no <code>cudart</code>, only the driver library <code>libcuda</code>; <code>/usr/local/cuda/include</code> is the usual header location in the devel image (an approximate path).</span></li>
+      <li><span lang="zh-CN">剖析，写作品项目报告要用的证据。先 <code>nsys</code> 看四个 kernel 的启动在时间线上占多少，再用 <code>ncu</code> 各看一次 4096 × 4096 时融合 kernel 和最大的那个未融合 kernel。每个 kernel 在每个形状上启动 24 次（3 次预热加 21 次），<code>-s 24</code> 跳过第一个形状：CLI 文档说这个计数只算匹配过滤条件的启动：</span><span lang="en">Profile, collecting evidence for the capstone report. First <code>nsys</code> shows how much of the timeline the four kernel launches take, then <code>ncu</code> looks once at the fused kernel and once at the biggest unfused one at 4096 × 4096. Each kernel launches 24 times per shape (3 warm-ups plus 21), so <code>-s 24</code> skips the first shape; the CLI documentation says this count includes only launches that match the kernel filter:</span><pre data-lang="sh" data-file="on the rented machine"># 未运行 · not run; assembled from the Nsight Systems and Nsight Compute documentation on 2026-10-31
+nsys profile --stats=true -o softmax_timeline ./softmax_capstone
+ncu -k regex:softmax_fused -s 24 -c 1 --section SpeedOfLight --section MemoryWorkloadAnalysis_Tables ./softmax_capstone
+ncu -k regex:exp_sub -s 24 -c 1 --section SpeedOfLight --section MemoryWorkloadAnalysis_Tables ./softmax_capstone</pre><span lang="zh-CN">预期（定性，推断）：两个 kernel 的 SpeedOfLight 都是访存一侧远高于计算一侧，访存受限；融合 kernel 的 DRAM 读字节在 4096 列时明显少于 2 × 64 MiB，说明第二遍的读有一部分命中了 L2；<code>nsys</code> 的 <code>cuda_gpu_kern_sum</code> 里，未融合版四个 kernel 的总时间明显长于融合版。</span><span lang="en">Expected (qualitative, an inference): SpeedOfLight shows the memory side far above the compute side for both kernels, so both are memory-bound; at 4096 columns the fused kernel’s DRAM read bytes are clearly fewer than 2 × 64 MiB, meaning part of the second pass hit in L2; in <code>nsys</code>’s <code>cuda_gpu_kern_sum</code>, the four unfused kernels add up to clearly more time than the fused one.</span></li>
+      <li><span lang="zh-CN">接进 PyTorch。换用 NGC 的 PyTorch 镜像 <code>nvcr.io/nvidia/pytorch:26.10-py3</code>（2026-10-31 时最新的标签，里面带 PyTorch 和 nvcc），把 <code>softmax_kernels.cuh</code> 放在旁边，写出下面两个文件，运行 <code>python softmax_op_test.py</code>。<code>TORCH_CUDA_ARCH_LIST="7.5+PTX"</code> 就是这个扩展的 <code>-gencode</code>：</span><span lang="en">Plug it into PyTorch. Switch to NGC’s PyTorch image <code>nvcr.io/nvidia/pytorch:26.10-py3</code> (the newest tag on 2026-10-31, with PyTorch and nvcc inside), put <code>softmax_kernels.cuh</code> next to the two files below, and run <code>python softmax_op_test.py</code>. <code>TORCH_CUDA_ARCH_LIST="7.5+PTX"</code> is this extension’s <code>-gencode</code>:</span><pre data-lang="cpp" data-file="softmax_op.cu">// 未运行 · not run; assembled from the PyTorch 2.15 and CUDA documentation on 2026-10-31
+// softmax_op.cu: the fused kernel as the PyTorch operator gpu_lab::softmax (2-D float32 CUDA tensor, last dimension)
+#include &lt;ATen/Operators.h&gt;
+#include &lt;torch/all.h&gt;
+#include &lt;torch/library.h&gt;
+#include &lt;cuda_runtime.h&gt;
+#include &lt;ATen/cuda/CUDAContext.h&gt;
+#include "softmax_kernels.cuh"
+
+at::Tensor softmax_cuda(const at::Tensor&amp; x) {
+    TORCH_CHECK(x.dim() == 2 &amp;&amp; x.dtype() == at::kFloat, "gpu_lab::softmax expects a 2-D float32 tensor");
+    TORCH_INTERNAL_ASSERT(x.device().type() == at::DeviceType::CUDA);
+    at::Tensor xc = x.contiguous();
+    at::Tensor y = at::empty(xc.sizes(), xc.options());
+    int rows = int(xc.size(0)), n = int(xc.size(1));
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();      // run on PyTorch's current stream
+    softmax_fused&lt;&lt;&lt;rows, TB, 0, stream&gt;&gt;&gt;(xc.data_ptr&lt;float&gt;(), y.data_ptr&lt;float&gt;(), n);
+    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "softmax_fused launch failed");
+    return y;
+}
+
+TORCH_LIBRARY(gpu_lab, m) { m.def("softmax(Tensor x) -&gt; Tensor"); }
+TORCH_LIBRARY_IMPL(gpu_lab, CUDA, m) { m.impl("softmax", &amp;softmax_cuda); }</pre><pre data-lang="py" data-file="softmax_op_test.py"># 未运行 · not run; assembled from the PyTorch 2.15 documentation on 2026-10-31
+# softmax_op_test.py: build gpu_lab::softmax just in time, check it against torch.softmax, time both with CUDA events
+import os
+import torch
+from torch.utils.cpp_extension import load
+
+os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "7.5+PTX")   # sm_75 SASS plus compute_75 PTX in the extension's fatbin
+load(name="gpu_lab_softmax", sources=["softmax_op.cu"], extra_cuda_cflags=["-O3"],
+     is_python_module=False, verbose=True)                  # registers torch.ops.gpu_lab.softmax as a side effect
+
+@torch.library.register_fake("gpu_lab::softmax")            # shape-only kernel, so torch.compile can trace the op
+def _(x):
+    return torch.empty_like(x)
+
+def median_ms(fn, warm=3, reps=21):
+    times = []
+    for i in range(warm + reps):
+        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        a.record(); fn(); b.record(); torch.cuda.synchronize()
+        if i &gt;= warm:
+            times.append(a.elapsed_time(b))
+    return sorted(times)[len(times) // 2]
+
+print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name())
+for M, N in [(4096, 1024), (4096, 4096), (1024, 32768)]:
+    x = ((torch.arange(M * N, device="cuda") * 37) % 1000).float().div(100).sub(5).view(M, N)
+    torch.testing.assert_close(torch.ops.gpu_lab.softmax(x), torch.softmax(x, dim=-1))
+    ours = median_ms(lambda: torch.ops.gpu_lab.softmax(x))
+    ref = median_ms(lambda: torch.softmax(x, dim=-1))
+    print(f"M={M:5d} N={N:5d} gpu_lab.softmax {ours:8.3f} ms  torch.softmax {ref:8.3f} ms")
+torch.library.opcheck(torch.ops.gpu_lab.softmax.default, (x,))
+print("opcheck passed")</pre><span lang="zh-CN">预期（定性，推断）：第一次运行要编译几十秒；三个形状上 <code>assert_close</code> 都通过，<code>opcheck passed</code>；<code>gpu_lab.softmax</code> 和 <code>torch.softmax</code> 的时间在同一个量级，谁快取决于形状，这正是作品项目报告要解释的。把 <code>TORCH_LIBRARY</code> 放在 <code>.cu</code> 文件里（教程放在 <code>.cpp</code> 里）、用 <code>load</code> 加 <code>is_python_module=False</code> 注册算子，是本页按文档的组合，没有运行过。</span><span lang="en">Expected (qualitative, an inference): the first run spends tens of seconds compiling; <code>assert_close</code> passes at all three shapes and <code>opcheck passed</code> is printed; <code>gpu_lab.softmax</code> and <code>torch.softmax</code> take times of the same order, and which wins depends on the shape, which is exactly what the capstone report has to explain. Putting <code>TORCH_LIBRARY</code> in the <code>.cu</code> file (the tutorial puts it in a <code>.cpp</code> file) and registering the operator through <code>load</code> with <code>is_python_module=False</code> is this page’s combination from the documentation and has not been run.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 版本：同一个作品项目在这台 Mac 上，未融合、融合与 MPSMatrixSoftMax</h3><h3 lang="en">Lab B · The Metal twin: the same capstone on this Mac, unfused, fused and MPSMatrixSoftMax</h3>
+
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-10-31。下面的输出都来自这台 Mac 上的实际运行。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-10-31. The outputs below come from actual runs on this Mac.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>metal_softmax.swift</code>。kernel 和 Lab A 一一对应：<code>row_max</code>、<code>exp_sub</code>、<code>row_sum</code>、<code>divide</code> 四个 kernel 放进同一个命令缓冲区，融合版 <code>softmax_fused</code> 每行一个 threadgroup（256 个线程，8 个 SIMD-group），归约用 <code>simd_max</code>、<code>simd_sum</code> 和 threadgroup memory，代替 CUDA 的 <code>__shfl_xor_sync</code> 和 shared memory。第三个版本是 Metal Performance Shaders 的 <code>MPSMatrixSoftMax</code>，扮演 Lab A 里 <code>torch.softmax</code> 的角色。GPU 时间取命令缓冲区的 <code>gpuEndTime − gpuStartTime</code>，预热 3 次后 21 次取中位数，同时给出最小值和最大值；输入和 Lab A 相同，三行结果和 CPU 上的双精度参考比较：</span><span lang="en">Save the program below as <code>metal_softmax.swift</code>. Its kernels match Lab A one for one: the four kernels <code>row_max</code>, <code>exp_sub</code>, <code>row_sum</code> and <code>divide</code> go into one command buffer, and the fused <code>softmax_fused</code> uses one threadgroup per row (256 threads, 8 SIMD-groups), reducing with <code>simd_max</code>, <code>simd_sum</code> and threadgroup memory in place of CUDA’s <code>__shfl_xor_sync</code> and shared memory. The third version is <code>MPSMatrixSoftMax</code> from Metal Performance Shaders, playing the role <code>torch.softmax</code> plays in Lab A. GPU time is the command buffer’s <code>gpuEndTime − gpuStartTime</code>, the median of 21 runs after 3 warm-ups, with the minimum and maximum alongside; the inputs are those of Lab A, and three rows are compared with a double-precision reference on the CPU:</span><pre data-lang="swift" data-file="metal_softmax.swift">// metal_softmax.swift: the capstone's Metal twin. Row-wise softmax over an M x N float matrix, three ways:
+// unfused (four kernels with intermediates in memory), fused (one threadgroup per row, online max and sum),
+// and MPSMatrixSoftMax (Apple's library kernel, the stand-in for PyTorch or cuDNN).
+// GPU time = command buffer gpuEndTime - gpuStartTime, median of 21 runs after 3 warm-ups.
+// build: swiftc -O metal_softmax.swift -o metal_softmax    run: ./metal_softmax
+import Foundation
+import Metal
+import MetalPerformanceShaders
+setvbuf(stdout, nil, _IOLBF, 0)
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+#define TG 256                      // threads per threadgroup; 8 SIMD-groups of 32
+
+// reduce one value per thread to one value per threadgroup (max or sum), result in every thread
+inline float tg_reduce(float v, bool isMax, threadgroup float* scratch, uint lane, uint sg, uint nsg) {
+    v = isMax ? simd_max(v) : simd_sum(v);
+    if (lane == 0) scratch[sg] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        float w = lane &lt; nsg ? scratch[lane] : (isMax ? -INFINITY : 0.0f);
+        w = isMax ? simd_max(w) : simd_sum(w);
+        if (lane == 0) scratch[0] = w;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float r = scratch[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);   // scratch may be reused right after
+    return r;
+}
+
+// ---- unfused: four kernels, intermediates go through memory ----
+kernel void row_max(device const float* x [[buffer(0)]], device float* m [[buffer(1)]], constant uint&amp; n [[buffer(2)]],
+                    uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+                    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                    uint nsg [[simdgroups_per_threadgroup]]) {
+    threadgroup float scratch[32];
+    float v = -INFINITY;
+    for (uint j = t; j &lt; n; j += TG) v = max(v, x[row * n + j]);
+    v = tg_reduce(v, true, scratch, lane, sg, nsg);
+    if (t == 0) m[row] = v;
+}
+kernel void exp_sub(device const float* x [[buffer(0)]], device const float* m [[buffer(1)]], device float* e [[buffer(2)]],
+                    constant uint&amp; n [[buffer(3)]], uint2 g [[thread_position_in_grid]]) {
+    e[g.y * n + g.x] = exp(x[g.y * n + g.x] - m[g.y]);
+}
+kernel void row_sum(device const float* e [[buffer(0)]], device float* s [[buffer(1)]], constant uint&amp; n [[buffer(2)]],
+                    uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+                    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                    uint nsg [[simdgroups_per_threadgroup]]) {
+    threadgroup float scratch[32];
+    float v = 0;
+    for (uint j = t; j &lt; n; j += TG) v += e[row * n + j];
+    v = tg_reduce(v, false, scratch, lane, sg, nsg);
+    if (t == 0) s[row] = v;
+}
+kernel void divide(device const float* e [[buffer(0)]], device const float* s [[buffer(1)]], device float* y [[buffer(2)]],
+                   constant uint&amp; n [[buffer(3)]], uint2 g [[thread_position_in_grid]]) {
+    y[g.y * n + g.x] = e[g.y * n + g.x] / s[g.y];
+}
+
+// ---- fused: one threadgroup per row; pass 1 keeps a running (max, sum) per thread, pass 2 writes ----
+kernel void softmax_fused(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint&amp; n [[buffer(2)]],
+                          uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+                          uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                          uint nsg [[simdgroups_per_threadgroup]]) {
+    threadgroup float scratch[32];
+    device const float* xr = x + row * n;
+    float m = -INFINITY, d = 0;                      // online softmax: rescale the sum when the max grows
+    for (uint j = t; j &lt; n; j += TG) {
+        float v = xr[j], m2 = max(m, v);
+        d = d * exp(m - m2) + exp(v - m2);
+        m = m2;
+    }
+    float gm = tg_reduce(m, true, scratch, lane, sg, nsg);
+    float gd = tg_reduce(d * exp(m - gm), false, scratch, lane, sg, nsg);
+    float inv = 1.0f / gd;
+    for (uint j = t; j &lt; n; j += TG) y[row * n + j] = exp(xr[j] - gm) * inv;
+}
+"""
+
+func fail(_ s: String) -&gt; Never { print("error: \(s)"); exit(1) }
+guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else { fail("no Metal device") }
+let lib: MTLLibrary
+do { lib = try dev.makeLibrary(source: src, options: nil) } catch { fail("compile: \(error)") }
+func pipe(_ name: String) -&gt; MTLComputePipelineState {
+    guard let f = lib.makeFunction(name: name) else { fail("no function \(name)") }
+    do { return try dev.makeComputePipelineState(function: f) } catch { fail("pipeline \(name): \(error)") }
+}
+let pMax = pipe("row_max"), pExp = pipe("exp_sub"), pSum = pipe("row_sum"), pDiv = pipe("divide"), pFused = pipe("softmax_fused")
+print("device=\(dev.name) simdWidth=\(pFused.threadExecutionWidth) maxThreadsPerThreadgroup=\(pFused.maxTotalThreadsPerThreadgroup)")
+
+func median(_ v: [Double]) -&gt; Double { let s = v.sorted(); return s[s.count / 2] }
+let warm = 3, reps = 21
+let tg = MTLSize(width: 256, height: 1, depth: 1)
+
+for (M, N) in [(4096, 1024), (4096, 4096), (1024, 32768)] {
+    let cnt = M * N, bytes = cnt * 4
+    guard let X = dev.makeBuffer(length: bytes, options: .storageModeShared),
+          let Y = dev.makeBuffer(length: bytes, options: .storageModeShared),
+          let E = dev.makeBuffer(length: bytes, options: .storageModeShared),
+          let Mx = dev.makeBuffer(length: M * 4, options: .storageModeShared),
+          let S = dev.makeBuffer(length: M * 4, options: .storageModeShared) else { fail("buffers") }
+    let px = X.contents().bindMemory(to: Float.self, capacity: cnt)
+    for i in 0..&lt;cnt { px[i] = Float((i * 37) % 1000) / 100 - 5 }      // values in [-5, 5)
+    // CPU reference in double for rows 0, M/2 and M-1
+    let rows = [0, M / 2, M - 1]
+    var ref: [[Double]] = []
+    for r in rows {
+        var mx = -Double.infinity
+        for j in 0..&lt;N { mx = max(mx, Double(px[r * N + j])) }
+        var s = 0.0
+        for j in 0..&lt;N { s += exp(Double(px[r * N + j]) - mx) }
+        ref.append((0..&lt;N).map { exp(Double(px[r * N + $0]) - mx) / s })
+    }
+    let py = Y.contents().bindMemory(to: Float.self, capacity: cnt)
+    func maxErr() -&gt; Double {
+        var e = 0.0
+        for (k, r) in rows.enumerated() { for j in 0..&lt;N { e = max(e, abs(Double(py[r * N + j]) - ref[k][j])) } }
+        return e
+    }
+    var un = UInt32(N)
+    func timeOne(_ encode: (MTLCommandBuffer) -&gt; Void) -&gt; Double {
+        guard let cb = q.makeCommandBuffer() else { fail("command buffer") }
+        encode(cb)
+        cb.commit(); cb.waitUntilCompleted()
+        if cb.status != .completed { fail("command buffer: \(String(describing: cb.error))") }
+        return (cb.gpuEndTime - cb.gpuStartTime) * 1e3
+    }
+    func unfused(_ cb: MTLCommandBuffer) {
+        guard let e = cb.makeComputeCommandEncoder() else { fail("encoder") }
+        e.setComputePipelineState(pMax); e.setBuffer(X, offset: 0, index: 0); e.setBuffer(Mx, offset: 0, index: 1)
+        e.setBytes(&amp;un, length: 4, index: 2)
+        e.dispatchThreadgroups(MTLSize(width: M, height: 1, depth: 1), threadsPerThreadgroup: tg)
+        e.setComputePipelineState(pExp); e.setBuffer(X, offset: 0, index: 0); e.setBuffer(Mx, offset: 0, index: 1)
+        e.setBuffer(E, offset: 0, index: 2); e.setBytes(&amp;un, length: 4, index: 3)
+        e.dispatchThreads(MTLSize(width: N, height: M, depth: 1), threadsPerThreadgroup: tg)
+        e.setComputePipelineState(pSum); e.setBuffer(E, offset: 0, index: 0); e.setBuffer(S, offset: 0, index: 1)
+        e.setBytes(&amp;un, length: 4, index: 2)
+        e.dispatchThreadgroups(MTLSize(width: M, height: 1, depth: 1), threadsPerThreadgroup: tg)
+        e.setComputePipelineState(pDiv); e.setBuffer(E, offset: 0, index: 0); e.setBuffer(S, offset: 0, index: 1)
+        e.setBuffer(Y, offset: 0, index: 2); e.setBytes(&amp;un, length: 4, index: 3)
+        e.dispatchThreads(MTLSize(width: N, height: M, depth: 1), threadsPerThreadgroup: tg)
+        e.endEncoding()
+    }
+    func fused(_ cb: MTLCommandBuffer) {
+        guard let e = cb.makeComputeCommandEncoder() else { fail("encoder") }
+        e.setComputePipelineState(pFused); e.setBuffer(X, offset: 0, index: 0); e.setBuffer(Y, offset: 0, index: 1)
+        e.setBytes(&amp;un, length: 4, index: 2)
+        e.dispatchThreadgroups(MTLSize(width: M, height: 1, depth: 1), threadsPerThreadgroup: tg)
+        e.endEncoding()
+    }
+    let desc = MPSMatrixDescriptor(rows: M, columns: N, rowBytes: N * 4, dataType: .float32)
+    let mX = MPSMatrix(buffer: X, descriptor: desc), mY = MPSMatrix(buffer: Y, descriptor: desc)
+    let sm = MPSMatrixSoftMax(device: dev)
+    func mps(_ cb: MTLCommandBuffer) { sm.encode(commandBuffer: cb, inputMatrix: mX, resultMatrix: mY) }
+
+    // byte model per run: unfused reads x, x, e, e and writes e, y (6 MN floats); fused reads x twice, writes y (3 MN)
+    let gbUnfused = 6.0 * Double(cnt) * 4 / 1e9, gbFused = 3.0 * Double(cnt) * 4 / 1e9
+    for (name, enc, gb) in [("unfused", unfused, gbUnfused), ("fused", fused, gbFused), ("mps", mps, gbFused)] as [(String, (MTLCommandBuffer) -&gt; Void, Double)] {
+        memset(Y.contents(), 0, bytes)
+        for _ in 0..&lt;warm { _ = timeOne(enc) }
+        let ts = (0..&lt;reps).map { _ in timeOne(enc) }
+        let m = median(ts)
+        print(String(format: "M=%5d N=%5d %-7@ median_ms=%8.3f min=%8.3f max=%8.3f modelGB/s=%6.1f maxErr=%.2e",
+                     M, N, name as NSString, m, ts.min()!, ts.max()!, gb / (m / 1e3), maxErr()))
+    }
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是实验 Mac（Apple M5，macOS 27.2，Apple Swift 6.4.2）在 2026-10-31 22:42（本机时间，PDT）连续三次运行中第三次的完整输出，不是计算值：</span><span lang="en">Build and run it. Below is the full output of the third of three consecutive runs on the lab Mac (Apple M5, macOS 27.2, Apple Swift 6.4.2) at 22:42 on 2026-10-31 (local time, PDT), measured rather than computed:</span><pre data-lang="sh">$ swiftc -O metal_softmax.swift -o metal_softmax
+$ ./metal_softmax
+device=Apple M5 simdWidth=32 maxThreadsPerThreadgroup=1024
+M= 4096 N= 1024 unfused median_ms=   0.682 min=   0.663 max=   1.406 modelGB/s= 147.6 maxErr=1.30e-09
+M= 4096 N= 1024 fused median_ms=   0.250 min=   0.247 max=   0.265 modelGB/s= 201.5 maxErr=1.30e-09
+M= 4096 N= 1024 mps median_ms=   0.255 min=   0.254 max=   0.262 modelGB/s= 197.2 maxErr=1.30e-09
+M= 4096 N= 4096 unfused median_ms=   3.018 min=   2.998 max=   3.330 modelGB/s= 133.4 maxErr=3.08e-10
+M= 4096 N= 4096 fused median_ms=   1.072 min=   1.067 max=   1.108 modelGB/s= 187.8 maxErr=3.63e-10
+M= 4096 N= 4096 mps median_ms=   1.076 min=   1.071 max=   1.088 modelGB/s= 187.1 maxErr=2.27e-10
+M= 1024 N=32768 unfused median_ms=   6.230 min=   6.191 max=   6.458 modelGB/s= 129.3 maxErr=4.05e-11
+M= 1024 N=32768 fused median_ms=   2.967 min=   2.950 max=   2.991 modelGB/s= 135.7 maxErr=6.15e-11
+M= 1024 N=32768 mps median_ms=   2.612 min=   2.599 max=   2.634 modelGB/s= 154.1 maxErr=4.05e-11</pre></li>
+      <li><span lang="zh-CN">读懂稳定性。三次运行里，两个大形状的每个中位数相差都不超过 1.2%：4096 × 4096 时未融合 3.018–3.037 ms、融合 1.072–1.075 ms、MPS 1.076–1.079 ms；1024 × 32768 时未融合 6.203–6.266 ms、融合 2.966–2.986 ms、MPS 2.583–2.614 ms。4096 × 1024 却差了三倍多：融合版的中位数三次分别是 0.789、0.428 和 0.250 ms。它是每次进程里最先量的形状，也最短，和 Phase 4 在 n = 512 看到的一样，可能是 GPU 时钟还没升上来（推断，Metal 不报告也不能锁定时钟）。比较时只用两个大形状。</span><span lang="en">Read the stability. Across the three runs, every median at the two large shapes varied by at most 1.2%: at 4096 × 4096, unfused 3.018–3.037 ms, fused 1.072–1.075 ms, MPS 1.076–1.079 ms; at 1024 × 32768, unfused 6.203–6.266 ms, fused 2.966–2.986 ms, MPS 2.583–2.614 ms. 4096 × 1024 varied by more than a factor of three: the fused median was 0.789, 0.428 and 0.250 ms in the three runs. It is the first and shortest shape in each process, just like Phase 4’s n = 512, and the GPU clock may not have ramped up yet (an inference; Metal neither reports nor locks the clock). Compare only the two large shapes.</span></li>
+      <li><span lang="zh-CN">用字节模型读结果。<code>modelGB/s</code> 是按概念 8 的字节模型（未融合 6MN、融合 3MN 个 float；MPS 的内部做法没有公开，借用融合版的 3MN）除以时间。Phase 1 在这台 M5 上量到的 64 MB 拷贝带宽约 134 GB/s，可以当作内存这条线。未融合版在两个大形状上都是 129–133 GB/s，正好贴着这条线：它就是在搬 6MN 个 float。融合版在 1024 × 32768 时是 136 GB/s，也贴着这条线，快 2.1 倍，和 6MN 比 3MN 的预测一致；一行 32768 个 float 是 128 KB，第二遍要回内存去读。在 4096 × 4096 时融合版是 188 GB/s，超出这条线，快 2.8 倍：一行只有 16 KB，第二遍读大多在缓存里命中，真实的内存流量接近 2MN，预测就变成 3 倍（推断：Metal 没有给出命中率计数器，见 Phase 4）。<code>MPSMatrixSoftMax</code> 在 4096 列时和融合版持平，在 32768 列时用时短 12%，它没有公开用的是什么 kernel。</span><span lang="en">Read the results with the byte model. <code>modelGB/s</code> is concept 8’s byte model (6MN floats unfused, 3MN fused; MPS does not publish what it does, so it borrows the fused 3MN) divided by the time. Phase 1 measured a 64 MB copy on this M5 at about 134 GB/s, which serves as the memory line. The unfused version sits at 129–133 GB/s at both large shapes, right on that line: it really is moving 6MN floats. The fused version reaches 136 GB/s at 1024 × 32768, also on the line, and is 2.1 times as fast, as the 6MN-to-3MN prediction says; a row of 32768 floats is 128 KB, so the second pass goes back to memory. At 4096 × 4096 the fused version reaches 188 GB/s, above the line, and is 2.8 times as fast: a row is only 16 KB, so most of the second pass hits in cache, the real memory traffic is close to 2MN, and the prediction becomes 3 times (an inference; Metal offers no hit-rate counters, see Phase 4). <code>MPSMatrixSoftMax</code> is level with the fused version at 4096 columns and takes 12% less time at 32768 columns; Apple does not say which kernel it uses.</span></li>
+      <li><span lang="zh-CN">两边放进一张表（Metal 列来自上面第三次运行；CUDA 列等你在租用机器上跑完 Lab A 第 3 步和第 7 步后填写）：</span><span lang="en">Put both sides in one table (the Metal column is from the third run above; the CUDA column is for you to fill in after steps 3 and 7 of Lab A on the rented machine):</span>
+        <div class="table-wrap">
+        <table class="cmp">
+          <tr><th><span lang="zh-CN">形状 M × N</span><span lang="en">Shape M × N</span></th><th><span lang="zh-CN">版本</span><span lang="en">Version</span></th><th class="metal"><span lang="zh-CN">Apple M5 · Metal，中位数 ms（实测，2026-10-31）</span><span lang="en">Apple M5 · Metal, median ms (measured, 2026-10-31)</span></th><th><span lang="zh-CN">M5 模型 GB/s</span><span lang="en">M5 model GB/s</span></th><th class="cuda"><span lang="zh-CN">T4 · CUDA，中位数 ms</span><span lang="en">T4 · CUDA, median ms</span></th></tr>
+          <tr><td><span lang="zh-CN">4096 × 4096</span><span lang="en">4096 × 4096</span></td><td><span lang="zh-CN">未融合（四个 kernel）</span><span lang="en">Unfused (four kernels)</span></td><td><span lang="zh-CN">3.018</span><span lang="en">3.018</span></td><td><span lang="zh-CN">133.4</span><span lang="en">133.4</span></td><td><span lang="zh-CN">未运行</span><span lang="en">not run</span></td></tr>
+          <tr><td><span lang="zh-CN">4096 × 4096</span><span lang="en">4096 × 4096</span></td><td><span lang="zh-CN">融合</span><span lang="en">Fused</span></td><td><span lang="zh-CN">1.072</span><span lang="en">1.072</span></td><td><span lang="zh-CN">187.8</span><span lang="en">187.8</span></td><td><span lang="zh-CN">未运行</span><span lang="en">not run</span></td></tr>
+          <tr><td><span lang="zh-CN">4096 × 4096</span><span lang="en">4096 × 4096</span></td><td><span lang="zh-CN">库实现：MPS ↔ <code>torch.softmax</code></span><span lang="en">Library: MPS ↔ <code>torch.softmax</code></span></td><td><span lang="zh-CN">1.076</span><span lang="en">1.076</span></td><td><span lang="zh-CN">187.1</span><span lang="en">187.1</span></td><td><span lang="zh-CN">未运行</span><span lang="en">not run</span></td></tr>
+          <tr><td><span lang="zh-CN">1024 × 32768</span><span lang="en">1024 × 32768</span></td><td><span lang="zh-CN">未融合（四个 kernel）</span><span lang="en">Unfused (four kernels)</span></td><td><span lang="zh-CN">6.230</span><span lang="en">6.230</span></td><td><span lang="zh-CN">129.3</span><span lang="en">129.3</span></td><td><span lang="zh-CN">未运行</span><span lang="en">not run</span></td></tr>
+          <tr><td><span lang="zh-CN">1024 × 32768</span><span lang="en">1024 × 32768</span></td><td><span lang="zh-CN">融合</span><span lang="en">Fused</span></td><td><span lang="zh-CN">2.967</span><span lang="en">2.967</span></td><td><span lang="zh-CN">135.7</span><span lang="en">135.7</span></td><td><span lang="zh-CN">未运行</span><span lang="en">not run</span></td></tr>
+          <tr><td><span lang="zh-CN">1024 × 32768</span><span lang="en">1024 × 32768</span></td><td><span lang="zh-CN">库实现：MPS ↔ <code>torch.softmax</code></span><span lang="en">Library: MPS ↔ <code>torch.softmax</code></span></td><td><span lang="zh-CN">2.612</span><span lang="en">2.612</span></td><td><span lang="zh-CN">154.1</span><span lang="en">154.1</span></td><td><span lang="zh-CN">未运行</span><span lang="en">not run</span></td></tr>
+        </table>
+        </div>
+      </li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>nvidia-smi</code> 和 <code>nvcc --version</code>、<code>softmax_capstone</code> 的完整输出、<code>cuobjdump -lelf -lptx</code> 的输出和 PTX 开头两行；第 4 步每条命令的结果（能跑或错误信息）；<code>driver_launch</code> 的输出；两份 <code>ncu</code> 报告的 SpeedOfLight 和 DRAM 字节；<code>softmax_op_test.py</code> 的输出；Lab B 在你的 Mac 上连续三次运行的输出；上面那张表填满 CUDA 列；以及 10 行以内的解释：每个形状上融合版快多少、是否符合字节模型，第 4 步每个结果分别由概念 3 到 5 的哪条规则决定。</div>
+    <div class="note" lang="en">Deliverables: Lab A’s <code>nvidia-smi</code> and <code>nvcc --version</code>, the full output of <code>softmax_capstone</code>, the output of <code>cuobjdump -lelf -lptx</code> and the first two lines of the PTX; the result of each command in step 4 (runs, or the error message); the output of <code>driver_launch</code>; SpeedOfLight and DRAM bytes from the two <code>ncu</code> reports; the output of <code>softmax_op_test.py</code>; three consecutive Lab B runs on your Mac; the table above with its CUDA column filled in; and an explanation in 10 lines or fewer of how much faster the fused version is at each shape and whether that fits the byte model, and which rule from concepts 3 to 5 decides each result of step 4.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="gpu/phase-7">
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">1. 一个程序只用 <code>nvcc -arch=sm_89</code> 编译，拿到 T4（cc 7.5）上运行。会怎样？</p>
+      <p lang="en">1. A program built only with <code>nvcc -arch=sm_89</code> is run on a T4 (cc 7.5). What happens?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">驱动把 fatbin 里的 <code>compute_89</code> PTX JIT 成 <code>sm_75</code> 的 SASS，第一次启动慢一些</span><span lang="en">The driver JIT-compiles the <code>compute_89</code> PTX in the fatbin into <code>sm_75</code> SASS, and the first launch is a little slower</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">能跑：<code>sm_89</code> 的 SASS 在更低次版本的 GPU 上向下兼容</span><span lang="en">It runs: <code>sm_89</code> SASS is backward compatible with GPUs of a lower minor version</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">kernel 加载失败，没有适合这张 GPU 的映像</span><span lang="en">The kernel fails to load: there is no image suitable for this GPU</span></label>
+      <div class="why" hidden><span lang="zh-CN">PTX 只能 JIT 到相同或更高的计算能力，<code>compute_89</code> 编不到 7.5，a 不对。cubin 只能在同一主版本内、次版本相同或更高的 GPU 上运行，8.9 的 SASS 既不同主版本、也不是更低的目标，b 不对。fatbin 里没有能用的东西，对应 <code>cudaErrorNoKernelImageForDevice</code>。</span><span lang="en">PTX can be JIT-compiled only to an equal or higher compute capability, so <code>compute_89</code> cannot become 7.5 code, which rules out a. A cubin runs only within the same major version on a GPU of equal or higher minor version, and 8.9 SASS is a different major version and a higher target, which rules out b. Nothing in the fatbin is usable, which is <code>cudaErrorNoKernelImageForDevice</code>.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">2. 一台机器的驱动是 r580（CUDA 13.0），你用 CUDA 13.4 的容器编译程序。按 CUDA Compatibility 文档，哪种构建最可能在这台机器上正常运行？</p>
+      <p lang="en">2. A machine has the r580 driver (CUDA 13.0), and you build in a CUDA 13.4 container. According to the CUDA Compatibility guide, which build is most likely to run there?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">带这张 GPU 的 SASS 的构建，例如 <code>-arch=sm_75</code> 在 T4 上</span><span lang="en">A build that carries SASS for this GPU, such as <code>-arch=sm_75</code> on a T4</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">只带 PTX 的构建，因为 PTX 可以在任何驱动上 JIT</span><span lang="en">A PTX-only build, since PTX can be JIT-compiled on any driver</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">都不行：工具链比驱动新时一律需要升级驱动</span><span lang="en">Neither: a toolkit newer than the driver always requires a driver upgrade</span></label>
+      <div class="why" hidden><span lang="zh-CN">同一主版本内的小版本兼容允许 13.x 的程序在 ≥ 580 的驱动上运行，所以 c 不对；但文档列出的限制之一是把设备代码编成 PTX 的程序在旧驱动上不能工作，因为旧驱动的 JIT 不认识新的 PTX ISA，所以 b 不对；文档要求给 nvcc 指定目标架构，就是为了让 fatbin 里有 SASS。</span><span lang="en">Minor-version compatibility lets a 13.x program run on any driver ≥ 580, which rules out c; but one of the caveats the guide lists is that programs compiling device code to PTX do not work on older drivers, since the old JIT does not know the newer PTX ISA, which rules out b; the guide requires a target architecture for nvcc precisely so that the fatbin carries SASS.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 在线 softmax 里，一个线程已经看过的元素的最大值是 m、和是 d（按 m 缩放过），现在读到一个更大的值 v。它应当怎样更新？</p>
+      <p lang="en">3. In the online softmax, a thread has seen elements with maximum m and sum d (scaled to m), and now reads a larger value v. How should it update?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">d ← d + exp(v − m)，然后 m ← v</span><span lang="en">d ← d + exp(v − m), then m ← v</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">d ← d · exp(m − v) + 1，然后 m ← v</span><span lang="en">d ← d · exp(m − v) + 1, then m ← v</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">把 d 清零，从 v 重新开始累加</span><span lang="en">Reset d to zero and start summing again from v</span></label>
+      <div class="why" hidden><span lang="zh-CN">d 里的每一项都是 exp(x − m)，换到新最大值 v 后应是 exp(x − v) = exp(x − m) · exp(m − v)，所以整个旧和乘 exp(m − v)，再加上新元素自己的 exp(v − v) = 1。a 没有缩放旧和，还按旧最大值加了新项，既错又可能溢出；c 丢掉了已经读过的元素。</span><span lang="en">Each term in d is exp(x − m); under the new maximum v it should be exp(x − v) = exp(x − m) · exp(m − v), so the whole old sum is multiplied by exp(m − v), and the new element adds its own exp(v − v) = 1. Option a does not rescale the old sum and adds the new term against the old maximum, which is wrong and can overflow; c throws away the elements already read.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. 你用 <code>TORCH_LIBRARY</code> 注册了一个 CUDA 算子，在 eager 模式下工作正常，但 <code>torch.compile</code> 追踪它时失败。最可能缺了什么？</p>
+      <p lang="en">4. You registered a CUDA operator with <code>TORCH_LIBRARY</code>; it works in eager mode, but <code>torch.compile</code> fails to trace it. What is most likely missing?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">用 <code>torch.library.register_fake</code> 注册一个只计算输出形状和类型的 FakeTensor kernel</span><span lang="en">A FakeTensor kernel registered with <code>torch.library.register_fake</code>, computing only the output’s shape and type</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">在 <code>TORCH_CUDA_ARCH_LIST</code> 里加上 <code>+PTX</code></span><span lang="en">Adding <code>+PTX</code> to <code>TORCH_CUDA_ARCH_LIST</code></span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">把 kernel 改到默认流上启动，而不是 PyTorch 的当前流</span><span lang="en">Launching the kernel on the default stream instead of PyTorch’s current stream</span></label>
+      <div class="why" hidden><span lang="zh-CN">PyTorch 教程说，要支持 <code>torch.compile</code>，算子需要一个 FakeTensor kernel，它只根据输入的元数据算出输出的形状、步长、类型和设备，追踪时不碰真实数据。<code>+PTX</code> 决定 fatbin 里有没有 PTX，与追踪无关，b 不对；在当前流以外的流上启动会破坏 PyTorch 的执行顺序，是错误做法，c 不对。</span><span lang="en">The PyTorch tutorial says that to support <code>torch.compile</code> an operator needs a FakeTensor kernel, which works out the output’s shape, strides, type and device from the inputs’ metadata, so tracing never touches real data. <code>+PTX</code> decides whether the fatbin carries PTX and has nothing to do with tracing, which rules out b; launching on a stream other than the current one breaks PyTorch’s ordering and is wrong, which rules out c.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html">NVCC documentation</a> <span class="lvl" lang="zh-CN">官方文档，中级（CUDA 13.4，2026-10-12 版，2026-10-31 读取）：GPU Compilation 一章（虚拟与真实架构、JIT、Fatbinaries、简写规则）、<code>--gpu-architecture</code>、<code>--gpu-code</code>、<code>--generate-code</code>；概念 2 到 4 和动画 (a)</span><span class="lvl" lang="en">Official docs, intermediate (CUDA 13.4, edition of 2026-10-12, read 2026-10-31): the GPU Compilation chapter (virtual and real architectures, JIT, fatbinaries, the shorthands), <code>--gpu-architecture</code>, <code>--gpu-code</code>, <code>--generate-code</code>; concepts 2 to 4 and diagram (a)</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html">PTX ISA 9.4</a> <span class="lvl" lang="zh-CN">官方规范，高级（2026-10-31 读取）：PTX 的目标、发布历史表（PTX ISA 版本 ↔ CUDA 版本 ↔ 驱动分支）；概念 2 和 5</span><span class="lvl" lang="en">Official specification, advanced (read 2026-10-31): the goals of PTX and the release-history table (PTX ISA version ↔ CUDA release ↔ driver branch); concepts 2 and 5</span></li>
+    <li><a href="https://docs.nvidia.com/deploy/cuda-compatibility/index.html">CUDA Compatibility</a> <span class="lvl" lang="zh-CN">官方文档，入门到中级（2026-09-09 版）：向后兼容、小版本兼容的三条限制、向前兼容与 <code>cuda-compat</code> 包；概念 5</span><span class="lvl" lang="en">Official docs, introductory to intermediate (edition of 2026-09-09): backward compatibility, the three caveats of minor-version compatibility, forward compatibility and the <code>cuda-compat</code> package; concept 5</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/cuda-platform.html">CUDA Programming Guide: The CUDA Platform</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/driver-api.html">The CUDA Driver API</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html">CUDA Environment Variables</a> <span class="lvl" lang="zh-CN">官方文档（2026-09-10 版）：运行时与驱动 API、PTX、cubin 与 fatbin、二进制兼容与 PTX 兼容；上下文、模块、<code>cuLaunchKernel</code>；<code>CUDA_CACHE_PATH</code>、<code>CUDA_FORCE_PTX_JIT</code>、<code>CUDA_DISABLE_PTX_JIT</code></span><span class="lvl" lang="en">Official docs (edition of 2026-09-10): runtime and driver APIs, PTX, cubins and fatbins, binary and PTX compatibility; contexts, modules, <code>cuLaunchKernel</code>; <code>CUDA_CACHE_PATH</code>, <code>CUDA_FORCE_PTX_JIT</code>, <code>CUDA_DISABLE_PTX_JIT</code></span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-driver-api/index.html">CUDA Driver API reference</a> · <a href="https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html">CUDA Binary Utilities</a> <span class="lvl" lang="zh-CN">参考：Lab A 第 5 步用到的每个 <code>cu*</code> 函数的签名；<code>cuobjdump</code> 的 <code>-sass</code>、<code>-ptx</code>、<code>-lelf</code>、<code>-lptx</code> 和 <code>nvdisasm</code></span><span class="lvl" lang="en">Reference: the signature of every <code>cu*</code> function in step 5 of Lab A; <code>cuobjdump</code>’s <code>-sass</code>, <code>-ptx</code>, <code>-lelf</code>, <code>-lptx</code>, and <code>nvdisasm</code></span></li>
+    <li><a href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda">NGC: CUDA container</a> · <a href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch">NGC: PyTorch container</a> <span class="lvl" lang="zh-CN">镜像目录（2026-10-31 读取）：<code>nvcr.io/nvidia/cuda</code> 的 base、runtime、devel 标签；<code>nvcr.io/nvidia/pytorch:26.10-py3</code></span><span class="lvl" lang="en">Image catalog (read 2026-10-31): the base, runtime and devel tags of <code>nvcr.io/nvidia/cuda</code>; <code>nvcr.io/nvidia/pytorch:26.10-py3</code></span></li>
+    <li><a href="https://docs.pytorch.org/tutorials/advanced/cpp_custom_ops.html">PyTorch: Custom C++ and CUDA Operators</a> · <a href="https://docs.pytorch.org/docs/stable/cpp_extension.html">torch.utils.cpp_extension</a> · <a href="https://docs.pytorch.org/tutorials/recipes/torch_compile_user_defined_triton_kernel_tutorial.html">Using User-Defined Triton Kernels with torch.compile</a> <span class="lvl" lang="zh-CN">官方教程和参考，中级（2.15 版文档，2026-10-31 读取）：<code>TORCH_LIBRARY</code>、<code>TORCH_LIBRARY_IMPL</code>、<code>register_fake</code>、<code>opcheck</code>、稳定 ABI；<code>load</code> 与 <code>TORCH_CUDA_ARCH_LIST</code>；<code>triton_op</code> 与 <code>wrap_triton</code></span><span class="lvl" lang="en">Official tutorials and reference, intermediate (2.15 documentation, read 2026-10-31): <code>TORCH_LIBRARY</code>, <code>TORCH_LIBRARY_IMPL</code>, <code>register_fake</code>, <code>opcheck</code>, the stable ABI; <code>load</code> and <code>TORCH_CUDA_ARCH_LIST</code>; <code>triton_op</code> and <code>wrap_triton</code></span></li>
+    <li><a href="https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html">Triton: Fused Softmax</a> <span class="lvl" lang="zh-CN">官方教程，中级：同一个作品项目的 Triton 写法，以及朴素 softmax 的 DRAM 读写计数</span><span class="lvl" lang="en">Official tutorial, intermediate: the same capstone written in Triton, with the DRAM read and write count of a naive softmax</span></li>
+    <li><a href="https://rocm.docs.amd.com/projects/HIP/en/latest/what_is_hip.html">HIP: What is HIP?</a> · <a href="https://rocm.docs.amd.com/projects/HIPIFY/en/latest/index.html">HIPIFY</a> · <a href="https://www.khronos.org/sycl/">Khronos SYCL</a> · <a href="https://kokkos.org/kokkos-core-wiki/">Kokkos Core</a> <span class="lvl" lang="zh-CN">官方文档（2026-10-31 读取）：HIP 7.16.0 的定义与移植说明、<code>hipify-clang</code> 和 <code>hipify-perl</code>；SYCL 2020 与实现列表；Kokkos 的编程模型和后端；概念 6</span><span class="lvl" lang="en">Official docs (read 2026-10-31): HIP 7.16.0’s definition and porting notes, <code>hipify-clang</code> and <code>hipify-perl</code>; SYCL 2020 and its implementations; Kokkos’s programming model and back ends; concept 6</span></li>
+    <li><a href="https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixsoftmax">MPSMatrixSoftMax</a> <span class="lvl" lang="zh-CN">官方文档：Lab B 里扮演库实现的 Metal Performance Shaders 类</span><span class="lvl" lang="en">Official docs: the Metal Performance Shaders class that plays the library implementation in Lab B</span></li>
+    <li><a href="https://arxiv.org/abs/1805.02867">Milakov, Gimelshein: Online normalizer calculation for softmax (2018)</a> <span class="lvl" lang="zh-CN">一手资料，中级：在线 softmax 的原始论文；概念 8 和作品项目的融合 kernel</span><span class="lvl" lang="en">Primary source, intermediate: the original paper on the online softmax; concept 8 and the capstone’s fused kernel</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 10 章 Reduction 对应概念 8 的行内归约；第 18 章 Deep learning 对应概念 7 和作品项目的背景；第 23 章 Advanced Optimizations for Matrix Multiplication（第 5 版新增）对应作品项目里「和库实现比」的那一面；第 24 章 Advanced practices and future evolution 和第 25 章 Conclusion and outlook 对应概念 6。章号来自 Elsevier 页面上的第 5 版目录（2026-10-31 读取），按章名对应，本页没有核对章内是否讲到 PTX、驱动 API 或 HIP</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 10, Reduction, for the in-row reductions of concept 8; chapter 18, Deep learning, for concept 7 and the capstone’s background; chapter 23, Advanced Optimizations for Matrix Multiplication (new in the 5th edition), for the compare-with-the-library side of the capstone; chapter 24, Advanced practices and future evolution, and chapter 25, Conclusion and outlook, for concept 6. Chapter numbers come from the 5th-edition table of contents on Elsevier’s page (read 2026-10-31) and are matched by chapter title; this page did not check whether those chapters cover PTX, the driver API or HIP</span></li>
+    <li lang="zh-CN">John Cheng, Max Grossman, Ty McKercher, 《Professional CUDA C Programming》, Wrox (Wiley), 2014, ISBN 9781118739327. <span class="lvl">第 10 章 Implementation Considerations 的「CUDA Code Compilation」对应概念 2 到 4，「A Case Study in Porting C Programs to CUDA C」是另一种移植；第 5 章「The Warp Shuffle Instruction」到「Parallel Reduction Using the Warp Shuffle Instruction」对应概念 8 和作品项目的归约；第 8 章「Using OpenACC」对应概念 6；第 2 章「Managing Devices」对应概念 1。目录来自 Wiley 页面上的目录 PDF（2026-10-31 读取）。书写于 2014 年，早于 Turing、PTX ISA 9 和 CUDA 13 的兼容规则，架构名和工具（nvprof、nvvp）已过时</span></li>
+    <li lang="en">John Cheng, Max Grossman, Ty McKercher, <em>Professional CUDA C Programming</em>, Wrox (Wiley), 2014, ISBN 9781118739327. <span class="lvl">In Chapter 10, Implementation Considerations, “CUDA Code Compilation” for concepts 2 to 4, and “A Case Study in Porting C Programs to CUDA C” as a different kind of porting; in Chapter 5, the sections from “The Warp Shuffle Instruction” to “Parallel Reduction Using the Warp Shuffle Instruction” for concept 8 and the capstone’s reductions; in Chapter 8, “Using OpenACC” for concept 6; in Chapter 2, “Managing Devices” for concept 1. The table of contents comes from the contents PDF on Wiley’s page (read 2026-10-31). The book dates from 2014, before Turing, PTX ISA 9 and the CUDA 13 compatibility rules, so its architecture names and tools (nvprof, nvvp) are dated</span></li>
+  </ol>
+
+  <h2 id="capstone" lang="zh-CN">作品项目：融合 softmax（或 layer norm、或 n-body），对照库实现并附剖析报告</h2><h2 id="capstone-en" lang="en">Capstone: a fused softmax (or layer norm, or n-body), measured against a library, with a profiling report</h2>
+  <p lang="zh-CN">作品项目把整个专题放进一个程序：执行模型和归约（Phase 0、2、3），内存层次和合并访问（Phase 1），剖析与 roofline（Phase 4），流和 PyTorch 的当前流（Phase 5），分配器与 <code>compute-sanitizer</code>（Phase 6），构建、兼容性和接进 PyTorch（本课）。下面是规格和验收标准，不是写好的答案：Lab A 和 Lab B 给出了 softmax 路线的起点，CUDA 那一半没有运行过。</p>
+  <p lang="en">The capstone puts the whole topic into one program: the execution model and reductions (Phases 0, 2 and 3), the memory hierarchy and coalescing (Phase 1), profiling and the roofline (Phase 4), streams and PyTorch’s current stream (Phase 5), allocators and <code>compute-sanitizer</code> (Phase 6), and building, compatibility and PyTorch integration (this phase). Below are the specification and the acceptance criteria, not a finished answer: Labs A and B give the starting point of the softmax route, and their CUDA half has not been run.</p>
+  <h3 lang="zh-CN">规格</h3><h3 lang="en">Specification</h3>
+  <ul>
+    <li lang="zh-CN"><strong>选一条路线。</strong>A：按行的 softmax（float32，M × N，对最后一维）。B：按行的 layer norm（float32，带 γ 和 β，ε = 1e-5），同样一行一个 block，均值和方差用 Welford 或两遍法。C：n-body，N 个物体（至少 16384）、float32、所有对之间直接求引力（带软化项），每步更新速度和位置，用 shared memory 分块复用位置数据。</li>
+    <li lang="en"><strong>Pick one route.</strong> A: row-wise softmax (float32, M × N, over the last dimension). B: row-wise layer norm (float32, with γ and β, ε = 1e-5), likewise one block per row, with mean and variance by Welford or by two passes. C: n-body with N bodies (at least 16384), float32, direct all-pairs gravity with a softening term, updating velocities and positions each step, with shared-memory tiling to reuse position data.</li>
+    <li lang="zh-CN"><strong>输入。</strong>A 和 B 至少三个形状，覆盖「一行能放进片上存储」和「放不下」两种（例如 Lab B 的 4096 × 1024、4096 × 4096、1024 × 32768）；C 至少两个 N。输入用固定公式生成，任何人都能复现。</li>
+    <li lang="en"><strong>Inputs.</strong> For A and B at least three shapes, covering rows that fit in on-chip storage and rows that do not (for example Lab B’s 4096 × 1024, 4096 × 4096 and 1024 × 32768); for C at least two values of N. Inputs come from a fixed formula so anyone can reproduce them.</li>
+    <li lang="zh-CN"><strong>版本。</strong>V0：CPU 上的双精度参考，只用来定义正确结果。V1：未融合的 CUDA 版（A、B 按算子拆成几个 kernel；C 为朴素版，每个线程直接从全局内存读所有物体）。V2：融合或分块的 CUDA 版。V3：库实现：A 用 <code>torch.softmax</code>，B 用 <code>torch.nn.functional.layer_norm</code>，C 没有现成的库，用 cuBLAS 无法直接表达，改为和 V1 比，并在报告里说明。V4：V2 注册成 PyTorch 算子（概念 7）。V5：Metal 版，在 Mac 上运行（Lab B 的形状）。</li>
+    <li lang="en"><strong>Versions.</strong> V0: a double-precision CPU reference, used only to define the correct result. V1: an unfused CUDA version (A and B split into several kernels by operator; for C a naive version in which each thread reads every body straight from global memory). V2: the fused or tiled CUDA version. V3: the library version: <code>torch.softmax</code> for A, <code>torch.nn.functional.layer_norm</code> for B; C has no ready-made library and cannot be expressed directly in cuBLAS, so compare with V1 and say so in the report. V4: V2 registered as a PyTorch operator (concept 7). V5: the Metal version, run on the Mac (Lab B’s shapes).</li>
+    <li lang="zh-CN"><strong>构建。</strong>用概念 4 的发布构建（T4 和 L4 两个 SASS 加 <code>compute_75</code> PTX），并附 <code>cuobjdump -lelf -lptx</code> 的输出。</li>
+    <li lang="en"><strong>Build.</strong> Use concept 4’s release build (SASS for the T4 and the L4 plus <code>compute_75</code> PTX), with the output of <code>cuobjdump -lelf -lptx</code> attached.</li>
+  </ul>
+  <h3 lang="zh-CN">剖析报告（必交）</h3><h3 lang="en">The profiling report (required)</h3>
+  <ul>
+    <li lang="zh-CN"><strong>环境。</strong>日期；GPU 型号和计算能力；<code>nvidia-smi</code> 的驱动版本和 <code>nvcc --version</code>；容器镜像的完整标签；PyTorch 版本；Mac 型号、macOS 和 Swift 版本。</li>
+    <li lang="en"><strong>Environment.</strong> The date; the GPU model and compute capability; the driver version from <code>nvidia-smi</code> and <code>nvcc --version</code>; the full tag of the container image; the PyTorch version; the Mac model and the macOS and Swift versions.</li>
+    <li lang="zh-CN"><strong>方法。</strong>预热次数、计时次数、报中位数和最小到最大的范围；用什么计时（CUDA 事件、<code>torch.cuda.Event</code>、命令缓冲区时间）；每个进程里先量哪个形状，怎样避开 Lab B 第 3 步那种「第一个形状不稳」。</li>
+    <li lang="en"><strong>Method.</strong> The number of warm-ups and timed runs, the median with the min-to-max range; what timed it (CUDA events, <code>torch.cuda.Event</code>, command-buffer times); which shape each process measures first, and how you avoid the unstable-first-shape effect of Lab B, step 3.</li>
+    <li lang="zh-CN"><strong>字节模型和 roofline。</strong>每个版本每次运行读写多少字节（A、B）或每次相互作用多少次浮点运算、每步搬多少字节（C）；由此算出的 GB/s 或 GFLOP/s；放到 Phase 4 的 roofline 上（用你自己量的拷贝带宽，或厂商峰值并注明）。</li>
+    <li lang="en"><strong>Byte model and roofline.</strong> How many bytes each version reads and writes per run (A, B), or how many floating-point operations per interaction and bytes per step (C); the GB/s or GFLOP/s that follows; placed on Phase 4’s roofline (with your own measured copy bandwidth, or the vendor’s peak, stated).</li>
+    <li lang="zh-CN"><strong>结果表。</strong>每个形状、每个版本一行：中位数、范围、相对 V1 和 V3 的倍数、模型 GB/s、和 V0 的最大误差；CUDA 和 Metal 两列放在一张表里，像 Lab B 第 5 步那样。</li>
+    <li lang="en"><strong>Results table.</strong> One row per shape and version: median, range, ratio to V1 and to V3, model GB/s, maximum error against V0; CUDA and Metal side by side in one table, as in Lab B, step 5.</li>
+    <li lang="zh-CN"><strong>剖析证据。</strong><code>nsys</code> 的 <code>cuda_gpu_kern_sum</code>；V1 中最大的 kernel 和 V2 各一份 <code>ncu</code> 报告的 SpeedOfLight、DRAM 字节和前三个停顿原因；C 路线再加 Occupancy 一节。</li>
+    <li lang="en"><strong>Profile evidence.</strong> <code>nsys</code>’s <code>cuda_gpu_kern_sum</code>; SpeedOfLight, DRAM bytes and the top three stall reasons from one <code>ncu</code> report each of V1’s biggest kernel and V2; for route C add the Occupancy section.</li>
+    <li lang="zh-CN"><strong>剩下的差距。</strong>一段话：V2 离屋顶还有多远、和 V3 比谁快、你认为原因是什么，哪些是测出来的、哪些是推断。</li>
+    <li lang="en"><strong>The remaining gap.</strong> One paragraph: how far V2 is below its roof, whether it beats V3, what you think the cause is, and which parts are measured and which inferred.</li>
+  </ul>
+  <h3 lang="zh-CN">验收标准</h3><h3 lang="en">Acceptance criteria</h3>
+  <ol>
+    <li lang="zh-CN">每个 GPU 版本和 V0 比：A 的最大绝对误差不超过 1e-6，B 不超过 1e-4，C 跑 10 步后位置的最大相对误差不超过 1e-3；报告里有这个检查的输出。</li>
+    <li lang="en">Every GPU version against V0: a maximum absolute error of at most 1e-6 for A and 1e-4 for B, and for C a maximum relative position error of at most 1e-3 after 10 steps; the report contains the output of this check.</li>
+    <li lang="zh-CN">V2 在 <code>compute-sanitizer</code> 的 memcheck 和 racecheck 下运行一个小形状，没有错误报告。</li>
+    <li lang="en">V2 runs a small shape under <code>compute-sanitizer</code> memcheck and racecheck with no errors reported.</li>
+    <li lang="zh-CN">每个时间都是至少 3 次预热之后至少 20 次的中位数，带最小值和最大值。</li>
+    <li lang="en">Every time is the median of at least 20 runs after at least 3 warm-ups, with its minimum and maximum.</li>
+    <li lang="zh-CN">在每个「一行放不下」的形状上，V2 比 V1 快，且快的倍数和字节模型的预测相差不超过 25%，或者报告用 <code>ncu</code> 的 DRAM 字节解释为什么不符。这是目标值，本页只在 M5 上验证过 softmax 路线（2.1 倍对预测的 2 倍）。</li>
+    <li lang="en">At every shape whose rows do not fit on chip, V2 is faster than V1 by a factor within 25% of the byte model’s prediction, or the report uses <code>ncu</code>’s DRAM bytes to explain the mismatch. This is a target; this page verified it only for the softmax route on the M5 (2.1 times against a predicted 2).</li>
+    <li lang="zh-CN">V4 通过 <code>torch.library.opcheck</code>，并在 <code>torch.compile</code> 编译的一个小函数里被调用一次。</li>
+    <li lang="en">V4 passes <code>torch.library.opcheck</code> and is called once inside a small function compiled with <code>torch.compile</code>.</li>
+    <li lang="zh-CN">用 <code>CUDA_FORCE_PTX_JIT=1</code> 和 <code>CUDA_DISABLE_PTX_JIT=1</code> 各运行一次发布构建，两次结果都正确，报告记下第一次启动的时间差。</li>
+    <li lang="en">The release build runs once with <code>CUDA_FORCE_PTX_JIT=1</code> and once with <code>CUDA_DISABLE_PTX_JIT=1</code>, both correct, and the report notes the difference in first-launch time.</li>
+    <li lang="zh-CN">一个脚本从源码编译所有版本、跑完全部测量、打印报告里的数字；另一个人在同型号的 GPU 和同一个镜像标签上运行，中位数落在你报告的范围附近。</li>
+    <li lang="en">One script builds every version from source, runs every measurement and prints the numbers in the report; someone else running it on the same GPU model and the same image tag gets medians near the ranges you reported.</li>
+  </ol>
+
+  <h2 id="next" lang="zh-CN">接下来</h2><h2 id="next-en" lang="en">What comes next</h2>
+  <ul>
+    <li lang="zh-CN"><strong>LLM Inference Kernels</strong>（计划中的专题，以 SGLang 为主线，还没有页面）：本课的融合 softmax 是 attention kernel 的一部分；那里会用 Triton 和 CUDA 写融合的 attention 和量化 GEMM，用 Phase 5 的 CUDA graph 加速解码，用本课的自定义算子把它们接进推理引擎。</li>
+    <li lang="en"><strong>LLM Inference Kernels</strong> (a planned topic built around SGLang, no page yet): this phase’s fused softmax is one piece of an attention kernel; that topic writes fused attention and quantised GEMMs in Triton and CUDA, speeds up decoding with Phase 5’s CUDA graphs, and plugs them into an inference engine with this phase’s custom operators.</li>
+    <li lang="zh-CN"><a href="../../parallel-programming/index.html">Parallel Programming</a>：CPU 这一侧。同样的 roofline、算术强度和「先量带宽」的方法，用在线程、内存模型和 SIMD 上；它的作品项目是图像模糊流水线，可以和本课的融合 kernel 对照着看。</li>
+    <li lang="en"><a href="../../parallel-programming/index.html">Parallel Programming</a>: the CPU side. The same roofline, arithmetic intensity and measure-the-bandwidth-first method, applied to threads, the memory model and SIMD; its capstone is an image-blur pipeline that reads well next to this phase’s fused kernel.</li>
+    <li lang="zh-CN"><a href="../../kernel-engineering/index.html">Kernel Engineering</a>：驱动 API 和兼容性规则下面的那一层：内核模块、MMIO、DMA 和页错误，也就是 <code>libcuda.so</code> 每次调用最终落到的地方。</li>
+    <li lang="en"><a href="../../kernel-engineering/index.html">Kernel Engineering</a>: the layer beneath the driver API and the compatibility rules: kernel modules, MMIO, DMA and page faults, which is where every <code>libcuda.so</code> call finally lands.</li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../phase-6-memory-management/index.html"><span lang="zh-CN">← Phase 6 · 内存管理与宿主集成</span><span lang="en">← Phase 6 · Memory Management and Host Integration</span></a>
+    <a href="../index.html"><span lang="zh-CN">GPU Programming with CUDA · 回到专题 →</span><span lang="en">GPU Programming with CUDA · back to the topic →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

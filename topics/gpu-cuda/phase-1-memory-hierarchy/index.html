@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 1 · The Memory Hierarchy · GPU Programming with CUDA</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">GPU Programming with CUDA</a>
+    <span class="crumb current" aria-current="page">Phase 1 · The Memory Hierarchy</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 1 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 1 / 8 · about 1–2 weeks</p>
+  <h1>The Memory Hierarchy <span class="en" lang="zh-CN">内存层次：寄存器到 global memory、合并访问、bank 冲突、分块矩阵乘、统一内存与 pinned 内存</span><span class="en" lang="en">Registers to global memory, coalescing, bank conflicts, tiled matrix multiply, unified and pinned memory</span></h1>
+  <p class="lede" lang="zh-CN">GPU 的算力很少是瓶颈，喂数据才是。这一课从一个线程能用的每一种内存讲起：寄存器、local、shared、global、constant、texture，以及中间的 L1 和 L2；然后讲决定带宽的两条规则：一个 warp 的 32 次访问怎样合并成 32 字节的 sector，shared memory 的 32 个 bank 怎样冲突；再用 shared memory 把矩阵乘分块，把 global 访问砍掉 TILE 倍；最后看主机和设备之间的统一内存与 pinned 内存。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-10-31 在这台 Apple M5 上实际运行，数字原样贴出；Lab A 的 CUDA 代码<strong>未运行</strong>，是 2026-10-31 根据 CUDA 文档整理的。</p>
+  <p class="lede" lang="en">A GPU is rarely short of arithmetic; it is short of data. This lesson starts from every kind of memory a thread can use: registers, local, shared, global, constant and texture, with L1 and L2 in between. Then come the two rules that decide bandwidth: how the 32 accesses of a warp combine into 32-byte sectors, and how the 32 banks of shared memory conflict. Shared memory then tiles a matrix multiply and cuts global accesses by the tile width; last come unified and pinned memory between host and device. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-10-31 and its numbers are pasted as they came; the CUDA code of Lab A is <strong>not run</strong>, assembled from the CUDA documentation on 2026-10-31.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出每种内存空间的作用域、生命周期、在片上还是片外，以及它在 Metal 里的对应物。</li>
+      <li lang="en">Give the scope, lifetime and on-chip or off-chip location of every memory space, and its counterpart in Metal.</li>
+      <li lang="zh-CN">给出一个 warp 的访问模式，数出它要几个 32 字节 sector，算出取回的字节有多少是有用的。</li>
+      <li lang="en">Given the access pattern of a warp, count the 32-byte sectors it needs and work out what share of the fetched bytes is used.</li>
+      <li lang="zh-CN">用「32 个 bank、每个 4 字节宽」判断一次 shared memory 访问有没有冲突、几路冲突，并用补一列消掉它。</li>
+      <li lang="en">Use the rule of 32 banks, each 4 bytes wide, to tell whether a shared-memory access conflicts and how many ways, and remove it with a padding column.</li>
+      <li lang="zh-CN">写出分块矩阵乘，说清两个 <code>__syncthreads()</code> 各防的是什么，并算出 global 访问为什么少了 TILE 倍。</li>
+      <li lang="en">Write a tiled matrix multiply, say what each of its two <code>__syncthreads()</code> calls guards against, and show why global accesses drop by the tile width.</li>
+      <li lang="zh-CN">说出统一内存发生缺页时搬了什么，以及 pinned 主机内存为什么让拷贝更快。</li>
+      <li lang="en">Say what unified memory moves on a page fault, and why pinned host memory makes copies faster.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0 · 基础</a>：grid、block、thread、warp 的关系，<code>CHECK</code> 宏和 <code>cudaEvent</code> 计时。</li>
+    <li lang="en"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>: how grid, block, thread and warp relate, the <code>CHECK</code> macro and <code>cudaEvent</code> timing.</li>
+    <li lang="zh-CN">CPU 缓存的基本概念：缓存行、局部性、命中与未命中。Parallel Programming 专题讲过这些。</li>
+    <li lang="en">The basics of CPU caches: cache lines, locality, hits and misses. The Parallel Programming topic covers them.</li>
+    <li lang="zh-CN">虚拟内存和缺页：<a href="../../kernel-engineering/phase-2-memory/index.html">Kernel Engineering Phase 2 · Memory</a>，概念 5 要用到它的缺页路径。</li>
+    <li lang="en">Virtual memory and page faults: <a href="../../kernel-engineering/phase-2-memory/index.html">Kernel Engineering Phase 2 · Memory</a>; concept 5 builds on its page-fault path.</li>
+    <li lang="zh-CN"><a href="../lab-setup/index.html">实验环境</a>页已经走通：Colab 能跑 <code>nvcc</code>，Mac 上 <code>metal_add</code> 能跑。</li>
+    <li lang="en">The <a href="../lab-setup/index.html">lab environment</a> page works for you: <code>nvcc</code> runs on Colab and <code>metal_add</code> runs on the Mac.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. 内存空间：谁能看见、活多久、在哪里</h3><h3 lang="en">1. Memory spaces: who sees them, how long they live, where they sit</h3>
+  <p lang="zh-CN">CUDA 的内存空间按两件事区分：<strong>作用域</strong>（哪些线程能访问）和<strong>位置</strong>（在 SM 片上还是在片外的显存里）。位置决定速度，作用域决定你能拿它做什么。下面的规格数字来自 CUDA Programming Guide 的 compute capability 附录（v13.4.2，2026-10-31 读取），按本专题的目标 <code>sm_75</code>（T4）给出：</p><p lang="en">CUDA tells its memory spaces apart by two things: <strong>scope</strong> (which threads can reach it) and <strong>location</strong> (on the SM chip or off chip in device memory). Location decides speed; scope decides what you can do with it. The figures below come from the compute-capability appendix of the CUDA Programming Guide (v13.4.2, read 2026-10-31), given for this topic’s target <code>sm_75</code> (the T4):</p>
+  <ul>
+    <li lang="zh-CN"><strong>寄存器（registers）</strong>：每个线程私有，在片上，最快。每个 SM 有 64 K 个 32 位寄存器，每个线程最多 255 个。用得越多，一个 SM 上同时驻留的线程越少（Phase 2 的占用率）。</li>
+    <li lang="en"><strong>Registers</strong>: private to each thread, on chip, the fastest. An SM has 64 K 32-bit registers, and a thread can use at most 255. The more each thread uses, the fewer threads fit on an SM at once (occupancy, Phase 2).</li>
+    <li lang="zh-CN"><strong>local memory</strong>：也是每个线程私有，但「local」说的是作用域，不是位置。它<strong>在片外的 device memory 里</strong>，延迟和带宽与 global 一样。编译器在三种情况下用它：下标不是常量的数组、放不进寄存器的大结构、寄存器不够时的溢出（spilling）。每个线程最多 512 KB。</li>
+    <li lang="en"><strong>Local memory</strong>: also private to each thread, but "local" names its scope, not its place. It <strong>lives off chip in device memory</strong>, with the same latency and bandwidth as global. The compiler uses it in three cases: arrays indexed by non-constant subscripts, large structures that do not fit in registers, and spills when registers run out. Up to 512 KB per thread.</li>
+    <li lang="zh-CN"><strong>shared memory</strong>：一个 block 内的线程共享，在片上，生命周期就是这个 block。它和 L1 是同一块物理存储：<code>sm_75</code> 的统一数据缓存共 96 KB，其中 shared 可配成 32 KB 或 64 KB，每个 SM 和每个 block 最多 64 KB。一个 block 要用超过 48 KB，必须用动态 shared memory 并调用 <code>cudaFuncSetAttribute</code> 显式开启。</li>
+    <li lang="en"><strong>Shared memory</strong>: shared by the threads of one block, on chip, living as long as the block. It is the same physical storage as L1: on <code>sm_75</code> the unified data cache is 96 KB, of which shared memory can be set to 32 KB or 64 KB, at most 64 KB per SM and per block. A block that needs more than 48 KB must use dynamic shared memory and opt in explicitly with <code>cudaFuncSetAttribute</code>.</li>
+    <li lang="zh-CN"><strong>global memory</strong>：所有线程和主机都能访问，在片外的显存里，生命周期由主机的分配决定（<code>cudaMalloc</code> 到 <code>cudaFree</code>）。容量最大、最慢，带宽全靠合并访问（概念 2）。</li>
+    <li lang="en"><strong>Global memory</strong>: reachable by every thread and by the host, off chip in device memory, living from the host’s allocation to its release (<code>cudaMalloc</code> to <code>cudaFree</code>). The largest and the slowest; its bandwidth depends entirely on coalescing (concept 2).</li>
+    <li lang="zh-CN"><strong>constant memory</strong>：整个 grid 可读、kernel 只读，用 <code>__constant__</code> 声明，主机用 <code>cudaMemcpyToSymbol</code> 写入。共 64 KB，每个 SM 的常量缓存工作集 8 KB。一个 warp 的线程读同一个地址时最合适，比如滤波系数。</li>
+    <li lang="en"><strong>Constant memory</strong>: readable by the whole grid and read-only to kernels, declared with <code>__constant__</code> and written by the host with <code>cudaMemcpyToSymbol</code>. 64 KB in all, with an 8 KB constant-cache working set per SM. It suits the case where the threads of a warp read the same address, such as filter coefficients.</li>
+    <li lang="zh-CN"><strong>texture 和 surface</strong>：老代码里常见，因为在早期 GPU 上有性能好处。指南现在的说法是：在所有仍受支持的 GPU 上，普通的 load/store 就能做到，texture 对非纹理数据<strong>不再有性能优势</strong>。它留给图像采样这类真正的纹理用途。</li>
+    <li lang="en"><strong>Texture and surface</strong>: common in old code, because they paid off on early GPUs. The guide now says that on every supported GPU ordinary loads and stores do the same job, and texture memory <strong>no longer gives any performance benefit</strong> for non-texture data. It remains for real texture work such as image sampling.</li>
+    <li lang="zh-CN"><strong>L1 和 L2</strong>：L1 在每个 SM 上，和 shared 共用物理空间，kernel 不用 shared 时整块都给 L1；L2 在芯片上、所有 SM 共享，大小用 <code>cudaGetDeviceProperties</code> 的 <code>l2CacheSize</code> 查。从 compute capability 6.0 起 global 的读默认经过 L1，但传输单位仍是 32 字节。</li>
+    <li lang="en"><strong>L1 and L2</strong>: L1 sits on each SM and shares its physical space with shared memory, taking all of it when a kernel uses no shared memory; L2 is on the chip and shared by all SMs, its size given by <code>l2CacheSize</code> from <code>cudaGetDeviceProperties</code>. From compute capability 6.0 on, global loads are cached in L1 by default, but the unit of transfer is still 32 bytes.</li>
+  </ul>
+  <div class="note" lang="zh-CN">本页只给延迟的<strong>等级</strong>（片上快、片外慢），不给周期数：指南没有列出各级内存的延迟周期，按代际也不同。要真实的数字，Phase 4 用 Nsight Compute 在自己的卡上量。</div><div class="note" lang="en">This page gives latency only as a <strong>class</strong> (on chip fast, off chip slow), never as cycle counts: the guide lists no per-level latencies, and they change between generations. For real numbers, Phase 4 measures them on your own card with Nsight Compute.</div>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 章 Memory architecture and data locality（CUDA 的各种内存类型、作用域与生命周期）；第 7 章 Convolution（constant memory 和缓存）；Sanders、Kandrot《CUDA by Example》6.2 节 Constant Memory 和第 7 章 Texture Memory。</p><p lang="en">Further reading: chapter 5 of PMPP, Memory architecture and data locality (the CUDA memory types, their scope and lifetime); chapter 7, Convolution (constant memory and caches); section 6.2, Constant Memory, and chapter 7, Texture Memory, of Sanders and Kandrot, <em>CUDA by Example</em>.</p>
+
+  <h3 lang="zh-CN">2. 合并访问：32 次读怎样变成 4 次传输</h3><h3 lang="en">2. Coalescing: how 32 loads become 4 transactions</h3>
+  <p lang="zh-CN">指南的原话是：global memory 通过 <strong>32 字节的内存传输</strong>访问；一个线程要读一个字时，它所在的 warp 会把 32 个线程的请求合并成满足它们所需的最少次数的传输。所以一个线程读 4 字节，实际搬的至少是 32 字节，剩下的 28 字节能不能派上用场，取决于同一个 warp 里别的线程要不要它们。</p><p lang="en">In the guide’s words, global memory is accessed through <strong>32-byte memory transactions</strong>; when a thread asks for a word, its warp combines the requests of all 32 threads into the fewest transactions that serve them. So a thread reading 4 bytes moves at least 32, and whether the other 28 are of any use depends on whether other threads of the same warp want them.</p>
+  <ul>
+    <li lang="zh-CN"><strong>相邻线程读相邻的 float</strong>：32 × 4 = 128 字节，对齐时正好 4 个 32 字节 sector，4 次传输，利用率 100%。这就是「一个 warp 一条 128 字节」的来历：128 字节不是一次传输，是 4 个 sector 合起来。</li>
+    <li lang="en"><strong>Neighbouring threads read neighbouring floats</strong>: 32 × 4 = 128 bytes, exactly 4 aligned 32-byte sectors, 4 transactions, 100% use. That is where "one 128-byte line per warp" comes from: 128 bytes is not one transaction but four sectors together.</li>
+    <li lang="zh-CN"><strong>错开一个 float（没对齐）</strong>：128 字节跨过 5 个 sector，5 次传输。Best Practices Guide 的例子里实际带宽只降到约 9/10，因为相邻 warp 会用到彼此多取的缓存内容。</li>
+    <li lang="en"><strong>Shifted by one float (misaligned)</strong>: the 128 bytes straddle 5 sectors, 5 transactions. In the Best Practices Guide example the bandwidth only falls to about 9/10, because neighbouring warps reuse what the others over-fetched from the cache.</li>
+    <li lang="zh-CN"><strong>步长为 s 个 float</strong>：步长 2 时 32 个地址分布在 256 字节里，要 8 个 sector，用到 50%；步长到 8（32 字节）时每个线程独占一个 sector，32 次传输共 1024 字节，用到 12.5%。再增大步长，sector 数不再增加（每个线程最多一个），按 sector 规则算的利用率也不再下降（推断：更大的步长还会碰到更多的 DRAM 行和 TLB 项，指南没有给这部分的数字）。</li>
+    <li lang="en"><strong>A stride of s floats</strong>: at stride 2 the 32 addresses spread over 256 bytes and need 8 sectors, 50% used; by stride 8 (32 bytes) every thread has a sector of its own, 32 transactions moving 1024 bytes, 12.5% used. Larger strides add no more sectors (at most one per thread), so by the sector rule the use stops falling (inference: larger strides also touch more DRAM rows and TLB entries, for which the guide gives no figures).</li>
+  </ul>
+  <p lang="zh-CN">二维数据最容易踩这个坑：按行存储的矩阵，线程沿行走是合并的，沿列走就是步长 n 的跨步访问。Lab B 在这台 M5 上量到了同样的形状：64 MB 拷贝从步长 1 到步长 2 带宽掉到约五分之一，之后每加倍再减半，到步长 16 后不再下降。Apple 没有公开它的传输粒度；拐点落在 8 和 16 个 float 之间，说明粒度在 32 到 64 字节之间（推断）。</p><p lang="en">Two-dimensional data is where this bites: in a row-major matrix, threads walking along a row are coalesced and threads walking down a column make a stride-n access. Lab B measured the same shape on this M5: for a 64 MB copy the bandwidth fell to about a fifth from stride 1 to stride 2, halved again with each doubling, and stopped falling from stride 16. Apple does not document its transfer granularity; the knee between 8 and 16 floats suggests a granule between 32 and 64 bytes (inference).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 6 章 Performance considerations（memory coalescing，以及把列访问改成行访问的 corner turning）；CUDA Best Practices Guide 10.2.1 Coalesced Access to Global Memory。</p><p lang="en">Further reading: chapter 6 of PMPP, Performance considerations (memory coalescing, and corner turning, which turns column accesses into row accesses); section 10.2.1 of the CUDA Best Practices Guide, Coalesced Access to Global Memory.</p>
+
+  <h3 lang="zh-CN">3. bank 冲突：shared memory 的 32 条车道</h3><h3 lang="en">3. Bank conflicts: the 32 lanes of shared memory</h3>
+  <p lang="zh-CN">shared memory 被分成 <strong>32 个 bank</strong>，连续的 32 位字依次落在连续的 bank 上，每个 bank 每个时钟周期提供 32 位。所以字节地址 <code>addr</code> 所在的 bank 是 <code>(addr / 4) % 32</code>。一个 warp 的 32 个线程如果各自落在不同的 bank，一个周期全部取完；如果有几个线程访问<strong>同一个 bank 的不同地址</strong>，这些访问被串行化，带宽按串行的次数下降，这就是 bank 冲突。例外是多个线程读<strong>同一个地址</strong>：那是广播（broadcast），不算冲突。</p><p lang="en">Shared memory is divided into <strong>32 banks</strong>: successive 32-bit words fall in successive banks, and each bank delivers 32 bits per clock cycle. So byte address <code>addr</code> lives in bank <code>(addr / 4) % 32</code>. If the 32 threads of a warp land in 32 different banks, one cycle serves them all; if several threads hit <strong>different addresses in the same bank</strong>, those accesses are serialized and bandwidth drops by the number of serial requests. That is a bank conflict. The exception is several threads reading <strong>the same address</strong>: that is a broadcast, not a conflict.</p>
+  <ul>
+    <li lang="zh-CN">步长 1 个字：32 个线程落在 32 个 bank，无冲突。步长 2：线程 0 和 16 都在 bank 0，两路冲突。步长 3：3 和 32 互质，32 个线程仍落在 32 个不同的 bank，无冲突。规律：步长为奇数时无冲突，步长含因子 2<sup>k</sup> 时是 2<sup>k</sup> 路冲突（最多 32 路）。</li>
+    <li lang="en">Stride of 1 word: 32 threads in 32 banks, no conflict. Stride 2: threads 0 and 16 both land in bank 0, a two-way conflict. Stride 3: 3 and 32 are coprime, so the 32 threads still fall in 32 different banks, no conflict. The rule: odd strides are conflict-free, and a stride with a factor of 2<sup>k</sup> gives a 2<sup>k</sup>-way conflict (at most 32-way).</li>
+    <li lang="zh-CN">最典型的 32 路冲突：<code>__shared__ float t[32][32]</code>，线程 <code>tx</code> 读 <code>t[tx][0]</code>。相邻线程相隔 32 个字，全部落在 bank 0。补一列，声明成 <code>t[32][33]</code>，步长变成 33，对 32 取模等于 1，冲突就消失了。Best Practices Guide 的矩阵转置例子用的正是这一招。</li>
+    <li lang="en">The classic 32-way conflict: <code>__shared__ float t[32][32]</code> with thread <code>tx</code> reading <code>t[tx][0]</code>. Neighbouring threads are 32 words apart and all land in bank 0. Add one padding column, <code>t[32][33]</code>, and the stride becomes 33, which is 1 modulo 32, so the conflict is gone. The matrix-transpose example in the Best Practices Guide uses exactly this trick.</li>
+    <li lang="zh-CN">本课的分块矩阵乘没有冲突（TILE = 16，一个 warp 覆盖两行 <code>ty</code>）：读 <code>As[ty][k]</code> 时同一行的 16 个线程读同一个地址，是广播，两行落在相隔 16 的两个 bank；读 <code>Bs[k][tx]</code> 时 16 个 <code>tx</code> 落在 16 个相邻的 bank，两行读同样的地址，又是广播。</li>
+    <li lang="en">The tiled matrix multiply of this lesson is conflict-free (TILE = 16, so one warp covers two rows of <code>ty</code>): reading <code>As[ty][k]</code>, the 16 threads of a row read one address, a broadcast, and the two rows fall in two banks 16 apart; reading <code>Bs[k][tx]</code>, the 16 values of <code>tx</code> fall in 16 neighbouring banks and the two rows read the same addresses, a broadcast again.</li>
+  </ul>
+  <p lang="zh-CN">Metal 一侧：Apple 的文档没有公开 threadgroup memory 的 bank 结构，所以本页不给 M5 的 bank 规则，Lab B 也不测它。</p><p lang="en">On the Metal side, Apple’s documentation does not describe the bank structure of threadgroup memory, so this page gives no bank rule for the M5, and Lab B does not measure one.</p>
+  <p lang="zh-CN">延伸阅读：bank 的规则本身来自 CUDA Programming Guide 2.3.4.2 Shared Memory Access Patterns 和 Best Practices Guide 10.2.3.1 Shared Memory and Memory Banks；书里对应的是 PMPP 第 5 章 Memory architecture and data locality（shared memory 的用法）和第 6 章 Performance considerations。</p><p lang="en">Further reading: the bank rule itself comes from section 2.3.4.2 of the CUDA Programming Guide, Shared Memory Access Patterns, and section 10.2.3.1 of the Best Practices Guide, Shared Memory and Memory Banks; in the book, chapter 5 of PMPP, Memory architecture and data locality (using shared memory), and chapter 6, Performance considerations.</p>
+
+  <h3 lang="zh-CN">4. 分块矩阵乘与 <code>__syncthreads()</code></h3><h3 lang="en">4. Tiled matrix multiply and <code>__syncthreads()</code></h3>
+  <p lang="zh-CN">朴素的矩阵乘让每个线程算 C 的一个元素：读 A 的一行 n 个数和 B 的一列 n 个数。整个矩阵一共 2n<sup>3</sup> 次 global 读，而 A 和 B 合起来只有 2n<sup>2</sup> 个不同的数，每个数被读了 n 次。分块（tiling）的想法是让一个 block 把 A 和 B 各一块 TILE × TILE 的数据搬进 shared memory，块里的每个数在 shared 里被这个 block 的 TILE 个线程复用。每个 block 沿 k 方向走 n / TILE 步，每步搬两块，于是每个数从 global 读的次数从 n 降到 n / TILE，<strong>global 访问少了 TILE 倍</strong>。TILE = 16 时少 16 倍；代价是每个 block 2 × 16 × 16 × 4 = 2048 字节的 shared memory。</p><p lang="en">The naive matrix multiply has each thread compute one element of C, reading a row of n values of A and a column of n values of B. The whole product makes 2n<sup>3</sup> global reads, while A and B together hold only 2n<sup>2</sup> distinct values, so each one is read n times. Tiling has one block copy a TILE × TILE tile of A and one of B into shared memory, where TILE threads of the block reuse each value. Each block walks along k in n / TILE steps, two tiles per step, so each value is read from global memory n / TILE times instead of n: <strong>global accesses drop by the tile width</strong>. With TILE = 16 that is 16 times fewer; the price is 2 × 16 × 16 × 4 = 2048 bytes of shared memory per block.</p>
+  <p lang="zh-CN">循环里的两个 <code>__syncthreads()</code> 各管一件事。指南的定义是：它让 block 里所有没退出的线程都到达同一个调用点后才继续，并且提供内存顺序，这次调用 happens-before 任何参与线程从等待中放行（<a href="../../parallel-programming/phase-3-memory-model-and-atomics/index.html">Parallel Programming 专题的 Phase 3</a> 讲过 happens-before）。于是：</p><p lang="en">The two <code>__syncthreads()</code> calls in the loop each guard one thing. The guide defines it as waiting until every non-exited thread of the block reaches the same call, and as providing memory ordering: the call happens-before any participating thread is released from the wait (<a href="../../parallel-programming/phase-3-memory-model-and-atomics/index.html">Phase 3 of Parallel Programming</a> covered happens-before). So:</p>
+  <ul>
+    <li lang="zh-CN"><strong>第一个</strong>防「写后读」：所有线程写完 <code>As</code>、<code>Bs</code> 之前，谁也不许开始读。没有它，快的线程会读到还没装进来的旧数据。</li>
+    <li lang="en"><strong>The first</strong> guards read-after-write: nobody starts reading until every thread has written its part of <code>As</code> and <code>Bs</code>. Without it, a fast thread reads stale data that has not arrived yet.</li>
+    <li lang="zh-CN"><strong>第二个</strong>防「读后写」：所有线程用完当前这两块之前，谁也不许进入下一轮去覆盖它们。没有它，快的线程会把下一块写进别人还在读的位置。</li>
+    <li lang="en"><strong>The second</strong> guards write-after-read: nobody moves on to overwrite the tiles until every thread is done with the current pair. Without it, a fast thread writes the next tile over values others are still reading.</li>
+    <li lang="zh-CN">它是 block 级的屏障，管不到别的 block，也不能放在只有部分线程会走到的分支里。本课的 kernel 要求 n 是 TILE 的倍数，所以没有线程提前返回。</li>
+    <li lang="en">It is a block-level barrier: it says nothing about other blocks, and it must not sit in a branch that only some threads reach. The kernels of this lesson require n to be a multiple of TILE, so no thread returns early.</li>
+  </ul>
+  <p lang="zh-CN">Metal 里一模一样：<code>threadgroup float As[16][16]</code> 声明 threadgroup memory，<code>threadgroup_barrier(mem_flags::mem_threadgroup)</code> 是 <code>__syncthreads()</code> 的对应物。M5 上实测分块版只比朴素版快约 2 倍，不是 16 倍：global 访问次数确实少了 16 倍，但朴素版的很多重复读本来就被 GPU 缓存接住了，没有真的走到 DRAM（推断；要证实得看缓存命中计数，Phase 4 的内容）。</p><p lang="en">Metal is the same: <code>threadgroup float As[16][16]</code> declares threadgroup memory, and <code>threadgroup_barrier(mem_flags::mem_threadgroup)</code> is the counterpart of <code>__syncthreads()</code>. On the M5 the tiled version measured only about 2 times faster than the naive one, not 16: global accesses really did drop 16-fold, but the GPU caches already caught many of the naive kernel’s repeated reads before they reached DRAM (inference; proving it takes cache-hit counters, the subject of Phase 4).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 章 Memory architecture and data locality（分块矩阵乘、<code>__syncthreads</code> 与 shared memory 用量对并行度的影响）；《CUDA by Example》5.3 节 Shared Memory and Synchronization。</p><p lang="en">Further reading: chapter 5 of PMPP, Memory architecture and data locality (tiled matrix multiplication, <code>__syncthreads</code>, and how shared-memory use limits parallelism); section 5.3 of <em>CUDA by Example</em>, Shared Memory and Synchronization.</p>
+
+  <h3 lang="zh-CN">5. 统一内存、缺页与 pinned 主机内存</h3><h3 lang="en">5. Unified memory, page faults and pinned host memory</h3>
+  <p lang="zh-CN"><strong>pinned 内存。</strong><code>malloc</code>、<code>new</code>、<code>mmap</code> 拿到的主机内存是可分页的（pageable）：操作系统可以把它换出到磁盘，也可以搬到别的物理页。<code>cudaMallocHost</code> 分配的是页锁定（page-locked，也叫 pinned）内存。指南写明：异步拷贝必须用 pinned 内存，同步拷贝用它也更快。原因在 DMA：GPU 的拷贝引擎按物理地址直接读主机内存，这要求那些页在拷贝期间不动也不被换出。可分页内存没有这个保证，驱动只好先把数据复制到自己的一块 pinned 中转缓冲区，再从那里 DMA，多了一次主机内的复制。Runtime API 参考的「API synchronization behavior」一页（2026-10-12 版）写明：可分页缓冲区先被复制到用于 DMA 传输的中转内存（staging memory），再传到显存。<code>copy.cu</code> 量的就是这两者的差别。</p><p lang="en"><strong>Pinned memory.</strong> Host memory from <code>malloc</code>, <code>new</code> or <code>mmap</code> is pageable: the operating system may swap it to disk or move it to other physical pages. <code>cudaMallocHost</code> allocates page-locked, or pinned, memory. The guide states that asynchronous copies require pinned memory and that synchronous copies are faster with it. The reason is DMA: the copy engine of the GPU reads host memory by physical address, which needs those pages to stay put and stay resident for the whole copy. Pageable memory gives no such promise, so the driver first copies the data into a pinned staging buffer of its own and DMAs from there, one extra copy inside the host. The Runtime API reference page “API synchronization behavior” (2026-10-12 version) says so: “the pageable buffer has been copied to the staging memory for DMA transfer to device memory”. <code>copy.cu</code> measures the difference.</p>
+  <p lang="zh-CN"><strong>统一内存。</strong><code>cudaMallocManaged</code> 给出一个 CPU 和 GPU 都能用同一个指针访问的分配。在 CPU 和 GPU 各有一套页表的系统上（指南称为 software-coherent，插 PCIe 的独立显卡就是这种），一致性靠缺页维持。一个处理器访问一个物理上在另一边的页时发生缺页，指南列出这时要做的三件事：</p><p lang="en"><strong>Unified memory.</strong> <code>cudaMallocManaged</code> returns an allocation that the CPU and the GPU reach through the same pointer. On systems where the CPU and GPU each keep their own page table (the guide calls them software-coherent; a discrete PCIe card is one), coherence is kept by page faults. When one processor touches a page that physically lives on the other side, a fault occurs, and the guide lists three things that then happen:</p>
+  <ol>
+    <li lang="zh-CN">让当前拥有这一页的处理器不能再访问它：删掉或改写它那边的页表项。</li>
+    <li lang="en">The processor that currently owns the page loses access to it: its page table entry is deleted or updated.</li>
+    <li lang="zh-CN">让发起访问的处理器能访问它：新建或更新这边的页表项。</li>
+    <li lang="en">The processor asking for it gains access: a page table entry on its side is created or updated.</li>
+    <li lang="zh-CN">把这一页背后的物理页迁移过来。这一步很贵，工作量和页大小成正比。</li>
+    <li lang="en">The physical page behind the virtual page is migrated over. This step is expensive, and its cost grows with the page size.</li>
+  </ol>
+  <p lang="zh-CN">这和 <a href="../../kernel-engineering/phase-2-memory/index.html">Kernel Engineering Phase 2</a> 的缺页路径是同一件事，只是「另一边」是 GPU 的显存，迁移走的是 PCIe。所以 CPU 初始化一大块统一内存后第一次在 GPU 上跑 kernel，时间里会混进一连串缺页和迁移；用 <code>cudaMemPrefetchAsync</code> 预先把数据搬过去可以避开它（Phase 6 量这件事）。你的 GPU 支持哪种统一内存，用 <code>cudaDeviceGetAttribute</code> 查 <code>cudaDevAttrConcurrentManagedAccess</code> 和 <code>cudaDevAttrPageableMemoryAccess</code>。</p><p lang="en">This is the same thing as the page-fault path of <a href="../../kernel-engineering/phase-2-memory/index.html">Kernel Engineering Phase 2</a>, except that the other side is GPU memory and the migration crosses PCIe. So the first kernel run after the CPU initialises a large unified allocation has a train of faults and migrations mixed into its time; prefetching with <code>cudaMemPrefetchAsync</code> avoids it (Phase 6 measures this). Which form of unified memory your GPU supports is answered by <code>cudaDeviceGetAttribute</code> with <code>cudaDevAttrConcurrentManagedAccess</code> and <code>cudaDevAttrPageableMemoryAccess</code>.</p>
+  <p lang="zh-CN">Apple 的统一内存在物理上就是一块：CPU 和 GPU 共用同一组 DRAM。Lab B 用 <code>makeBuffer(length:)</code> 默认的共享存储模式（<code>MTLStorageModeShared</code>），CPU 写进去的数据 GPU 直接读，没有迁移，也没有拷贝。这也是 Lab B 里没有 <code>cudaMemcpy</code> 那一步的原因。</p><p lang="en">Apple’s unified memory is physically one pool: the CPU and the GPU share the same DRAM. Lab B uses the default shared storage mode of <code>makeBuffer(length:)</code> (<code>MTLStorageModeShared</code>), so what the CPU writes the GPU reads directly, with no migration and no copy. That is why Lab B has no step like <code>cudaMemcpy</code>.</p>
+  <p lang="zh-CN">延伸阅读：《CUDA by Example》10.2 节 Page-Locked Host Memory；PMPP 第 22 章 Programming a heterogeneous computing cluster（主机与设备之间的拷贝）和第 24 章 Advanced practices and future evolution（统一内存，按章名推断）。</p><p lang="en">Further reading: section 10.2 of <em>CUDA by Example</em>, Page-Locked Host Memory; chapter 22 of PMPP, Programming a heterogeneous computing cluster (copies between host and device), and chapter 24, Advanced practices and future evolution (unified memory, inferred from the chapter title).</p>
+
+  <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">内存空间</span><span lang="en">Memory space</span></th><th><span lang="zh-CN">作用域</span><span lang="en">Scope</span></th><th><span lang="zh-CN">位置与延迟等级</span><span lang="en">Location and latency class</span></th><th><span lang="zh-CN">Metal 对应物</span><span lang="en">Metal twin</span></th></tr>
+    <tr><td><span lang="zh-CN">寄存器</span><span lang="en">Registers</span></td><td><span lang="zh-CN">一个线程</span><span lang="en">One thread</span></td><td><span lang="zh-CN">片上，最快</span><span lang="en">On chip, fastest</span></td><td><span lang="zh-CN"><code>thread</code> 地址空间里的局部变量</span><span lang="en">Local variables in the <code>thread</code> address space</span></td></tr>
+    <tr><td><span lang="zh-CN">local</span><span lang="en">Local</span></td><td><span lang="zh-CN">一个线程</span><span lang="en">One thread</span></td><td><span lang="zh-CN">片外 device memory，和 global 一样慢</span><span lang="en">Off chip in device memory, as slow as global</span></td><td><span lang="zh-CN">寄存器溢出由编译器处理，Metal 不单独命名（推断）</span><span lang="en">Spills are the compiler’s business; Metal gives them no name (inference)</span></td></tr>
+    <tr><td><span lang="zh-CN">shared</span><span lang="en">Shared</span></td><td><span lang="zh-CN">一个 block</span><span lang="en">One block</span></td><td><span lang="zh-CN">片上，快；无冲突时一个周期服务一个 warp</span><span lang="en">On chip, fast; serves a warp in one cycle without conflicts</span></td><td><span lang="zh-CN"><code>threadgroup</code> 内存，M5 上每个 threadgroup 32 KB</span><span lang="en"><code>threadgroup</code> memory, 32 KB per threadgroup on the M5</span></td></tr>
+    <tr><td><span lang="zh-CN">global</span><span lang="en">Global</span></td><td><span lang="zh-CN">所有线程加主机</span><span lang="en">All threads plus the host</span></td><td><span lang="zh-CN">片外，慢；经 L2 和 L1，32 字节为单位</span><span lang="en">Off chip, slow; through L2 and L1 in 32-byte units</span></td><td><span lang="zh-CN"><code>device</code> 地址空间的缓冲区</span><span lang="en">Buffers in the <code>device</code> address space</span></td></tr>
+    <tr><td><span lang="zh-CN">constant</span><span lang="en">Constant</span></td><td><span lang="zh-CN">整个 grid，只读</span><span lang="en">The whole grid, read-only</span></td><td><span lang="zh-CN">片外，有每 SM 8 KB 的常量缓存，同址广播时快</span><span lang="en">Off chip with an 8 KB constant cache per SM; fast when a warp reads one address</span></td><td><span lang="zh-CN"><code>constant</code> 地址空间</span><span lang="en">The <code>constant</code> address space</span></td></tr>
+    <tr><td><span lang="zh-CN">texture</span><span lang="en">Texture</span></td><td><span lang="zh-CN">整个 grid，只读</span><span lang="en">The whole grid, read-only</span></td><td><span lang="zh-CN">片外，经纹理缓存；对非纹理数据已无优势</span><span lang="en">Off chip through the texture cache; no longer an advantage for non-texture data</span></td><td><span lang="zh-CN"><code>texture2d</code> 等纹理类型</span><span lang="en">Texture types such as <code>texture2d</code></span></td></tr>
+    <tr><td><span lang="zh-CN">L1 / L2</span><span lang="en">L1 / L2</span></td><td><span lang="zh-CN">L1 一个 SM，L2 全部 SM</span><span lang="en">L1 per SM, L2 for all SMs</span></td><td><span lang="zh-CN">片上缓存，硬件管理</span><span lang="en">On-chip caches, managed by hardware</span></td><td><span lang="zh-CN">GPU 缓存，Apple 未公开大小</span><span lang="en">GPU caches whose sizes Apple does not publish</span></td></tr>
+    <tr><td><span lang="zh-CN">统一内存 / pinned</span><span lang="en">Unified / pinned</span></td><td><span lang="zh-CN">主机和设备</span><span lang="en">Host and device</span></td><td><span lang="zh-CN">独立显卡上靠缺页迁移或 DMA 穿过 PCIe</span><span lang="en">On a discrete card, page-fault migration or DMA across PCIe</span></td><td><span lang="zh-CN"><code>MTLStorageModeShared</code>：同一块 DRAM，不迁移</span><span lang="en"><code>MTLStorageModeShared</code>: the same DRAM, no migration</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 一个 warp 读 global memory：合并与跨步</h3><h3 lang="en">(a) One warp reading global memory: coalesced and strided</h3>
+<div class="diagram">
+  <svg data-diagram viewBox="0 0 900 440" data-interval="2600"
+       data-captions='["全图：同一个 warp 的 32 个线程各读一个 4 字节的 float。左边线程 i 读 a[i]，右边线程 i 读 a[8i]。global memory 以 32 字节的 sector 为单位传输，所以要数的是这一次访问碰到了几个 sector。", "1. 一个 warp 是 32 个线程，它们同时发出各自的读请求。硬件把这 32 个地址合在一起，算出最少要几次 32 字节的传输。", "2. 合并访问：32 个相邻的 float 正好是 128 字节，落在 4 个 sector 里，4 次传输，取回的每个字节都有用。", "3. 跨步访问：相邻线程相隔 8 个 float，也就是 32 字节，每个线程独占一个 sector。32 次传输共 1024 字节，有用的只有 128 字节。步长为 2 时是 8 个 sector，用到一半。", "4. 这台 M5 上实测 64 MB 拷贝：步长 1 约 134 GB/s，步长 2 就掉到约 28 GB/s，步长 16 和 32 是 5.7 和 5.5 GB/s，不再明显下降。CUDA 一侧在 T4 上未运行。"]'
+       data-captions-en='["The whole picture: the 32 threads of one warp each read one 4-byte float. On the left thread i reads a[i]; on the right thread i reads a[8i]. Global memory moves in 32-byte sectors, so what counts is how many sectors one access touches.", "1. A warp is 32 threads issuing their loads together. The hardware combines the 32 addresses and works out the fewest 32-byte transactions that serve them.", "2. Coalesced access: 32 adjacent floats are exactly 128 bytes, which fall in 4 sectors. Four transactions, and every byte fetched is used.", "3. Strided access: neighbouring threads are 8 floats, or 32 bytes, apart, so each thread gets a sector of its own. Thirty-two transactions move 1024 bytes for 128 useful ones. At stride 2 it is 8 sectors, half used.", "4. Measured on this M5 for a 64 MB copy: about 134 GB/s at stride 1, down to about 28 GB/s at stride 2, and 5.7 and 5.5 GB/s at strides 16 and 32, where it barely falls any more. The CUDA side was not run on a T4."]'>
+    <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/></marker></defs>
+    <text x="30" y="22" lang="zh-CN">合并：线程 i 读 a[i]</text><text x="30" y="22" lang="en">Coalesced: thread i reads a[i]</text>
+    <text x="470" y="22" lang="zh-CN">跨步：线程 i 读 a[8i]</text><text x="470" y="22" lang="en">Strided: thread i reads a[8i]</text>
+    <line x1="450" y1="8" x2="450" y2="250" class="lane"/>
+    <g data-step="1"><text x="30" y="46" class="small" lang="zh-CN">一个 warp：32 个线程</text><text x="30" y="46" class="small" lang="en">One warp: 32 threads</text><rect class="box" x="30" y="54" width="10" height="22"/><rect class="box" x="42" y="54" width="10" height="22"/><rect class="box" x="54" y="54" width="10" height="22"/><rect class="box" x="66" y="54" width="10" height="22"/><rect class="box" x="78" y="54" width="10" height="22"/><rect class="box" x="90" y="54" width="10" height="22"/><rect class="box" x="102" y="54" width="10" height="22"/><rect class="box" x="114" y="54" width="10" height="22"/><rect class="box" x="126" y="54" width="10" height="22"/><rect class="box" x="138" y="54" width="10" height="22"/><rect class="box" x="150" y="54" width="10" height="22"/><rect class="box" x="162" y="54" width="10" height="22"/><rect class="box" x="174" y="54" width="10" height="22"/><rect class="box" x="186" y="54" width="10" height="22"/><rect class="box" x="198" y="54" width="10" height="22"/><rect class="box" x="210" y="54" width="10" height="22"/><rect class="box" x="222" y="54" width="10" height="22"/><rect class="box" x="234" y="54" width="10" height="22"/><rect class="box" x="246" y="54" width="10" height="22"/><rect class="box" x="258" y="54" width="10" height="22"/><rect class="box" x="270" y="54" width="10" height="22"/><rect class="box" x="282" y="54" width="10" height="22"/><rect class="box" x="294" y="54" width="10" height="22"/><rect class="box" x="306" y="54" width="10" height="22"/><rect class="box" x="318" y="54" width="10" height="22"/><rect class="box" x="330" y="54" width="10" height="22"/><rect class="box" x="342" y="54" width="10" height="22"/><rect class="box" x="354" y="54" width="10" height="22"/><rect class="box" x="366" y="54" width="10" height="22"/><rect class="box" x="378" y="54" width="10" height="22"/><rect class="box" x="390" y="54" width="10" height="22"/><rect class="box" x="402" y="54" width="10" height="22"/><text x="30" y="92" class="small">t0</text><text x="396" y="92" class="small">t31</text><text x="470" y="46" class="small" lang="zh-CN">一个 warp：32 个线程</text><text x="470" y="46" class="small" lang="en">One warp: 32 threads</text><rect class="box" x="470" y="54" width="10" height="22"/><rect class="box" x="482" y="54" width="10" height="22"/><rect class="box" x="494" y="54" width="10" height="22"/><rect class="box" x="506" y="54" width="10" height="22"/><rect class="box" x="518" y="54" width="10" height="22"/><rect class="box" x="530" y="54" width="10" height="22"/><rect class="box" x="542" y="54" width="10" height="22"/><rect class="box" x="554" y="54" width="10" height="22"/><rect class="box" x="566" y="54" width="10" height="22"/><rect class="box" x="578" y="54" width="10" height="22"/><rect class="box" x="590" y="54" width="10" height="22"/><rect class="box" x="602" y="54" width="10" height="22"/><rect class="box" x="614" y="54" width="10" height="22"/><rect class="box" x="626" y="54" width="10" height="22"/><rect class="box" x="638" y="54" width="10" height="22"/><rect class="box" x="650" y="54" width="10" height="22"/><rect class="box" x="662" y="54" width="10" height="22"/><rect class="box" x="674" y="54" width="10" height="22"/><rect class="box" x="686" y="54" width="10" height="22"/><rect class="box" x="698" y="54" width="10" height="22"/><rect class="box" x="710" y="54" width="10" height="22"/><rect class="box" x="722" y="54" width="10" height="22"/><rect class="box" x="734" y="54" width="10" height="22"/><rect class="box" x="746" y="54" width="10" height="22"/><rect class="box" x="758" y="54" width="10" height="22"/><rect class="box" x="770" y="54" width="10" height="22"/><rect class="box" x="782" y="54" width="10" height="22"/><rect class="box" x="794" y="54" width="10" height="22"/><rect class="box" x="806" y="54" width="10" height="22"/><rect class="box" x="818" y="54" width="10" height="22"/><rect class="box" x="830" y="54" width="10" height="22"/><rect class="box" x="842" y="54" width="10" height="22"/><text x="470" y="92" class="small">t0</text><text x="836" y="92" class="small">t31</text></g>
+    <g data-step="2"><rect class="box" x="30" y="150" width="94" height="40"/><rect x="34" y="176" width="86" height="8" style="fill: var(--ink-3); opacity: .55"/><text x="40" y="169" class="mono">a[0–7]</text><path class="arrow" d="M77 98 L77 148"/><rect class="box" x="126" y="150" width="94" height="40"/><rect x="130" y="176" width="86" height="8" style="fill: var(--ink-3); opacity: .55"/><text x="136" y="169" class="mono">a[8–15]</text><path class="arrow" d="M173 98 L173 148"/><rect class="box" x="222" y="150" width="94" height="40"/><rect x="226" y="176" width="86" height="8" style="fill: var(--ink-3); opacity: .55"/><text x="232" y="169" class="mono">a[16–23]</text><path class="arrow" d="M269 98 L269 148"/><rect class="box" x="318" y="150" width="94" height="40"/><rect x="322" y="176" width="86" height="8" style="fill: var(--ink-3); opacity: .55"/><text x="328" y="169" class="mono">a[24–31]</text><path class="arrow" d="M365 98 L365 148"/><text x="30" y="212" class="small" lang="zh-CN">128 字节 · 4 个 32 字节 sector</text><text x="30" y="212" class="small" lang="en">128 bytes · four 32-byte sectors</text><text x="30" y="230" class="small" lang="zh-CN">4 次传输，取回的字节 100% 有用</text><text x="30" y="230" class="small" lang="en">4 transactions, 100% of the bytes used</text></g>
+    <g data-step="3"><rect class="box" x="470" y="150" width="10" height="40"/><rect x="471" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M475 98 L475 148"/><rect class="box" x="482" y="150" width="10" height="40"/><rect x="483" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M487 98 L487 148"/><rect class="box" x="494" y="150" width="10" height="40"/><rect x="495" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M499 98 L499 148"/><rect class="box" x="506" y="150" width="10" height="40"/><rect x="507" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M511 98 L511 148"/><rect class="box" x="518" y="150" width="10" height="40"/><rect x="519" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M523 98 L523 148"/><rect class="box" x="530" y="150" width="10" height="40"/><rect x="531" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M535 98 L535 148"/><rect class="box" x="542" y="150" width="10" height="40"/><rect x="543" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M547 98 L547 148"/><rect class="box" x="554" y="150" width="10" height="40"/><rect x="555" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M559 98 L559 148"/><rect class="box" x="566" y="150" width="10" height="40"/><rect x="567" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M571 98 L571 148"/><rect class="box" x="578" y="150" width="10" height="40"/><rect x="579" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M583 98 L583 148"/><rect class="box" x="590" y="150" width="10" height="40"/><rect x="591" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M595 98 L595 148"/><rect class="box" x="602" y="150" width="10" height="40"/><rect x="603" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M607 98 L607 148"/><rect class="box" x="614" y="150" width="10" height="40"/><rect x="615" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M619 98 L619 148"/><rect class="box" x="626" y="150" width="10" height="40"/><rect x="627" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M631 98 L631 148"/><rect class="box" x="638" y="150" width="10" height="40"/><rect x="639" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M643 98 L643 148"/><rect class="box" x="650" y="150" width="10" height="40"/><rect x="651" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M655 98 L655 148"/><rect class="box" x="662" y="150" width="10" height="40"/><rect x="663" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M667 98 L667 148"/><rect class="box" x="674" y="150" width="10" height="40"/><rect x="675" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M679 98 L679 148"/><rect class="box" x="686" y="150" width="10" height="40"/><rect x="687" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M691 98 L691 148"/><rect class="box" x="698" y="150" width="10" height="40"/><rect x="699" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M703 98 L703 148"/><rect class="box" x="710" y="150" width="10" height="40"/><rect x="711" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M715 98 L715 148"/><rect class="box" x="722" y="150" width="10" height="40"/><rect x="723" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M727 98 L727 148"/><rect class="box" x="734" y="150" width="10" height="40"/><rect x="735" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M739 98 L739 148"/><rect class="box" x="746" y="150" width="10" height="40"/><rect x="747" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M751 98 L751 148"/><rect class="box" x="758" y="150" width="10" height="40"/><rect x="759" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M763 98 L763 148"/><rect class="box" x="770" y="150" width="10" height="40"/><rect x="771" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M775 98 L775 148"/><rect class="box" x="782" y="150" width="10" height="40"/><rect x="783" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M787 98 L787 148"/><rect class="box" x="794" y="150" width="10" height="40"/><rect x="795" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M799 98 L799 148"/><rect class="box" x="806" y="150" width="10" height="40"/><rect x="807" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M811 98 L811 148"/><rect class="box" x="818" y="150" width="10" height="40"/><rect x="819" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M823 98 L823 148"/><rect class="box" x="830" y="150" width="10" height="40"/><rect x="831" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M835 98 L835 148"/><rect class="box" x="842" y="150" width="10" height="40"/><rect x="843" y="176" width="3" height="8" style="fill: var(--ink-3); opacity: .55"/><path class="arrow" d="M847 98 L847 148"/><text x="470" y="212" class="small" lang="zh-CN">32 个 sector = 1024 字节，有用 128 字节</text><text x="470" y="212" class="small" lang="en">32 sectors = 1024 bytes, 128 of them used</text><text x="470" y="230" class="small" lang="zh-CN">32 次传输，只用到 12.5%</text><text x="470" y="230" class="small" lang="en">32 transactions, only 12.5% used</text></g>
+    <g data-step="4"><rect class="box" x="30" y="266" width="840" height="156"/><text x="46" y="292" lang="zh-CN">这台 M5 上实测：64 MB 拷贝，11 次取中位数，2026-10-31</text><text x="46" y="292" lang="en">Measured on this M5: a 64 MB copy, median of 11, 2026-10-31</text><text x="46" y="320" class="mono">stride 1</text><rect x="46" y="330" width="120" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="46" y="364" class="mono">134.2 GB/s</text><text x="182" y="320" class="mono">stride 2</text><rect x="182" y="330" width="25" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="182" y="364" class="mono">27.6 GB/s</text><text x="318" y="320" class="mono">stride 4</text><rect x="318" y="330" width="12" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="318" y="364" class="mono">13.6 GB/s</text><text x="454" y="320" class="mono">stride 8</text><rect x="454" y="330" width="6" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="454" y="364" class="mono">6.8 GB/s</text><text x="590" y="320" class="mono">stride 16</text><rect x="590" y="330" width="5" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="590" y="364" class="mono">5.7 GB/s</text><text x="726" y="320" class="mono">stride 32</text><rect x="726" y="330" width="5" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="726" y="364" class="mono">5.5 GB/s</text><text x="46" y="392" class="small" lang="zh-CN">步长到 16 个 float（64 字节）后不再下降</text><text x="46" y="392" class="small" lang="en">No further drop past 16 floats (64 bytes)</text><text x="46" y="410" class="small" lang="zh-CN">T4 上的 CUDA 版：未运行，见 Lab A</text><text x="46" y="410" class="small" lang="en">The CUDA version on a T4: not run; see Lab A</text></g>
+  </svg>
+</div>
+  <h3 lang="zh-CN">(b) 分块矩阵乘：每个 block 搬进 shared memory 的块</h3><h3 lang="en">(b) Tiled matrix multiply: the tiles each block loads into shared memory</h3>
+<div class="diagram">
+  <svg data-diagram viewBox="0 0 900 450" data-interval="2800"
+       data-captions='["全图：C = A × B，图中 n = 64、TILE = 16，每个矩阵是 4 × 4 个块。一个 block 负责 C 的一个 16 × 16 块；左上是这个 block 的 shared memory，只放得下 A 的一块和 B 的一块。", "1. 这个 block 负责 C 左上角的块 C₀₀，256 个线程各算一个元素。它要用到 A 的第 0 行块和 B 的第 0 列块。", "2. 第一步 k0 = 0：每个线程从 global memory 搬 A₀₀ 的一个元素和 B₀₀ 的一个元素，256 个线程合起来正好填满 As 和 Bs。相邻线程读相邻地址，所以是合并访问。", "3. 第一个 __syncthreads() 保证两块都装满了才开始读；每个线程再从 shared memory 做 16 次乘加。第二个 __syncthreads() 保证大家都用完了，下一块才能覆盖它们。", "4. k0 沿 k 方向走 n / 16 = 4 步，每步换一对块：A 这一行的四块和 B 这一列的四块各被搬进来一次。", "5. 账：朴素版每个 A、B 元素被从 global memory 读 n 次，分块后只读 n / 16 次，global 访问少了 16 倍。shared memory 用量是 2 × 16 × 16 × 4 = 2048 字节，M5 上实测也是 2048。"]'
+       data-captions-en='["The whole picture: C = A × B with n = 64 and TILE = 16, so each matrix is 4 × 4 tiles. One block owns one 16 × 16 tile of C; at the top left is the shared memory of that block, which holds just one tile of A and one of B.", "1. This block owns the top-left tile C₀₀, and each of its 256 threads computes one element. It needs tile row 0 of A and tile column 0 of B.", "2. Step k0 = 0: each thread copies one element of A₀₀ and one of B₀₀ from global memory, and the 256 threads together fill As and Bs. Neighbouring threads read neighbouring addresses, so the loads coalesce.", "3. The first __syncthreads() makes sure both tiles are full before anyone reads; then each thread does 16 multiply-adds out of shared memory. The second __syncthreads() makes sure everyone is done before the next tiles overwrite them.", "4. k0 walks along k in n / 16 = 4 steps, one pair of tiles per step: the four tiles of that row of A and of that column of B are each loaded exactly once.", "5. The count: the naive kernel reads each element of A and B from global memory n times; tiled, only n / 16 times, 16 times fewer global accesses. Shared memory use is 2 × 16 × 16 × 4 = 2048 bytes, and the M5 reported 2048 too."]'>
+    <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/></marker></defs>
+    <rect class="box" x="300" y="34" width="42" height="42"/><rect class="box" x="345" y="34" width="42" height="42"/><rect class="box" x="390" y="34" width="42" height="42"/><rect class="box" x="435" y="34" width="42" height="42"/><rect class="box" x="300" y="79" width="42" height="42"/><rect class="box" x="345" y="79" width="42" height="42"/><rect class="box" x="390" y="79" width="42" height="42"/><rect class="box" x="435" y="79" width="42" height="42"/><rect class="box" x="300" y="124" width="42" height="42"/><rect class="box" x="345" y="124" width="42" height="42"/><rect class="box" x="390" y="124" width="42" height="42"/><rect class="box" x="435" y="124" width="42" height="42"/><rect class="box" x="300" y="169" width="42" height="42"/><rect class="box" x="345" y="169" width="42" height="42"/><rect class="box" x="390" y="169" width="42" height="42"/><rect class="box" x="435" y="169" width="42" height="42"/><rect class="box" x="80" y="246" width="42" height="42"/><rect class="box" x="125" y="246" width="42" height="42"/><rect class="box" x="170" y="246" width="42" height="42"/><rect class="box" x="215" y="246" width="42" height="42"/><rect class="box" x="80" y="291" width="42" height="42"/><rect class="box" x="125" y="291" width="42" height="42"/><rect class="box" x="170" y="291" width="42" height="42"/><rect class="box" x="215" y="291" width="42" height="42"/><rect class="box" x="80" y="336" width="42" height="42"/><rect class="box" x="125" y="336" width="42" height="42"/><rect class="box" x="170" y="336" width="42" height="42"/><rect class="box" x="215" y="336" width="42" height="42"/><rect class="box" x="80" y="381" width="42" height="42"/><rect class="box" x="125" y="381" width="42" height="42"/><rect class="box" x="170" y="381" width="42" height="42"/><rect class="box" x="215" y="381" width="42" height="42"/><rect class="box" x="300" y="246" width="42" height="42"/><rect class="box" x="345" y="246" width="42" height="42"/><rect class="box" x="390" y="246" width="42" height="42"/><rect class="box" x="435" y="246" width="42" height="42"/><rect class="box" x="300" y="291" width="42" height="42"/><rect class="box" x="345" y="291" width="42" height="42"/><rect class="box" x="390" y="291" width="42" height="42"/><rect class="box" x="435" y="291" width="42" height="42"/><rect class="box" x="300" y="336" width="42" height="42"/><rect class="box" x="345" y="336" width="42" height="42"/><rect class="box" x="390" y="336" width="42" height="42"/><rect class="box" x="435" y="336" width="42" height="42"/><rect class="box" x="300" y="381" width="42" height="42"/><rect class="box" x="345" y="381" width="42" height="42"/><rect class="box" x="390" y="381" width="42" height="42"/><rect class="box" x="435" y="381" width="42" height="42"/>
+    <text x="300" y="24" class="mono">B (n × n)</text><text x="80" y="440" class="mono">A (n × n)</text><text x="300" y="440" class="mono">C = A × B</text>
+    <text x="34" y="26" class="small" lang="zh-CN">这个 block 的 shared memory</text><text x="34" y="26" class="small" lang="en">Shared memory of this block</text>
+    <rect x="30" y="34" width="252" height="178" class="lane"/>
+    <g data-step="1"><rect class="box" x="300" y="246" width="42" height="42"/><text x="306" y="272" class="mono">C₀₀</text></g>
+    <g data-step="2"><rect class="box" x="80" y="246" width="42" height="42"/><text x="86" y="272" class="mono">A₀₀</text><rect class="box" x="300" y="34" width="42" height="42"/><text x="306" y="60" class="mono">B₀₀</text><rect class="box" x="42" y="118" width="110" height="80"/><text x="52" y="146" class="mono">As[16][16]</text><rect class="box" x="162" y="118" width="110" height="80"/><text x="172" y="146" class="mono">Bs[16][16]</text><text x="52" y="172" class="small" lang="zh-CN">← A₀₀</text><text x="52" y="172" class="small" lang="en">← A₀₀</text><text x="172" y="172" class="small" lang="zh-CN">← B₀₀</text><text x="172" y="172" class="small" lang="en">← B₀₀</text><path class="arrow" d="M101 246 L101 200"/><path class="arrow" d="M300 64 C 286 64, 280 100, 266 116"/></g>
+    <g data-step="3"><text x="42" y="58" class="mono">__syncthreads()</text><text x="42" y="78" class="small" lang="zh-CN">每个线程 16 次乘加</text><text x="42" y="78" class="small" lang="en">16 multiply-adds per thread</text><text x="42" y="100" class="mono">__syncthreads()</text><path class="arrow" d="M270 214 L314 244"/></g>
+    <g data-step="4"><rect class="box" x="125" y="246" width="42" height="42"/><rect class="box" x="300" y="79" width="42" height="42"/><rect class="box" x="170" y="246" width="42" height="42"/><rect class="box" x="300" y="124" width="42" height="42"/><rect class="box" x="215" y="246" width="42" height="42"/><rect class="box" x="300" y="169" width="42" height="42"/><text x="83" y="317" class="small">k0=0</text><text x="348" y="60" class="small">k0=0</text><text x="128" y="317" class="small">k0=16</text><text x="348" y="105" class="small">k0=16</text><text x="173" y="317" class="small">k0=32</text><text x="348" y="150" class="small">k0=32</text><text x="218" y="317" class="small">k0=48</text><text x="348" y="195" class="small">k0=48</text></g>
+    <g data-step="5"><rect class="box" x="552" y="34" width="318" height="168"/><text x="566" y="60" lang="zh-CN">每个元素从 global 读几次</text><text x="566" y="60" lang="en">Global reads per element</text><text x="566" y="92" class="mono">naive: n = 64</text><text x="566" y="116" class="mono">tiled: n / 16 = 4</text><text x="566" y="146" class="small" lang="zh-CN">global 访问少 TILE = 16 倍</text><text x="566" y="146" class="small" lang="en">TILE = 16 times fewer global accesses</text><text x="566" y="168" class="small" lang="zh-CN">shared：2 × 16 × 16 × 4 = 2048 字节</text><text x="566" y="168" class="small" lang="en">Shared: 2 × 16 × 16 × 4 = 2048 bytes</text><text x="566" y="188" class="small" lang="zh-CN">M5 上实测 2048 字节（Metal 管线）</text><text x="566" y="188" class="small" lang="en">Measured 2048 bytes on the M5 (Metal)</text></g>
+  </svg>
+</div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · 在 Colab 的 T4 上：朴素与分块矩阵乘，合并与跨步拷贝</h3><h3 lang="en">Lab A · On the Colab T4: naive and tiled matrix multiply, coalesced and strided copies</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-10-31。本实验根据 CUDA 文档整理。<code>matmul.cu</code> 和 <code>copy.cu</code> 在实验机上用 clang 的 CUDA 前端对照一个桩头文件做过语法检查，主机端和 <code>sm_75</code> 设备端都通过；它们没有被 <code>nvcc</code> 编译过，也没有在 GPU 上运行过，所以下面只描述预期的现象，不给数字。</div><div class="note" lang="en"><strong>Not run</strong>, 2026-10-31. This lab was assembled from the CUDA documentation. <code>matmul.cu</code> and <code>copy.cu</code> were syntax-checked on the lab Mac with clang’s CUDA front end against a stub header, and both the host side and the <code>sm_75</code> device side passed; they have not been compiled by <code>nvcc</code> or run on a GPU, so what follows describes the expected behaviour and gives no numbers.</div>
+    <ol>
+      <li><span lang="zh-CN">新建 notebook，运行时选 T4 GPU（见实验环境页）。第一个单元格记下 GPU 和工具链：</span><span lang="en">Create a notebook with the T4 GPU runtime (see the lab environment page). In the first cell, record the GPU and the toolchain:</span><pre data-lang="sh" data-file="Colab cell 1"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvidia-smi
+!nvcc --version</pre></li>
+      <li><span lang="zh-CN">第二个单元格写出矩阵乘。两个 kernel 算同一个 C；输入是小整数，乘积之和在 float 里精确，所以和 CPU 的结果可以逐个比较。每个 kernel 预热 2 次，再测 11 次取中位数：</span><span lang="en">The second cell writes the matrix multiply. Both kernels compute the same C; the inputs are small integers whose sums of products are exact in float, so the results can be compared one by one with the CPU’s. Each kernel warms up twice and is then timed 11 times, reporting the median:</span><pre data-lang="cpp" data-file="Colab cell 2 · matmul.cu">%%writefile matmul.cu
+// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// matmul.cu: 朴素与分块（shared memory）矩阵乘，cudaEvent 计时，预热 2 次后测 11 次取中位数
+#include &lt;algorithm&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;vector&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); std::exit(1); } } while (0)
+#define TILE 16
+
+// 朴素：每个线程算 C 的一个元素，A 的一行和 B 的一列全部从 global memory 读
+__global__ void mm_naive(const float* A, const float* B, float* C, int n) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row &gt;= n || col &gt;= n) return;
+    float acc = 0.0f;
+    for (int k = 0; k &lt; n; ++k) acc += A[row * n + k] * B[k * n + col];
+    C[row * n + col] = acc;
+}
+
+// 分块：block 把 A 和 B 的 TILE x TILE 块搬进 shared memory，每个值在块内被用 TILE 次
+// 要求 n 是 TILE 的倍数（main 里检查）
+__global__ void mm_tiled(const float* A, const float* B, float* C, int n) {
+    __shared__ float As[TILE][TILE];
+    __shared__ float Bs[TILE][TILE];
+    int tx = threadIdx.x, ty = threadIdx.y;
+    int row = blockIdx.y * TILE + ty, col = blockIdx.x * TILE + tx;
+    float acc = 0.0f;
+    for (int k0 = 0; k0 &lt; n; k0 += TILE) {
+        As[ty][tx] = A[row * n + k0 + tx];      // 相邻 tx 读相邻地址：合并
+        Bs[ty][tx] = B[(k0 + ty) * n + col];
+        __syncthreads();                        // 块装满之前谁也不许读
+        for (int k = 0; k &lt; TILE; ++k) acc += As[ty][k] * Bs[k][tx];
+        __syncthreads();                        // 块用完之前谁也不许覆盖
+    }
+    C[row * n + col] = acc;
+}
+
+float median_ms(bool tiled, const float* A, const float* B, float* C, int n) {
+    dim3 block(TILE, TILE), grid(n / TILE, n / TILE);
+    cudaEvent_t t0, t1;
+    CHECK(cudaEventCreate(&amp;t0)); CHECK(cudaEventCreate(&amp;t1));
+    std::vector&lt;float&gt; ms;
+    for (int r = 0; r &lt; 13; ++r) {              // 前 2 次是预热
+        CHECK(cudaEventRecord(t0));
+        if (tiled) mm_tiled&lt;&lt;&lt;grid, block&gt;&gt;&gt;(A, B, C, n);   // 按名字启动每个 kernel
+        else       mm_naive&lt;&lt;&lt;grid, block&gt;&gt;&gt;(A, B, C, n);
+        CHECK(cudaGetLastError());
+        CHECK(cudaEventRecord(t1));
+        CHECK(cudaEventSynchronize(t1));
+        float m = 0; CHECK(cudaEventElapsedTime(&amp;m, t0, t1));
+        if (r &gt;= 2) ms.push_back(m);
+    }
+    CHECK(cudaEventDestroy(t0)); CHECK(cudaEventDestroy(t1));
+    std::sort(ms.begin(), ms.end());
+    return ms[ms.size() / 2];
+}
+
+int main() {
+    const int sizes[] = {256, 512, 1024};
+    for (int n : sizes) {
+        if (n % TILE != 0) { std::fprintf(stderr, "n must be a multiple of %d\n", TILE); return 1; }
+        size_t bytes = size_t(n) * n * sizeof(float);
+        std::vector&lt;float&gt; hA(n * n), hB(n * n), hC1(n * n), hC2(n * n), ref(n * n, 0.0f);
+        // 小整数输入：乘积之和在 float 里精确，结果可以逐个比较
+        for (int i = 0; i &lt; n * n; ++i) { hA[i] = float(i % 7) - 3; hB[i] = float(i % 5) - 2; }
+        float *A, *B, *C1, *C2;
+        CHECK(cudaMalloc(&amp;A, bytes)); CHECK(cudaMalloc(&amp;B, bytes));
+        CHECK(cudaMalloc(&amp;C1, bytes)); CHECK(cudaMalloc(&amp;C2, bytes));
+        CHECK(cudaMemcpy(A, hA.data(), bytes, cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(B, hB.data(), bytes, cudaMemcpyHostToDevice));
+
+        float tn = median_ms(false, A, B, C1, n);
+        float tt = median_ms(true, A, B, C2, n);
+        CHECK(cudaMemcpy(hC1.data(), C1, bytes, cudaMemcpyDeviceToHost));
+        CHECK(cudaMemcpy(hC2.data(), C2, bytes, cudaMemcpyDeviceToHost));
+
+        for (int i = 0; i &lt; n; ++i)             // CPU 参考结果
+            for (int k = 0; k &lt; n; ++k)
+                for (int j = 0; j &lt; n; ++j) ref[i * n + j] += hA[i * n + k] * hB[k * n + j];
+        int bad = 0;
+        for (int i = 0; i &lt; n * n; ++i) bad += (hC1[i] != ref[i]) || (hC2[i] != ref[i]);
+
+        double gflop = 2.0 * n * n * double(n) / 1e9;
+        std::printf("matmul n=%4d  naive %8.3f ms (%7.1f GFLOP/s)  tiled %8.3f ms (%7.1f GFLOP/s)  mismatches %d\n",
+                    n, tn, gflop / (tn / 1e3), tt, gflop / (tt / 1e3), bad);
+        CHECK(cudaFree(A)); CHECK(cudaFree(B)); CHECK(cudaFree(C1)); CHECK(cudaFree(C2));
+    }
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行，再让 <code>ptxas</code> 报告每个 kernel 的寄存器和 shared memory 用量：</span><span lang="en">Build and run it, then have <code>ptxas</code> report the registers and shared memory of each kernel:</span><pre data-lang="sh" data-file="Colab cell 3"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvcc -arch=sm_75 -O3 matmul.cu -o matmul &amp;&amp; ./matmul
+!nvcc -arch=sm_75 -O3 --ptxas-options=-v -c matmul.cu -o /dev/null</pre><span lang="zh-CN">预期：三种规模的 <code>mismatches</code> 都是 0；分块版在每种规模都比朴素版快；<code>ptxas</code> 报告里 <code>mm_tiled</code> 的 shared memory 是 2048 字节（2 × 16 × 16 × 4），<code>mm_naive</code> 是 0。把你的倍数和 Lab B 在 M5 上的约 2 倍比一比，并记下差别。</span><span lang="en">Expected: <code>mismatches</code> is 0 at all three sizes; the tiled version is faster than the naive one at every size; in the <code>ptxas</code> report <code>mm_tiled</code> uses 2048 bytes of shared memory (2 × 16 × 16 × 4) and <code>mm_naive</code> uses none. Compare your speed-up with the factor of about 2 that Lab B measured on the M5, and note the difference.</span></li>
+      <li><span lang="zh-CN">第四个单元格写出拷贝实验：同一个 kernel 按步长 1 到 32 拷贝 64 MB，下标是一个置换，所以每种步长搬的字节数相同；然后分别从 pageable 和 pinned 主机内存做一次 64 MB 的 <code>cudaMemcpy</code>：</span><span lang="en">The fourth cell writes the copy lab: one kernel copies 64 MB at strides 1 to 32, with an index permutation so that every stride moves the same bytes; then a 64 MB <code>cudaMemcpy</code> runs from pageable and from pinned host memory:</span><pre data-lang="cpp" data-file="Colab cell 4 · copy.cu">%%writefile copy.cu
+// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// copy.cu: 合并与跨步拷贝的有效带宽，再比较 pageable 和 pinned 主机内存的 cudaMemcpy
+#include &lt;algorithm&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;cstring&gt;
+#include &lt;vector&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
+    std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); std::exit(1); } } while (0)
+
+// 跨步拷贝：相邻线程访问相隔 stride 个 float 的地址；stride = 1 就是合并拷贝
+// 下标是一个置换，每个元素恰好读写一次，所以每种 stride 搬的字节数相同
+__global__ void copy_strided(const float* in, float* out, int n, int stride) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i &gt;= n) return;
+    int rows = n / stride;
+    int j = (i % rows) * stride + i / rows;
+    out[j] = in[j];
+}
+
+int main() {
+    const int n = 1 &lt;&lt; 24;                      // 2^24 个 float = 64 MB
+    const size_t bytes = size_t(n) * sizeof(float);
+    float *in, *out;
+    CHECK(cudaMalloc(&amp;in, bytes)); CHECK(cudaMalloc(&amp;out, bytes));
+    CHECK(cudaMemset(in, 0, bytes));
+    cudaEvent_t t0, t1;
+    CHECK(cudaEventCreate(&amp;t0)); CHECK(cudaEventCreate(&amp;t1));
+
+    const int strides[] = {1, 2, 4, 8, 16, 32}; // 8 个 float = 32 字节，32 个 float = 128 字节
+    for (int s : strides) {
+        std::vector&lt;float&gt; ms;
+        for (int r = 0; r &lt; 13; ++r) {          // 前 2 次是预热
+            CHECK(cudaEventRecord(t0));
+            copy_strided&lt;&lt;&lt;n / 256, 256&gt;&gt;&gt;(in, out, n, s);
+            CHECK(cudaGetLastError());
+            CHECK(cudaEventRecord(t1));
+            CHECK(cudaEventSynchronize(t1));
+            float m = 0; CHECK(cudaEventElapsedTime(&amp;m, t0, t1));
+            if (r &gt;= 2) ms.push_back(m);
+        }
+        std::sort(ms.begin(), ms.end());
+        float med = ms[ms.size() / 2];
+        std::printf("copy 64 MB  stride %2d  %8.3f ms  %7.1f GB/s\n", s, med, 2.0 * bytes / 1e9 / (med / 1e3));
+    }
+
+    // 主机到设备：malloc 出来的 pageable 内存，和 cudaMallocHost 出来的 pinned 内存
+    float* pageable = static_cast&lt;float*&gt;(std::malloc(bytes));
+    float* pinned = nullptr;
+    if (!pageable) { std::fprintf(stderr, "malloc failed\n"); return 1; }
+    CHECK(cudaMallocHost(&amp;pinned, bytes));
+    std::memset(pageable, 0, bytes); std::memset(pinned, 0, bytes);
+    const float* hosts[] = {pageable, pinned};
+    const char* names[] = {"pageable", "pinned  "};
+    for (int h = 0; h &lt; 2; ++h) {
+        std::vector&lt;float&gt; ms;
+        for (int r = 0; r &lt; 7; ++r) {
+            CHECK(cudaEventRecord(t0));
+            CHECK(cudaMemcpy(in, hosts[h], bytes, cudaMemcpyHostToDevice));
+            CHECK(cudaEventRecord(t1));
+            CHECK(cudaEventSynchronize(t1));
+            float m = 0; CHECK(cudaEventElapsedTime(&amp;m, t0, t1));
+            if (r &gt;= 2) ms.push_back(m);
+        }
+        std::sort(ms.begin(), ms.end());
+        float med = ms[ms.size() / 2];
+        std::printf("H2D 64 MB  %s  %8.3f ms  %6.1f GB/s\n", names[h], med, bytes / 1e9 / (med / 1e3));
+    }
+    std::free(pageable); CHECK(cudaFreeHost(pinned));
+    CHECK(cudaEventDestroy(t0)); CHECK(cudaEventDestroy(t1));
+    CHECK(cudaFree(in)); CHECK(cudaFree(out));
+    return 0;
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行：</span><span lang="en">Build and run it:</span><pre data-lang="sh" data-file="Colab cell 5"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvcc -arch=sm_75 -O3 copy.cu -o copy &amp;&amp; ./copy</pre><span lang="zh-CN">预期：步长 1 最快；步长 2 到 8 每加倍带宽大致减半，因为每个 warp 要的 sector 数从 4 涨到 8、16、32；步长 8 以后 sector 数不再增加，下降应当明显变缓（按 sector 规则推断，L2 和 DRAM 行的影响以你的输出为准）。pinned 那一行应当比 pageable 快。</span><span lang="en">Expected: stride 1 is fastest; from stride 2 to 8 the bandwidth roughly halves per doubling, because the sectors per warp grow from 4 to 8, 16 and 32; past stride 8 the sector count stops growing and the decline should flatten clearly (inferred from the sector rule; the effect of L2 and DRAM rows is whatever your output shows). The pinned line should be faster than the pageable one.</span></li>
+      <li><span lang="zh-CN">做一次 bank 冲突的小改动：把 <code>mm_tiled</code> 的 <code>TILE</code> 改成 32、<code>Bs</code> 的读法改成 <code>Bs[tx][k]</code>（同时把装载改成 <code>Bs[tx][ty]</code>，结果不变），这时一个 warp 的 32 个线程读同一个 bank 的 32 个不同地址。再声明成 <code>Bs[TILE][TILE + 1]</code>，比较三种写法的时间。这一步的代码由你自己改，本页没有给出它的运行结果。</span><span lang="en">Make one bank-conflict change: set <code>TILE</code> in <code>mm_tiled</code> to 32 and read <code>Bs[tx][k]</code> instead (loading it as <code>Bs[tx][ty]</code> as well, so the result is unchanged); now the 32 threads of a warp read 32 different addresses in one bank. Then declare <code>Bs[TILE][TILE + 1]</code> and compare the three versions. You make this change yourself; this page has no run results for it.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · 在这台 Mac 上：Metal 的分块矩阵乘和跨步拷贝</h3><h3 lang="en">Lab B · On this Mac: tiled matrix multiply and strided copies in Metal</h3>
+
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-10-31。下面的输出都来自这台 Mac 上的实际运行。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-10-31. The outputs below come from actual runs on this Mac.</div>
+    <ol>
+      <li><span lang="zh-CN">写出程序。它在实验环境页的 <code>metal_add.swift</code> 上扩展：四个 kernel 在运行时从源码编译；分块版用 <code>threadgroup</code> 数组和 <code>threadgroup_barrier</code>，和 Lab A 的 <code>mm_tiled</code> 一行对一行。计时取命令缓冲区自己报告的 <code>gpuStartTime</code> 到 <code>gpuEndTime</code>，每个配置预热 2 次再测 11 次取中位数，每次一个命令缓冲区：</span><span lang="en">Write the program. It extends <code>metal_add.swift</code> from the lab environment page: four kernels compiled from source at run time, the tiled one using a <code>threadgroup</code> array and <code>threadgroup_barrier</code>, line for line like <code>mm_tiled</code> in Lab A. Timing takes the command buffer’s own <code>gpuStartTime</code> to <code>gpuEndTime</code>; each configuration warms up twice and is then measured 11 times for the median, one command buffer per run:</span><pre data-lang="swift" data-file="metal_mem.swift">// metal_mem.swift: 朴素与分块矩阵乘（threadgroup 内存）、合并与跨步拷贝；kernel 在运行时从源码编译
+import Metal
+
+let src = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+#define TILE 16
+
+// 朴素：每个线程算 C 的一个元素，从 device 内存读 A 的一行和 B 的一列
+kernel void mm_naive(device const float* A [[buffer(0)]],
+                     device const float* B [[buffer(1)]],
+                     device float*       C [[buffer(2)]],
+                     constant uint&amp;      n [[buffer(3)]],
+                     uint2 g [[thread_position_in_grid]]) {
+    if (g.x &gt;= n || g.y &gt;= n) return;
+    float acc = 0;
+    for (uint k = 0; k &lt; n; ++k) acc += A[g.y * n + k] * B[k * n + g.x];
+    C[g.y * n + g.x] = acc;
+}
+
+// 分块：每个 threadgroup 把 A 和 B 的 TILE x TILE 块搬进 threadgroup 内存，块内复用 TILE 次
+kernel void mm_tiled(device const float* A [[buffer(0)]],
+                     device const float* B [[buffer(1)]],
+                     device float*       C [[buffer(2)]],
+                     constant uint&amp;      n [[buffer(3)]],
+                     uint2 g [[thread_position_in_grid]],
+                     uint2 t [[thread_position_in_threadgroup]]) {
+    threadgroup float As[TILE][TILE];
+    threadgroup float Bs[TILE][TILE];
+    float acc = 0;
+    for (uint k0 = 0; k0 &lt; n; k0 += TILE) {
+        As[t.y][t.x] = A[g.y * n + k0 + t.x];        // 相邻线程读相邻地址：合并
+        Bs[t.y][t.x] = B[(k0 + t.y) * n + g.x];
+        threadgroup_barrier(mem_flags::mem_threadgroup);   // 块装满之前谁也不许读
+        for (uint k = 0; k &lt; TILE; ++k) acc += As[t.y][k] * Bs[k][t.x];
+        threadgroup_barrier(mem_flags::mem_threadgroup);   // 块用完之前谁也不许覆盖
+    }
+    C[g.y * n + g.x] = acc;
+}
+
+// 合并拷贝：线程 i 读 in[i]
+kernel void copy_coalesced(device const float* in [[buffer(0)]],
+                           device float* out [[buffer(1)]],
+                           constant uint&amp; n [[buffer(2)]],
+                           uint i [[thread_position_in_grid]]) {
+    out[i] = in[i];
+}
+
+// 跨步拷贝：相邻线程读相隔 stride 个 float 的地址；仍是一一对应，每个元素恰好读写一次
+kernel void copy_strided(device const float* in [[buffer(0)]],
+                         device float* out [[buffer(1)]],
+                         constant uint&amp; n [[buffer(2)]],
+                         constant uint&amp; stride [[buffer(3)]],
+                         uint i [[thread_position_in_grid]]) {
+    uint rows = n / stride;
+    uint j = (i % rows) * stride + i / rows;
+    out[j] = in[j];
+}
+"""
+
+guard let dev = MTLCreateSystemDefaultDevice() else { print("no device"); exit(1) }
+let lib = try dev.makeLibrary(source: src, options: nil)
+func pipe(_ name: String) throws -&gt; MTLComputePipelineState {
+    try dev.makeComputePipelineState(function: lib.makeFunction(name: name)!)
+}
+let naive = try pipe("mm_naive"), tiled = try pipe("mm_tiled")
+let cco = try pipe("copy_coalesced"), cst = try pipe("copy_strided")
+let q = dev.makeCommandQueue()!
+print("device=\(dev.name) simdWidth=\(tiled.threadExecutionWidth) maxThreadgroupMemoryLength=\(dev.maxThreadgroupMemoryLength) mm_tiled.staticThreadgroupMemoryLength=\(tiled.staticThreadgroupMemoryLength)")
+
+// 一次派发的 GPU 时间（毫秒），来自命令缓冲区自己的 gpuStartTime / gpuEndTime
+func gpuMs(_ encode: (MTLComputeCommandEncoder) -&gt; Void) -&gt; Double {
+    let cb = q.makeCommandBuffer()!
+    let enc = cb.makeComputeCommandEncoder()!
+    encode(enc)
+    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if let e = cb.error { print("command buffer error: \(e)"); exit(1) }
+    return (cb.gpuEndTime - cb.gpuStartTime) * 1000
+}
+// 预热 2 次，再测 reps 次，取中位数
+func median(_ reps: Int, _ encode: (MTLComputeCommandEncoder) -&gt; Void) -&gt; Double {
+    for _ in 0..&lt;2 { _ = gpuMs(encode) }
+    let t = (0..&lt;reps).map { _ in gpuMs(encode) }.sorted()
+    return t[reps / 2]
+}
+let reps = 11
+let T = 16
+
+for n in [256, 512, 1024] {
+    let bytes = n * n * 4
+    let A = dev.makeBuffer(length: bytes)!, B = dev.makeBuffer(length: bytes)!
+    let C1 = dev.makeBuffer(length: bytes)!, C2 = dev.makeBuffer(length: bytes)!
+    let pa = A.contents().bindMemory(to: Float.self, capacity: n * n)
+    let pb = B.contents().bindMemory(to: Float.self, capacity: n * n)
+    // 小整数输入：乘积之和在 float 里精确，三种结果可以逐位比较
+    for i in 0..&lt;(n * n) { pa[i] = Float(i % 7) - 3; pb[i] = Float(i % 5) - 2 }
+    var un = UInt32(n)
+    func mm(_ p: MTLComputePipelineState, _ C: MTLBuffer) -&gt; Double {
+        median(reps) { e in
+            e.setComputePipelineState(p)
+            e.setBuffer(A, offset: 0, index: 0); e.setBuffer(B, offset: 0, index: 1)
+            e.setBuffer(C, offset: 0, index: 2); e.setBytes(&amp;un, length: 4, index: 3)
+            e.dispatchThreads(MTLSize(width: n, height: n, depth: 1),
+                              threadsPerThreadgroup: MTLSize(width: T, height: T, depth: 1))
+        }
+    }
+    let tn = mm(naive, C1), tt = mm(tiled, C2)
+    // CPU 参考结果
+    var ref = [Float](repeating: 0, count: n * n)
+    for i in 0..&lt;n { for k in 0..&lt;n { let a = pa[i * n + k]; for j in 0..&lt;n { ref[i * n + j] += a * pb[k * n + j] } } }
+    let p1 = C1.contents().bindMemory(to: Float.self, capacity: n * n)
+    let p2 = C2.contents().bindMemory(to: Float.self, capacity: n * n)
+    var bad = 0
+    for i in 0..&lt;(n * n) where p1[i] != ref[i] || p2[i] != ref[i] { bad += 1 }
+    let gflop = 2.0 * Double(n) * Double(n) * Double(n) / 1e9
+    print(String(format: "matmul n=%4d  naive %8.3f ms (%6.1f GFLOP/s)  tiled %8.3f ms (%6.1f GFLOP/s)  speedup %.2fx  mismatches %d",
+                 n, tn, gflop / (tn / 1000), tt, gflop / (tt / 1000), tn / tt, bad))
+}
+
+for n in [1 &lt;&lt; 22, 1 &lt;&lt; 24] {
+    let bytes = n * 4
+    let src = dev.makeBuffer(length: bytes)!, dst = dev.makeBuffer(length: bytes)!
+    let ps = src.contents().bindMemory(to: Float.self, capacity: n)
+    let pd = dst.contents().bindMemory(to: Float.self, capacity: n)
+    for i in 0..&lt;n { ps[i] = Float(i) }
+    var un = UInt32(n)
+    let gb = 2.0 * Double(bytes) / 1e9   // 读一遍加写一遍
+    func check() -&gt; Int { var bad = 0; for i in 0..&lt;n where pd[i] != ps[i] { bad += 1 }; memset(dst.contents(), 0, bytes); return bad }
+    let tc = median(reps) { e in
+        e.setComputePipelineState(cco); e.setBuffer(src, offset: 0, index: 0); e.setBuffer(dst, offset: 0, index: 1)
+        e.setBytes(&amp;un, length: 4, index: 2)
+        e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+    }
+    print(String(format: "copy %3d MB  coalesced  %8.3f ms  %6.1f GB/s  mismatches %d", bytes &gt;&gt; 20, tc, gb / (tc / 1000), check()))
+    for s in [1, 2, 4, 8, 16, 32] {   // 相邻线程相隔 s 个 float；s = 8 是 32 字节，s = 32 是 128 字节
+        var us = UInt32(s)
+        let ts = median(reps) { e in
+            e.setComputePipelineState(cst); e.setBuffer(src, offset: 0, index: 0); e.setBuffer(dst, offset: 0, index: 1)
+            e.setBytes(&amp;un, length: 4, index: 2); e.setBytes(&amp;us, length: 4, index: 3)
+            e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
+        print(String(format: "copy %3d MB  stride %2d  %8.3f ms  %6.1f GB/s  mismatches %d", bytes &gt;&gt; 20, s, ts, gb / (ts / 1000), check()))
+    }
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行三次。下面是第三次的完整输出：</span><span lang="en">Build it and run it three times. Below is the full output of the third run:</span><pre data-lang="sh">$ swiftc -O metal_mem.swift -o metal_mem
+$ ./metal_mem
+device=Apple M5 simdWidth=32 maxThreadgroupMemoryLength=32768 mm_tiled.staticThreadgroupMemoryLength=2048
+matmul n= 256  naive    0.107 ms ( 312.9 GFLOP/s)  tiled    0.050 ms ( 672.2 GFLOP/s)  speedup 2.15x  mismatches 0
+matmul n= 512  naive    0.750 ms ( 358.0 GFLOP/s)  tiled    0.375 ms ( 715.7 GFLOP/s)  speedup 2.00x  mismatches 0
+matmul n=1024  naive    5.778 ms ( 371.6 GFLOP/s)  tiled    2.952 ms ( 727.4 GFLOP/s)  speedup 1.96x  mismatches 0
+copy  16 MB  coalesced     0.338 ms    99.2 GB/s  mismatches 0
+copy  16 MB  stride  1     0.380 ms    88.2 GB/s  mismatches 0
+copy  16 MB  stride  2     1.277 ms    26.3 GB/s  mismatches 0
+copy  16 MB  stride  4     2.676 ms    12.5 GB/s  mismatches 0
+copy  16 MB  stride  8     5.494 ms     6.1 GB/s  mismatches 0
+copy  16 MB  stride 16     8.389 ms     4.0 GB/s  mismatches 0
+copy  16 MB  stride 32     8.420 ms     4.0 GB/s  mismatches 0
+copy  64 MB  coalesced     0.992 ms   135.3 GB/s  mismatches 0
+copy  64 MB  stride  1     1.000 ms   134.2 GB/s  mismatches 0
+copy  64 MB  stride  2     4.857 ms    27.6 GB/s  mismatches 0
+copy  64 MB  stride  4     9.900 ms    13.6 GB/s  mismatches 0
+copy  64 MB  stride  8    19.790 ms     6.8 GB/s  mismatches 0
+copy  64 MB  stride 16    23.733 ms     5.7 GB/s  mismatches 0
+copy  64 MB  stride 32    24.421 ms     5.5 GB/s  mismatches 0
+# 2026-10-31 实验机输出（Apple M5，macOS 27.2，Swift 6.4.2），三次运行中的第三次</pre></li>
+      <li><span lang="zh-CN">读设备那一行：<code>maxThreadgroupMemoryLength=32768</code>，每个 threadgroup 32 KB，和 Apple 的 Metal Feature Set Tables（2026-10-23 版）给 Apple10 家族（M5 所在的家族）的 32 KB 一致；<code>staticThreadgroupMemoryLength=2048</code> 正是 <code>As</code> 加 <code>Bs</code> 的 2 × 16 × 16 × 4 字节。</span><span lang="en">Read the device line: <code>maxThreadgroupMemoryLength=32768</code>, 32 KB per threadgroup, matching the 32 KB that Apple’s Metal Feature Set Tables (2026-10-23 edition) give for the Apple10 family, to which the M5 belongs; <code>staticThreadgroupMemoryLength=2048</code> is exactly the 2 × 16 × 16 × 4 bytes of <code>As</code> plus <code>Bs</code>.</span></li>
+      <li><span lang="zh-CN">读矩阵乘：三次运行的 <code>mismatches</code> 全是 0。n = 512 和 1024 在第二、三次运行里很稳定，分块版快 1.96 到 2.00 倍，约 727 GFLOP/s 对约 372 GFLOP/s。n = 256 每次差别很大（第三次朴素 0.107 ms、分块 0.050 ms），一次派发只有几十微秒，GPU 频率的变化就足以左右结果（推断）。第一次运行有一个反常值：n = 1024 的分块版 7.718 ms，比朴素版还慢；第二、三次都是 2.952 ms。这提醒我们一次运行不算测量。</span><span lang="en">Read the matrix multiply: <code>mismatches</code> is 0 in all three runs. At n = 512 and 1024 runs two and three were steady, with the tiled version 1.96 to 2.00 times faster, about 727 GFLOP/s against about 372 GFLOP/s. At n = 256 the numbers move a lot between runs (in the third, 0.107 ms naive and 0.050 ms tiled); one dispatch lasts only tens of microseconds, so changes in GPU clock are enough to swing it (inference). The first run had one outlier: the tiled kernel at n = 1024 took 7.718 ms, slower than the naive one; runs two and three both gave 2.952 ms. A single run is not a measurement.</span></li>
+      <li><span lang="zh-CN">读拷贝：64 MB 那一组三次运行几乎一样。合并拷贝和步长 1 都约 134 GB/s；步长 2 约 27.6 GB/s，掉到约五分之一，比按 sector 算的「一半」还多；之后步长每加倍带宽大致减半，到步长 16 和 32 是 5.7 和 5.5 GB/s，几乎不再下降。16 MB 那一组不稳定：合并拷贝在三次运行里是 11.395、0.718、0.338 ms。拷贝太短时 GPU 可能还没升频（推断），所以结论看 64 MB 那一组。</span><span lang="en">Read the copies: the 64 MB rows were nearly identical across the three runs. The coalesced copy and stride 1 both ran at about 134 GB/s; stride 2 fell to about 27.6 GB/s, a fifth, more than the half the sector count predicts; after that each doubling of the stride roughly halved the bandwidth, down to 5.7 and 5.5 GB/s at strides 16 and 32, where it barely fell any more. The 16 MB rows were unsteady: the coalesced copy took 11.395, 0.718 and 0.338 ms in the three runs. A short copy may finish before the GPU clocks up (inference), so the conclusions rest on the 64 MB rows.</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 的 <code>nvidia-smi</code> 输出、<code>./matmul</code> 和 <code>./copy</code> 的完整输出、<code>ptxas</code> 报告里两个 kernel 的 shared memory 用量，以及第 6 步三种写法的时间；Lab B 的三次 <code>metal_mem</code> 输出。写进当天日志，回答两个问题：分块版在 T4 上快了几倍，和 M5 的约 2 倍差在哪里；拷贝带宽在哪个步长不再下降。还没有 Colab 账号时，先只交 Lab B。</div><div class="note" lang="en">Deliverables: from Lab A, the <code>nvidia-smi</code> output, the full output of <code>./matmul</code> and <code>./copy</code>, the shared-memory use of both kernels from the <code>ptxas</code> report, and the times of the three versions in step 6; from Lab B, the output of the three <code>metal_mem</code> runs. Write them into that day’s log and answer two questions: how much faster the tiled kernel was on the T4, and why that differs from the factor of about 2 on the M5; and at which stride the copy bandwidth stopped falling. If you have no Colab account yet, hand in Lab B alone first.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="gpu/phase-1">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 一个 warp 里线程 i 读 <code>a[2 * i]</code>（float，起点对齐）。这次访问要几个 32 字节的 sector？</p><p lang="en">1. In a warp, thread i reads <code>a[2 * i]</code> (floats, aligned start). How many 32-byte sectors does the access need?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">4 个，和相邻访问一样，因为一个 warp 总是取一条 128 字节</span><span lang="en">4, the same as adjacent access, because a warp always fetches one 128-byte line</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">8 个：地址分布在 256 字节里，取回的字节一半有用</span><span lang="en">8: the addresses spread over 256 bytes, and half the fetched bytes are used</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">32 个：只要不是相邻访问，每个线程就单独一次传输</span><span lang="en">32: as soon as access is not adjacent, every thread gets a transaction of its own</span></label>
+      <div class="why" hidden><span lang="zh-CN">传输单位是 32 字节，warp 只取它需要的 sector。步长 2 时 32 个地址横跨 256 字节，也就是 8 个 sector，每个 sector 的 8 个 float 只用到 4 个，正好一半。128 字节一条说的是相邻访问时 4 个 sector 合起来的大小，不是固定的取数单位；每个线程独占一个 sector 要到步长 8（32 字节）才发生。</span><span lang="en">The unit is 32 bytes, and the warp fetches only the sectors it needs. At stride 2 the 32 addresses span 256 bytes, which is 8 sectors, and each sector supplies 4 of its 8 floats, exactly half. The 128-byte line is just the size of the 4 sectors that adjacent access touches, not a fixed fetch unit; one sector per thread only happens at stride 8 (32 bytes).</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. <code>__shared__ float t[32][32]</code>，线程 <code>tx</code>（0 到 31）读 <code>t[tx][0]</code>。会发生什么？</p><p lang="en">2. With <code>__shared__ float t[32][32]</code>, thread <code>tx</code> (0 to 31) reads <code>t[tx][0]</code>. What happens?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">没有冲突：32 个线程读的是 32 个不同的地址</span><span lang="en">No conflict: the 32 threads read 32 different addresses</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">广播：它们读的都是第 0 列，硬件一次发给所有线程</span><span lang="en">A broadcast: they all read column 0, so the hardware sends it to every thread at once</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">32 路冲突：相邻线程相隔 32 个字，全在 bank 0；声明成 <code>t[32][33]</code> 就消除了</span><span lang="en">A 32-way conflict: neighbouring threads are 32 words apart, all in bank 0; declaring <code>t[32][33]</code> removes it</span></label>
+      <div class="why" hidden><span lang="zh-CN">冲突看的是 bank，不是地址是否不同：<code>(32 × tx) % 32</code> 恒为 0，32 个不同地址挤在同一个 bank，要串行 32 次。广播只在多个线程读<strong>同一个地址</strong>时发生，第 0 列的 32 个元素是 32 个不同的地址。补一列后步长 33，对 32 取模为 1，每个线程一个 bank。</span><span lang="en">Conflicts are about banks, not about whether addresses differ: <code>(32 × tx) % 32</code> is always 0, so 32 different addresses crowd into one bank and take 32 serial accesses. A broadcast needs several threads reading <strong>the same address</strong>, and the 32 elements of column 0 are 32 different addresses. With the padding column the stride is 33, which is 1 modulo 32: one bank per thread.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">3. 分块矩阵乘的循环末尾还有第二个 <code>__syncthreads()</code>。去掉它会怎样？</p><p lang="en">3. The loop of the tiled matrix multiply ends with a second <code>__syncthreads()</code>. What goes wrong without it?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">快的线程进入下一轮，把新块写进 <code>As</code>、<code>Bs</code>，而慢的线程还在读当前这一块</span><span lang="en">Fast threads enter the next round and write new tiles into <code>As</code> and <code>Bs</code> while slow threads are still reading the current ones</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">写到 C 的结果对别的 block 不可见</span><span lang="en">The results written to C become invisible to other blocks</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">什么也不会发生：每次读 shared memory 之后硬件本来就要求一次屏障，这个调用只是重复</span><span lang="en">Nothing: the hardware already requires a barrier after every shared-memory read, so the call is a duplicate</span></label>
+      <div class="why" hidden><span lang="zh-CN">第二个屏障防的是「读后写」：同一块 shared memory 下一轮就要被覆盖。<code>__syncthreads()</code> 只管一个 block 内部，从来不负责跨 block 的可见性，C 的写入也不需要它。硬件并不在每次读之后自动加屏障，正因为如此才要自己写。</span><span lang="en">The second barrier guards write-after-read: the same shared memory is overwritten in the next round. <code>__syncthreads()</code> works only inside one block and never provides visibility across blocks, nor do the writes to C need it. The hardware adds no barrier after each read by itself, which is exactly why you write one.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">4. 在插 PCIe 的独立显卡上，CPU 初始化了一块 <code>cudaMallocManaged</code> 内存，然后 GPU 第一次访问其中一页。发生了什么？</p><p lang="en">4. On a discrete PCIe card, the CPU initialises a <code>cudaMallocManaged</code> allocation, and then the GPU touches one of its pages for the first time. What happens?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">什么都不搬：GPU 每次访问都直接穿过 PCIe 读主机内存</span><span lang="en">Nothing moves: every GPU access reads host memory directly across PCIe</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">缺页：撤掉 CPU 那边的映射，给 GPU 建映射，再把物理页迁移到显存</span><span lang="en">A page fault: the CPU-side mapping is removed, a GPU mapping is created, and the physical page migrates to GPU memory</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">没有缺页：<code>cudaMallocManaged</code> 在分配时就把整块复制到了显存</span><span lang="en">No fault: <code>cudaMallocManaged</code> copied the whole allocation to GPU memory when it was made</span></label>
+      <div class="why" hidden><span lang="zh-CN">在 CPU 和 GPU 各有页表的系统上，统一内存靠缺页维持一致：撤销旧主人的页表项、给新访问者建页表项、迁移物理页，代价和页大小成正比。直接穿过 PCIe 访问主机内存的是另一种机制（mapped pinned memory，零拷贝），不是统一内存的默认行为。分配时也不会整块复制；要提前搬，得自己调用 <code>cudaMemPrefetchAsync</code>。</span><span lang="en">On systems where the CPU and GPU each keep a page table, unified memory keeps coherence with page faults: the old owner’s entry is revoked, an entry is created for the new accessor, and the physical page migrates, at a cost that grows with page size. Reading host memory directly across PCIe is a different mechanism (mapped pinned memory, zero copy), not the default behaviour of unified memory. Nor is the allocation copied when it is made; to move it early you call <code>cudaMemPrefetchAsync</code> yourself.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html">NVIDIA — CUDA Programming Guide 2.3, Writing SIMT Kernels</a> <span class="lvl" lang="zh-CN">官方：各内存空间、缓存、合并访问（2.3.4.1）、shared memory 的 bank（2.3.4.2）；v13.4.2，2026-10-31 读取</span><span class="lvl" lang="en">Official: the memory spaces, caches, coalescing (2.3.4.1), shared-memory banks (2.3.4.2); v13.4.2, read 2026-10-31</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html">NVIDIA — Compute Capabilities</a> <span class="lvl" lang="zh-CN">查手册：寄存器、shared memory、constant memory 的容量，按 compute capability 列出</span><span class="lvl" lang="en">Reference: register, shared-memory and constant-memory capacities by compute capability</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/cpp-language-extensions.html">NVIDIA — C++ Language Extensions</a> <span class="lvl" lang="zh-CN">官方：<code>__syncthreads()</code> 的定义和内存顺序（5.4.4.1）</span><span class="lvl" lang="en">Official: the definition and memory ordering of <code>__syncthreads()</code> (5.4.4.1)</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/understanding-memory.html">NVIDIA — Unified and System Memory</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html">Unified Memory</a> <span class="lvl" lang="zh-CN">官方：页锁定内存（2.6.3），统一内存的缺页与迁移（4.1）</span><span class="lvl" lang="en">Official: page-locked memory (2.6.3), unified-memory faults and migration (4.1)</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-runtime-api/api-sync-behavior.html">NVIDIA — CUDA Runtime API: API synchronization behavior</a> <span class="lvl" lang="zh-CN">官方（2026-10-12 版）：可分页内存的拷贝先经过中转内存再 DMA，概念 5</span><span class="lvl" lang="en">Official (2026-10-12 version): copies from pageable memory go through staging memory before the DMA; concept 5</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html">NVIDIA — CUDA C++ Best Practices Guide</a> <span class="lvl" lang="zh-CN">官方：第 10 章 Memory Optimizations，pinned 内存、合并访问的几个例子、分块矩阵乘和补列消除 bank 冲突</span><span class="lvl" lang="en">Official: chapter 10, Memory Optimizations: pinned memory, worked coalescing examples, tiled matrix multiply and padding away bank conflicts</span></li>
+    <li><a href="https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf">Apple — Metal Feature Set Tables</a> <span class="lvl" lang="zh-CN">查手册：各 GPU 家族的 threadgroup memory 上限；M5 属于 Apple10（2026-10-23 版）</span><span class="lvl" lang="en">Reference: the threadgroup-memory limit of each GPU family; the M5 is Apple10 (2026-10-23 edition)</span></li>
+    <li><a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Apple — Metal Shading Language Specification</a> · <a href="https://developer.apple.com/documentation/metal/mtldevice/maxthreadgroupmemorylength">maxThreadgroupMemoryLength</a> <span class="lvl" lang="zh-CN">规范原文（4.1 版，2026-06-04）：<code>device</code>、<code>threadgroup</code>、<code>constant</code> 地址空间和 <code>threadgroup_barrier</code></span><span class="lvl" lang="en">The specification itself (version 4.1, 2026-06-04): the <code>device</code>, <code>threadgroup</code> and <code>constant</code> address spaces and <code>threadgroup_barrier</code></span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 5 章 Memory architecture and data locality 对应概念 1、3、4、图解 (b) 和 Lab A 的矩阵乘；第 6 章 Performance considerations 对应概念 2、3 和图解 (a)；第 7 章 Convolution 对应概念 1 的 constant memory；第 22 章 Programming a heterogeneous computing cluster 和第 24 章 Advanced practices and future evolution 对应概念 5（按章名对应）</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 5, Memory architecture and data locality, for concepts 1, 3 and 4, diagram (b) and the matrix multiply of Lab A; chapter 6, Performance considerations, for concepts 2 and 3 and diagram (a); chapter 7, Convolution, for the constant memory of concept 1; chapter 22, Programming a heterogeneous computing cluster, and chapter 24, Advanced practices and future evolution, for concept 5 (matched by chapter title)</span></li>
+    <li lang="zh-CN">Jason Sanders, Edward Kandrot, 《CUDA by Example: An Introduction to General-Purpose GPU Programming》, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">5.3 节 Shared Memory and Synchronization 对应概念 4；6.2 节 Constant Memory 和第 7 章 Texture Memory 对应概念 1；10.2 节 Page-Locked Host Memory 对应概念 5。书比较老，texture 的性能建议已过时，以 CUDA 13 文档为准</span></li>
+    <li lang="en">Jason Sanders, Edward Kandrot, <em>CUDA by Example: An Introduction to General-Purpose GPU Programming</em>, Addison-Wesley, 2010, ISBN 9780131387683. <span class="lvl">Section 5.3, Shared Memory and Synchronization, for concept 4; section 6.2, Constant Memory, and chapter 7, Texture Memory, for concept 1; section 10.2, Page-Locked Host Memory, for concept 5. The book is old and its texture performance advice is outdated; the CUDA 13 documentation is authoritative</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-0-foundations/index.html"><span lang="zh-CN">← Phase 0 · 基础</span><span lang="en">← Phase 0 · Foundations</span></a>
+    <a href="../phase-2-execution-and-scheduling/index.html"><span lang="zh-CN">Phase 2 · 执行与调度 →</span><span lang="en">Phase 2 · Execution and Scheduling →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

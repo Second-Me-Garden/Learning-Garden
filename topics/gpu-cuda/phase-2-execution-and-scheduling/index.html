@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 2 · Execution and Scheduling · GPU Programming with CUDA</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">GPU Programming with CUDA</a>
+    <span class="crumb current" aria-current="page">Phase 2 · Execution and Scheduling</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">Phase 2 / 8 · 约 1–2 周</p><p class="meta" lang="en">Phase 2 / 8 · about 1–2 weeks</p>
+  <h1>Execution and Scheduling <span class="en" lang="zh-CN">执行与调度：SM 与 warp 调度器、延迟隐藏、occupancy、分支发散、独立线程调度、block 调度与启动路径</span><span class="en" lang="en">The SM and its warp schedulers, latency hiding, occupancy, branch divergence, independent thread scheduling, block scheduling and the launch path</span></h1>
+  <p class="lede" lang="zh-CN">Phase 0 说过 GPU 靠大量驻留的 warp 藏起延迟；这一阶段打开 SM 看它怎样做到：warp 调度器每个周期挑一个就绪的 warp 发射，寄存器和 shared memory 的用量决定一个 SM 能同时放多少个 warp（occupancy），一个 warp 里的线程走了不同的分支就要把两条路都走一遍。最后顺着一次 kernel 启动往下走，看驱动把什么交给了 GPU。CUDA 实验在 Colab 的 T4 上做；Metal 版本在这台 Apple M5 上实测：同一个 SIMD-group 里相邻 lane 走不同分支，GPU 时间变成 1.97–2.00 倍；改成按 SIMD-group 交替分支，多花的时间不到 1%。<strong>哪些跑过、哪些没跑过：</strong>Lab B 的 Metal 程序 2026-10-31 在这台 Apple M5 上实际运行，数字原样贴出；概念 5 和 Lab A 的 CUDA 代码<strong>未运行</strong>，是 2026-10-31 根据 CUDA 文档整理的。</p>
+  <p class="lede" lang="en">Phase 0 said a GPU hides latency with many resident warps; this phase opens the SM to see how: a warp scheduler issues from a ready warp each cycle, register and shared-memory use decide how many warps an SM can hold at once (occupancy), and when the threads of one warp take different branches the warp walks both paths. At the end it follows a kernel launch downward to see what the driver hands the GPU. The CUDA lab runs on a Colab T4; the Metal version is measured on this Apple M5: when neighbouring lanes of one SIMD-group take different branches, GPU time becomes 1.97–2.00 times as long, while alternating the branch per SIMD-group costs less than 1% extra. <strong>What was run and what was not:</strong> the Metal program of Lab B was actually run on this Apple M5 on 2026-10-31 and its numbers are pasted as they came; the CUDA code of concept 5 and Lab A is <strong>not run</strong>, assembled from the CUDA documentation on 2026-10-31.</p>
+
+  <h2 id="goals" lang="zh-CN">目标</h2><h2 id="goals-en" lang="en">Goals</h2>
+  <div class="goals">
+    <span lang="zh-CN">读完并做完实验后，你应该能：</span><span lang="en">After reading this and doing the labs, you should be able to:</span>
+    <ul>
+      <li lang="zh-CN">说出一个 Turing SM 里有几个 warp 调度器、每个调度器每周期做什么，以及为什么切换 warp 不花时间。</li>
+      <li lang="en">Say how many warp schedulers a Turing SM has, what each does every cycle, and why switching warps costs nothing.</li>
+      <li lang="zh-CN">从每线程寄存器数、每 block 的 shared memory 和 block 大小，算出一个 SM 能驻留几个 block、occupancy 是多少，并说出是哪一项在限制它。</li>
+      <li lang="en">From registers per thread, shared memory per block and block size, work out how many blocks an SM can hold and what the occupancy is, and name which of them is the limit.</li>
+      <li lang="zh-CN">用 <code>--ptxas-options=-v</code>、<code>cudaFuncGetAttributes</code> 和 <code>cudaOccupancyMaxActiveBlocksPerMultiprocessor</code> 查出这些数，并知道 <code>-maxrregcount</code> 和 <code>__launch_bounds__</code> 的代价。</li>
+      <li lang="en">Read those numbers with <code>--ptxas-options=-v</code>, <code>cudaFuncGetAttributes</code> and <code>cudaOccupancyMaxActiveBlocksPerMultiprocessor</code>, and know what <code>-maxrregcount</code> and <code>__launch_bounds__</code> cost.</li>
+      <li lang="zh-CN">判断一个分支条件会不会让 warp 发散，并解释 Lab B 里逐 lane 分支为什么慢一倍、逐 SIMD-group 分支为什么几乎不慢。</li>
+      <li lang="en">Tell whether a branch condition makes a warp diverge, and explain why in Lab B a per-lane branch doubles the time while a per-SIMD-group branch barely changes it.</li>
+      <li lang="zh-CN">说清 Volta 起的独立线程调度改变了什么，什么时候必须写 <code>__syncwarp()</code>。</li>
+      <li lang="en">Explain what independent thread scheduling changed from Volta on, and when <code>__syncwarp()</code> is required.</li>
+      <li lang="zh-CN">描述 block 怎样被分到各个 SM、什么是「一波」（wave），以及一次 <code>&lt;&lt;&lt; &gt;&gt;&gt;</code> 启动在驱动和硬件里大致经过哪几步。</li>
+      <li lang="en">Describe how blocks are handed to SMs, what a wave is, and roughly which steps a <code>&lt;&lt;&lt; &gt;&gt;&gt;</code> launch goes through in the driver and the hardware.</li>
+    </ul>
+  </div>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+  <ul>
+    <li lang="zh-CN"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>：warp、SIMT、grid 与 block、事件计时，以及「在途字节数 = 带宽 × 延迟」。</li>
+    <li lang="en"><a href="../phase-0-foundations/index.html">Phase 0 · Foundations</a>: warps, SIMT, grids and blocks, event timing, and “bytes in flight = bandwidth × latency”.</li>
+    <li lang="zh-CN"><a href="../phase-1-memory-hierarchy/index.html">Phase 1 · The Memory Hierarchy</a>：寄存器、shared memory、local memory 是什么，<code>__syncthreads()</code> 做什么。本页把它们当作 SM 上要分配的资源来看。</li>
+    <li lang="en"><a href="../phase-1-memory-hierarchy/index.html">Phase 1 · The Memory Hierarchy</a>: what registers, shared memory and local memory are, and what <code>__syncthreads()</code> does. This page treats them as resources an SM hands out.</li>
+    <li lang="zh-CN">Kernel Engineering 的 <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5 · Device Drivers</a>：MMIO、DMA 和环形命令队列。概念 6 讲 <code>cudaLaunchKernel</code> 底下的驱动时会用到。</li>
+    <li lang="en">Kernel Engineering <a href="../../kernel-engineering/phase-5-device-drivers/index.html">Phase 5 · Device Drivers</a>: MMIO, DMA and ring-style command queues. Concept 6 uses them when it looks at the driver under <code>cudaLaunchKernel</code>.</li>
+    <li lang="zh-CN">按 <a href="../lab-setup/index.html">实验环境</a> 准备好的 Colab 笔记本（T4）和这台 Mac 上的 <code>swiftc</code>。</li>
+    <li lang="en">The Colab notebook (T4) and <code>swiftc</code> on this Mac, prepared as in <a href="../lab-setup/index.html">Lab environment</a>.</li>
+  </ul>
+
+  <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <h3 lang="zh-CN">1. SM 与 warp 调度器</h3><h3 lang="en">1. The SM and its warp schedulers</h3>
+  <p lang="zh-CN">SM（streaming multiprocessor）是 GPU 上执行线程的单元。编程指南这样描述它：SM 拿到一个或几个 block 后，把它们切成 warp，每个 warp 交给一个 warp 调度器；SM <strong>按顺序</strong>发射指令，不做分支预测，也不做推测执行（CUDA Programming Guide，「Hardware Implementation」一节）。CPU 核靠乱序执行在一个线程内部找活干；SM 不这么做，它的办法是在很多个 warp 之间找活干。</p>
+  <p lang="en">The SM (streaming multiprocessor) is the unit of a GPU that executes threads. The programming guide describes it like this: when an SM is given one or more blocks, it partitions them into warps and each warp is scheduled by a warp scheduler; the SM issues instructions <strong>in order</strong>, with no branch prediction and no speculative execution (CUDA Programming Guide, section “Hardware Implementation”). A CPU core finds work inside one thread through out-of-order execution; an SM does not, and instead finds work across many warps.</p>
+  <ul>
+    <li lang="zh-CN"><strong>Turing（<code>sm_75</code>，T4）</strong>：每个 SM 有 4 个 warp 调度器，每个调度器管一组固定的 warp，向自己专属的一组运算单元发射；调度器每个周期都能发射一条独立的指令。每个 SM 有 64 个 FP32 核、64 个 INT32 核和 8 个 Tensor Core（Turing Tuning Guide）。</li>
+    <li lang="en"><strong>Turing (<code>sm_75</code>, T4)</strong>: each SM has 4 warp schedulers; each handles a static set of warps and issues to its own dedicated set of arithmetic units, and each can issue an independent instruction every cycle. Each SM has 64 FP32 cores, 64 INT32 cores and 8 Tensor Cores (Turing Tuning Guide).</li>
+    <li lang="zh-CN"><strong>每个 SM 能驻留多少</strong>：编程指南的 compute capability 表给出，<code>sm_75</code> 每 SM 最多 32 个 warp（1024 个线程）、16 个 block；<code>sm_89</code>（Ada，比如 L4）是 48 个 warp（1536 个线程）、24 个 block；<code>sm_80</code>（A100）是 64 个 warp、32 个 block。三者每个 SM 都是 64 K 个 32 位寄存器，每线程最多 255 个，每个 block 最多 64 K 个；每 SM 的 shared memory 最多 64 KB（<code>sm_75</code>）、100 KB（<code>sm_89</code>）、164 KB（<code>sm_80</code>）。表里的 K 和 KB 都按 1024 算。</li>
+    <li lang="en"><strong>How much an SM can hold</strong>: the compute-capability table of the programming guide gives, for <code>sm_75</code>, at most 32 warps (1024 threads) and 16 blocks per SM; for <code>sm_89</code> (Ada, such as the L4), 48 warps (1536 threads) and 24 blocks; for <code>sm_80</code> (A100), 64 warps and 32 blocks. All three have 64 K 32-bit registers per SM, at most 255 per thread and at most 64 K per block; shared memory per SM is at most 64 KB (<code>sm_75</code>), 100 KB (<code>sm_89</code>) and 164 KB (<code>sm_80</code>). K and KB in the table both mean 1024.</li>
+    <li lang="zh-CN"><strong>调度器的个数</strong>：本页读过的 CUDA 文档只对 Turing 写明了「4 个」；Ada Tuning Guide 和新版编程指南都没有写。更新的架构请以 NVIDIA 的架构白皮书为准，本页不替它们给数。</li>
+    <li lang="en"><strong>The scheduler count</strong>: of the CUDA documents read for this page, only the Turing one states “4”; neither the Ada Tuning Guide nor the current programming guide states it. For newer architectures, rely on NVIDIA’s architecture whitepapers; this page gives no number for them.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 4 章「Compute architecture and scheduling」（现代 GPU 的结构、block 调度、warp 与 SIMD 硬件）；Cheng 等《Professional CUDA C Programming》讲 CUDA 执行模型的一章（GPU 架构概览、warp 执行的本质）。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 4, “Compute architecture and scheduling” (the architecture of a modern GPU, block scheduling, warps and SIMD hardware); the chapter on the CUDA execution model in Cheng et al., <em>Professional CUDA C Programming</em> (an overview of GPU architecture, the nature of warp execution).</p>
+
+  <h3 lang="zh-CN">2. 用切换 warp 藏起延迟</h3><h3 lang="en">2. Hiding latency by switching warps</h3>
+  <p lang="zh-CN">SM 上每个 warp 的执行上下文（程序计数器、寄存器等）在 warp 的整个生命期内都留在片上，所以「在 warp 之间切换没有代价」；每个发射周期，warp 调度器挑一个下一条指令已经可以执行的 warp，把这条指令发给它的活动线程（编程指南，「Hardware Multithreading」）。一个 warp 卡住的原因有很多：在等全局内存的数据、在等上一条指令的结果、在等 <code>__syncthreads()</code> 屏障。只要还有别的 warp 能发射，这个周期就没浪费；动画 (a) 画的就是这件事。</p>
+  <p lang="en">The execution context of each warp on an SM (program counters, registers and so on) stays on chip for the warp’s whole lifetime, so “switching between warps incurs no cost”; at each issue cycle a warp scheduler picks a warp whose next instruction is ready to run and issues it to that warp’s active threads (programming guide, “Hardware Multithreading”). A warp stalls for many reasons: waiting for data from global memory, waiting for the result of its previous instruction, waiting at a <code>__syncthreads()</code> barrier. As long as some other warp can issue, the cycle is not wasted; diagram (a) draws exactly this.</p>
+  <ul>
+    <li lang="zh-CN"><strong>算术延迟要几个 warp</strong>：Turing Tuning Guide 给了一个具体的数：相互依赖的 FMA 之间的发射延迟是 4 个周期，所以每个 SM 只要 16 个 warp（4 个调度器 × 4 个周期）就能藏住算术延迟；如果每个 warp 自己有 4 路互不依赖的指令（指令级并行，ILP），4 个 warp 就够。</li>
+    <li lang="en"><strong>How many warps arithmetic latency takes</strong>: the Turing Tuning Guide gives a concrete figure: the dependent issue latency of core FMA operations is 4 cycles, so 16 warps per SM (4 schedulers × 4 cycles) hide arithmetic latency, and if each warp has 4 independent instructions of its own (instruction-level parallelism, ILP), 4 warps are enough.</li>
+    <li lang="zh-CN"><strong>内存延迟要多得多</strong>：一次全局内存读要等几百个周期（大致数量级，Phase 1），用同样的道理，要藏住它需要每个调度器手里有更多个 warp，或者每个线程同时挂起好几次读。这就是 Phase 0 的 Little 定律落到一个 SM 上的样子：驻留的 warp 越多，在途的读就越多。</li>
+    <li lang="en"><strong>Memory latency takes far more</strong>: a global-memory read waits hundreds of cycles (an approximate order of magnitude; Phase 1), so by the same reasoning hiding it needs many more warps per scheduler, or several reads in flight per thread. This is Phase 0’s Little’s law brought down to one SM: the more warps are resident, the more reads are in flight.</li>
+    <li lang="zh-CN"><strong>两条路</strong>：多驻留几个 warp（提高 occupancy，概念 3），或者让每个线程自己多做几件互不依赖的事（ILP，比如每个线程处理 4 个元素）。Best Practices Guide 明确说，ILP 高的内核有时在低 occupancy 下也能完全藏住延迟。</li>
+    <li lang="en"><strong>Two routes</strong>: keep more warps resident (raise occupancy, concept 3), or give each thread several independent things to do (ILP, such as four elements per thread). The Best Practices Guide states plainly that a kernel with a high degree of ILP can, in some cases, fully cover latency at low occupancy.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 4 章（warp 调度与延迟容忍）；Hennessy &amp; Patterson 第 4 章讲 GPU 多线程调度的部分。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 4 (warp scheduling and latency tolerance); the part of Hennessy &amp; Patterson, Chapter 4, on multithreaded scheduling in GPUs.</p>
+
+  <h3 lang="zh-CN">3. Occupancy 与它的限制因素</h3><h3 lang="en">3. Occupancy and what limits it</h3>
+  <p lang="zh-CN">occupancy 是一个 SM 上活动的 warp 数和它最多能驻留的 warp 数之比。编程指南说，一个 SM 上能同时驻留多少个 block 和 warp，取决于内核用了多少寄存器和 shared memory、SM 有多少，以及每 SM 的 block 数和 warp 数上限；如果连一个 block 的资源都不够，内核启动失败。四个限制同时起作用，occupancy 由最紧的那个决定。下面用 T4（<code>sm_75</code>：32 个 warp、16 个 block、64 K 个寄存器、64 KB shared memory）的数字逐个算，算法是从上面的文档数字推出来的，不是测量值：</p>
+  <p lang="en">Occupancy is the ratio of active warps on an SM to the most warps it can hold. The programming guide says that how many blocks and warps can reside on an SM at once depends on the registers and shared memory the kernel uses, how much the SM has, and the per-SM limits on blocks and warps; if there is not enough for even one block, the kernel fails to launch. The four limits act together, and the tightest one sets the occupancy. Below, each is worked through with the T4’s numbers (<code>sm_75</code>: 32 warps, 16 blocks, 64 K registers, 64 KB shared memory); the arithmetic is derived from the documented figures above, not measured:</p>
+  <ul>
+    <li lang="zh-CN"><strong>寄存器</strong>：寄存器按 warp 分配，每个 warp 向上取整到 256 个寄存器的倍数（Best Practices Guide，「Calculating Occupancy」），而且一个 block 的寄存器一次分完。每线程 64 个寄存器时，一个 warp 用 64 × 32 = 2048 个，65536 / 2048 = 32 个 warp，T4 正好满（100%）；每线程 128 个时只剩 16 个 warp（50%）。同一个 64 寄存器的内核放到 <code>sm_89</code> 上，寄存器同样只够 32 个 warp，但那里上限是 48，所以只有 67%。</li>
+    <li lang="en"><strong>Registers</strong>: registers are allocated per warp, rounded up to a multiple of 256 registers per warp (Best Practices Guide, “Calculating Occupancy”), and a block’s registers are allocated all at once. At 64 registers per thread a warp uses 64 × 32 = 2048, and 65536 / 2048 = 32 warps, exactly full on a T4 (100%); at 128 per thread only 16 warps fit (50%). The same 64-register kernel on <code>sm_89</code> also fits only 32 warps by registers, but the limit there is 48, so it reaches only 67%.</li>
+    <li lang="zh-CN"><strong>shared memory</strong>：shared memory 按 block 分。每个 block 用 48 KB 时，64 KB 的 SM 只放得下 1 个 block；block 是 256 个线程，也就是 8 个 warp，occupancy 只有 25%。静态声明的 shared memory 每 block 最多 48 KB，超过要用动态 shared memory 并显式开启（编程指南）。</li>
+    <li lang="en"><strong>Shared memory</strong>: shared memory is allocated per block. At 48 KB per block, a 64 KB SM holds only 1 block; with 256 threads, that is 8 warps, so occupancy is 25%. Statically declared shared memory is limited to 48 KB per block; going beyond needs dynamic shared memory and an explicit opt-in (programming guide).</li>
+    <li lang="zh-CN"><strong>block 太小</strong>：每 SM 最多 16 个 block。block 只有 32 个线程（1 个 warp）时，16 个 block 只有 16 个 warp，50%；block 至少 64 个线程，T4 上这一项才不卡。</li>
+    <li lang="en"><strong>Blocks that are too small</strong>: an SM holds at most 16 blocks. With 32 threads (1 warp) per block, 16 blocks are only 16 warps, 50%; from 64 threads per block up, this limit stops binding on a T4.</li>
+    <li lang="zh-CN"><strong>block 太大</strong>：资源按整个 block 分，block 越大，「装不下一个整 block」时浪费的越多。极端情况：每线程 96 个寄存器、每 block 1024 个线程，需要 98304 个寄存器，超过每 block 64 K 的上限，内核根本启动不了，<code>cudaGetLastError</code> 报资源不足。Best Practices Guide 建议总是写上 <code>__launch_bounds__(maxThreadsPerBlock)</code>，让编译器按你会用的最大 block 来控制寄存器。</li>
+    <li lang="en"><strong>Blocks that are too large</strong>: resources are handed out per whole block, so the larger the block, the more is wasted when the remainder cannot hold one more whole block. At the extreme, 96 registers per thread and 1024 threads per block need 98,304 registers, above the 64 K per-block limit, and the kernel does not launch at all; <code>cudaGetLastError</code> reports too many resources. The Best Practices Guide recommends always writing <code>__launch_bounds__(maxThreadsPerBlock)</code> so the compiler budgets registers for the largest block you will launch.</li>
+  </ul>
+  <p lang="zh-CN"><strong>怎样查</strong>：编译时加 <code>--ptxas-options=-v</code>（也写作 <code>-Xptxas -v</code>），ptxas 为每个内核打印寄存器、shared memory 和常量内存的用量，以及溢出到 local memory 的字节数（Best Practices Guide，「nvcc Compiler Switches」）。运行时用 <code>cudaFuncGetAttributes</code> 读 <code>numRegs</code>、<code>sharedSizeBytes</code>、<code>localSizeBytes</code>；用 <code>cudaOccupancyMaxActiveBlocksPerMultiprocessor(&amp;numBlocks, kernel, blockSize, dynamicSMem)</code> 直接问运行时「这个内核按这个 block 大小，每个 SM 能放几个 block」（Runtime API，Occupancy 一组）。Nsight Compute 也带一个 occupancy 计算器（Phase 4）。</p>
+  <p lang="en"><strong>How to find out</strong>: compile with <code>--ptxas-options=-v</code> (also written <code>-Xptxas -v</code>), and ptxas prints each kernel’s register, shared-memory and constant-memory use, and how many bytes spill to local memory (Best Practices Guide, “nvcc Compiler Switches”). At run time, <code>cudaFuncGetAttributes</code> reads <code>numRegs</code>, <code>sharedSizeBytes</code> and <code>localSizeBytes</code>, and <code>cudaOccupancyMaxActiveBlocksPerMultiprocessor(&amp;numBlocks, kernel, blockSize, dynamicSMem)</code> asks the runtime directly how many blocks of this kernel at this block size fit on one SM (Runtime API, the Occupancy group). Nsight Compute also has an occupancy calculator (Phase 4).</p>
+  <p lang="zh-CN"><strong>occupancy 不是目标本身</strong>：Best Practices Guide 写明，把 occupancy 从 66% 提到 100% 一般不会带来同样比例的提速。用 <code>-maxrregcount=N</code>（按文件）或 <code>__launch_bounds__</code>（按内核）压低寄存器，occupancy 上去了，多出来的变量却会溢出到 local memory，而 local memory 在 DRAM 里。该不该压，要量（Lab A 第 5 步，Phase 4 再用剖析器看清楚）。</p>
+  <p lang="en"><strong>Occupancy is not the goal in itself</strong>: the Best Practices Guide states that raising occupancy from 66 percent to 100 percent generally does not give a similar speed-up. Squeezing registers with <code>-maxrregcount=N</code> (per file) or <code>__launch_bounds__</code> (per kernel) raises occupancy, but the variables that no longer fit spill to local memory, which lives in DRAM. Whether to squeeze is a measurement question (Lab A step 5; Phase 4 looks at it properly with the profiler).</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 4 章（资源划分与 occupancy）和第 6 章「Performance considerations」；Best Practices Guide 中「Occupancy」和「Register Pressure」两节。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 4 (resource partitioning and occupancy) and Chapter 6, “Performance considerations”; the “Occupancy” and “Register Pressure” sections of the Best Practices Guide.</p>
+
+  <h3 lang="zh-CN">4. warp 内的分支发散</h3><h3 lang="en">4. Branch divergence inside a warp</h3>
+  <p lang="zh-CN">一个 warp 一次执行一条公共指令，所以 32 个线程走同一条路径时效率最高。编程指南：如果 warp 里的线程因为依赖数据的条件分支而走了不同的路，warp 会把每条被走到的路径都执行一遍，同时屏蔽不在这条路径上的线程；<strong>发散只发生在一个 warp 之内</strong>，不同的 warp 各走各的，互不影响。所以代价看的是「一个 warp 里有没有两种走法」，不是「整个 grid 里有没有两种走法」。动画 (b) 一步步画出来。</p>
+  <p lang="en">A warp executes one common instruction at a time, so it is most efficient when all 32 threads follow the same path. The programming guide: if threads of a warp diverge through a data-dependent conditional branch, the warp executes each branch path taken, disabling the threads that are not on that path; <strong>divergence occurs only within a warp</strong>, and different warps execute independently. So the cost depends on whether one warp contains both choices, not on whether the whole grid does. Diagram (b) draws it step by step.</p>
+  <ul>
+    <li lang="zh-CN"><strong>按 warp 对齐写条件</strong>：block 切成 warp 的方式是确定的（线程编号连续，第一个 warp 从线程 0 开始），所以条件只依赖 <code>threadIdx.x / warpSize</code> 时，没有一个 warp 会发散（Best Practices Guide，「Branching and Divergence」）。<code>if (threadIdx.x % 2)</code> 让每个 warp 都发散；<code>if ((threadIdx.x / 32) % 2)</code> 一个也不发散，而两者都让一半线程走 A、一半走 B。</li>
+    <li lang="en"><strong>Write conditions aligned to warps</strong>: the way a block is cut into warps is deterministic (consecutive thread IDs, the first warp starting at thread 0), so when a condition depends only on <code>threadIdx.x / warpSize</code>, no warp diverges (Best Practices Guide, “Branching and Divergence”). <code>if (threadIdx.x % 2)</code> makes every warp diverge; <code>if ((threadIdx.x / 32) % 2)</code> makes none diverge, yet both send half the threads down A and half down B.</li>
+    <li lang="zh-CN"><strong>短分支常常不算数</strong>：分支体只有几条指令时，编译器可能用谓词执行（predication）代替真正的跳转：所有指令都发射，只有谓词为真的线程写结果。这时没有 warp 会发散，损失很小。Lab 里的两条路径都是 2000 次的循环，故意让编译器无法这样做。</li>
+    <li lang="en"><strong>Short branches often do not count</strong>: when a branch body is only a few instructions, the compiler may use predication instead of a real jump: every instruction is issued, and only threads with a true predicate write results. Then no warp diverges and the loss is small. Both paths in the labs are 2000-iteration loops, deliberately too long for that.</li>
+    <li lang="zh-CN"><strong>循环次数不同也是发散</strong>：<code>for (k = 0; k &lt; len[i]; ++k)</code> 里各线程的 <code>len</code> 不同，warp 要跑到最长的那个线程做完为止，其余线程陪着空转。不规则数据（稀疏矩阵、图）里的主要损失常在这里。</li>
+    <li lang="en"><strong>Different trip counts are divergence too</strong>: in <code>for (k = 0; k &lt; len[i]; ++k)</code> with a different <code>len</code> per thread, the warp keeps going until its longest thread finishes, and the others idle along. In irregular data (sparse matrices, graphs) this is often where most of the loss is.</li>
+  </ul>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 4 章（控制发散）和第 10 章「Reduction」；Best Practices Guide 中「Branching and Divergence」与「Branch Predication」两节。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 4 (control divergence) and Chapter 10, “Reduction”; the “Branching and Divergence” and “Branch Predication” sections of the Best Practices Guide.</p>
+
+  <h3 lang="zh-CN">5. 独立线程调度（Volta 起）与 <code>__syncwarp</code></h3><h3 lang="en">5. Independent thread scheduling (Volta on) and <code>__syncwarp</code></h3>
+  <p lang="zh-CN">compute capability 7.0 之前，一个 warp 的 32 个线程共用一个程序计数器，外加一个标记哪些线程活动的掩码。从 7.0（Volta）起，GPU 为每个线程保存执行状态，包括程序计数器和调用栈，可以按线程粒度让出执行；一个调度优化器决定把同一个 warp 里哪些活动线程编成一个 SIMT 单元，线程可以在小于 warp 的粒度上发散和重新汇合（编程指南，「Independent Thread Scheduling」）。T4 是 7.5，所以本主题的所有 GPU 都是这种行为；CUDA 13 已经移除了 Turing（7.5）之前所有架构的支持。</p>
+  <p lang="en">Before compute capability 7.0, the 32 threads of a warp shared one program counter plus a mask of which threads were active. From 7.0 (Volta) on, the GPU keeps execution state per thread, including a program counter and call stack, and can yield execution at per-thread granularity; a schedule optimizer decides how to group active threads of the same warp into SIMT units, and threads can diverge and reconverge at sub-warp granularity (programming guide, “Independent Thread Scheduling”). The T4 is 7.5, so every GPU in this topic behaves this way; CUDA 13 has removed support for every architecture before Turing (7.5).</p>
+  <ul>
+    <li lang="zh-CN"><strong>它带来了什么</strong>：同一个 warp 里的线程现在可以互相等待（比如一个线程等另一个线程放开一把锁），不会像以前那样因为共用程序计数器而死锁。</li>
+    <li lang="en"><strong>What it brought</strong>: threads of one warp can now wait on each other (for example, one thread waiting for another to release a lock) without the deadlock a shared program counter used to cause.</li>
+    <li lang="zh-CN"><strong>它打破了什么</strong>：老代码常假设「一个 warp 的线程每条指令都齐步走」，于是不加同步就通过 shared memory 在 warp 内交换数据（不加同步的 warp 内归约就是典型）。编程指南说这种假设现在不成立，这类代码必须用 <code>__syncwarp()</code> 显式同步。<code>__syncwarp(mask)</code> 让 <code>mask</code> 里的线程在这里会合，并保证它们之间的内存顺序；不写参数时 <code>mask</code> 是全部 32 个线程（C++ Language Extensions）。</li>
+    <li lang="en"><strong>What it broke</strong>: old code often assumed that the threads of a warp move in lockstep at every instruction, and exchanged data within a warp through shared memory without synchronising (the synchronisation-free intra-warp reduction is the classic case). The programming guide says that assumption no longer holds, and such code must synchronise explicitly with <code>__syncwarp()</code>. <code>__syncwarp(mask)</code> makes the threads named in <code>mask</code> meet there and orders memory among them; with no argument, <code>mask</code> is all 32 threads (C++ Language Extensions).</li>
+  </ul>
+  <p lang="zh-CN">下面是一个 warp 通过 shared memory 求 32 个整数的和：每一轮先读、再写，读和写之间、写和下一轮读之间各放一个 <code>__syncwarp()</code>。去掉它们，在 Volta 以后的 GPU 上可能读到另一个线程还没写完的值。Phase 3 会用 warp shuffle（<code>__shfl_down_sync</code>）把它写得更快，那一族函数的名字里带着 <code>_sync</code> 和一个 <code>mask</code> 参数，原因相同。</p>
+  <p lang="en">Below, one warp sums 32 integers through shared memory: each round reads, then writes, with a <code>__syncwarp()</code> between the read and the write and between the write and the next read. Remove them, and on GPUs from Volta on a thread may read a value another thread has not finished writing. Phase 3 writes this faster with warp shuffles (<code>__shfl_down_sync</code>); that family of functions carries <code>_sync</code> in its name and a <code>mask</code> argument for the same reason.</p>
+  <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-10-31。根据 CUDA 文档整理。这段代码只在这台 Mac 上用 clang 的 CUDA 前端对照一个桩头文件做过语法检查（主机端和 <code>sm_75</code> 设备端都通过），没有被 <code>nvcc</code> 编译过，也没有在 GPU 上运行过。</div>
+  <div class="note" lang="en"><strong>Not run</strong>, 2026-10-31. Assembled from the CUDA documentation. This code has only been syntax-checked on this Mac with clang’s CUDA front end against a stub header (both the host side and the <code>sm_75</code> device side passed); it has not been compiled by <code>nvcc</code> or run on a GPU.</div>
+<pre data-lang="cpp" data-file="warp_sum.cu">// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// warp_sum.cu: one warp sums 32 ints through shared memory; launch with 32 threads per block
+__global__ void warp_sum(const int* in, int* out) {
+  __shared__ int s[32];
+  unsigned t = threadIdx.x;
+  s[t] = in[blockIdx.x * 32 + t];
+  __syncwarp();                               // every write of s is visible before anyone reads
+  for (int off = 16; off &gt; 0; off /= 2) {
+    int v = (t &lt; off) ? s[t + off] : 0;       // read phase
+    __syncwarp();                             // all reads finish before any write
+    if (t &lt; off) s[t] += v;                   // write phase
+    __syncwarp();                             // all writes finish before the next read
+  }
+  if (t == 0) out[blockIdx.x] = s[0];
+}</pre>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 4 章（warp 与 SIMD 硬件）和第 10 章（归约里的同步）；NVIDIA 技术博客「Using CUDA Warp-Level Primitives」（见资料）。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 4 (warps and SIMD hardware) and Chapter 10 (synchronisation in reductions); the NVIDIA technical blog post “Using CUDA Warp-Level Primitives” (see Resources).</p>
+
+  <h3 lang="zh-CN">6. block 怎样分到各个 SM，以及一次启动底下发生了什么</h3><h3 lang="en">6. How blocks reach the SMs, and what happens under a launch</h3>
+  <p lang="zh-CN"><strong>block 调度</strong>：一个 grid 可以有几百万个 block，GPU 却只有几十到几百个 SM。一个 block 的所有线程由同一个 SM 执行，多数情况下在那个 SM 上一直跑到结束；block 之间没有调度上的保证，可以按任何顺序执行，所以一个 block 不能依赖另一个 block 的结果（编程指南，「Programming Model」）。每个 SM 按概念 3 的限制同时放 k 个 block，整块 GPU 一次能跑 SM 数 × k 个，这叫一波（wave）；剩下的 block 等前面的结束再上。这引出一个实用的推论（推断，Phase 4 用剖析器验证）：T4 有 40 个 SM（NVIDIA 给出 2560 个 CUDA 核，Turing 每个 SM 64 个 FP32 核），若每个 SM 放 4 个 block，一波是 160 个；一个 161 个 block 的 grid 要跑两波，第二波只有 1 个 block 在干活，这叫尾部效应（tail effect）。block 数远大于一波时，这点浪费就被摊薄了。</p>
+  <p lang="en"><strong>Block scheduling</strong>: a grid may have millions of blocks, while the GPU has only tens or hundreds of SMs. All threads of a block are executed by one SM and, in most cases, run to completion on it; there is no scheduling guarantee between blocks, which may run in any order, so a block must not depend on another block’s results (programming guide, “Programming Model”). Each SM holds k blocks at once under the limits of concept 3, so the whole GPU runs SMs × k blocks at a time, which is called a wave; the remaining blocks start as earlier ones finish. A practical consequence follows (an inference; Phase 4 checks it with the profiler): a T4 has 40 SMs (NVIDIA gives 2,560 CUDA cores, and a Turing SM has 64 FP32 cores), so at 4 blocks per SM one wave is 160 blocks, and a grid of 161 blocks runs two waves, the second with a single block at work. This is the tail effect. When the block count is far larger than one wave, that waste is spread thin.</p>
+  <p lang="zh-CN"><strong>启动路径</strong>：<code>kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(args)</code> 被 <code>nvcc</code> 改写成对 CUDA 运行时的调用，运行时的公开入口是 <code>cudaLaunchKernel</code>，它再交给用户态的 CUDA 驱动（推断：<code>nvcc</code> 生成的胶水代码细节没有文档）。NVIDIA 在 open-gpu-doc 里公开了硬件这一侧的接口，可以据此画出大致的路径；CUDA 用户态驱动是闭源的，下面哪一步由谁做属于推断：</p>
+  <p lang="en"><strong>The launch path</strong>: <code>kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(args)</code> is rewritten by <code>nvcc</code> into a call to the CUDA runtime, whose public entry point is <code>cudaLaunchKernel</code>, which in turn hands off to the user-mode CUDA driver (an inference: the glue code <code>nvcc</code> generates is not documented). NVIDIA publishes the hardware side of the interface in open-gpu-doc, from which a rough path can be drawn; the CUDA user-mode driver is closed source, so which step is done by whom below is inference:</p>
+  <ol>
+    <li lang="zh-CN"><strong>启动描述符</strong>：Turing 的计算类（<code>TURING_COMPUTE_A</code>）用一个叫 QMD 的结构描述一次启动。它的头文件里有 grid 宽度（<code>CTA_RASTER_WIDTH</code>）、block 维度（<code>CTA_THREAD_DIMENSION0</code>）、每线程寄存器数（<code>REGISTER_COUNT</code>）、shared memory 大小（<code>SHARED_MEMORY_SIZE</code>）和常量缓冲区地址等字段。寄存器数和 shared memory 就写在启动描述符里，这正是硬件按它们决定一个 SM 放几个 block 的原因（推断）。内核参数大致放在其中一个常量缓冲区里（大致）。</li>
+    <li lang="en"><strong>The launch descriptor</strong>: Turing’s compute class (<code>TURING_COMPUTE_A</code>) describes a launch with a structure called the QMD. Its header has fields for the grid width (<code>CTA_RASTER_WIDTH</code>), the block dimensions (<code>CTA_THREAD_DIMENSION0</code>), registers per thread (<code>REGISTER_COUNT</code>), the shared-memory size (<code>SHARED_MEMORY_SIZE</code>), constant-buffer addresses and more. The register count and shared memory are written into the launch descriptor itself, which is why the hardware can use them to decide how many blocks fit on an SM (an inference). Kernel arguments go, approximately, into one of those constant buffers.</li>
+    <li lang="zh-CN"><strong>命令进入通道</strong>：驱动把指向 QMD 的命令写进一个 pushbuffer（内存里的命令流），再在通道的 GPFIFO 环里加一项指向这段 pushbuffer。<code>TURING_CHANNEL_GPFIFO_A</code> 类的头文件记录了 GPFIFO 项和 pushbuffer 方法的格式。</li>
+    <li lang="en"><strong>Commands enter a channel</strong>: the driver writes commands that point at the QMD into a pushbuffer (a command stream in memory), then adds an entry to the channel’s GPFIFO ring pointing at that stretch of pushbuffer. The header of the <code>TURING_CHANNEL_GPFIFO_A</code> class records the format of GPFIFO entries and pushbuffer methods.</li>
+    <li lang="zh-CN"><strong>敲门铃</strong>：驱动往一个 MMIO 寄存器写一下，告诉 GPU 这个通道有新工作；Turing 的 usermode 手册把 <code>NOTIFY_CHANNEL_PENDING</code> 称为通道的门铃寄存器（doorbell），并说 USERMODE 是一段「可映射的、供用户态驱动使用的」寄存器。所以一次启动通常不需要系统调用（推断：闭源的 CUDA 驱动是否每次都这样做，没有文档）。这就是 Kernel Engineering Phase 5 讲的「环形队列 + 门铃寄存器」。</li>
+    <li lang="en"><strong>Ringing the doorbell</strong>: the driver makes one MMIO write to tell the GPU the channel has new work; Turing’s usermode manual calls <code>NOTIFY_CHANNEL_PENDING</code> the channel doorbell register and describes USERMODE as “a mappable range of registers for use by usermode drivers”. So a launch usually needs no system call (an inference: whether the closed CUDA driver always does it this way is not documented). This is the “ring plus doorbell register” of Kernel Engineering Phase 5.</li>
+    <li lang="zh-CN"><strong>GPU 取命令、分 block</strong>：GPU 的命令前端用 DMA 从内存读 GPFIFO 和 pushbuffer，计算引擎读 QMD，再把 block 一个个分给有空余资源的 SM（大致；分配器的细节没有公开）。内核本身的代码早在模块加载时就已经放进了 device 内存。</li>
+    <li lang="en"><strong>The GPU fetches commands and hands out blocks</strong>: the GPU’s command front end reads the GPFIFO and the pushbuffer from memory by DMA, the compute engine reads the QMD, and then hands blocks one by one to SMs with free resources (approximate; the distributor’s details are not public). The kernel’s own code was placed in device memory long before, when the module was loaded.</li>
+  </ol>
+  <p lang="zh-CN">这条路径解释了 Phase 0 量到的「每次启动几微秒的固定开销」大致从哪来，也解释了 Phase 5 的 CUDA graph 为什么能省时间：把一串启动预先录好，一次提交。</p>
+  <p lang="en">This path roughly explains where the fixed cost of a few microseconds per launch seen in Phase 0 comes from, and why Phase 5’s CUDA graphs save time: a series of launches is recorded in advance and submitted at once.</p>
+  <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 4 章（block 调度、透明可扩展性）；启动路径没有哪本参考书目里的书讲到这个深度，它依据的是 NVIDIA open-gpu-doc 里的 <code>clc5c0qmd.h</code>、<code>clc46f.h</code> 和 Turing 的 <code>dev_usermode.ref.txt</code>（见资料），以及 Kernel Engineering Phase 5。</p>
+  <p lang="en">Further reading: PMPP, 5th ed., Chapter 4 (block scheduling, transparent scalability); no book in the bibliography covers the launch path at this depth, so it rests on <code>clc5c0qmd.h</code>, <code>clc46f.h</code> and Turing’s <code>dev_usermode.ref.txt</code> in NVIDIA’s open-gpu-doc (see Resources), and on Kernel Engineering Phase 5.</p>
+
+  <h2 id="compare" lang="zh-CN">对照表：occupancy 的限制因素 ↔ 怎样看出来 ↔ 怎样改</h2><h2 id="compare-en" lang="en">Comparison: occupancy limiter ↔ how to spot it ↔ how to fix it</h2>
+  <div class="table-wrap">
+  <table class="cmp">
+    <tr><th><span lang="zh-CN">限制因素</span><span lang="en">Limiter</span></th><th><span lang="zh-CN">T4（<code>sm_75</code>）上的上限</span><span lang="en">Limit on a T4 (<code>sm_75</code>)</span></th><th><span lang="zh-CN">怎样看出来</span><span lang="en">How to spot it</span></th><th><span lang="zh-CN">怎样改</span><span lang="en">How to fix it</span></th><th><span lang="zh-CN">代价</span><span lang="en">Cost</span></th></tr>
+    <tr><td><span lang="zh-CN">每线程寄存器</span><span lang="en">Registers per thread</span></td><td><span lang="zh-CN">每 SM 64 K 个，每线程最多 255 个</span><span lang="en">64 K per SM, at most 255 per thread</span></td><td><span lang="zh-CN"><code>--ptxas-options=-v</code> 的 Used N registers；<code>numRegs</code></span><span lang="en">“Used N registers” from <code>--ptxas-options=-v</code>; <code>numRegs</code></span></td><td><span lang="zh-CN"><code>__launch_bounds__</code>、<code>-maxrregcount</code>；减少同时存活的变量</span><span lang="en"><code>__launch_bounds__</code>, <code>-maxrregcount</code>; fewer variables live at once</span></td><td><span lang="zh-CN">可能溢出到 local memory（DRAM）</span><span lang="en">May spill to local memory (DRAM)</span></td></tr>
+    <tr><td><span lang="zh-CN">每 block 的 shared memory</span><span lang="en">Shared memory per block</span></td><td><span lang="zh-CN">每 SM 64 KB；静态声明每 block 48 KB</span><span lang="en">64 KB per SM; 48 KB per block when declared statically</span></td><td><span lang="zh-CN">ptxas 的 smem；<code>sharedSizeBytes</code>；占用 API 的 <code>dynamicSMem</code> 参数</span><span lang="en">smem from ptxas; <code>sharedSizeBytes</code>; the <code>dynamicSMem</code> argument of the occupancy API</span></td><td><span lang="zh-CN">缩小 tile；把一部分数据留在寄存器</span><span lang="en">Smaller tiles; keep some data in registers</span></td><td><span lang="zh-CN">每个 block 复用的数据变少（Phase 1）</span><span lang="en">Less reuse per block (Phase 1)</span></td></tr>
+    <tr><td><span lang="zh-CN">block 太小</span><span lang="en">Blocks too small</span></td><td><span lang="zh-CN">每 SM 最多 16 个 block</span><span lang="en">At most 16 blocks per SM</span></td><td><span lang="zh-CN">32 线程的 block：16 个 warp，50%</span><span lang="en">32-thread blocks: 16 warps, 50%</span></td><td><span lang="zh-CN">每 block 至少 64 个线程；Best Practices 建议从 128–256 起试</span><span lang="en">At least 64 threads per block; the Best Practices Guide suggests starting at 128–256</span></td><td><span lang="zh-CN">几乎没有</span><span lang="en">Almost none</span></td></tr>
+    <tr><td><span lang="zh-CN">block 太大</span><span lang="en">Blocks too large</span></td><td><span lang="zh-CN">每 block 最多 1024 个线程、64 K 个寄存器</span><span lang="en">At most 1024 threads and 64 K registers per block</span></td><td><span lang="zh-CN">占用 API 返回 0 个 block；启动报资源不足</span><span lang="en">The occupancy API returns 0 blocks; the launch reports too many resources</span></td><td><span lang="zh-CN">减小 block；<code>__launch_bounds__(1024)</code></span><span lang="en">Smaller blocks; <code>__launch_bounds__(1024)</code></span></td><td><span lang="zh-CN">block 内能协作的线程变少</span><span lang="en">Fewer threads can cooperate within a block</span></td></tr>
+    <tr><td><span lang="zh-CN">block 线程数不是 32 的倍数</span><span lang="en">Block size not a multiple of 32</span></td><td><span lang="zh-CN">warp 数 = 向上取整(线程数 / 32)</span><span lang="en">Warps = ceil(threads / 32)</span></td><td><span lang="zh-CN">最后一个 warp 有空 lane</span><span lang="en">The last warp has empty lanes</span></td><td><span lang="zh-CN">取 32 的倍数</span><span lang="en">Use a multiple of 32</span></td><td><span lang="zh-CN">没有</span><span lang="en">None</span></td></tr>
+    <tr><td><span lang="zh-CN">grid 太小</span><span lang="en">Grid too small</span></td><td><span lang="zh-CN">T4 有 40 个 SM</span><span lang="en">A T4 has 40 SMs</span></td><td><span lang="zh-CN">block 数少于一波，有的 SM 闲着</span><span lang="en">Fewer blocks than one wave; some SMs sit idle</span></td><td><span lang="zh-CN">更多、更小的 block；或者每个线程少做一点</span><span lang="en">More, smaller blocks, or less work per thread</span></td><td><span lang="zh-CN">每个线程的 ILP 变少</span><span lang="en">Less ILP per thread</span></td></tr>
+  </table>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+  <h3 lang="zh-CN">(a) 一个 warp 调度器：就绪的 warp 和停顿的 warp，逐周期</h3><h3 lang="en">(a) One warp scheduler: ready and stalled warps, cycle by cycle</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：一个 warp 调度器在 12 个周期里的发射记录。每行一个 warp，方框是这个周期发射的指令，虚线条是 warp 在停顿；最下面一行是每个周期由谁发射。这是示意：真实的内存延迟是几百个周期，这里画成 7 个周期。按播放逐步看。", "1. 周期 1：w0 发射一条全局内存读（ld）。它的下一条指令要用读回来的值，所以 w0 停顿，直到周期 8 数据回来。", "2. 周期 2 到 6：调度器每个周期换一个就绪的 warp，w1 到 w5 各发射自己的 ld，然后也停顿。切换不花时间，因为每个 warp 的寄存器一直留在 SM 上。", "3. 周期 7：6 个 warp 全在等内存，没有一个能发射，这个发射槽空转了。驻留的 warp 太少时，延迟就露出来了。", "4. 周期 8 到 12：数据按发射的顺序回来，w0 到 w4 依次发射用到数据的 add。延迟被别的 warp 的工作盖住了，只漏了周期 7 一个空槽。", "5. 如果 SM 能多驻留一个 warp（w6），周期 7 就有活可干，空槽消失。这就是 occupancy 的用处：驻留的 warp 越多，越不容易出现所有 warp 同时在等的周期。Turing 的每个 SM 有 4 个这样的调度器。"]'
+         data-captions-en='["The whole picture: what one warp scheduler issues over 12 cycles. Each row is a warp, a box is an instruction issued in that cycle, and a dashed bar is a warp stalled; the bottom row shows who issued in each cycle. This is a sketch: real memory latency is hundreds of cycles, drawn here as 7. Press Play to step through.", "1. Cycle 1: w0 issues a global-memory load (ld). Its next instruction needs the loaded value, so w0 stalls until the data arrives in cycle 8.", "2. Cycles 2 to 6: each cycle the scheduler switches to a ready warp, and w1 to w5 each issue their own ld and then stall too. Switching costs nothing, because every warp keeps its registers on the SM.", "3. Cycle 7: all 6 warps are waiting on memory, none can issue, and the issue slot idles. With too few resident warps, latency shows through.", "4. Cycles 8 to 12: the data returns in issue order, and w0 to w4 in turn issue the add that uses it. Other warps covered the latency, leaving only the one empty slot at cycle 7.", "5. If the SM could hold one more warp (w6), cycle 7 would have work and the empty slot would vanish. This is what occupancy is for: the more resident warps, the rarer a cycle in which every warp is waiting. A Turing SM has 4 such schedulers."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="40" class="small" lang="zh-CN">周期</text><text x="30" y="40" class="small" lang="en">cycle</text>
+      <text x="155" y="40" class="small" text-anchor="middle">1</text>
+      <text x="211" y="40" class="small" text-anchor="middle">2</text>
+      <text x="267" y="40" class="small" text-anchor="middle">3</text>
+      <text x="323" y="40" class="small" text-anchor="middle">4</text>
+      <text x="379" y="40" class="small" text-anchor="middle">5</text>
+      <text x="435" y="40" class="small" text-anchor="middle">6</text>
+      <text x="491" y="40" class="small" text-anchor="middle">7</text>
+      <text x="547" y="40" class="small" text-anchor="middle">8</text>
+      <text x="603" y="40" class="small" text-anchor="middle">9</text>
+      <text x="659" y="40" class="small" text-anchor="middle">10</text>
+      <text x="715" y="40" class="small" text-anchor="middle">11</text>
+      <text x="771" y="40" class="small" text-anchor="middle">12</text>
+      <text x="30" y="76" class="mono">w0</text>
+      <text x="30" y="118" class="mono">w1</text>
+      <text x="30" y="160" class="mono">w2</text>
+      <text x="30" y="202" class="mono">w3</text>
+      <text x="30" y="244" class="mono">w4</text>
+      <text x="30" y="286" class="mono">w5</text>
+      <path class="lane" d="M30 302 L796 302 M30 344 L796 344"/>
+      <text x="30" y="370" class="mono" lang="zh-CN">发射</text><text x="30" y="370" class="mono" lang="en">issued</text>
+      <g data-step="1"><rect class="box" x="130" y="56" width="50" height="30"/><text x="155" y="76" class="mono" text-anchor="middle">ld</text><rect class="lane" x="186" y="60" width="330" height="22"/><text x="194" y="75" class="small" style="fill: var(--ink-2)" lang="zh-CN">停顿：等全局内存</text><text x="194" y="75" class="small" style="fill: var(--ink-2)" lang="en">stalled: waiting on memory</text></g>
+      <g data-step="2"><rect class="box" x="186" y="98" width="50" height="30"/><text x="211" y="118" class="mono" text-anchor="middle">ld</text><rect class="lane" x="242" y="102" width="330" height="22"/><text x="250" y="117" class="small" style="fill: var(--ink-2)" lang="zh-CN">停顿：等全局内存</text><text x="250" y="117" class="small" style="fill: var(--ink-2)" lang="en">stalled: waiting on memory</text><rect class="box" x="242" y="140" width="50" height="30"/><text x="267" y="160" class="mono" text-anchor="middle">ld</text><rect class="lane" x="298" y="144" width="330" height="22"/><rect class="box" x="298" y="182" width="50" height="30"/><text x="323" y="202" class="mono" text-anchor="middle">ld</text><rect class="lane" x="354" y="186" width="330" height="22"/><rect class="box" x="354" y="224" width="50" height="30"/><text x="379" y="244" class="mono" text-anchor="middle">ld</text><rect class="lane" x="410" y="228" width="330" height="22"/><rect class="box" x="410" y="266" width="50" height="30"/><text x="435" y="286" class="mono" text-anchor="middle">ld</text><rect class="lane" x="466" y="270" width="330" height="22"/></g>
+      <g data-step="3"><text x="155" y="370" class="mono" text-anchor="middle">w0</text><text x="211" y="370" class="mono" text-anchor="middle">w1</text><text x="267" y="370" class="mono" text-anchor="middle">w2</text><text x="323" y="370" class="mono" text-anchor="middle">w3</text><text x="379" y="370" class="mono" text-anchor="middle">w4</text><text x="435" y="370" class="mono" text-anchor="middle">w5</text><text x="491" y="370" class="mono" text-anchor="middle" style="fill: var(--ink-2)">✗</text><text x="30" y="404" class="small" style="fill: var(--ink-2)" lang="zh-CN">✗ 周期 7：6 个 warp 全在等，发射槽空转一个周期</text><text x="30" y="404" class="small" style="fill: var(--ink-2)" lang="en">✗ cycle 7: all 6 warps are waiting, so the issue slot idles for one cycle</text></g>
+      <g data-step="4"><rect class="box" x="522" y="56" width="50" height="30"/><text x="547" y="76" class="mono" text-anchor="middle">add</text><text x="547" y="370" class="mono" text-anchor="middle">w0</text><rect class="box" x="578" y="98" width="50" height="30"/><text x="603" y="118" class="mono" text-anchor="middle">add</text><text x="603" y="370" class="mono" text-anchor="middle">w1</text><rect class="box" x="634" y="140" width="50" height="30"/><text x="659" y="160" class="mono" text-anchor="middle">add</text><text x="659" y="370" class="mono" text-anchor="middle">w2</text><rect class="box" x="690" y="182" width="50" height="30"/><text x="715" y="202" class="mono" text-anchor="middle">add</text><text x="715" y="370" class="mono" text-anchor="middle">w3</text><rect class="box" x="746" y="224" width="50" height="30"/><text x="771" y="244" class="mono" text-anchor="middle">add</text><text x="771" y="370" class="mono" text-anchor="middle">w4</text></g>
+      <g data-step="5"><text x="30" y="328" class="mono" lang="zh-CN">w6（多一个）</text><text x="30" y="328" class="mono" lang="en">w6 (+1 warp)</text><rect class="box" x="466" y="308" width="50" height="30"/><text x="491" y="328" class="mono" text-anchor="middle">ld</text><rect class="lane" x="522" y="312" width="274" height="22"/><text x="530" y="327" class="small" style="fill: var(--ink-2)" lang="zh-CN">多驻留一个 warp，就填上了周期 7 的空槽</text><text x="530" y="327" class="small" style="fill: var(--ink-2)" lang="en">one more resident warp fills the empty slot at cycle 7</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(b) 分支发散：一个 warp 在 if 上分开，两条路径串行执行</h3><h3 lang="en">(b) Divergence: a warp splits on an if, and both paths run one after the other</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 440" data-interval="2600"
+         data-captions='["全图：左边是一段带 if 的代码，右边是一个 warp 的 32 个 lane 随时间往下走。实线方块是在工作的 lane，虚线方块是被屏蔽的 lane。按播放逐步看。", "1. 32 个 lane 一起执行比较指令，算出各自的条件。偶数 lane 的 i % 2 == 0 为真，奇数 lane 为假，这个 warp 发散了。", "2. warp 先执行路径 A，只有 16 个偶数 lane 活动；奇数 lane 被屏蔽，不写结果，但也得陪着等。", "3. 再执行路径 B，换成 16 个奇数 lane 活动，偶数 lane 等着。两条路径是串行的，不是同时的。", "4. 两条路径都走完，32 个 lane 重新汇合，一起执行 C。这个 warp 的时间是 A + B，一半的 lane 在每条路径上都闲着。", "5. 同样是一半线程走 A、一半走 B，若条件按 warp 对齐（i / 32），每个 warp 内部一致，就不会发散。Lab B 在 M5 上量到：逐 lane 分支用了 2.00 倍时间，逐 SIMD-group 分支 1.00 倍。", "6. Volta 起每个线程有自己的程序计数器：A 与 B 的先后、在哪里重新汇合都由硬件决定，代码不能依赖它。lane 之间要通过 shared memory 交换数据时，用 __syncwarp() 显式同步。"]'
+         data-captions-en='["The whole picture: on the left a piece of code with an if, on the right the 32 lanes of one warp moving down through time. Solid squares are lanes at work, dashed squares are masked lanes. Press Play to step through.", "1. All 32 lanes execute the compare together and each gets its own condition. i % 2 == 0 is true for even lanes and false for odd ones, so this warp diverges.", "2. The warp runs path A first with only the 16 even lanes active; the odd lanes are masked and write nothing, but they still have to wait.", "3. Then it runs path B with the 16 odd lanes active while the even lanes wait. The two paths run one after the other, not at the same time.", "4. Once both paths are done, the 32 lanes reconverge and run C together. The warp took A + B, and half its lanes sat idle on each path.", "5. With the same half of the threads on A and half on B, a condition aligned to warps (i / 32) keeps each warp uniform inside, and nothing diverges. Lab B measured on the M5: a per-lane branch took 2.00 times as long, a per-SIMD-group branch 1.00 times.", "6. Since Volta each thread has its own program counter: the order of A and B and the point where they reconverge are up to the hardware, and code must not rely on them. When lanes exchange data through shared memory, synchronise explicitly with __syncwarp()."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="30" y="36" width="226" height="150"/>
+      <text x="42" y="60" class="mono" xml:space="preserve">if (i % 2 == 0) {</text>
+      <text x="42" y="82" class="mono" xml:space="preserve">  A();  // even lanes</text>
+      <text x="42" y="104" class="mono" xml:space="preserve">} else {</text>
+      <text x="42" y="126" class="mono" xml:space="preserve">  B();  // odd lanes</text>
+      <text x="42" y="148" class="mono" xml:space="preserve">}</text>
+      <text x="42" y="170" class="mono" xml:space="preserve">C();</text>
+      <path class="arrow" d="M272 52 L272 270" style="marker-end: url(#arr)"/>
+      <path d="M267 262 L272 272 L277 262 z" style="fill: var(--ink-3)"/>
+      <text x="30" y="214" class="small" lang="zh-CN">时间从上往下 ↓</text><text x="30" y="214" class="small" lang="en">time runs downward ↓</text>
+      <text x="290" y="30" class="small">lane 0</text><text x="863" y="30" class="small" text-anchor="end">lane 31</text>
+      <g data-step="1"><text x="290" y="48" class="small" lang="zh-CN">判断条件：32 个 lane 全部参与</text><text x="290" y="48" class="small" lang="en">evaluate the condition: all 32 lanes take part</text><rect class="box" x="290" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="308" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="326" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="344" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="362" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="380" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="398" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="416" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="434" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="452" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="470" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="488" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="506" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="524" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="542" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="560" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="578" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="596" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="614" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="632" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="650" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="668" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="686" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="704" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="722" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="740" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="758" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="776" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="794" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="812" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="830" y="56" width="15" height="16" style="rx: 2"/><rect class="box" x="848" y="56" width="15" height="16" style="rx: 2"/></g>
+      <g data-step="2"><text x="290" y="112" class="small" lang="zh-CN">路径 A：16 个偶数 lane 工作，16 个被屏蔽（虚线）</text><text x="290" y="112" class="small" lang="en">path A: 16 even lanes work, 16 are masked (dashed)</text><rect class="box" x="290" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="308" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="326" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="344" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="362" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="380" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="398" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="416" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="434" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="452" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="470" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="488" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="506" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="524" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="542" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="560" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="578" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="596" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="614" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="632" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="650" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="668" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="686" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="704" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="722" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="740" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="758" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="776" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="794" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="812" y="120" width="15" height="16" style="rx: 2"/><rect class="box" x="830" y="120" width="15" height="16" style="rx: 2"/><rect class="lane" x="848" y="120" width="15" height="16" style="rx: 2"/></g>
+      <g data-step="3"><text x="290" y="176" class="small" lang="zh-CN">路径 B：16 个奇数 lane 工作，偶数 lane 等着</text><text x="290" y="176" class="small" lang="en">path B: 16 odd lanes work, the even lanes wait</text><rect class="lane" x="290" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="308" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="326" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="344" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="362" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="380" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="398" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="416" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="434" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="452" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="470" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="488" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="506" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="524" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="542" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="560" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="578" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="596" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="614" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="632" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="650" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="668" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="686" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="704" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="722" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="740" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="758" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="776" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="794" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="812" y="184" width="15" height="16" style="rx: 2"/><rect class="lane" x="830" y="184" width="15" height="16" style="rx: 2"/><rect class="box" x="848" y="184" width="15" height="16" style="rx: 2"/></g>
+      <g data-step="4"><text x="290" y="240" class="small" lang="zh-CN">重新汇合，C：32 个 lane 一起</text><text x="290" y="240" class="small" lang="en">reconverge for C: all 32 lanes together</text><rect class="box" x="290" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="308" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="326" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="344" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="362" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="380" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="398" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="416" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="434" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="452" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="470" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="488" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="506" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="524" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="542" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="560" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="578" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="596" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="614" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="632" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="650" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="668" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="686" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="704" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="722" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="740" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="758" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="776" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="794" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="812" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="830" y="248" width="15" height="16" style="rx: 2"/><rect class="box" x="848" y="248" width="15" height="16" style="rx: 2"/><text x="290" y="290" class="small" lang="zh-CN">这个 warp 花了 A + B 的时间，每个 lane 只有一半时间在干活</text><text x="290" y="290" class="small" lang="en">this warp spent A + B, and each lane was busy only half the time</text></g>
+      <g data-step="5"><text x="30" y="326" class="mono">if ((i / 32) % 2 == 0) { A(); } else { B(); }</text><text x="30" y="348" class="small" lang="zh-CN">按 warp 对齐：warp 0 全走 A，warp 1 全走 B，每个 warp 只执行一条路径，不发散</text><text x="30" y="348" class="small" lang="en">aligned to warps: warp 0 all takes A, warp 1 all takes B; each warp runs one path and none diverges</text><text x="30" y="368" class="small" lang="zh-CN">M5 实测（2026-10-31，n = 2^22）：逐 lane 分支 2.00 倍，逐 SIMD-group 分支 1.00 倍</text><text x="30" y="368" class="small" lang="en">measured on the M5 (2026-10-31, n = 2^22): per-lane branch 2.00 times, per-SIMD-group branch 1.00 times</text></g>
+      <g data-step="6"><text x="30" y="400" class="small" lang="zh-CN">Volta 起（独立线程调度）：A 与 B 谁先执行、在哪里重新汇合，都不保证</text><text x="30" y="400" class="small" lang="en">since Volta (independent thread scheduling): neither the order of A and B nor the reconvergence point is guaranteed</text><text x="30" y="420" class="small" lang="zh-CN">lane 之间要通过内存交换数据时，先写 __syncwarp()</text><text x="30" y="420" class="small" lang="en">when lanes exchange data through memory, call __syncwarp() first</text></g>
+    </svg>
+  </div>
+
+  <h2 id="lab" lang="zh-CN">动手实验</h2><h2 id="lab-en" lang="en">Hands-on labs</h2>
+  <div class="lab">
+    <h3 lang="zh-CN">Lab A · Colab T4：occupancy 扫描与分支发散的代价</h3><h3 lang="en">Lab A · Colab T4: an occupancy sweep and the cost of divergence</h3>
+    <div class="note" lang="zh-CN"><strong>未运行</strong>，2026-10-31。根据 CUDA 文档整理。这台 Mac 没有 NVIDIA GPU：下面的程序只在本机用 clang 的 CUDA 前端对照一个桩头文件做过语法检查（主机端和 <code>sm_75</code> 设备端都通过），没有被 <code>nvcc</code> 编译过，也没有在 GPU 上运行过。所以这里不给数字，只描述你应当看到的形状；第 4 步里的硬件上限来自 compute capability 表，不是运行结果。</div>
+    <div class="note" lang="en"><strong>Not run</strong>, 2026-10-31. Assembled from the CUDA documentation. This Mac has no NVIDIA GPU: the program below has only been syntax-checked here with clang’s CUDA front end against a stub header (both the host side and the <code>sm_75</code> device side passed), and has not been compiled by <code>nvcc</code> or run on a GPU. So this lab gives no numbers, only the shape you should see; the hardware limits in step 4 come from the compute-capability table, not from a run.</div>
+    <ol>
+      <li><span lang="zh-CN">在 Colab 里选 T4 运行时，第一个单元格确认 GPU 和工具链（与 Phase 0 相同；任何 13.x 都可以）：</span><span lang="en">Choose a T4 runtime in Colab and confirm the GPU and the toolchain in the first cell (as in Phase 0; any 13.x will do):</span><pre data-lang="sh" data-file="Colab cell 1"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvidia-smi
+!nvcc --version</pre></li>
+      <li><span lang="zh-CN">第二个单元格写出 <code>occupancy.cu</code>。第一部分不运行任何内核，只问运行时：三种寄存器用量的 <code>pressure&lt;R&gt;</code>（R 个值在循环里一直存活）和一个用动态 shared memory 的 <code>staged</code>，在六种 block 大小下每个 SM 能放几个 block、occupancy 是多少。第二部分用和 Lab B 一样的三种分支方式运行 <code>branchy</code>，用事件计时，每种取 21 次的中位数：</span><span lang="en">The second cell writes <code>occupancy.cu</code>. Part 1 runs no kernel and only asks the runtime: for <code>pressure&lt;R&gt;</code> at three register budgets (R values kept live through a loop) and for <code>staged</code>, which uses dynamic shared memory, how many blocks fit on an SM at six block sizes and what the occupancy is. Part 2 runs <code>branchy</code> with the same three branch patterns as Lab B, timed with events, taking the median of 21 runs for each:</span><pre data-lang="cpp" data-file="Colab cell 2 · occupancy.cu">%%writefile occupancy.cu
+// 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+// occupancy.cu: what the occupancy API predicts for three register budgets and six block sizes,
+// what dynamic shared memory does to it, and what branch divergence inside a warp costs
+#include &lt;algorithm&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;vector&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "%s:%d: %s failed: %s\n", __FILE__, __LINE__,    \
+                   #call, cudaGetErrorString(err_));                        \
+      std::exit(1);                                                         \
+    }                                                                       \
+  } while (0)
+
+// R values stay live across the loop, so the register count grows with R
+template &lt;int R&gt;
+__global__ void pressure(const float* a, float* c, int n, int iters) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i &gt;= n) return;
+  float v[R];
+#pragma unroll
+  for (int k = 0; k &lt; R; ++k) v[k] = a[i] * float(k + 1);
+  for (int t = 0; t &lt; iters; ++t) {
+#pragma unroll
+    for (int k = 0; k &lt; R; ++k) v[k] = fmaf(v[k], v[(k + 1) % R], 0.5f);
+  }
+  float s = 0.0f;
+#pragma unroll
+  for (int k = 0; k &lt; R; ++k) s += v[k];
+  c[i] = s;
+}
+
+// uses dynamic shared memory, sized at launch, to show the shared-memory limiter
+__global__ void staged(const float* a, float* c, int n) {
+  extern __shared__ float tile[];
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  tile[threadIdx.x] = (i &lt; n) ? a[i] : 0.0f;
+  __syncthreads();
+  if (i &lt; n) c[i] = tile[blockDim.x - 1 - threadIdx.x];
+}
+
+// two paths of equal cost; mode 0: all lanes take A; mode 1: alternate warps take A or B;
+// mode 2: alternate lanes take A or B, so every warp diverges
+__global__ void branchy(const float* a, float* c, int n, int iters, int mode) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i &gt;= n) return;
+  float x = a[i];
+  bool takeA = (mode == 0) ? true : (mode == 1) ? (((i / 32) &amp; 1) == 0) : ((i &amp; 1) == 0);
+  if (takeA) {
+    for (int t = 0; t &lt; iters; ++t) x = fmaf(x, 1.0001f, 0.3f);
+  } else {
+    for (int t = 0; t &lt; iters; ++t) x = fmaf(x, 0.9999f, -0.7f);
+  }
+  c[i] = x;
+}
+
+template &lt;class K&gt;
+void report(const char* name, K kernel, const cudaDeviceProp&amp; p, size_t smem) {
+  cudaFuncAttributes fa;
+  CUDA_CHECK(cudaFuncGetAttributes(&amp;fa, kernel));
+  std::printf("%-12s regs=%3d local_bytes=%zu smem_dyn=%6zu |", name, fa.numRegs, fa.localSizeBytes, smem);
+  const int maxWarps = p.maxThreadsPerMultiProcessor / p.warpSize;
+  for (int block : {32, 64, 128, 256, 512, 1024}) {
+    int blocks = 0;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&amp;blocks, kernel, block, smem));
+    const int warps = blocks * ((block + p.warpSize - 1) / p.warpSize);
+    std::printf("  b%-4d %2d blk %3d%%", block, blocks, 100 * warps / maxWarps);
+  }
+  std::printf("\n");
+}
+
+int main() {
+  cudaDeviceProp p;
+  CUDA_CHECK(cudaGetDeviceProperties(&amp;p, 0));
+  std::printf("device=%s sm_%d%d SMs=%d maxThreadsPerSM=%d maxBlocksPerSM=%d regsPerSM=%d smemPerSM=%zu\n",
+              p.name, p.major, p.minor, p.multiProcessorCount, p.maxThreadsPerMultiProcessor,
+              p.maxBlocksPerMultiProcessor, p.regsPerMultiprocessor, p.sharedMemPerMultiprocessor);
+
+  // part 1: predicted occupancy, without running anything
+  report("pressure&lt;4&gt;", pressure&lt;4&gt;, p, 0);
+  report("pressure&lt;32&gt;", pressure&lt;32&gt;, p, 0);
+  report("pressure&lt;96&gt;", pressure&lt;96&gt;, p, 0);
+  for (size_t kb : {4, 8, 16, 32, 48}) report("staged", staged, p, kb * 1024);
+
+  // part 2: divergence, timed with events, median of 21 runs after one warm-up
+  const int iters = 2000, block = 256, reps = 21;
+  cudaEvent_t e0, e1;
+  CUDA_CHECK(cudaEventCreate(&amp;e0));
+  CUDA_CHECK(cudaEventCreate(&amp;e1));
+  for (int lg : {18, 20, 22}) {
+    const int n = 1 &lt;&lt; lg;
+    float *da, *dc;
+    CUDA_CHECK(cudaMalloc(&amp;da, n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&amp;dc, n * sizeof(float)));
+    CUDA_CHECK(cudaMemset(da, 0, n * sizeof(float)));
+    float ms[3];
+    for (int mode = 0; mode &lt; 3; ++mode) {
+      std::vector&lt;float&gt; t;
+      for (int r = 0; r &lt;= reps; ++r) {
+        CUDA_CHECK(cudaEventRecord(e0));
+        branchy&lt;&lt;&lt;(n + block - 1) / block, block&gt;&gt;&gt;(da, dc, n, iters, mode);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaEventRecord(e1));
+        CUDA_CHECK(cudaEventSynchronize(e1));
+        float x = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&amp;x, e0, e1));
+        if (r &gt; 0) t.push_back(x);
+      }
+      std::sort(t.begin(), t.end());
+      ms[mode] = t[t.size() / 2];
+    }
+    std::printf("n=2^%d  uniform_ms=%8.3f  per_warp_ms=%8.3f  per_lane_ms=%8.3f  per_lane/uniform=%.2f\n",
+                lg, ms[0], ms[1], ms[2], ms[2] / ms[0]);
+    CUDA_CHECK(cudaFree(da));
+    CUDA_CHECK(cudaFree(dc));
+  }
+  CUDA_CHECK(cudaEventDestroy(e0));
+  CUDA_CHECK(cudaEventDestroy(e1));
+}</pre></li>
+      <li><span lang="zh-CN">第三个单元格编译并运行。<code>--ptxas-options=-v</code> 让 ptxas 在编译时为每个内核打印一行资源用量：</span><span lang="en">The third cell builds and runs it. <code>--ptxas-options=-v</code> makes ptxas print a line of resource use for each kernel at build time:</span><pre data-lang="sh" data-file="Colab cell 3"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvcc -arch=sm_75 -O2 --ptxas-options=-v -o occupancy occupancy.cu &amp;&amp; ./occupancy</pre></li>
+      <li><span lang="zh-CN">预期输出（定性描述，不是实测）。第一行的上限应当与 compute capability 表一致：<code>sm_75</code>、40 个 SM、每 SM 1024 个线程、16 个 block、65536 个寄存器、65536 字节 shared memory。ptxas 的输出和 <code>regs=</code> 一列里，<code>pressure&lt;4&gt;</code> 只用很少的寄存器，<code>pressure&lt;32&gt;</code> 多一些，<code>pressure&lt;96&gt;</code> 接近或超过 96 个。occupancy 一列：<code>b32</code> 时所有内核都被每 SM 16 个 block 的上限卡在 50% 或以下；寄存器少的内核从 <code>b64</code> 起到 100%；<code>pressure&lt;96&gt;</code> 明显更低，在 <code>b1024</code> 处可能是 0 个 block（一个 block 需要的寄存器超过 64 K）。<code>staged</code> 一行里，动态 shared memory 越大，每 SM 的 block 数越少，48 KB 时只剩 1 个。把每个数和概念 3 的算法对上。</span><span lang="en">Expected output (described, not measured). The limits in the first line should match the compute-capability table: <code>sm_75</code>, 40 SMs, 1024 threads, 16 blocks, 65536 registers and 65536 bytes of shared memory per SM. In the ptxas output and the <code>regs=</code> column, <code>pressure&lt;4&gt;</code> uses very few registers, <code>pressure&lt;32&gt;</code> more, and <code>pressure&lt;96&gt;</code> close to or above 96. In the occupancy columns: at <code>b32</code> every kernel is held at 50% or below by the limit of 16 blocks per SM; the light kernels reach 100% from <code>b64</code> on; <code>pressure&lt;96&gt;</code> is clearly lower, and at <code>b1024</code> may show 0 blocks (one block needs more than 64 K registers). In the <code>staged</code> rows, the more dynamic shared memory, the fewer blocks per SM, down to 1 at 48 KB. Check each number against the arithmetic of concept 3.</span></li>
+      <li><span lang="zh-CN">压寄存器，看代价。用 <code>-maxrregcount=32</code> 重新编译：ptxas 应当报告 <code>pressure&lt;96&gt;</code> 只用 32 个寄存器，同时出现 spill stores 和 spill loads，程序里它的 <code>local_bytes</code> 不再是 0，occupancy 上去了。多出来的 local memory 读写在 DRAM 里，这次换算划不划算，Phase 4 用 Nsight Compute 量。</span><span lang="en">Squeeze registers and see the cost. Rebuild with <code>-maxrregcount=32</code>: ptxas should report that <code>pressure&lt;96&gt;</code> now uses 32 registers, along with spill stores and spill loads; in the program its <code>local_bytes</code> is no longer 0, and its occupancy goes up. The extra local-memory traffic lives in DRAM; whether the trade pays off is measured in Phase 4 with Nsight Compute.</span><pre data-lang="sh" data-file="Colab cell 4"># 未运行 · not run; assembled from the CUDA documentation on 2026-10-31
+!nvcc -arch=sm_75 -O2 --ptxas-options=-v -maxrregcount=32 -o occupancy32 occupancy.cu &amp;&amp; ./occupancy32</pre></li>
+      <li><span lang="zh-CN">读分支发散的三行（预期，定性）：<code>per_warp_ms</code> 与 <code>uniform_ms</code> 几乎相同，因为每个 warp 内部仍然只走一条路；<code>per_lane_ms</code> 约是 <code>uniform_ms</code> 的两倍，因为每个 warp 都要把 A 和 B 各走一遍。三个规模的比值应当都接近 2；若小规模时比值偏离，多半是 grid 还没铺满 40 个 SM。把你的三行和 Lab B 的 M5 结果并排放。</span><span lang="en">Read the three divergence rows (expected, qualitative): <code>per_warp_ms</code> is nearly the same as <code>uniform_ms</code>, because inside each warp only one path is taken; <code>per_lane_ms</code> is about twice <code>uniform_ms</code>, because every warp walks both A and B. The ratio should be close to 2 at all three sizes; if it drifts at the small size, the grid most likely does not yet fill the 40 SMs. Put your three rows next to the M5 results of Lab B.</span></li>
+    </ol>
+
+    <h3 lang="zh-CN">Lab B · Metal 版本：SIMD-group 宽度、线程组上限和分支发散，在这台 Mac 上实测</h3><h3 lang="en">Lab B · The Metal twin: SIMD-group width, the threadgroup limit and divergence, measured on this Mac</h3>
+
+    <div class="note" lang="zh-CN"><strong>实测</strong>，Apple M5，2026-10-31。下面的输出都来自这台 Mac 上的实际运行。</div><div class="note" lang="en"><strong>Run on this Mac</strong>, Apple M5, 2026-10-31. The outputs below come from actual runs on this Mac.</div>
+    <ol>
+      <li><span lang="zh-CN">把下面的程序存成 <code>simd_diverge.swift</code>。它在运行时编译三个内核：<code>light</code> 每线程只用几个寄存器；<code>heavy</code> 由 Swift 生成源码，让 128 个值在循环里一直存活；<code>branchy</code> 有两条代价相同的路径，<code>mode</code> 选择三种分支方式：全部走 A、按 SIMD-group 交替（组内一致）、按 lane 交替（组内发散）。程序先打印每个内核的 <code>threadExecutionWidth</code> 和 <code>maxTotalThreadsPerThreadgroup</code>，再在三个规模上计时 <code>branchy</code>，每种方式预热一次后跑 21 次取中位数；GPU 时间来自 command buffer 的 <code>gpuStartTime</code> 和 <code>gpuEndTime</code>：</span><span lang="en">Save the program below as <code>simd_diverge.swift</code>. It compiles three kernels at run time: <code>light</code> uses only a few registers per thread; <code>heavy</code> has its source generated by Swift so that 128 values stay live through a loop; <code>branchy</code> has two paths of equal cost, with <code>mode</code> choosing one of three branch patterns: every lane takes A, alternate SIMD-groups (uniform inside each group), or alternate lanes (divergent inside each group). The program first prints <code>threadExecutionWidth</code> and <code>maxTotalThreadsPerThreadgroup</code> for each kernel, then times <code>branchy</code> at three sizes, warming up once per pattern and taking the median of 21 runs; GPU time comes from the command buffer’s <code>gpuStartTime</code> and <code>gpuEndTime</code>:</span><pre data-lang="swift" data-file="simd_diverge.swift">// simd_diverge.swift: SIMD-group width and threadgroup limit for two kernels, then the cost of divergence
+// build: swiftc -O simd_diverge.swift -o simd_diverge    run: ./simd_diverge
+import Foundation
+import Metal
+
+// heavy: 128 values live across a loop, so each thread needs far more registers than light
+var heavyBody = "    float x = a[i];\n"
+for k in 0..&lt;128 { heavyBody += "    float v\(k) = x * \(k + 1).0f;\n" }
+heavyBody += "    for (uint t = 0; t &lt; iters; ++t) {\n"
+for k in 0..&lt;128 { heavyBody += "        v\(k) = fma(v\(k), v\((k + 1) % 128), 0.5f);\n" }
+heavyBody += "    }\n    float s = 0.0f;\n"
+for k in 0..&lt;128 { heavyBody += "    s += v\(k);\n" }
+
+let source = """
+#include &lt;metal_stdlib&gt;
+using namespace metal;
+
+kernel void light(device const float* a [[buffer(0)]], device float* c [[buffer(1)]],
+                  uint i [[thread_position_in_grid]]) {
+    c[i] = a[i] * 2.0f + 1.0f;                     // a few registers per thread
+}
+
+kernel void heavy(device const float* a [[buffer(0)]], device float* c [[buffer(1)]],
+                  constant uint&amp; iters [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+\(heavyBody)    c[i] = s;
+}
+
+// two paths of equal cost. mode 0: every lane takes A. mode 1: alternate SIMD-groups take
+// A or B, uniform inside each group. mode 2: alternate lanes take A or B, divergent.
+kernel void branchy(device const float* a [[buffer(0)]], device float* c [[buffer(1)]],
+                    constant uint&amp; iters [[buffer(2)]], constant uint&amp; mode [[buffer(3)]],
+                    uint i [[thread_position_in_grid]]) {
+    float x = a[i];
+    bool takeA = (mode == 0) ? true : (mode == 1) ? (((i / 32) &amp; 1) == 0) : ((i &amp; 1) == 0);
+    if (takeA) {
+        for (uint t = 0; t &lt; iters; ++t) x = fma(x, 1.0001f, 0.3f);
+    } else {
+        for (uint t = 0; t &lt; iters; ++t) x = fma(x, 0.9999f, -0.7f);
+    }
+    c[i] = x;
+}
+"""
+
+func fail(_ msg: String) -&gt; Never { print("error: \(msg)"); exit(1) }
+guard let dev = MTLCreateSystemDefaultDevice() else { fail("no Metal device") }
+let lib: MTLLibrary
+do { lib = try dev.makeLibrary(source: source, options: nil) } catch { fail("compile: \(error)") }
+func pipeline(_ name: String) -&gt; MTLComputePipelineState {
+    guard let fn = lib.makeFunction(name: name) else { fail("no function \(name)") }
+    do { return try dev.makeComputePipelineState(function: fn) } catch { fail("pipeline \(name): \(error)") }
+}
+guard let queue = dev.makeCommandQueue() else { fail("no command queue") }
+print("device=\(dev.name)")
+let branchy = pipeline("branchy")
+for (name, p) in [("light", pipeline("light")), ("heavy", pipeline("heavy")), ("branchy", branchy)] {
+    print("kernel=\(name) threadExecutionWidth=\(p.threadExecutionWidth) " +
+          "maxTotalThreadsPerThreadgroup=\(p.maxTotalThreadsPerThreadgroup)")
+}
+
+func median(_ x: [Double]) -&gt; Double { let s = x.sorted(); return s[s.count / 2] }
+let reps = 21, tg = 256                      // 21 timed runs after one warm-up; 256 threads per threadgroup
+var iters: UInt32 = 2000                     // loop trips per path, so the branch body dominates
+
+for lg in [18, 20, 22] {
+    let n = 1 &lt;&lt; lg
+    guard let a = dev.makeBuffer(length: n * 4, options: .storageModeShared),
+          let c = dev.makeBuffer(length: n * 4, options: .storageModeShared) else { fail("buffers") }
+    let pa = a.contents().bindMemory(to: Float.self, capacity: n)
+    for i in 0..&lt;n { pa[i] = Float(i % 97) * 0.01 }
+    var ms: [Double] = []
+    for m in 0..&lt;3 {
+        var times: [Double] = []
+        for r in 0...reps {                                          // r == 0 is the warm-up
+            guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { fail("encoder") }
+            enc.setComputePipelineState(branchy)
+            enc.setBuffer(a, offset: 0, index: 0)
+            enc.setBuffer(c, offset: 0, index: 1)
+            var mode = UInt32(m)
+            enc.setBytes(&amp;iters, length: 4, index: 2)
+            enc.setBytes(&amp;mode, length: 4, index: 3)
+            enc.dispatchThreadgroups(MTLSize(width: n / tg, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
+            enc.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+            if cb.status != .completed { fail("command buffer: \(String(describing: cb.error))") }
+            if r &gt; 0 { times.append((cb.gpuEndTime - cb.gpuStartTime) * 1e3) }   // seconds to ms
+        }
+        ms.append(median(times))
+    }
+    print(String(format: "n=2^%d  uniform_ms=%7.3f  per_group_ms=%7.3f  per_lane_ms=%7.3f  per_lane/uniform=%.2f",
+                 lg, ms[0], ms[1], ms[2], ms[2] / ms[0]))
+}</pre></li>
+      <li><span lang="zh-CN">编译并运行。下面是实验 Mac（Apple M5，macOS 27.2，Apple Swift 6.4.2）在 2026-10-31（本机时间）的实测，不是计算值；这是连续三次运行中的第一次，另外两次每个数相差不到 1%：</span><span lang="en">Build and run it. These are measurements on the lab Mac (Apple M5, macOS 27.2, Apple Swift 6.4.2) on 2026-10-31 (local time), not computed values; this is the first of three consecutive runs, and every figure in the other two was within 1% of it:</span><pre>$ swiftc -O simd_diverge.swift -o simd_diverge
+$ ./simd_diverge
+device=Apple M5
+kernel=light threadExecutionWidth=32 maxTotalThreadsPerThreadgroup=1024
+kernel=heavy threadExecutionWidth=32 maxTotalThreadsPerThreadgroup=1024
+kernel=branchy threadExecutionWidth=32 maxTotalThreadsPerThreadgroup=1024
+n=2^18  uniform_ms=  1.448  per_group_ms=  1.462  per_lane_ms=  2.859  per_lane/uniform=1.97
+n=2^20  uniform_ms=  5.697  per_group_ms=  5.759  per_lane_ms= 11.342  per_lane/uniform=1.99
+n=2^22  uniform_ms= 22.725  per_group_ms= 22.836  per_lane_ms= 45.450  per_lane/uniform=2.00</pre></li>
+      <li><span lang="zh-CN">读懂上限。三个内核的 <code>threadExecutionWidth</code> 都是 32：Apple GPU 的 SIMD-group 和 warp 一样宽，分支发散的单位就是这 32 个 lane。<code>maxTotalThreadsPerThreadgroup</code> 三个都是 1024，连 <code>heavy</code> 也是。Apple 的文档说这个值在创建 pipeline 时算出，不同的 pipeline 可以不同，所以它挂在 pipeline 上而不是 device 上；但在这台 M5 上，128 个存活值没有让它降下来。换成 CUDA，同样的内核会让 ptxas 报出很多寄存器，每 block 能用的线程数随之受限（Lab A）。一个可能的解释是 Apple 从 M3 起的 Dynamic Caching：Apple 说它「在硬件里实时分配局部内存」，每个任务只用正好需要的量（Apple Newsroom，2023-10-30）；它是否就是这里的原因，属于推断，Apple 没有公开寄存器分配的细节。</span><span lang="en">Read the limits. All three kernels report a <code>threadExecutionWidth</code> of 32: an Apple GPU’s SIMD-group is as wide as a warp, and those 32 lanes are the unit of divergence. All three report a <code>maxTotalThreadsPerThreadgroup</code> of 1024, <code>heavy</code> included. Apple’s documentation says this value is calculated when the pipeline is created and may differ between pipeline objects, which is why it lives on the pipeline rather than the device; yet on this M5, 128 live values did not lower it. In CUDA, the same kernel would make ptxas report many registers, and the threads usable per block would be limited accordingly (Lab A). One possible explanation is the Dynamic Caching that Apple introduced with M3: Apple says it “allocates the use of local memory in hardware in real time”, so each task uses only the amount it needs (Apple Newsroom, 2023-10-30); whether that is the reason here is an inference, since Apple publishes no details of register allocation.</span></li>
+      <li><span lang="zh-CN">读懂分支发散。三次运行、三个规模，<code>per_lane/uniform</code> 都在 1.97–2.00：相邻 lane 走不同路径时，每个 SIMD-group 把 A 和 B 各执行一遍，时间正好加倍。<code>per_group</code> 和 <code>uniform</code> 相差不到 1%：一半线程走 A、一半走 B，和逐 lane 时完全一样多，但每个 SIMD-group 内部一致，所以几乎不花额外的时间。这就是编程指南那句「发散只发生在一个 warp 之内」的实测版本。</span><span lang="en">Read the divergence. Across three runs and three sizes, <code>per_lane/uniform</code> stayed between 1.97 and 2.00: when neighbouring lanes take different paths, each SIMD-group executes A and B in turn and the time exactly doubles. <code>per_group</code> and <code>uniform</code> differ by less than 1%: half the threads take A and half take B, exactly as many as in the per-lane case, but each SIMD-group is uniform inside, so almost no extra time is spent. This is the measured version of the programming guide’s sentence that divergence occurs only within a warp.</span></li>
+      <li><span lang="zh-CN">读懂规模。n 每乘 4，时间几乎正好乘 4（1.44、5.70、22.73 ms）：从 2<sup>18</sup> 起 GPU 已经被铺满，多出来的线程只是排成更多波（概念 6）。这些内核几乎不读内存，每个线程做 2000 次相互依赖的 FMA，所以这里量到的是算术吞吐，不是带宽（推断）。</span><span lang="en">Read the scaling. Each time n is multiplied by 4, the time is multiplied by almost exactly 4 (1.44, 5.70, 22.73 ms): from 2<sup>18</sup> on the GPU is already full, and extra threads simply form more waves (concept 6). These kernels hardly touch memory and each thread does 2000 dependent FMAs, so what is measured here is arithmetic throughput, not bandwidth (an inference).</span></li>
+    </ol>
+    <div class="note" lang="zh-CN">交付物：Lab A 在 T4 上的完整输出、两次编译的 ptxas 输出（默认和 <code>-maxrregcount=32</code>）和 <code>nvcc --version</code> 的版本；Lab B 在你的 Mac 上连续三次运行的输出；一张表，每个规模一行，列出 T4 和 M5 的 <code>per_lane/uniform</code> 和 <code>per_warp</code>（或 <code>per_group</code>）对 <code>uniform</code> 的比值；以及 10 行以内的解释：occupancy 一列里每处下降是哪个限制因素造成的，压寄存器换来了什么、付出了什么，为什么两台机器上逐 warp 分支都几乎不花钱。</div>
+    <div class="note" lang="en">Deliverables: the full Lab A output from the T4, the ptxas output of both builds (default and <code>-maxrregcount=32</code>) and the version from <code>nvcc --version</code>; the output of three consecutive Lab B runs on your Mac; one table with a row per size giving, for the T4 and the M5, <code>per_lane/uniform</code> and the ratio of <code>per_warp</code> (or <code>per_group</code>) to <code>uniform</code>; and an explanation in 10 lines or fewer of which limiter causes each drop in the occupancy columns, what squeezing registers bought and what it cost, and why a per-warp branch costs almost nothing on both machines.</div>
+  </div>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+  <form class="quiz" data-quiz="gpu/phase-2">
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">1. 一个内核每线程用 64 个寄存器，每 block 256 个线程，不用 shared memory。在 T4（<code>sm_75</code>）上它的理论 occupancy 是多少？</p>
+      <p lang="en">1. A kernel uses 64 registers per thread, 256 threads per block and no shared memory. What is its theoretical occupancy on a T4 (<code>sm_75</code>)?</p>
+      <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">50%：每线程超过 32 个寄存器就到不了满载</span><span lang="en">50%: above 32 registers per thread, full occupancy is out of reach</span></label>
+      <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">100%：每 warp 2048 个寄存器，65536 / 2048 = 32 个 warp，正好是 T4 每 SM 的上限</span><span lang="en">100%: 2048 registers per warp, and 65536 / 2048 = 32 warps, exactly the T4’s per-SM limit</span></label>
+      <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">25%：每 SM 只能放 1 个 256 线程的 block</span><span lang="en">25%: an SM holds only one 256-thread block</span></label>
+      <div class="why" hidden><span lang="zh-CN">「32 个寄存器才能满载」是每 SM 2048 个线程的 GPU 上的数（Best Practices Guide 用 7.0 举的例子），T4 每 SM 只有 1024 个线程，所以 a 套错了架构。一个 block 用 256 × 64 = 16384 个寄存器，SM 放得下 4 个，不是 1 个，所以 c 不对。4 个 block 是 32 个 warp，等于上限，100%。同一个内核在 <code>sm_89</code> 上只有 32 / 48 ≈ 67%。</span><span lang="en">“32 registers for full occupancy” holds on a GPU with 2048 threads per SM (the Best Practices Guide’s example uses 7.0), but a T4 has only 1024 threads per SM, so a applies the wrong architecture. A block uses 256 × 64 = 16,384 registers, so the SM holds 4 of them, not 1, which rules out c. 4 blocks are 32 warps, the limit, so 100%. The same kernel on <code>sm_89</code> reaches only 32 / 48 ≈ 67%.</span></div>
+    </div>
+    <div class="q" data-answer="c">
+      <p lang="zh-CN">2. 两个内核都让一半线程走路径 A、一半走 B，两条路径代价相同。内核 X 的条件是 <code>threadIdx.x % 2 == 0</code>，内核 Y 的条件是 <code>(threadIdx.x / 32) % 2 == 0</code>。哪个更快？</p>
+      <p lang="en">2. Two kernels both send half their threads down path A and half down B, and the paths cost the same. Kernel X branches on <code>threadIdx.x % 2 == 0</code>, kernel Y on <code>(threadIdx.x / 32) % 2 == 0</code>. Which is faster?</p>
+      <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">一样快：两者走 A 和走 B 的线程一样多</span><span lang="en">Equally fast: both have as many threads on A as on B</span></label>
+      <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">X 更快：相邻线程交替，负载更均衡</span><span lang="en">X: alternating neighbours balances the load better</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">Y 更快，约快一倍：Y 的每个 warp 只走一条路，X 的每个 warp 两条都要走</span><span lang="en">Y, by about a factor of two: each warp of Y takes one path, while each warp of X has to walk both</span></label>
+      <div class="why" hidden><span lang="zh-CN">发散只发生在一个 warp 之内，代价看的是每个 warp 里有没有两种走法，不是整个 grid 的线程数，所以 a 不对。X 恰好让每个 warp 都发散，负载「均衡」反而是最坏的情况，所以 b 不对。Lab B 在 M5 上量到逐 lane 是 2.00 倍、逐 SIMD-group 是 1.00 倍。</span><span lang="en">Divergence occurs only within a warp, so the cost depends on whether each warp contains both choices, not on thread counts across the grid, which rules out a. X makes every single warp diverge, so its “balance” is the worst case, which rules out b. Lab B measured 2.00 times per lane and 1.00 times per SIMD-group on the M5.</span></div>
+    </div>
+    <div class="q" data-answer="b">
+      <p lang="zh-CN">3. 一段为 Pascal 写的 warp 内归约，通过 shared memory 交换数据，没有任何同步，靠「一个 warp 齐步走」保证正确。在 T4 上它会怎样？</p>
+      <p lang="en">3. An intra-warp reduction written for Pascal exchanges data through shared memory with no synchronisation at all, relying on the warp moving in lockstep. What happens on a T4?</p>
+      <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">仍然正确：warp 还是 32 个线程，硬件仍是 SIMT</span><span lang="en">Still correct: a warp is still 32 threads and the hardware is still SIMT</span></label>
+      <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">可能出错：Volta 起线程可以在 warp 内分开调度，齐步走的假设不再成立；在读和写之间加 <code>__syncwarp()</code></span><span lang="en">It may break: from Volta on, threads can be scheduled apart within a warp and the lockstep assumption no longer holds; add <code>__syncwarp()</code> between the reads and the writes</span></label>
+      <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">编译不过：Volta 以后的编译器拒绝不带同步的 shared memory 访问</span><span lang="en">It does not compile: compilers for Volta on reject shared-memory accesses without synchronisation</span></label>
+      <div class="why" hidden><span lang="zh-CN">warp 的大小没变，但独立线程调度让每个线程有自己的程序计数器，同一个 warp 的线程可以不在同一条指令上，所以 a 的理由不成立。编译器不会检查这种数据竞争，代码照样编译，这正是它危险的地方，所以 c 不对。编程指南要求这类代码用 <code>__syncwarp()</code> 显式同步，概念 5 的例子就是这样写的。</span><span lang="en">The warp size did not change, but independent thread scheduling gives each thread its own program counter, so threads of one warp need not be on the same instruction, and a’s reasoning fails. The compiler does not check for this data race and the code compiles as before, which is exactly what makes it dangerous, so c is wrong. The programming guide requires such code to synchronise explicitly with <code>__syncwarp()</code>, as the example in concept 5 does.</span></div>
+    </div>
+    <div class="q" data-answer="a">
+      <p lang="zh-CN">4. ptxas 报告一个内核每线程用 96 个寄存器。你在 T4 上用 <code>&lt;&lt;&lt;grid, 1024&gt;&gt;&gt;</code> 启动它。会发生什么？</p>
+      <p lang="en">4. ptxas reports that a kernel uses 96 registers per thread. You launch it on a T4 with <code>&lt;&lt;&lt;grid, 1024&gt;&gt;&gt;</code>. What happens?</p>
+      <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">启动失败：一个 block 需要 98304 个寄存器，超过每 block 64 K 的上限；<code>cudaGetLastError</code> 报资源不足。改小 block，或者加 <code>__launch_bounds__(1024)</code> 让编译器按 1024 控制寄存器</span><span lang="en">The launch fails: one block needs 98,304 registers, above the 64 K per-block limit, and <code>cudaGetLastError</code> reports too many resources. Use smaller blocks, or add <code>__launch_bounds__(1024)</code> so the compiler budgets registers for 1024 threads</span></label>
+      <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">能运行，只是 occupancy 很低，每 SM 不到一个 block</span><span lang="en">It runs, only with very low occupancy, less than one block per SM</span></label>
+      <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">能运行：驱动在启动时自动把多出来的寄存器溢出到 local memory</span><span lang="en">It runs: the driver spills the extra registers to local memory automatically at launch</span></label>
+      <div class="why" hidden><span lang="zh-CN">一个 block 要么整块放上一个 SM，要么放不上，不存在「不到一个 block」，所以 b 不对。寄存器数是编译时由 ptxas 定下、写进启动描述符的，驱动在启动时不会重新分配寄存器，所以 c 不对。编程指南说，资源连一个 block 都不够时内核启动失败。</span><span lang="en">A block either fits on an SM whole or not at all; there is no “less than one block”, so b is wrong. The register count is fixed at build time by ptxas and written into the launch descriptor, and the driver does not reallocate registers at launch, so c is wrong. The programming guide says that if there are not enough resources for even one block, the kernel fails to launch.</span></div>
+    </div>
+    <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+    <div class="result"></div>
+  </form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+  <ul class="res">
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html">CUDA Programming Guide: Advanced Kernel Programming</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html">Programming Model</a> <span class="lvl" lang="zh-CN">官方文档，中级：Hardware Implementation、SIMT、独立线程调度、Hardware Multithreading；block 调度没有顺序保证（2026-10-31 读取）</span><span class="lvl" lang="en">Official docs, intermediate: Hardware Implementation, SIMT, independent thread scheduling, Hardware Multithreading; no ordering guarantee between blocks (read 2026-10-31)</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html">CUDA Programming Guide: Compute Capabilities</a> <span class="lvl" lang="zh-CN">参考：每个 compute capability 的驻留 warp、block、线程上限，寄存器和 shared memory 的容量，概念 1 和 3 的数字都出自这里</span><span class="lvl" lang="en">Reference: resident warps, blocks and threads, register and shared-memory capacity per compute capability; the numbers in concepts 1 and 3 come from here</span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/cpp-language-extensions.html">CUDA Programming Guide: C++ Language Extensions</a> <span class="lvl" lang="zh-CN">参考：<code>__syncwarp</code> 的语义和例子、<code>__launch_bounds__</code></span><span class="lvl" lang="en">Reference: the semantics and example of <code>__syncwarp</code>, <code>__launch_bounds__</code></span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html">CUDA C++ Best Practices Guide</a> <span class="lvl" lang="zh-CN">官方文档，中级：Calculating Occupancy（寄存器按 warp 取整到 256）、Register Pressure、Branching and Divergence、Branch Predication、nvcc 的 <code>--ptxas-options=-v</code></span><span class="lvl" lang="en">Official docs, intermediate: Calculating Occupancy (registers rounded to 256 per warp), Register Pressure, Branching and Divergence, Branch Predication, nvcc’s <code>--ptxas-options=-v</code></span></li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__OCCUPANCY.html">CUDA Runtime API: Occupancy</a> · <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/structcudaFuncAttributes.html">cudaFuncAttributes</a> <span class="lvl" lang="zh-CN">参考：<code>cudaOccupancyMaxActiveBlocksPerMultiprocessor</code> 的参数；<code>numRegs</code>、<code>localSizeBytes</code></span><span class="lvl" lang="en">Reference: the parameters of <code>cudaOccupancyMaxActiveBlocksPerMultiprocessor</code>; <code>numRegs</code>, <code>localSizeBytes</code></span></li>
+    <li><a href="https://docs.nvidia.com/cuda/turing-tuning-guide/index.html">Turing Tuning Guide</a> · <a href="https://docs.nvidia.com/cuda/ada-tuning-guide/index.html">Ada Tuning Guide</a> <span class="lvl" lang="zh-CN">官方文档：Turing 每 SM 4 个 warp 调度器、FMA 的 4 周期依赖延迟、16 个 warp 藏住算术延迟；两代的 occupancy 上限</span><span class="lvl" lang="en">Official docs: 4 warp schedulers per Turing SM, the 4-cycle dependent FMA latency, 16 warps to hide arithmetic latency; the occupancy limits of both generations</span></li>
+    <li><a href="https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/compute/clc5c0qmd.h">open-gpu-doc: clc5c0qmd.h</a> · <a href="https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/host/clc46f.h">clc46f.h</a> · <a href="https://github.com/NVIDIA/open-gpu-doc/blob/master/manuals/turing/tu104/dev_usermode.ref.txt">dev_usermode.ref.txt</a> <span class="lvl" lang="zh-CN">一手资料，高级：Turing 计算类的启动描述符（QMD）字段、GPFIFO 通道和 pushbuffer 格式、usermode 门铃寄存器，概念 6</span><span class="lvl" lang="en">Primary sources, advanced: the launch-descriptor (QMD) fields of Turing’s compute class, the GPFIFO channel and pushbuffer formats, the usermode doorbell register; concept 6</span></li>
+    <li><a href="https://developer.apple.com/documentation/metal/mtlcomputepipelinestate/maxtotalthreadsperthreadgroup">MTLComputePipelineState.maxTotalThreadsPerThreadgroup</a> · <a href="https://developer.apple.com/documentation/metal/mtlcomputepipelinestate/threadexecutionwidth">threadExecutionWidth</a> · <a href="https://www.apple.com/newsroom/2023/10/apple-unveils-m3-m3-pro-and-m3-max-the-most-advanced-chips-for-a-personal-computer/">Apple Newsroom: M3 and Dynamic Caching</a> <span class="lvl" lang="zh-CN">官方文档：两个 pipeline 属性的含义（上限可因 pipeline 而不同）；M3 起 GPU 的 Dynamic Caching，Lab B</span><span class="lvl" lang="en">Official docs: what the two pipeline properties mean (the limit may differ per pipeline); the Dynamic Caching of GPUs from M3 on; Lab B</span></li>
+    <li><a href="https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/">NVIDIA Technical Blog: Using CUDA Warp-Level Primitives</a> <span class="lvl" lang="zh-CN">二手资料，中级：独立线程调度之后怎样写 warp 内的同步和 <code>_sync</code> 系列函数，接 Phase 3</span><span class="lvl" lang="en">Secondary, intermediate: how to write intra-warp synchronisation and the <code>_sync</code> family of functions after independent thread scheduling; leads into Phase 3</span></li>
+  </ul>
+
+  <h2 id="books" lang="zh-CN">参考书目</h2><h2 id="books-en" lang="en">Bibliography</h2>
+  <ol class="books">
+    <li lang="zh-CN">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, 《Programming Massively Parallel Processors: A Hands-on Approach》, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">第 4 章「Compute architecture and scheduling」对应概念 1–6 和两个动画（SM 结构、block 调度、warp 与 SIMD 硬件、控制发散、warp 调度与延迟容忍、资源划分与 occupancy）；第 6 章「Performance considerations」对应概念 3 和 Lab A；第 10 章「Reduction」对应概念 4–5</span></li>
+    <li lang="en">Wen-mei W. Hwu, David B. Kirk, Izzat El Hajj, <em>Programming Massively Parallel Processors: A Hands-on Approach</em>, 5th ed., Morgan Kaufmann, 2026, ISBN 9780443439001. <span class="lvl">Chapter 4, “Compute architecture and scheduling”, matches concepts 1–6 and both diagrams (SM structure, block scheduling, warps and SIMD hardware, control divergence, warp scheduling and latency tolerance, resource partitioning and occupancy); Chapter 6, “Performance considerations”, matches concept 3 and Lab A; Chapter 10, “Reduction”, matches concepts 4–5</span></li>
+    <li lang="zh-CN">John Cheng, Max Grossman &amp; Ty McKercher, 《Professional CUDA C Programming》, Wrox (Wiley), 2014, ISBN 9781118739327. <span class="lvl">讲 CUDA 执行模型的一章对应概念 1–4（warp 执行、发散、资源划分、延迟隐藏、occupancy）；书早于 Volta，没有独立线程调度，读概念 5 时以编程指南为准</span></li>
+    <li lang="en">John Cheng, Max Grossman &amp; Ty McKercher, <em>Professional CUDA C Programming</em>, Wrox (Wiley), 2014, ISBN 9781118739327. <span class="lvl">The chapter on the CUDA execution model matches concepts 1–4 (warp execution, divergence, resource partitioning, latency hiding, occupancy); the book predates Volta and has no independent thread scheduling, so for concept 5 follow the programming guide</span></li>
+    <li lang="zh-CN">John L. Hennessy &amp; David A. Patterson, 《Computer Architecture: A Quantitative Approach》, 6th ed., Morgan Kaufmann, 2017 (Elsevier: November 23, 2017), ISBN 9780128119051（第 7 版，Hennessy、Patterson 和 Kozyrakis，2025-12-02，第 4 章和第 7 章标题不变）。 <span class="lvl">第 4 章「Data-Level Parallelism in Vector, SIMD, and GPU Architectures」对应概念 2 和 4（GPU 的多线程调度、条件分支的掩码执行）</span></li>
+    <li lang="en">John L. Hennessy &amp; David A. Patterson, <em>Computer Architecture: A Quantitative Approach</em>, 6th ed., Morgan Kaufmann, 2017 (Elsevier: November 23, 2017), ISBN 9780128119051 (a 7th edition, Hennessy, Patterson and Kozyrakis, 2025-12-02, keeps the chapter 4 and 7 titles). <span class="lvl">Chapter 4, “Data-Level Parallelism in Vector, SIMD, and GPU Architectures”, matches concepts 2 and 4 (multithreaded scheduling in GPUs, masked execution of conditional branches)</span></li>
+  </ol>
+
+  <nav class="pn">
+    <a href="../phase-1-memory-hierarchy/index.html">← <span lang="zh-CN">Phase 1 · 内存层次</span><span lang="en">Phase 1 · The Memory Hierarchy</span></a>
+    <a href="../phase-3-parallel-patterns/index.html"><span lang="zh-CN">Phase 3 · 并行模式</span><span lang="en">Phase 3 · Parallel Patterns</span> →</a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>

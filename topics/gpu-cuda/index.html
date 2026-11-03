@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GPU Programming with CUDA · Learning Garden</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script src="../../assets/theme.js"></script>
+<script src="../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../index.html"><span class="mark" aria-hidden="true"><img src="../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <span class="crumb current" aria-current="page">GPU Programming with CUDA</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <h1>GPU Programming with CUDA</h1>
+  <p class="lede" lang="zh-CN">目标：在一块真正的 NVIDIA GPU 上写出、测量并剖析 CUDA 内核，从 warp 一路理解到驱动；同一套思路在这台 Mac 上用 Metal 再做一遍。Mac 没有 NVIDIA GPU，所以 CUDA 实验在云端 GPU 上做（先用免费的 Colab T4，剖析阶段再租一台），每一页都配一个在本机运行的 Metal 对照实验。</p>
+  <p class="lede" lang="en">Goal: write, measure and profile CUDA kernels on a real NVIDIA GPU and understand the GPU from the warp up to the driver, then do the same in Metal on this Mac. The Mac has no NVIDIA GPU, so the CUDA labs run on a cloud GPU (a free Colab T4 first, a rented machine for the profiling phases), and every page carries a Metal twin that runs here.</p>
+
+  <div class="note" lang="zh-CN">
+    读者画像：做过 Parallel Programming（线程、内存模型、SIMD、roofline）和 Kernel Engineering（驱动、DMA、缺页）。每个 phase 大约 1–2 周（每天 1–2 小时）。CUDA 实验以 sm_75（T4）为最低目标；Metal 对照实验用 Swift 在运行时编译内核，只需 Command Line Tools。先看「实验环境」。
+  </div>
+  <div class="note" lang="en">
+    Reader: has done Parallel Programming (threads, memory models, SIMD, the roofline) and Kernel Engineering (drivers, DMA, page faults). Each phase is about 1–2 weeks at 1–2 hours a day. The CUDA labs target sm_75 (a T4) as the minimum; the Metal twins compile their kernels at runtime from Swift and need only the Command Line Tools. Start with the lab environment page.
+  </div>
+
+  <h2 lang="zh-CN">路线图</h2><h2 lang="en">Roadmap</h2>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 300" data-interval="1400"
+         data-captions='["全图：八个阶段，左侧建立模型，中间学模式与性能，右侧进入系统层。点「播放」逐步点亮。",
+           "Phase 0 基础：为什么用 GPU、SIMT、grid/block/thread、第一个内核、计时与错误检查。",
+           "Phase 1 内存层次：全局、共享、寄存器、常量；合并访问、bank 冲突、分块矩阵乘。",
+           "Phase 2 执行与调度：SM、warp 调度、占用率、分支发散；启动时驱动在做什么。",
+           "Phase 3 并行模式：规约、scan、直方图、stencil；Thrust、CUB、cuBLAS。",
+           "Phase 4 性能剖析与优化：Nsight Systems 与 Nsight Compute、GPU roofline、tensor core。",
+           "Phase 5 流、图与并发：异步拷贝、流与事件、CUDA graphs、多 GPU 概览。",
+           "Phase 6 内存管理与宿主集成：统一内存、内存池、固定内存与 DMA、compute-sanitizer、cuda-gdb。",
+           "Phase 7 软件栈、可移植性与作品项目：PTX 与 SASS、容器、HIP/SYCL/Metal、PyTorch 自定义内核、作品项目。"]'
+         data-captions-en='["The whole picture: eight phases, the model on the left, patterns and performance in the middle, the systems layer on the right. Press Play to light them up one by one.",
+           "Phase 0 Foundations: why GPUs, SIMT, grid, block and thread, a first kernel, timing and error checking.",
+           "Phase 1 The memory hierarchy: global, shared, registers, constant; coalescing, bank conflicts, tiled matrix multiply.",
+           "Phase 2 Execution and scheduling: SMs, warp scheduling, occupancy, divergence; what the driver does on launch.",
+           "Phase 3 Parallel patterns: reduction, scan, histogram, stencil; Thrust, CUB, cuBLAS.",
+           "Phase 4 Profiling and optimization: Nsight Systems and Nsight Compute, the GPU roofline, tensor cores.",
+           "Phase 5 Streams, graphs and concurrency: asynchronous copies, streams and events, CUDA graphs, multi-GPU in outline.",
+           "Phase 6 Memory management and host integration: unified memory, memory pools, pinned memory and DMA, compute-sanitizer, cuda-gdb.",
+           "Phase 7 The stack, portability and the capstone: PTX and SASS, containers, HIP, SYCL and Metal, custom kernels for PyTorch, the capstone."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="28" class="small" lang="zh-CN">模型</text><text x="20" y="28" class="small" lang="en">The model</text>
+      <text x="320" y="28" class="small" lang="zh-CN">模式与性能</text><text x="320" y="28" class="small" lang="en">Patterns and performance</text>
+      <text x="600" y="28" class="small" lang="zh-CN">系统层</text><text x="600" y="28" class="small" lang="en">The systems layer</text>
+      <line x1="300" y1="15" x2="300" y2="250" class="lane"/>
+      <line x1="580" y1="15" x2="580" y2="250" class="lane"/>
+
+      <g data-step="1"><rect class="box" x="20" y="50" width="120" height="60"/><text x="30" y="74">Phase 0</text><text x="30" y="94" class="small">Foundations</text></g>
+      <g data-step="2"><rect class="box" x="160" y="50" width="120" height="60"/><text x="170" y="74">Phase 1</text><text x="170" y="94" class="small">Memory</text></g>
+      <path data-step="2" class="arrow" d="M140 80 L160 80"/>
+      <path data-step="3" class="arrow" d="M220 110 L220 140 L80 140 L80 160"/>
+      <g data-step="3"><rect class="box" x="20" y="160" width="120" height="60"/><text x="30" y="184">Phase 2</text><text x="30" y="204" class="small">Scheduling</text></g>
+
+      <path data-step="4" class="arrow" d="M140 190 L370 190 L370 110"/>
+      <g data-step="4"><rect class="box" x="310" y="50" width="120" height="60"/><text x="320" y="74">Phase 3</text><text x="320" y="94" class="small">Patterns</text></g>
+      <g data-step="5"><rect class="box" x="450" y="50" width="120" height="60"/><text x="460" y="74">Phase 4</text><text x="460" y="94" class="small">Profiling</text></g>
+      <path data-step="5" class="arrow" d="M430 80 L450 80"/>
+
+      <path data-step="6" class="arrow" d="M570 80 L600 80"/>
+      <g data-step="6"><rect class="box" x="600" y="50" width="130" height="60"/><text x="610" y="74">Phase 5</text><text x="610" y="94" class="small">Streams · Graphs</text></g>
+      <g data-step="7"><rect class="box" x="750" y="50" width="130" height="60"/><text x="760" y="74">Phase 6</text><text x="760" y="94" class="small">Memory · Host</text></g>
+      <path data-step="7" class="arrow" d="M730 80 L750 80"/>
+      <path data-step="8" class="arrow" d="M815 110 L815 160"/>
+      <g data-step="8"><rect class="box" x="750" y="160" width="130" height="60"/><text x="760" y="184">Phase 7</text><text x="760" y="204" class="small">Stack · Capstone</text></g>
+
+      <text x="20" y="270" class="small" lang="zh-CN">每个阶段：目标 → 核心概念 → 对照表 → 动画 → 实验 A（<tspan style="fill: var(--cuda)">CUDA</tspan>，云端）与实验 B（<tspan style="fill: var(--metal)">Metal</tspan>，本机运行）→ 自测 → 资料 → 参考书目</text><text x="20" y="270" class="small" lang="en">Each phase: goals → core concepts → comparison → diagrams → Lab A (<tspan style="fill: var(--cuda)">CUDA</tspan>, in the cloud) and Lab B (<tspan style="fill: var(--metal)">Metal</tspan>, run on this Mac) → quiz → resources → bibliography</text>
+    </svg>
+  </div>
+
+  <section class="setup" data-setup="gpu" lang="zh-CN">
+    <div class="setup-text">
+      <h2>实验环境</h2>
+      <p>三层：免费的 Colab T4 做 Phase 0–3 的 CUDA 实验；从 Phase 4 起租一台带 SSH 的 GPU 机器跑 Nsight；Metal 对照实验在这台 Mac 上用 Swift 运行时编译内核，不需要 Xcode。租机器是花钱的决定，环境页给出一个预算估计。</p>
+      <p class="setup-ready">实验环境已建好。<a href="lab-setup/index.html">查看说明</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">设置实验环境</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="gpu"> 我已建好</label>
+    </div>
+  </section>
+  <section class="setup" data-setup="gpu" lang="en">
+    <div class="setup-text">
+      <h2>Lab environment</h2>
+      <p>Three tiers: the free Colab T4 for the CUDA labs of Phases 0–3; from Phase 4 a rented GPU machine with SSH for Nsight; the Metal twins on this Mac, compiling kernels at runtime from Swift, with no Xcode needed. Renting a machine costs money, so the environment page gives one budget estimate.</p>
+      <p class="setup-ready">Lab environment is ready. <a href="lab-setup/index.html">Open the guide</a></p>
+    </div>
+    <div class="setup-actions">
+      <a class="btn" href="lab-setup/index.html">Set up the lab</a>
+      <label class="setup-done"><input type="checkbox" data-setup-done="gpu"> Done</label>
+    </div>
+  </section>
+
+  <h2 lang="zh-CN">阶段</h2><h2 lang="en">Phases</h2>
+  <ol class="phases">
+    <li data-phase="gpu/phase-0"><span class="n">0</span><span><span class="t"><a href="phase-0-foundations/index.html">Foundations</a></span><br><span class="d" lang="zh-CN">为什么用 GPU、SIMT、grid/block/thread、第一个内核、计时与错误检查</span><span class="d" lang="en">Why GPUs, SIMT, grid, block and thread, a first kernel, timing and error checking</span></span><span class="st"></span></li>
+    <li data-phase="gpu/phase-1"><span class="n">1</span><span><span class="t"><a href="phase-1-memory-hierarchy/index.html">The Memory Hierarchy</a></span><br><span class="d" lang="zh-CN">全局、共享、寄存器、常量；合并访问、bank 冲突、分块矩阵乘、统一内存</span><span class="d" lang="en">Global, shared, registers, constant; coalescing, bank conflicts, tiled matmul, unified memory</span></span><span class="st"></span></li>
+    <li data-phase="gpu/phase-2"><span class="n">2</span><span><span class="t"><a href="phase-2-execution-and-scheduling/index.html">Execution &amp; Scheduling</a></span><br><span class="d" lang="zh-CN">SM、warp 调度、占用率、分支发散；启动时驱动在做什么</span><span class="d" lang="en">SMs, warp scheduling, occupancy, divergence; what the driver does on launch</span></span><span class="st"></span></li>
+    <li data-phase="gpu/phase-3"><span class="n">3</span><span><span class="t"><a href="phase-3-parallel-patterns/index.html">Parallel Patterns</a></span><br><span class="d" lang="zh-CN">规约、scan、直方图、stencil；Thrust、CUB、cuBLAS</span><span class="d" lang="en">Reduction, scan, histogram, stencil; Thrust, CUB, cuBLAS</span></span><span class="st"></span></li>
+    <li data-phase="gpu/phase-4"><span class="n">4</span><span><span class="t"><a href="phase-4-profiling-and-optimization/index.html">Profiling &amp; Optimization</a></span><br><span class="d" lang="zh-CN">Nsight Systems 与 Nsight Compute、GPU roofline、tensor core、cuBLAS 作为上限</span><span class="d" lang="en">Nsight Systems and Nsight Compute, the GPU roofline, tensor cores, cuBLAS as the ceiling</span></span><span class="st"></span></li>
+    <li data-phase="gpu/phase-5"><span class="n">5</span><span><span class="t"><a href="phase-5-streams-and-graphs/index.html">Streams, Graphs &amp; Concurrency</a></span><br><span class="d" lang="zh-CN">异步拷贝、流与事件、CUDA graphs、多 GPU 概览</span><span class="d" lang="en">Asynchronous copies, streams and events, CUDA graphs, multi-GPU in outline</span></span><span class="st"></span></li>
+    <li data-phase="gpu/phase-6"><span class="n">6</span><span><span class="t"><a href="phase-6-memory-management/index.html">Memory Management &amp; Host Integration</a></span><br><span class="d" lang="zh-CN">统一内存、内存池、固定内存与 DMA、compute-sanitizer、cuda-gdb</span><span class="d" lang="en">Unified memory, memory pools, pinned memory and DMA, compute-sanitizer, cuda-gdb</span></span><span class="st"></span></li>
+    <li data-phase="gpu/phase-7"><span class="n">7</span><span><span class="t"><a href="phase-7-stack-and-capstone/index.html">The Stack, Portability &amp; the Capstone</a></span><br><span class="d" lang="zh-CN">PTX 与 SASS、容器、HIP/SYCL/Metal、PyTorch 自定义内核、作品项目</span><span class="d" lang="en">PTX and SASS, containers, HIP, SYCL and Metal, custom kernels for PyTorch, the capstone</span></span><span class="st"></span></li>
+  </ol>
+
+  <section class="related" data-related="gpu-cuda" data-root="../../"></section>
+</div>
+<script src="../../assets/diagram.js"></script>
+<script src="../../assets/progress.js"></script>
+<script src="../../assets/topics.js"></script>
+<script src="../../assets/related.js"></script>
+</body>
+</html>

@@ -19,6 +19,9 @@
   --ros: #1f5fbf;
   --gz: #b43c0b;
   --par: #6b3fa0;   /* Parallel Programming: user space, your threads and the runtimes under them; ochre stays the kernel beneath */
+  /* GPU topic: plum = the NVIDIA/CUDA side, slate blue = the Apple/Metal side; failures are marked by glyph, not colour. */
+  --cuda: #8a3b78;
+  --metal: #4b5f8a;
   --ok: #1f6f4a;
   --warn: #9a6200;
   --radius: 6px;
@@ -52,6 +55,8 @@
     --accent-ink: #0d1a12;
     --linux: #e0a63a;
     --xnu: #8fa3ea; --ros: #7fb0ff; --gz: #f59e5b; --par: #b48cf0;
+    --cuda: #e0a0d2; /* plum: NVIDIA/CUDA side */
+    --metal: #a3b4d6; /* slate blue: Apple/Metal side */
     --ok: #5fbf8e;
     --warn: #e0a63a;
     --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
@@ -73,6 +78,8 @@
   --accent-ink: #0d1a12;
   --linux: #e0a63a;
   --xnu: #8fa3ea; --ros: #7fb0ff; --gz: #f59e5b; --par: #b48cf0;
+  --cuda: #e0a0d2; /* plum: NVIDIA/CUDA side */
+  --metal: #a3b4d6; /* slate blue: Apple/Metal side */
   --ok: #5fbf8e;
   --warn: #e0a63a;
   --field-top: #151d18; --field-bot: #111613; --bloom-paper: rgba(95,191,142,.06); --bloom-green: rgba(95,191,142,.14); --bloom-lime: rgba(196,214,140,.06); --bloom-low: rgba(95,191,142,.05);
@@ -171,6 +178,12 @@ body.scrolled .top button.theme, body.scrolled .top button.lang { border-color: 
 .top .crumb { text-decoration: none; color: var(--ink-2); }
 .top .crumb::before { content: "›"; color: var(--ink-3); margin: 0 10px 0 2px; font-weight: 400; }
 .top .spacer { flex: 1; }
+/* Wide screens: the at-rest header stays on one row; the current crumb shrinks with an ellipsis instead of wrapping. */
+@media (min-width: 801px) {
+  .top { flex-wrap: nowrap; }
+  .top .crumb { white-space: nowrap; flex: none; }
+  .top .crumb.current, .top .crumb[aria-current="page"] { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+}
 .top button.theme, .top button.lang {
   background: transparent; border: 1px solid var(--line); color: var(--ink-2);
   border-radius: 999px; height: 34px; font: inherit; cursor: pointer; line-height: 1;
@@ -288,6 +301,7 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .cmp th, .cmp td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .cmp th { font-weight: 600; color: var(--ink-2); font-size: 13px; }
 .cmp th.linux { color: var(--linux); } .cmp th.xnu { color: var(--xnu); } .cmp th.ros { color: var(--ros); } .cmp th.gz { color: var(--gz); } .cmp th.par { color: var(--par); }
+.cmp th.cuda { color: var(--cuda); } .cmp th.metal { color: var(--metal); } /* GPU topic: CUDA side plum, Metal side slate blue */
 .table-wrap { overflow-x: auto; }
 
 /* Diagram frame */
@@ -308,6 +322,7 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .diagram text.small { font-size: 11px; fill: var(--ink-3); }
 .diagram .box { fill: var(--surface-2); stroke: var(--line); stroke-width: 1.2; rx: 6; }
 .diagram .box.linux { stroke: var(--linux); } .diagram .box.xnu { stroke: var(--xnu); } .diagram .box.ros { stroke: var(--ros); } .diagram .box.gz { stroke: var(--gz); } .diagram .box.par { stroke: var(--par); }
+.diagram .box.cuda { stroke: var(--cuda); } .diagram .box.metal { stroke: var(--metal); } /* GPU topic: CUDA side plum, Metal side slate blue */
 .diagram .arrow { stroke: var(--ink-3); stroke-width: 1.6; fill: none; marker-end: url(#arr); }
 .diagram .lane { fill: none; stroke: var(--line); stroke-dasharray: 3 4; }
 .diagram [data-step] { transition: opacity .35s ease, fill .35s ease, stroke .35s ease, transform .35s ease; }
