@@ -15,6 +15,35 @@
   function setup(frame) {
     const svg = frame.querySelector('svg[data-diagram]');
     if (!svg) return;
+    // Phones: the SVG keeps a 720 px minimum inside a horizontal scroller (style.css);
+    // each step scrolls its lit parts into view, and the edge classes drive the fades.
+    const scroller = document.createElement('div');
+    scroller.className = 'diagram-scroll';
+    svg.parentNode.insertBefore(scroller, svg);
+    scroller.appendChild(svg);
+    const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function edges() {
+      const room = scroller.scrollWidth - scroller.clientWidth;
+      scroller.classList.toggle('can-left', room > 2 && scroller.scrollLeft > 2);
+      scroller.classList.toggle('can-right', room > 2 && scroller.scrollLeft < room - 2);
+    }
+    function follow() {
+      if (step === 0 || scroller.scrollWidth <= scroller.clientWidth + 2) return;
+      const box = scroller.getBoundingClientRect();
+      let l = Infinity, r = -Infinity;
+      for (const el of parts) {
+        if (!el.classList.contains('on')) continue;
+        const b = el.getBoundingClientRect();
+        if (!b.width && !b.height) continue;
+        l = Math.min(l, b.left); r = Math.max(r, b.right);
+      }
+      if (!isFinite(l)) return;
+      const w = scroller.clientWidth, x0 = l - box.left + scroller.scrollLeft, x1 = r - box.left + scroller.scrollLeft;
+      const target = (x1 - x0 <= w) ? (x0 + x1) / 2 - w / 2 : x0 - 12;
+      scroller.scrollTo({ left: Math.max(0, target), behavior: reduceMotion ? 'auto' : 'smooth' });
+    }
+    scroller.addEventListener('scroll', edges, { passive: true });
+    window.addEventListener('resize', edges);
     const L = () => (window.LG ? window.LG.lang() : 'zh-CN');
     const T = (k) => (window.LG ? window.LG.t(k) : ({ play: '▶ 播放', pause: '❚❚ 暂停', prev: '← 上一步', next: '下一步 →', reset: '↺ 重置' })[k]);
     let captions = [];
@@ -58,6 +87,7 @@
       }
       caption.textContent = captions[step] || (step === 0 ? (captions[0] || '') : '');
       counter.textContent = step + ' / ' + max;
+      follow(); edges();
     }
     function go(n, manual) {
       if (manual) pause();
