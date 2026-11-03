@@ -16,7 +16,7 @@ window.LG_TOPICS = {
     { id: "gpu-cuda", path: "topics/gpu-cuda/index.html", status: "ready",
       title: { "zh-CN": "GPU 编程与 CUDA", en: "GPU Programming with CUDA" },
       line: { "zh-CN": "CUDA 执行模型、内存层次、GEMM、带宽与剖析；云端 GPU 实验，Metal 作本地对照。", en: "The CUDA execution model, memory hierarchy, GEMMs, bandwidth and profiling; labs on a cloud GPU, Metal as the local counterpart." } },
-    { id: "llm-inference-kernels", path: "topics/llm-inference-kernels/index.html", status: "planned",
+    { id: "llm-inference-kernels", path: "topics/llm-inference-kernels/index.html", status: "ready",
       title: { "zh-CN": "推理引擎与 GPU 内核（SGLang）", en: "LLM Inference Kernels (SGLang)" },
       line: { "zh-CN": "RadixAttention、prefill/decode、CUDA graphs、MoE、融合与量化如何对 GPU 内核提出要求，以及内核工程师从哪里切入。", en: "How RadixAttention, prefill/decode, CUDA graphs, MoE, fusion and quantization place requirements on GPU kernels, and where a kernel engineer plugs in." } }
   ],
