@@ -114,6 +114,41 @@
     </div>
     <p class="card-related" data-root=""></p>
   </article>
+  <article class="topic-card" aria-labelledby="t-par" data-topic-id="parallel-programming">
+    <figure class="topic-art" aria-hidden="true">
+      <svg viewBox="20 12 320 216" preserveAspectRatio="xMaxYMin meet">
+        <!-- ten cores as a 4 + 6 grid, one shared cache line crossing two of them -->
+        <g class="art-node">
+          <rect x="60" y="40" width="44" height="44" rx="8"/><rect x="112" y="40" width="44" height="44" rx="8"/><rect x="164" y="40" width="44" height="44" rx="8"/><rect x="216" y="40" width="44" height="44" rx="8"/>
+          <rect x="60" y="120" width="34" height="34" rx="7"/><rect x="102" y="120" width="34" height="34" rx="7"/><rect x="144" y="120" width="34" height="34" rx="7"/><rect x="186" y="120" width="34" height="34" rx="7"/><rect x="228" y="120" width="34" height="34" rx="7"/><rect x="270" y="120" width="34" height="34" rx="7"/>
+        </g>
+        <rect class="art-hub" x="60" y="178" width="244" height="26" rx="6"/>
+        <path class="art-path" d="M82 84 L82 178 M134 84 L134 178"/>
+        <circle class="art-dot" cx="82" cy="178" r="4"/>
+        <circle class="art-dot" cx="134" cy="178" r="4"/>
+      </svg>
+    </figure>
+    <h2 id="t-par"><a href="topics/parallel-programming/index.html">Parallel Programming</a></h2>
+    <p class="what" lang="zh-CN">共享内存并行：线程、锁、内存模型、无锁结构、OpenMP 与 NEON，每一步都在这台 Mac 上实测。八个阶段。</p>
+    <p class="what" lang="en">Shared-memory parallelism: threads, locks, memory models, lock-free structures, OpenMP and NEON, every step measured on this Mac. Eight phases.</p>
+    <div class="track" data-topic="par">
+      <svg viewBox="0 0 900 120" role="group" aria-labelledby="track-par-title">
+        <title id="track-par-title">Parallel Programming: progress across eight phases / 八个阶段的进度</title>
+        <path class="bed-line" d="M50 50 L850 50"/>
+        <path class="grown" data-track d="M50 50 L50 50"/>
+        <a href="topics/parallel-programming/phase-0-foundations/index.html"><rect x="0" y="0" width="114" height="120" fill="transparent"/><circle class="plot" data-phase="par/phase-0" data-href="topics/parallel-programming/phase-0-foundations/index.html" data-title="Phase 0 · Foundations" cx="50" cy="50" r="11"/><text class="n" x="50" y="22" text-anchor="middle">0</text><text data-phase-label="par/phase-0" x="50" y="88" text-anchor="middle" lang="zh-CN">基础</text><text data-phase-label="par/phase-0" x="50" y="88" text-anchor="middle" lang="en">Foundations</text></a>
+        <a href="topics/parallel-programming/phase-1-threads-and-the-os/index.html"><rect x="114" y="0" width="114" height="120" fill="transparent"/><circle class="plot" data-phase="par/phase-1" data-href="topics/parallel-programming/phase-1-threads-and-the-os/index.html" data-title="Phase 1 · Threads &amp; the OS" cx="164" cy="50" r="11"/><text class="n" x="164" y="22" text-anchor="middle">1</text><text data-phase-label="par/phase-1" x="164" y="88" text-anchor="middle" lang="zh-CN">线程与 OS</text><text data-phase-label="par/phase-1" x="164" y="88" text-anchor="middle" lang="en">Threads &amp; OS</text></a>
+        <a href="topics/parallel-programming/phase-2-synchronization/index.html"><rect x="228" y="0" width="114" height="120" fill="transparent"/><circle class="plot" data-phase="par/phase-2" data-href="topics/parallel-programming/phase-2-synchronization/index.html" data-title="Phase 2 · Synchronization" cx="278" cy="50" r="11"/><text class="n" x="278" y="22" text-anchor="middle">2</text><text data-phase-label="par/phase-2" x="278" y="88" text-anchor="middle" lang="zh-CN">同步</text><text data-phase-label="par/phase-2" x="278" y="88" text-anchor="middle" lang="en">Synchronization</text></a>
+        <a href="topics/parallel-programming/phase-3-memory-model-and-atomics/index.html"><rect x="342" y="0" width="114" height="120" fill="transparent"/><circle class="plot" data-phase="par/phase-3" data-href="topics/parallel-programming/phase-3-memory-model-and-atomics/index.html" data-title="Phase 3 · Memory Model &amp; Atomics" cx="392" cy="50" r="11"/><text class="n" x="392" y="22" text-anchor="middle">3</text><text data-phase-label="par/phase-3" x="392" y="88" text-anchor="middle" lang="zh-CN">内存模型</text><text data-phase-label="par/phase-3" x="392" y="88" text-anchor="middle" lang="en">Memory model</text></a>
+        <a href="topics/parallel-programming/phase-4-lock-free-structures/index.html"><rect x="456" y="0" width="114" height="120" fill="transparent"/><circle class="plot" data-phase="par/phase-4" data-href="topics/parallel-programming/phase-4-lock-free-structures/index.html" data-title="Phase 4 · Lock-free Structures" cx="506" cy="50" r="11"/><text class="n" x="506" y="22" text-anchor="middle">4</text><text data-phase-label="par/phase-4" x="506" y="88" text-anchor="middle" lang="zh-CN">无锁</text><text data-phase-label="par/phase-4" x="506" y="88" text-anchor="middle" lang="en">Lock-free</text></a>
+        <a href="topics/parallel-programming/phase-5-structured-parallelism/index.html"><rect x="570" y="0" width="114" height="120" fill="transparent"/><circle class="plot" data-phase="par/phase-5" data-href="topics/parallel-programming/phase-5-structured-parallelism/index.html" data-title="Phase 5 · Structured Parallelism" cx="620" cy="50" r="11"/><text class="n" x="620" y="22" text-anchor="middle">5</text><text data-phase-label="par/phase-5" x="620" y="88" text-anchor="middle" lang="zh-CN">OpenMP 与 GCD</text><text data-phase-label="par/phase-5" x="620" y="88" text-anchor="middle" lang="en">OpenMP &amp; GCD</text></a>
+        <a href="topics/parallel-programming/phase-6-simd/index.html"><rect x="684" y="0" width="114" height="120" fill="transparent"/><circle class="plot" data-phase="par/phase-6" data-href="topics/parallel-programming/phase-6-simd/index.html" data-title="Phase 6 · SIMD" cx="734" cy="50" r="11"/><text class="n" x="734" y="22" text-anchor="middle">6</text><text data-phase-label="par/phase-6" x="734" y="88" text-anchor="middle" lang="zh-CN">SIMD</text><text data-phase-label="par/phase-6" x="734" y="88" text-anchor="middle" lang="en">SIMD</text></a>
+        <a href="topics/parallel-programming/phase-7-measurement-and-capstone/index.html"><rect x="798" y="0" width="102" height="120" fill="transparent"/><circle class="plot" data-phase="par/phase-7" data-href="topics/parallel-programming/phase-7-measurement-and-capstone/index.html" data-title="Phase 7 · Measurement &amp; Capstone" cx="848" cy="50" r="11"/><text class="n" x="848" y="22" text-anchor="middle">7</text><text data-phase-label="par/phase-7" x="848" y="88" text-anchor="middle" lang="zh-CN">测量</text><text data-phase-label="par/phase-7" x="848" y="88" text-anchor="middle" lang="en">Measurement</text></a>
+      </svg>
+      <p class="next" data-next>从这里开始：<a href="topics/parallel-programming/phase-0-foundations/index.html">Phase 0 · Foundations</a></p>
+    </div>
+    <p class="card-related" data-root=""></p>
+  </article>
   </div>
   <div class="legend" lang="zh-CN"><span><i class="done"></i>自测全对</span><span><i class="now"></i>正在学</span><span><i></i>还没到</span></div>
   <div class="legend" lang="en"><span><i class="done"></i>Quiz passed</span><span><i class="now"></i>In progress</span><span><i></i>Not yet</span></div>

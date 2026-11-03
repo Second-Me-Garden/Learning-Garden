@@ -10,7 +10,7 @@ window.LG_TOPICS = {
     { id: "ros2", path: "topics/ros2/index.html", status: "ready",
       title: { "zh-CN": "ROS 2", en: "ROS 2" },
       line: { "zh-CN": "机器人中间件：节点、话题、执行器、实时性；Gazebo 仿真实验。", en: "Robot middleware: nodes, topics, executors, real-time behaviour; labs in Gazebo." } },
-    { id: "parallel-programming", path: "topics/parallel-programming/index.html", status: "planned",
+    { id: "parallel-programming", path: "topics/parallel-programming/index.html", status: "ready",
       title: { "zh-CN": "并行编程", en: "Parallel Programming" },
       line: { "zh-CN": "CPU 上的并行：线程、锁、内存模型、OpenMP、SIMD、性能测量。", en: "Parallelism on the CPU: threads, locks, memory models, OpenMP, SIMD, measurement." } },
     { id: "gpu-cuda", path: "topics/gpu-cuda/index.html", status: "planned",
