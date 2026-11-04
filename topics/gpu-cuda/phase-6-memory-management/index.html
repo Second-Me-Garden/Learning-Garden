@@ -59,11 +59,42 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">同一个 kernel、同一份数据，换一种分配方式，第一次启动可能慢得多，第二次又和 <code>cudaMalloc</code> 一样快；一个每步都分配、释放临时 buffer 的循环，会把多个流的并发掐断；一次越界写在框架里可能什么都不报。原因都不在 kernel 里，而在内存住在哪、什么时候搬、由谁分配和归还。那么：一页内存是怎样从 CPU 跑到 GPU 的，怎样提前告诉驱动它该去哪，怎样分配才不让所有流同步，出了错又怎样找到是哪一行？</p>
+    <p lang="en">The same kernel on the same data, with a different allocation, can be far slower on its first launch and then as fast as <code>cudaMalloc</code> on the second; a loop that allocates and frees a temporary buffer every step cuts off the concurrency of several streams; an out-of-bounds write inside a framework may report nothing at all. None of the causes is in the kernel; they lie in where memory lives, when it moves, and who allocates and returns it. So how does a page get from the CPU to the GPU, how do you tell the driver in advance where it should go, how do you allocate without making every stream synchronize, and when something breaks, how do you find the line?</p>
+    <p lang="zh-CN">概念 1 和 2 的缺页迁移与预取回答前两问，概念 4 的流序分配器回答第三问，概念 6 和 7 的 <code>compute-sanitizer</code> 与 <code>cuda-gdb</code> 回答最后一问。</p>
+    <p lang="en">Fault-and-migrate and prefetch in concepts 1 and 2 answer the first two questions, the stream-ordered allocator of concept 4 answers the third, and <code>compute-sanitizer</code> and <code>cuda-gdb</code> in concepts 6 and 7 answer the last.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 统一内存的几种形态，和第一次访问时的迁移</h3><h3 lang="en">1. The forms of unified memory, and migration on first touch</h3>
   <p lang="zh-CN">CUDA 编程指南（「Understanding Memory」和「Unified Memory」两节，2026-10-31 读取）把统一内存分成四种形态，用三个设备属性区分：<code>cudaDevAttrConcurrentManagedAccess</code> 为 1 表示完整支持，为 0 表示有限支持（Windows、WSL 和部分 Tegra）；完整支持时，<code>cudaDevAttrPageableMemoryAccess</code> 为 1 表示所有系统内存（连 <code>malloc</code> 的都算）都是统一内存，为 0 表示只有显式分配的 managed 内存才是；所有系统内存都统一时，<code>cudaDevAttrPageableMemoryAccessUsesHostPageTables</code> 说明一致性靠硬件（1，比如 Grace Hopper 的 ATS）还是软件（0，Linux 的 HMM）。指南写明 HMM 需要 Linux 内核 6.1.24+、6.2.11+ 或 6.3+，compute capability 7.5 以上，以及 535 以上的驱动并使用开源内核模块。Colab 的 T4 是插在 PCIe 上的独立卡，属于 CPU 和 GPU 各有一套页表的「软件一致」系统；它具体落在哪一种形态，要看那台虚拟机的内核和驱动，Lab A 的第一行输出会告诉你（推断：本页没有在 Colab 上查过）。</p>
   <p lang="en">The CUDA Programming Guide (the “Understanding Memory” and “Unified Memory” sections, read 2026-10-31) divides unified memory into four forms, told apart by three device attributes: <code>cudaDevAttrConcurrentManagedAccess</code> is 1 for full support and 0 for limited support (Windows, WSL and some Tegra devices); with full support, <code>cudaDevAttrPageableMemoryAccess</code> is 1 when all system memory, even memory from <code>malloc</code>, is unified memory, and 0 when only explicitly allocated managed memory is; when all system memory is unified, <code>cudaDevAttrPageableMemoryAccessUsesHostPageTables</code> says whether coherence comes from hardware (1, such as the ATS of Grace Hopper) or from software (0, Linux HMM). The guide states that HMM needs Linux kernel 6.1.24+, 6.2.11+ or 6.3+, compute capability 7.5 or higher, and a 535+ driver with the open kernel modules. The Colab T4 is a discrete card on PCIe, a “software-coherent” system in which the CPU and the GPU keep separate page tables; which form it falls into depends on the kernel and driver of that virtual machine, and the first output line of Lab A tells you (an inference: this page did not check it on Colab).</p>
   <p lang="zh-CN">在完整支持的系统上，<code>cudaMallocManaged</code> 只给出一段 CPU 和 GPU 共用的虚拟地址。指南的分配器对照表写明，它的物理页按 <strong>first touch / hint</strong> 放置：谁先访问一页，那一页就落在谁的内存里，除非用 advice 另行指定；落在 CPU 上的页用系统页大小（多数系统 4 KiB 或 64 KiB），驻留在 GPU 上的页是 2 MB（指南注明 GPU 端的页大小以后可能改变）。默认机制是「缺页再迁移」（fault-and-migrate）：GPU 访问一页物理上在主机的内存时缺页，驱动让主机那边的页表项失效、把数据搬过 PCIe、在 GPU 页表里建新项（Phase 1 的三步），然后线程才能继续。指南还提醒，GPU 上的 TLB 缺失比 CPU 上贵得多。这就是为什么「CPU 初始化、GPU 第一次跑」的那次 kernel 会慢得多：它的时间里装着成千上万次缺页处理。动画 (a) 一步一步画出这个过程。</p>
   <p lang="en">On a system with full support, <code>cudaMallocManaged</code> hands out a range of virtual addresses shared by CPU and GPU. The allocator table of the guide says its physical pages are placed by <strong>first touch / hint</strong>: whichever processor touches a page first gets that page in its memory, unless advice says otherwise; pages on the CPU use the system page size (4 KiB or 64 KiB on most systems), and pages resident on the GPU are 2 MB (the guide notes that GPU-side page sizes may change in future). The default mechanism is fault-and-migrate: when the GPU touches a page that physically lives on the host, it faults, the driver invalidates the host page-table entry, moves the data across PCIe and creates an entry in the GPU page table (Phase 1’s three steps), and only then can the thread continue. The guide also warns that TLB misses are much more expensive on the GPU than on the CPU. This is why the first kernel after a CPU initialisation is so much slower: its time contains thousands of fault services. Diagram (a) draws the process step by step.</p>
+  <div class="worked">
+    <p lang="zh-CN">用 Lab A 的数字把动画 (a) 走一遍。<code>N = 1 &lt;&lt; 26</code> 个 float，每个数组 2<sup>28</sup> 字节，即 256 MiB；<code>scale</code> 用 256 个线程一块，共 262 144 个 block。下面的页数是按指南给出的页大小做的算术，驱动实际处理多少次缺页、一次搬多少，本页没有测过（Lab A 未运行）：</p>
+    <p lang="en">Walk diagram (a) with Lab A’s numbers. <code>N = 1 &lt;&lt; 26</code> floats makes each array 2<sup>28</sup> bytes, 256 MiB; <code>scale</code> runs 256 threads per block, 262 144 blocks in all. The page counts below are arithmetic on the page sizes the guide gives; how many faults the driver actually services, and how much it moves per fault, was not measured here (Lab A was not run):</p>
+    <pre>x, y   = 2^26 floats × 4 B = 2^28 B = 256 MiB each
+blocks = 2^26 / 256        = 262 144
+x on host after fill():  2^28 / 4 KiB  = 65 536 pages
+                     or  2^28 / 64 KiB =  4 096 pages
+x resident on GPU:       2^28 / 2 MB (2^21 bytes) = 128 pages
+one 2 MB page = 2^21 / 4 B = 524 288 floats = 2048 blocks</pre>
+    <ol lang="zh-CN">
+      <li><code>cudaMallocManaged</code> 给 x 和 y 各一段 256 MiB 的虚拟地址，还没有物理页（第 1 步）。</li>
+      <li><code>fill(x)</code> 在 CPU 上写满 x：CPU 先碰，x 落在主机内存里，按系统页大小是 65 536 页（4 KiB）或 4096 页（64 KiB）（第 2 步）。</li>
+      <li>第一次 <code>scale</code>：block 0 的线程读 <code>x[0]</code>，GPU 页表里没有这一页，缺页，线程停住；驱动让主机页表项失效、经 PCIe 搬数据、在 GPU 页表里建项（第 3、4 步）。驻留后一个 2 MB 页覆盖 2048 个 block 的数据，整个 x 在 GPU 上是 128 页，这一路缺页处理都算在第一次启动的时间里。</li>
+      <li>y 第一次被访问是 kernel 在 GPU 上写它，所以按 first touch，y 的页直接在显存里建，不需要从主机搬（推断：指南的规则是谁先碰就落在谁那边，本页没有测这一步的代价）。</li>
+      <li>第二次 <code>scale</code>：x 和 y 都已在显存，不再缺页（第 5 步）。Lab A 的第 3 种做法在 kernel 前对 x 和 y 各调一次 <code>cudaMemPrefetchAsync(…, BYTES, gpu, 0, s)</code>，x 的 256 MiB 就在同一个流里整块搬完，第一次启动也不缺页（第 6 步）。第 2 种做法里，<code>mismatches(y)</code> 随后在 CPU 上读 y，缺页反向，y 迁回主机（第 7 步）；第 3 种做法则先把 y 预取回主机再读。</li>
+    </ol>
+    <ol lang="en">
+      <li><code>cudaMallocManaged</code> gives x and y each a 256 MiB range of virtual addresses with no physical pages yet (step 1).</li>
+      <li><code>fill(x)</code> writes all of x on the CPU: the CPU touches it first, so x lands in host memory, 65 536 pages at 4 KiB or 4096 pages at 64 KiB (step 2).</li>
+      <li>The first <code>scale</code>: a thread of block 0 reads <code>x[0]</code>, the GPU page table has no entry for it, the page faults and the thread stalls; the driver invalidates the host entry, moves the data across PCIe and creates a GPU entry (steps 3 and 4). Once resident, one 2 MB page holds the data of 2048 blocks and all of x is 128 pages on the GPU, and all of this fault servicing is counted in the first launch’s time.</li>
+      <li>y is first touched by the kernel writing it on the GPU, so by first touch its pages are created straight in device memory with nothing to move from the host (an inference: the guide’s rule is that pages land with whoever touches them first; this page did not measure the cost of this step).</li>
+      <li>The second <code>scale</code>: x and y are already in device memory and nothing faults (step 5). The third variant of Lab A instead calls <code>cudaMemPrefetchAsync(…, BYTES, gpu, 0, s)</code> once for x and once for y before the kernel, so the 256 MiB of x move in bulk in the same stream and even the first launch takes no faults (step 6). In variant 2, <code>mismatches(y)</code> then reads y on the CPU and the faults run the other way (step 7); variant 3 instead prefetches y to the host before reading it.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 24 章「Advanced practices and future evolution」（章名按 Elsevier 的目录核对；本页推断它和第 4 版同名一章一样讲主机与设备的交互和统一内存，没有核对章内内容）；Bryant 与 O'Hallaron《Computer Systems: A Programmer's Perspective》第 9 章「Virtual Memory」讲按需分页和缺页处理本身。</p>
   <p lang="en">Further reading: PMPP, 5th ed., Chapter 24, “Advanced practices and future evolution” (the title checked against Elsevier’s table of contents; this page infers that, like the chapter of the same name in the 4th edition, it covers host–device interaction and unified memory, and did not check its contents); Bryant and O'Hallaron, <em>Computer Systems: A Programmer's Perspective</em>, Chapter 9, “Virtual Memory”, on demand paging and fault handling themselves.</p>
 
@@ -169,6 +200,37 @@ compute-sanitizer --tool initcheck --track-unused-memory ./app</pre>
   <p lang="en">In order: let <code>assert</code> and the check macro expose the error first, use <code>compute-sanitizer</code> to find which kind of memory error it is and on which line, and only then use <code>cuda-gdb</code> to stop on that thread and look at its state. A Colab cell is not an interactive terminal, so <code>cuda-gdb</code> is better used over SSH on the rented machine (an inference).</p>
   <p lang="zh-CN">延伸阅读：参考书目里没有书讲 <code>cuda-gdb</code>；依据是 NVIDIA 的 CUDA-GDB 文档 v13.4（见资料）。GDB 本身的用法参考 GNU 的 GDB 手册。</p>
   <p lang="en">Further reading: no book in the bibliography covers <code>cuda-gdb</code>; this rests on NVIDIA’s CUDA-GDB documentation v13.4 (see Resources). For GDB itself, see the GNU GDB manual.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li><code>cudaMallocManaged</code> 只给虚拟地址，物理页落在第一个访问它的处理器那边，GPU 上驻留的页是 2 MB。</li>
+      <li>默认的缺页再迁移是驱动的兜底，第一次启动的时间里装着全部缺页处理；在同一个流里先 <code>cudaMemPrefetchAsync</code> 就能整块提前搬好。</li>
+      <li><code>cudaMemAdvise</code> 的 ReadMostly、PreferredLocation 和 AccessedBy 告诉驱动数据该复制、该住哪、该映射给谁。</li>
+      <li>pinned 内存让拷贝引擎直接 DMA，mapped（零拷贝）内存永远不搬，GPU 的每次访问都要过 PCIe 或 NVLink C2C。</li>
+      <li><code>cudaMalloc</code> 和 <code>cudaFree</code> 会在所有流之间同步，<code>cudaMallocAsync</code> 把分配变成流里的操作，release threshold 默认 0，要调高池才不会每次同步都缩回去。</li>
+      <li>查内存错误按顺序来：<code>assert</code> 暴露、<code>compute-sanitizer</code> 先 memcheck 再 racecheck 定位、<code>cuda-gdb</code> 停到那个线程上看。</li>
+    </ul>
+    <ul lang="en">
+      <li><code>cudaMallocManaged</code> hands out only virtual addresses; physical pages land with the first processor to touch them, and pages resident on the GPU are 2 MB.</li>
+      <li>The default fault-and-migrate is the driver’s fallback, and the first launch’s time contains all of the fault servicing; a <code>cudaMemPrefetchAsync</code> earlier in the same stream moves everything in bulk beforehand.</li>
+      <li>ReadMostly, PreferredLocation and AccessedBy in <code>cudaMemAdvise</code> tell the driver whether data should be copied, where it should live and whom it should be mapped for.</li>
+      <li>Pinned memory lets the copy engines DMA directly; mapped (zero-copy) memory never moves, and every GPU access to it crosses PCIe or NVLink C2C.</li>
+      <li><code>cudaMalloc</code> and <code>cudaFree</code> synchronize across all streams; <code>cudaMallocAsync</code> makes allocation a stream operation, and its release threshold defaults to 0, so raise it or the pool shrinks at every synchronization.</li>
+      <li>Hunt memory errors in order: <code>assert</code> exposes them, <code>compute-sanitizer</code> locates them with memcheck before racecheck, and <code>cuda-gdb</code> stops on that thread to look.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：统一内存就是零拷贝，数据不用搬。→ 实际：在 T4 这样的独立卡上，统一内存会把页迁到访问它的处理器那边，搬过去以后才用满显存带宽；永远不搬的是 mapped 内存。</li>
+      <li>误解：<code>nvidia-smi</code> 显示显存快满了，说明张量占了这么多。→ 实际：PyTorch 的缓存分配器留着空闲块，<code>memory_allocated()</code> 才是张量实际占用，<code>memory_reserved()</code> 是分配器管着的总量。</li>
+      <li>误解：racecheck 没报错，程序的内存访问就是对的。→ 实际：racecheck 只查 shared memory 上的冒险，不做内存访问错误检查，文档要求先用 memcheck。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: unified memory is zero-copy, so nothing moves. → Fact: on a discrete card such as the T4, unified memory migrates pages to whichever processor touches them, and only then gets full device bandwidth; mapped memory is the kind that never moves.</li>
+      <li>Myth: when <code>nvidia-smi</code> shows device memory nearly full, tensors are using that much. → Fact: PyTorch’s caching allocator keeps idle blocks; <code>memory_allocated()</code> is what tensors occupy and <code>memory_reserved()</code> is all the allocator holds.</li>
+      <li>Myth: if racecheck reports nothing, the memory accesses are correct. → Fact: racecheck checks only shared-memory hazards and does no memory-access error checking; the documentation says to run memcheck first.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：分配 API ↔ 内存住在哪 ↔ 什么时候用</h2><h2 id="compare-en" lang="en">Comparison: allocation API ↔ where memory lives ↔ when to use it</h2>
   <div class="table-wrap">

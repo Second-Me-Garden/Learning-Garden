@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">Phase 0 里一行 <code>std::jthread</code> 就多出一个线程，好像不要钱。可在这台 Mac 上，创建并 join 一个什么都不做的线程要约 6 µs，把同样的空工作交给 GCD 只要约 0.1 µs；100 个线程抢一把自旋锁要 4.7 s，10 个线程只要 0.70 s。从调用 <code>pthread_create</code> 到你的函数跑起第一条指令，中间发生了什么？谁决定它上哪个核，线程多于核时又是什么变慢了？</p>
+    <p lang="en">In Phase 0 one line of <code>std::jthread</code> gave you another thread, apparently for free. On this Mac, though, creating and joining a thread that does nothing costs about 6 µs, while handing the same empty work to GCD costs about 0.1 µs; 100 threads fighting over one spin lock take 4.7 s where 10 threads take 0.70 s. What happens between the call to <code>pthread_create</code> and the first instruction of your function? Who decides which core it runs on, and what gets slower when threads outnumber cores?</p>
+    <p lang="zh-CN">概念 2 一步步走完 <code>pthread_create</code>，概念 4 和 5 讲调度器与 QoS，概念 6 的线程池和概念 7 的超订说明成本该怎样摊、线程该开多少。</p>
+    <p lang="en">Concept 2 walks through <code>pthread_create</code> step by step, concepts 4 and 5 cover the scheduler and QoS, and the thread pool of concept 6 and the oversubscription of concept 7 say how to amortise the cost and how many threads to start.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 线程是什么</h3><h3 lang="en">1. What a thread is</h3>
   <p lang="zh-CN">一个线程是一条独立的执行流：它有自己的寄存器（包括程序计数器和栈指针）、自己的栈和自己的线程局部存储（TLS），而地址空间、打开的文件、全局变量和堆是同一进程里所有线程共享的。共享地址空间正是线程比进程便宜、也比进程危险的原因：两个线程不用拷贝就能读写同一块内存，也不加同步就能把它写坏（Phase 2）。</p>
   <p lang="en">A thread is an independent flow of execution: it has its own registers (including the program counter and the stack pointer), its own stack and its own thread-local storage (TLS), while the address space, open files, globals and the heap are shared by every thread in the process. The shared address space is exactly why threads are cheaper than processes and also more dangerous: two threads can read and write the same memory without copying it, and can also corrupt it without synchronization (Phase 2).</p>
@@ -82,6 +89,23 @@
   </ol>
   <p lang="zh-CN"><strong>Linux 上同样的形状</strong>（据 glibc 和 man 手册，本页未在 Linux 上执行）：glibc 用 <code>mmap</code> 分配栈和保护页，把 <code>struct pthread</code> 和静态 TLS 放在栈顶，然后调 <code>clone3</code>（较老的 glibc 用 <code>clone</code>），flags 包括 <code>CLONE_VM</code>、<code>CLONE_THREAD</code>、<code>CLONE_SETTLS</code>、<code>CLONE_CHILD_CLEARTID</code>。最后这个 flag 让内核在线程退出时把 TID 清零并做一次 futex 唤醒，join 就是等在这个 futex 上。默认栈大小来自 <code>RLIMIT_STACK</code>（常见 8 MB），设成 unlimited 时多数架构用 2 MB（<code>pthread_create(3)</code>）。</p>
   <p lang="en"><strong>The same shape on Linux</strong> (from glibc and the man pages; not run on Linux for this page): glibc allocates the stack and guard page with <code>mmap</code>, places <code>struct pthread</code> and the static TLS at the top of the stack, then calls <code>clone3</code> (older glibc uses <code>clone</code>) with flags including <code>CLONE_VM</code>, <code>CLONE_THREAD</code>, <code>CLONE_SETTLS</code> and <code>CLONE_CHILD_CLEARTID</code>. That last flag makes the kernel clear the TID and do a futex wake when the thread exits, and join simply waits on that futex. The default stack size comes from <code>RLIMIT_STACK</code> (commonly 8 MB); when it is unlimited, most architectures use 2 MB (<code>pthread_create(3)</code>).</p>
+  <div class="worked">
+    <p lang="zh-CN">跟着一次默认属性的 <code>pthread_create</code> 走到底（与下方图解 (a) 第 1 到 6 步相同），数字取自下面 <code>stack_tls.c</code> 的输出和 Lab A 的实测：</p>
+    <p lang="en">Follow one <code>pthread_create</code> with default attributes all the way through (the same path as steps 1 to 6 of diagram (a) below), with numbers from the <code>stack_tls.c</code> output below and from Lab A:</p>
+    <pre>one mach_vm_map:  [ guard 16 KB | stack 512 KB | pthread_t ]   low → high
+initial sp = address of pthread_t;  pthread_get_stacksize_np reports 524 KB
+create + run + exit + join, N = 1   : 16.04 µs per thread  (pthreads, Lab A)
+batches of N = 100                  :  5.77 µs per thread
+GCD, batches of N = 100             :  0.13 µs per block   → 5.77 / 0.13 ≈ 44</pre>
+    <ol lang="zh-CN">
+      <li>前四步就是上面列表的第 1 到 4 步：一次 mach_vm_map、一次 __bsdthread_create、内核建 Mach thread 并伪造寄存器、thread_resume 进运行队列，之后调度器把它放上某个核（本机 cpu 6 到 9 是 P 核，0 到 5 是 E 核）。</li>
+      <li>函数返回后 <code>__bsdthread_terminate</code> 请内核连栈一起回收，join 的一方从 <code>__ulock_wait</code> 醒来。单独一个线程走完这一整趟约 16 µs；100 个一批时摊到每个约 5.8 µs。GCD 的线程早就建好，一个 block 只付入队和唤醒，约 0.13 µs，便宜约 44 倍。</li>
+    </ol>
+    <ol lang="en">
+      <li>The first four steps are steps 1 to 4 of the list above: one mach_vm_map, one __bsdthread_create, the kernel building a Mach thread with faked registers, and thread_resume onto a run queue, after which the scheduler puts it on a core (here cpu 6 to 9 are P cores and 0 to 5 E cores).</li>
+      <li>When the function returns, <code>__bsdthread_terminate</code> asks the kernel to reclaim the thread together with its stack, and the joining side wakes from <code>__ulock_wait</code>. One thread on its own takes about 16 µs for the whole trip; in batches of 100 it is about 5.8 µs each. GCD’s threads already exist, so a block pays only for an enqueue and a wake-up, about 0.13 µs, about 44 times cheaper.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">下面这个程序把栈和 TLS 摆到眼前。两个工作线程用一把锁和一个条件变量互相等，保证它们同时活着：</p>
   <p lang="en">The program below puts the stack and the TLS in front of you. The two worker threads wait for each other with a lock and a condition variable, so that both are alive at the same time:</p>
 <pre data-lang="c" data-file="stack_tls.c">// stack_tls.c: 栈从哪来、多大；每个线程的 _Thread_local 变量在哪
@@ -364,10 +388,61 @@ exit 0
     <li lang="zh-CN"><strong>还有内存。</strong>每个线程至少占 512 KB 的栈地址空间、一页保护页，以及内核里的 Mach thread 和内核栈。100 个线程不算多；一万个线程在 64 位地址空间里也放得下，但每个线程碰过的栈页都是真实内存。</li>
     <li lang="en"><strong>There is memory too.</strong> Each thread takes at least 512 KB of stack address space, a guard page, and a Mach thread and kernel stack inside the kernel. 100 threads is not many; ten thousand would still fit in a 64-bit address space, but every stack page a thread has touched is real memory.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把 Lab B 的一次输出换算成每次加锁的时间。<code>spin</code> 模式总共加锁 200 万次，<code>compute</code> 模式总共 50 亿次加法：</p>
+    <p lang="en">Turn one Lab B output into time per lock acquisition. The <code>spin</code> mode makes 2 million acquisitions in total, the <code>compute</code> mode 5 billion additions in total:</p>
+    <pre>spin    T =   1 : wall 0.01 s                    → about 5 ns per acquisition
+spin    T =  10 : wall 0.70 s, cpu  6.70 s (9.6×) → 350 ns,  1803 involuntary switches
+spin    T = 100 : wall 4.70 s, cpu 45.59 s (9.7×) → 2.35 µs, 18776 involuntary switches
+compute T =  10 : wall 0.49 s      compute T = 100 : wall 0.44 s</pre>
+    <ol lang="zh-CN">
+      <li>1 个线程时没有人抢，锁字一直在自己的 L1 里，每次约 5 ns（墙钟只打印到 0.01 s，这个数只是量级）。</li>
+      <li>10 个线程正好 10 个核：每次 350 ns，锁所在的缓存行在核之间来回搬（Phase 0 的同一个现象）。CPU 时间是墙钟的 9.6 倍，10 个核都满着，几乎全在空转。</li>
+      <li>100 个线程：每次 2.35 µs，非自愿切换从 1803 次涨到 18776 次。持锁的线程时间片到了被换下，锁还在它手里，上核的线程只能把自己的时间片空转烧完，直到持锁者回来。</li>
+      <li>同样从 10 个线程到 100 个线程，互不等待的 <code>compute</code> 从 0.49 s 变成 0.44 s，一点没慢。贵的不是切换本身，而是线程在等一个不在核上的线程。</li>
+    </ol>
+    <ol lang="en">
+      <li>With 1 thread nobody contends, the lock word stays in its own L1, and each acquisition takes about 5 ns (wall time is printed only to 0.01 s, so this is an order of magnitude).</li>
+      <li>10 threads on exactly 10 cores: 350 ns each, as the lock’s cache line moves between cores (the same effect as in Phase 0). CPU time is 9.6 times the wall time: all 10 cores are busy, almost all of it spinning.</li>
+      <li>100 threads: 2.35 µs each, and involuntary switches rise from 1803 to 18776. The lock holder runs out of time slice and is switched out still holding the lock, and the threads that come on can only spin through their slices until the holder returns.</li>
+      <li>Going from 10 to 100 threads in the same way, the independent <code>compute</code> mode goes from 0.49 s to 0.44 s, no slower at all. What costs is not the switching itself but threads waiting for a thread that is not on a core.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">规则：CPU 密集的工作，线程数等于核心数（本机 10，或者只要 P 核时 4）；线程会阻塞在 I/O 上时才多开；拿不准就交给 GCD 或线程池，让它们按核心数控制并发。忙等的锁只能用在临界区极短、而且线程数不超过核心数的地方；Phase 2 会换成会睡眠的锁。</p>
   <p lang="en">The rule: for CPU-bound work, use as many threads as cores (10 here, or 4 when you want P cores only); use more only when threads block on I/O; when in doubt, hand the work to GCD or a thread pool and let them bound concurrency by the core count. A busy-waiting lock belongs only where the critical section is tiny and there are no more threads than cores; Phase 2 replaces it with locks that sleep.</p>
   <p lang="zh-CN">延伸阅读：McKenney Hardware and its Habits 一章的 Overheads 一节；Bos 第 4 章 Building Our Own Spin Lock（自旋锁什么时候合适）。</p>
   <p lang="en">Further reading: the section Overheads in McKenney’s chapter Hardware and its Habits; chapter 4 of Bos, Building Our Own Spin Lock (when a spin lock is appropriate).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>线程有自己的寄存器、栈和 TLS，和同一进程的其他线程共享地址空间、堆和打开的文件。</li>
+      <li>macOS 上的 <code>pthread_create</code> 先在用户态映射保护页、512 KB 栈和 <code>pthread_t</code>，再用 <code>__bsdthread_create</code> 让内核建 Mach thread，最后 <code>thread_resume</code> 交给调度器。</li>
+      <li>创建并 join 一个线程在 100 个一批时约 6 µs，GCD 的一个 block 约 0.1 µs，差距来自 GCD 的线程早已存在。</li>
+      <li>macOS 不让你绑核，QoS 只是提示：机器空闲时一个 Background 线程也会整段跑在 P 核上。</li>
+      <li>超订对互不等待的计算几乎免费，对抢同一把自旋锁的线程却会因为持锁者被抢占慢几倍到几十倍。</li>
+      <li>CPU 密集的工作，线程数等于核心数；拿不准就交给线程池或 GCD。</li>
+    </ul>
+    <ul lang="en">
+      <li>A thread has its own registers, stack and TLS, and shares the address space, heap and open files with the other threads of its process.</li>
+      <li>On macOS <code>pthread_create</code> first maps a guard page, a 512 KB stack and the <code>pthread_t</code> in user space, then has the kernel build a Mach thread through <code>__bsdthread_create</code>, and finally hands it to the scheduler with <code>thread_resume</code>.</li>
+      <li>Creating and joining a thread costs about 6 µs each in batches of 100 and a GCD block about 0.1 µs, because GCD’s threads already exist.</li>
+      <li>macOS will not let you pin a thread, and QoS is only a hint: on an idle machine even a Background thread can run on P cores throughout.</li>
+      <li>Oversubscription is nearly free for computation that never waits, but threads contending for one spin lock become several to dozens of times slower through lock-holder preemption.</li>
+      <li>For CPU-bound work use as many threads as cores; when in doubt, hand the work to a thread pool or GCD.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：设成 <code>QOS_CLASS_BACKGROUND</code> 的线程只在 E 核上跑。→ 实际：Apple 的文档只说「更可能」，概念 5 实测空闲时一个 Background 线程全程在 P 核上。</li>
+      <li>误解：线程比核多，上下文切换就会让程序明显变慢。→ 实际：Lab B 的 <code>compute</code> 从 10 个线程到 100 个线程是 0.49 s 到 0.44 s；变慢的是互相等待的线程，<code>spin</code> 从 0.70 s 到 4.70 s。</li>
+      <li>误解：工作线程的栈和主线程一样大。→ 实际：本机新线程默认 512 KB，主线程按 <code>ulimit -s</code> 是 8176 KB，主线程里能跑的深递归在工作线程里可能溢出。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a thread set to <code>QOS_CLASS_BACKGROUND</code> runs only on E cores. → Fact: Apple’s documentation says only “more likely”, and concept 5 measured one Background thread on an idle machine running on P cores throughout.</li>
+      <li>Myth: with more threads than cores, context switching makes a program noticeably slower. → Fact: Lab B’s <code>compute</code> goes from 0.49 s at 10 threads to 0.44 s at 100; what slows down is threads that wait for each other, with <code>spin</code> going from 0.70 s to 4.70 s.</li>
+      <li>Myth: a worker thread’s stack is as big as the main thread’s. → Fact: a new thread here gets 512 KB by default while the main thread gets 8176 KB from <code>ulimit -s</code>, so a deep recursion that works on the main thread may overflow on a worker.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：pthreads ↔ std::thread ↔ GCD</h2><h2 id="compare-en" lang="en">Comparison: pthreads ↔ std::thread ↔ GCD</h2>
   <div class="table-wrap">

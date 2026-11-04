@@ -53,6 +53,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">多颗 CPU 同时跑内核代码，中断还能随时插进来。两个 CPU 同时给一个计数器加一，结果可能只加了一次；一个 CPU 先写数据再写标志，另一个 CPU 可能先看到标志、后看到数据。同时，两个进程的地址空间彼此隔离，想交换数据只能请内核转交，而内核还得决定谁有权给谁发消息。</p>
+    <p lang="en">Several CPUs run kernel code at the same time, and interrupts can cut in at any moment. Two CPUs incrementing one counter at once may add only one; one CPU writes data and then a flag, and another CPU may see the flag before the data. Meanwhile, two processes have isolated address spaces, so they can exchange data only by asking the kernel to carry it, and the kernel must also decide who is allowed to send to whom.</p>
+    <p lang="zh-CN">概念 1–4 的锁、原子操作、RCU 和 per-CPU 数据回答第一个问题，概念 6–7 的 Mach port 与 port right 回答第二个。</p>
+    <p lang="en">Concepts 1–4, locks, atomics, RCU and per-CPU data, answer the first problem; concepts 6–7, Mach ports and port rights, answer the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. spinlock、mutex、rw_semaphore</h3><h3 lang="en">1. spinlock, mutex, rw_semaphore</h3>
   <p lang="zh-CN">锁分两大类：<strong>忙等</strong>（拿不到就原地转圈）和<strong>可睡眠</strong>（拿不到就把自己挂到等待队列、让出 CPU）。选择标准只有三条：当前上下文能不能睡眠（中断处理程序、持有其他 spinlock 时都不能）；临界区有多长（比两次上下文切换还短，转圈更划算）；读多写少还是读写相当。</p>
   <p lang="en">Locks fall into two broad classes: <strong>busy-waiting</strong> (if you cannot get it, spin in place) and <strong>sleeping</strong> (if you cannot get it, put yourself on a wait queue and give up the CPU). There are only three criteria for choosing: whether the current context can sleep (it cannot in an interrupt handler, nor while holding another spinlock); how long the critical section is (if it is shorter than two context switches, spinning is cheaper); and whether reads far outnumber writes or the two are about equal.</p>
@@ -72,6 +79,25 @@ CPU1:  if (smp_load_acquire(&amp;ready))   BUG_ON(data != 42);   /* 有了 acqui
   <p lang="en"><strong>release</strong> guarantees that all reads and writes before it become visible to others before this write; <strong>acquire</strong> guarantees that reads and writes after it do not move ahead of this read. ARM64 has dedicated instructions, <code>stlr</code> (store-release) and <code>ldar</code> (load-acquire), and Linux arm64’s <code>smp_store_release</code>/<code>smp_load_acquire</code> compile to them (<code>arch/arm64/include/asm/barrier.h</code>). When you need a full barrier, use <code>dmb ish</code> (inner shareable, covering all CPUs): <code>smp_mb()</code> = <code>dmb ish</code>, <code>smp_rmb()</code> = <code>dmb ishld</code>, <code>smp_wmb()</code> = <code>dmb ishst</code>. <code>dsb</code> is stronger (it waits for earlier accesses to actually complete, and is used for TLB/cache maintenance), and <code>isb</code> flushes the pipeline; neither is meant for ordinary concurrent code.</p>
   <p lang="zh-CN">读改写原子操作：ARMv8.0 用 LL/SC（<code>ldxr</code>/<code>stxr</code> 循环），ARMv8.1 LSE 提供单条指令 <code>ldadd</code>、<code>cas</code>、<code>swp</code>（带 <code>a</code>/<code>l</code>/<code>al</code> 后缀表示 acquire/release）。Linux 在启动时检测 CPU 是否支持 LSE，再用 alternatives 机制把 <code>atomic_*</code> 的实现打补丁成 LSE 版本；Apple M 系列支持 LSE。Linux 接口：<code>atomic_t</code>/<code>atomic_long_t</code>、<code>atomic_inc</code>、<code>atomic_fetch_add</code>、<code>cmpxchg</code>，以及只防编译器撕裂/合并、不加硬件屏障的 <code>READ_ONCE</code>/<code>WRITE_ONCE</code>。</p>
   <p lang="en">Read-modify-write atomics: ARMv8.0 uses LL/SC (an <code>ldxr</code>/<code>stxr</code> loop), and ARMv8.1 LSE provides single instructions <code>ldadd</code>, <code>cas</code>, <code>swp</code> (the <code>a</code>/<code>l</code>/<code>al</code> suffixes mean acquire/release). Linux detects at boot whether the CPU supports LSE, then uses the alternatives mechanism to patch the <code>atomic_*</code> implementations into LSE versions; Apple M-series chips support LSE. Linux interfaces: <code>atomic_t</code>/<code>atomic_long_t</code>, <code>atomic_inc</code>, <code>atomic_fetch_add</code>, <code>cmpxchg</code>, and <code>READ_ONCE</code>/<code>WRITE_ONCE</code>, which only prevent the compiler from tearing/merging accesses and add no hardware barrier.</p>
+  <div class="worked">
+    <p lang="zh-CN">一个计数器 <code>n = 5</code>，CPU0 和 CPU1 各执行一次 <code>n++</code>，期望结果是 7。</p>
+    <p lang="en">A counter holds <code>n = 5</code>, and CPU0 and CPU1 each execute <code>n++</code> once; the expected result is 7.</p>
+    <pre>plain n++:   ldr w1, [x0]  ;  add w1, w1, #1  ;  str w1, [x0]
+LL/SC:   1:  ldxr w1, [x0] ;  add w1, w1, #1  ;  stxr w2, w1, [x0] ;  cbnz w2, 1b
+LSE:         mov w2, #1    ;  ldadd w2, w1, [x0]</pre>
+    <ol lang="zh-CN">
+      <li>普通 <code>n++</code>：两个 CPU 都 <code>ldr</code> 读到 5，都加到 6，都 <code>str</code> 写回 6。结果是 6，丢了一次加法。</li>
+      <li>LL/SC：两个 CPU 都 <code>ldxr</code> 读到 5 并取得独占标记。CPU0 先 <code>stxr</code> 成功写入 6，状态 <code>w2 = 0</code>；这次写清掉了 CPU1 的独占标记，CPU1 的 <code>stxr</code> 不写内存并返回 <code>w2 = 1</code>，<code>cbnz</code> 让它重来，读到 6，写入 7。</li>
+      <li>LSE：<code>ldadd</code> 在一条指令里完成读、加、写，两个 CPU 的加法由硬件排成先后，结果 7，没有重试循环。</li>
+      <li>三种写法都只保证这一个字的原子性；若还要让 <code>n</code> 之前的写对别人先可见，要用带 release 语义的变体（<code>stlxr</code>、<code>ldaddl</code>）。</li>
+    </ol>
+    <ol lang="en">
+      <li>Plain <code>n++</code>: both CPUs <code>ldr</code> 5, both add up to 6, and both <code>str</code> 6 back. The result is 6, and one increment is lost.</li>
+      <li>LL/SC: both CPUs <code>ldxr</code> 5 and take an exclusive mark. CPU0 does <code>stxr</code> first, writes 6 and gets status <code>w2 = 0</code>; that write clears CPU1’s exclusive mark, so CPU1’s <code>stxr</code> writes nothing and returns <code>w2 = 1</code>, and <code>cbnz</code> makes it retry, read 6 and write 7.</li>
+      <li>LSE: <code>ldadd</code> reads, adds and writes in one instruction, and the hardware orders the two CPUs’ additions one after the other; the result is 7, with no retry loop.</li>
+      <li>All three forms make only this one word atomic; if writes before <code>n</code> must also become visible to others first, use a variant with release semantics (<code>stlxr</code>, <code>ldaddl</code>).</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>XNU</strong> 用 <code>os_atomic_*</code> 宏（<code>libkern/os/atomic_private.h</code> 一带），内存序作为显式参数写在调用里：<code>os_atomic_load(&amp;x, acquire)</code>、<code>os_atomic_store(&amp;x, 1, release)</code>、<code>os_atomic_inc(&amp;n, relaxed)</code>、<code>os_atomic_cmpxchg(&amp;x, old, new, acq_rel)</code>、<code>os_atomic_thread_fence(seq_cst)</code>。本质是 C11 <code>&lt;stdatomic.h&gt;</code> 的包装，内存序命名与 C11 一致——读 XNU 代码时，每个原子操作的语义都直接写在参数里，这一点比 Linux 的命名约定更直白。</p>
   <p lang="en"><strong>XNU</strong> uses the <code>os_atomic_*</code> macros (around <code>libkern/os/atomic_private.h</code>), with the memory order written as an explicit argument in the call: <code>os_atomic_load(&amp;x, acquire)</code>, <code>os_atomic_store(&amp;x, 1, release)</code>, <code>os_atomic_inc(&amp;n, relaxed)</code>, <code>os_atomic_cmpxchg(&amp;x, old, new, acq_rel)</code>, <code>os_atomic_thread_fence(seq_cst)</code>. They are essentially a wrapper around C11 <code>&lt;stdatomic.h&gt;</code>, and the memory-order names match C11 — when you read XNU code, the semantics of every atomic operation are written right in its arguments, which is more direct than Linux’s naming conventions.</p>
 
@@ -104,6 +130,24 @@ CPU1:  if (smp_load_acquire(&amp;ready))   BUG_ON(data != 42);   /* 有了 acqui
   <p lang="en">Sending and receiving use a single system call: <code>mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify)</code>. If <code>option</code> contains <code>MACH_SEND_MSG</code> it sends first, if it contains <code>MACH_RCV_MSG</code> it then receives, and with both it is one RPC: “send the request and wait for the reply”. A message starts with <code>mach_msg_header_t</code>: <code>msgh_bits</code> (how rights are transferred for the remote and local ports), <code>msgh_size</code>, <code>msgh_remote_port</code> (where it goes), <code>msgh_local_port</code> (the reply port), <code>msgh_id</code>. When <code>MACH_MSGH_BITS_COMPLEX</code> is set, the body can carry <strong>descriptors</strong>: port descriptors (which transfer rights) and <strong>out-of-line (OOL) memory</strong> descriptors — large data is not copied but becomes a <code>vm_map_copy</code> in the kernel, and on receipt it is mapped copy-on-write into the receiver’s address space (Phase 2’s COW pays off here).</p>
   <p lang="zh-CN">内核里的大致路径：arm64 上 <code>svc #0x80</code>、<code>x16</code> 为负数表示 Mach trap，<code>mach_msg_trap</code> 是 −31 号；进入 <code>osfmk/ipc/mach_msg.c</code> 后，消息被拷进内核的 <code>ipc_kmsg</code>，<code>ipc_kmsg_copyin</code> 把名字翻译成 port 指针并处理权限，<code>ipc_kmsg_send</code> → <code>ipc_mqueue_send</code> 入队（或直接交给正在等待的接收者），接收侧 <code>ipc_mqueue_receive</code> 出队，<code>ipc_kmsg_copyout</code> 把指针翻译成接收方的名字，最后拷回用户缓冲区。较新的 XNU（macOS 13 起）新增了 <code>mach_msg2_trap</code>，内部函数也有重命名，以源码为准。port 的消息队列有长度上限（<code>qlimit</code>，默认值较小），满了发送方阻塞或按超时返回。</p>
   <p lang="en">The approximate path in the kernel: on arm64, <code>svc #0x80</code> with a negative <code>x16</code> means a Mach trap, and <code>mach_msg_trap</code> is number −31; after entering <code>osfmk/ipc/mach_msg.c</code>, the message is copied into a kernel <code>ipc_kmsg</code>, <code>ipc_kmsg_copyin</code> translates names into port pointers and handles the rights, <code>ipc_kmsg_send</code> → <code>ipc_mqueue_send</code> enqueues it (or hands it directly to a waiting receiver), on the receiving side <code>ipc_mqueue_receive</code> dequeues it, <code>ipc_kmsg_copyout</code> translates pointers into the receiver’s names, and finally it is copied back to the user buffer. Newer XNU (from macOS 13) adds <code>mach_msg2_trap</code>, and internal functions have been renamed too; go by the source. A port’s message queue has a length limit (<code>qlimit</code>, with a small default); when it is full the sender blocks or returns on timeout.</p>
+  <div class="worked">
+    <p lang="zh-CN">把下方图解 A 那次 RPC 用真实的字段值写出来。task A 里 port P 的 send right 名字是 <code>0x1103</code>，回复端口 R 是 A 自己持有 receive right 的另一个 port。</p>
+    <p lang="en">Write the RPC of diagram A below with real field values. In task A the send right to port P is named <code>0x1103</code>, and the reply port R is another port whose receive right A holds.</p>
+    <ol lang="zh-CN">
+      <li>头部：用户态的 <code>mach_msg_header_t</code> 是 6 个 32 位字段（bits、size、remote、local、voucher、id），共 24 字节。<code>msgh_remote_port = 0x1103</code>，<code>msgh_local_port = R</code>。</li>
+      <li>传递方式：<code>MACH_MSG_TYPE_COPY_SEND</code> = 19，<code>MACH_MSG_TYPE_MAKE_SEND_ONCE</code> = 21（<code>osfmk/mach/message.h</code>）。<code>MACH_MSGH_BITS(remote, local)</code> = remote | local &lt;&lt; 8，所以 <code>msgh_bits = 19 | 21 &lt;&lt; 8 = 0x1513</code>。</li>
+      <li>陷入：<code>mach_msg(MACH_SEND_MSG | MACH_RCV_MSG, …)</code> 执行 <code>svc #0x80</code>，<code>x16 = -31</code>；<code>osfmk/kern/syscall_sw.c</code> 的 <code>mach_trap_table</code> 第 31 项是 <code>mach_msg_trap</code>（这是经典的 mach_msg_trap；macOS 13 起 libsystem 的 mach_msg 实际走 mach_msg2_trap，x16 = −47，见 Phase 8）。</li>
+      <li>copyin 把 <code>0x1103</code> 翻成 P 的指针，从 R 造出一个 send-once right；kmsg 进入 P 的队列。copyout 时 B 的名字空间给这个 send-once right 分配名字 <code>0x1a07</code>，B 看到 <code>remote = 0x1a07</code>、<code>local = 0x0f03</code>，两端在头部里互换了位置。</li>
+      <li>B 向 <code>0x1a07</code> 发回复，send-once right 用掉即消失；A 的同一次 <code>mach_msg</code> 在 R 上收到回复后返回。</li>
+    </ol>
+    <ol lang="en">
+      <li>The header: the user-space <code>mach_msg_header_t</code> is 6 32-bit fields (bits, size, remote, local, voucher, id), 24 bytes in all. <code>msgh_remote_port = 0x1103</code>, <code>msgh_local_port = R</code>.</li>
+      <li>Transfer modes: <code>MACH_MSG_TYPE_COPY_SEND</code> = 19 and <code>MACH_MSG_TYPE_MAKE_SEND_ONCE</code> = 21 (<code>osfmk/mach/message.h</code>). <code>MACH_MSGH_BITS(remote, local)</code> = remote | local &lt;&lt; 8, so <code>msgh_bits = 19 | 21 &lt;&lt; 8 = 0x1513</code>.</li>
+      <li>The trap: <code>mach_msg(MACH_SEND_MSG | MACH_RCV_MSG, …)</code> executes <code>svc #0x80</code> with <code>x16 = -31</code>; entry 31 of <code>mach_trap_table</code> in <code>osfmk/kern/syscall_sw.c</code> is <code>mach_msg_trap</code> (this is the classic mach_msg_trap; from macOS 13 libsystem’s mach_msg goes through mach_msg2_trap, x16 = −47, see Phase 8).</li>
+      <li>copyin turns <code>0x1103</code> into a pointer to P and makes a send-once right from R; the kmsg joins P’s queue. At copyout, B’s name space gives that send-once right the name <code>0x1a07</code>, and B sees <code>remote = 0x1a07</code> and <code>local = 0x0f03</code>: the two ends have swapped places in the header.</li>
+      <li>B sends the reply to <code>0x1a07</code>, and the send-once right disappears once used; A’s same <code>mach_msg</code> call receives the reply on R and returns.</li>
+    </ol>
+  </div>
   <div class="note" lang="zh-CN">很多 port 背后不是用户进程，而是<strong>内核对象</strong>（kobject）：task port、thread port、host port、IOKit 的 user client。对这些 port 发消息，等于调用内核服务；接口由 MIG（Mach Interface Generator）从 <code>.defs</code> 文件生成收发桩代码。所以 <code>task_info</code>、<code>mach_vm_allocate</code> 这些「函数」其实都是 Mach 消息。</div>
   <div class="note" lang="en">Many ports are backed not by a user process but by a <strong>kernel object</strong> (kobject): the task port, thread port, host port, IOKit user clients. Sending a message to such a port amounts to calling a kernel service; MIG (Mach Interface Generator) generates the send/receive stub code for these interfaces from <code>.defs</code> files. So “functions” such as <code>task_info</code> and <code>mach_vm_allocate</code> are in fact all Mach messages.</div>
   <p lang="zh-CN">延伸阅读：《*OS Internals》Vol. I 的 Mach IPC 相关章节；《Mac OS X Internals》进程间通信相关章节。</p>
@@ -124,6 +168,37 @@ CPU1:  if (smp_load_acquire(&amp;ready))   BUG_ON(data != 42);   /* 有了 acqui
   <p lang="en"><strong>futex</strong> (<code>kernel/futex/</code>) is the “fast user-space lock”: without contention a pthread mutex does a single CAS in user space and never enters the kernel; only under contention does it call <code>futex(uaddr, FUTEX_WAIT, val)</code> — the kernel hashes <code>uaddr</code> into a wait bucket and sleeps only after confirming that <code>*uaddr</code> still equals <code>val</code>, which avoids lost wakeups; the unlocker calls <code>FUTEX_WAKE</code>. XNU’s counterpart is the private system call <strong>ulock</strong> (<code>__ulock_wait</code>/<code>__ulock_wake</code>, <code>bsd/kern/sys_ulock.c</code>), on which <code>os_unfair_lock</code> is built: the lock word stores the owner thread’s port name, so the kernel knows whom to pass the inherited priority to (turnstiles again). From macOS 14.4 there is also the public <code>os_sync_wait_on_address</code> family.</p>
   <p lang="zh-CN"><strong>signal</strong>：Linux 里硬件异常（如非法访存）直接变成 <code>SIGSEGV</code> 挂到线程上，返回用户态前投递。XNU 先把它变成一条 <strong>Mach 异常消息</strong>（<code>EXC_BAD_ACCESS</code> 等），按 thread → task → host 的顺序发往注册的异常 port（调试器、崩溃报告器在这里接管）；没人处理才由 BSD 层（<code>bsd/uxkern/ux_exception.c</code> 一带）转换成 UNIX 信号。这就是 Mach 设计的取舍：一个通用、带权限的消息原语承担几乎所有跨边界通信，换来统一的安全模型和可插拔的服务，代价是每次交互的固定开销和复杂得多的权限记账。</p>
   <p lang="en"><strong>signal</strong>: on Linux a hardware exception (such as an illegal memory access) becomes a <code>SIGSEGV</code> attached directly to the thread and delivered before returning to user mode. XNU first turns it into a <strong>Mach exception message</strong> (<code>EXC_BAD_ACCESS</code> and so on) and sends it to the registered exception ports in thread → task → host order (debuggers and crash reporters take over here); only if nobody handles it does the BSD layer (around <code>bsd/uxkern/ux_exception.c</code>) convert it into a UNIX signal. This is the trade-off of the Mach design: one general-purpose message primitive with rights carries almost all cross-boundary communication, which buys a uniform security model and pluggable services, at the cost of a fixed overhead on every interaction and far more complex rights bookkeeping.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>拿不到锁时，spinlock 原地转圈，mutex 让出 CPU 睡眠；持 spinlock 时不能睡。</li>
+      <li>ARM64 是弱内存模型，跨 CPU 的先后顺序要靠 acquire/release（<code>ldar</code>/<code>stlr</code>）或 <code>dmb</code> 来保证。</li>
+      <li>读改写要用 LL/SC 循环或 LSE 单指令，普通的读、加、写在多核上会丢更新。</li>
+      <li>RCU 让读者零锁零写，写者换指针后等一个宽限期再释放旧版本；XNU 的 SMR 用每 CPU 序号代替上下文切换做证据。</li>
+      <li>Mach port 是内核里带权限的消息队列，用户态只拿到名字；能给谁发消息完全取决于手里有没有它的 send right。</li>
+      <li>Linux 没有统一的消息原语，而是用 pipe、socket、futex、signal 按用途组合。</li>
+    </ul>
+    <ul lang="en">
+      <li>When a lock cannot be taken, a spinlock spins in place and a mutex sleeps and gives up the CPU; you must not sleep while holding a spinlock.</li>
+      <li>ARM64 has a weak memory model, so ordering across CPUs must come from acquire/release (<code>ldar</code>/<code>stlr</code>) or <code>dmb</code>.</li>
+      <li>Read-modify-write needs an LL/SC loop or a single LSE instruction, because a plain load, add and store loses updates on multiple cores.</li>
+      <li>RCU gives readers no locks and no writes; the writer swaps the pointer and waits one grace period before freeing the old version, and XNU’s SMR uses per-CPU sequence numbers instead of context switches as the evidence.</li>
+      <li>A Mach port is a message queue with rights inside the kernel, and user space holds only a name; whom you can send to depends entirely on holding their send right.</li>
+      <li>Linux has no single message primitive and combines pipes, sockets, futexes and signals by purpose.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：<code>volatile</code> 或 <code>READ_ONCE</code> 能让多核访问有序。→ 实际：它们只阻止编译器合并或撕裂访存，不发任何硬件屏障；顺序要靠 acquire/release 或 <code>dmb</code>。</li>
+      <li>误解：RCU 的读者也要等宽限期。→ 实际：只有写者等；读者只是关抢占或记一个计数，从不阻塞。</li>
+      <li>误解：port 名字是全局 ID，可以直接发给别的进程用。→ 实际：名字只在本 task 的 <code>ipc_space</code> 里有效，同一个 port 在两个 task 里名字不同；要给别人权限，得在消息里传 port right。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: <code>volatile</code> or <code>READ_ONCE</code> makes multi-core accesses ordered. → Fact: they only stop the compiler from merging or tearing accesses and emit no hardware barrier; ordering needs acquire/release or <code>dmb</code>.</li>
+      <li>Myth: RCU readers also wait for the grace period. → Fact: only the writer waits; readers just disable preemption or keep a count and never block.</li>
+      <li>Myth: a port name is a global ID that can be handed to another process directly. → Fact: a name is valid only in its own task’s <code>ipc_space</code>, and the same port has different names in two tasks; to give someone access, send a port right in a message.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

@@ -55,6 +55,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">一张 L4 标的稠密 FP16 算力是 121 TFLOPS，Qwen3-8B 解码一个 token 只要约 17.6 GFLOP，按算力算 0.15 ms 就够了；可一个请求每秒最多只能出约 20 个 token。时间花到哪里去了？如果瓶颈不在算力，一个推理引擎从调度器到内核，每一层又该为此做什么，而这些做法又要求内核接住什么？</p>
+    <p lang="en">An L4 lists 121 TFLOPS of dense FP16, and decoding one token of Qwen3-8B needs only about 17.6 GFLOP, which at that rate would take 0.15 ms; yet a single request gets at most about 20 tokens a second. Where does the time go? And if the bottleneck is not compute, what should each layer of an inference engine, from the scheduler down to the kernels, do about it, and what must the kernels then cope with?</p>
+    <p lang="zh-CN">概念 3 用运算强度与拐点回答时间去了哪里，概念 4 把每个运行时想法对到它给内核提出的要求上。</p>
+    <p lang="en">Concept 3 answers where the time goes with arithmetic intensity against the ridge point, and concept 4 matches each runtime idea with the requirement it places on the kernels.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 四层，以及它们在 v0.5.22 源码里的位置</h3><h3 lang="en">1. The four layers, and where they live in the v0.5.22 source</h3>
   <p lang="zh-CN">先说清一个词。本专题的「内核」（kernel）指在 GPU 上启动的一段计算程序，也就是 <a href="../../gpu-cuda/index.html">GPU Programming with CUDA</a> 里写的那种；<a href="../../kernel-engineering/index.html">Kernel Engineering</a> 里的「内核」是操作系统内核，管进程、内存和设备。两者没有关系，只是同名。下文的路径都按 SGLang 的 GitHub 发布 v0.5.22（2026-10-19）给出，每个文件都在 2026-11-01 从 raw.githubusercontent.com 按这个标签取回核对过。</p>
   <p lang="en">First, one word. A “kernel” in this topic is a compute program launched on the GPU, the kind written in <a href="../../gpu-cuda/index.html">GPU Programming with CUDA</a>; the “kernel” of <a href="../../kernel-engineering/index.html">Kernel Engineering</a> is the operating-system kernel that manages processes, memory and devices. The two are unrelated and merely share a name. Every path below is given at SGLang’s GitHub release v0.5.22 (2026-10-19), and each file was fetched from raw.githubusercontent.com at that tag and checked on 2026-11-01.</p>
@@ -108,6 +115,26 @@
     <li lang="zh-CN"><strong>硬件的拐点</strong>：峰值算力 ÷ 内存带宽。NVIDIA L4 的产品页（2026-11-01 读取）写 FP16 Tensor Core 242 TFLOPS，并注明这是带稀疏的数字、不带稀疏时减半，即稠密 121 TFLOPS；显存带宽 300 GB/s。拐点约 121 × 10<sup>12</sup> ÷ 300 × 10<sup>9</sup> ≈ 400 FLOP/字节。运算强度低于拐点，时间由字节数 ÷ 带宽决定；高于拐点，由运算量 ÷ 峰值算力决定。</li>
     <li lang="en"><strong>The machine’s ridge point</strong>: peak compute ÷ memory bandwidth. NVIDIA’s L4 product page (read 2026-11-01) lists 242 TFLOPS of FP16 Tensor Core throughput and notes that this is shown with sparsity and is one-half lower without it, so 121 TFLOPS dense; memory bandwidth is 300 GB/s. The ridge is about 121 × 10<sup>12</sup> ÷ 300 × 10<sup>9</sup> ≈ 400 FLOP per byte. Below the ridge, time is bytes ÷ bandwidth; above it, FLOPs ÷ peak compute.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">用概念 2 的数和动画 (b) 第 9、10 步，在 L4 上把一个内核和一整步各走一遍。所有数都是由 config 和 L4 产品页推出的下限，不是测量值。</p>
+    <p lang="en">With the figures of concept 2 and steps 9 and 10 of diagram (b), walk one kernel and then one whole step on an L4. Every number is a lower bound derived from the config and the L4 product page, not a measurement.</p>
+    <pre>QKV,  B = 1 : 50.3 MB / 300 GB/s = 0.168 ms   50.3 MFLOP / 121 TFLOP/s = 0.42 µs   bytes win
+QKV,  B = 4 : same 50.3 MB       = 0.168 ms   201 MFLOP  / 121 TFLOP/s = 1.66 µs   bytes win
+step, B = 1 : 15.7 GB / 300 GB/s = 52.3 ms    17.6 GFLOP / 121 TFLOP/s = 0.15 ms   1 / 52.3 ms = 19 tokens/s
+step, B = 4 : 15.7 GB + 3 × 36 × 16.8 MB = 17.5 GB = 58.3 ms                      4 / 58.3 ms = 69 tokens/s</pre>
+    <ol lang="zh-CN">
+      <li>QKV 投影一个内核：50.3 MB 权重、50.3 MFLOP，强度 1 FLOP/字节，离拐点 400 差得很远。读字节要 0.168 ms，算只要 0.42 µs，GPU 的算力在这个内核里几乎全闲着。</li>
+      <li>批大小 4：同一份 50.3 MB 权重给 4 个 token 用，读的时间不变，运算变成 201 MFLOP，强度变成 4。时间仍由字节决定，所以多出的 3 个 token 几乎是白送的。</li>
+      <li>整步，批大小 1：约 15.7 GB、17.6 GFLOP，下限 52.3 ms，也就是每秒约 19 个 token，与概念 3 下文按权重算的「约 20 个」一致。</li>
+      <li>整步，批大小 4：权重仍读一次，但每个请求的 KV 是自己的，多出的 3 个请求各读 36 层 × 16.8 MB ≈ 0.6 GB，合计约 17.5 GB、58.3 ms，比批大小 1 多约 11%，却出 4 个 token。注意力那部分的强度停在 4，批再大也不变，这就是概念 3 末尾说的例外。</li>
+    </ol>
+    <ol lang="en">
+      <li>One kernel, the QKV projection: 50.3 MB of weights for 50.3 MFLOP, an intensity of 1 FLOP per byte, far below the ridge of 400. Reading the bytes takes 0.168 ms and the arithmetic 0.42 µs, so in this kernel the GPU’s compute sits almost entirely idle.</li>
+      <li>Batch size 4: the same 50.3 MB of weights serves 4 tokens, the read time is unchanged, the arithmetic becomes 201 MFLOP and the intensity 4. Time is still set by bytes, so the 3 extra tokens come almost for free.</li>
+      <li>The whole step at batch size 1: about 15.7 GB and 17.6 GFLOP, a lower bound of 52.3 ms, or about 19 tokens a second, in line with the “about 20” worked from the weights alone further down concept 3.</li>
+      <li>The whole step at batch size 4: the weights are still read once, but each request has its own KV, so the 3 extra requests read 36 layers × 16.8 MB ≈ 0.6 GB each, about 17.5 GB and 58.3 ms in all, about 11% more than at batch size 1, for 4 tokens. The attention part stays at an intensity of 4 however large the batch, which is the exception at the end of concept 3.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">代入 Qwen3-8B：每步解码读约 15.1 GB 权重（P ≈ 7.57 G，嵌入表只查一行，不计）。在 L4 上，光读权重就至少要 15.1 GB ÷ 300 GB/s ≈ 50 ms，所以单个请求最多每秒约 20 个 token；同样的 17.6 GFLOP 按峰值算力只要约 0.15 ms，差了三百多倍。算力几乎全在闲着。把批大小提到 B，权重还是读一遍，时间几乎不变，吞吐却乘以 B：这就是连续批处理的经济学。换成一个 2000 个 token 的提示做预填充，运算强度约 2000，高过拐点，时间下限变成 2 × 7.57 × 10<sup>9</sup> × 2000 ÷ 121 × 10<sup>12</sup> ≈ 0.25 s，由算力决定。注意 256 个 token 在 L4 上还在拐点以下，要几百个 token 以上才真正受算力限制。以上都是由公开规格推出的下限，不是测量值。</p>
   <p lang="en">Plug in Qwen3-8B: each decode step reads about 15.1 GB of weights (P ≈ 7.57 G; the embedding table is indexed for one row and not counted). On an L4, just reading the weights takes at least 15.1 GB ÷ 300 GB/s ≈ 50 ms, so a single request gets at most about 20 tokens a second; the same 17.6 GFLOP at peak compute would take about 0.15 ms, more than three hundred times less. The compute sits almost entirely idle. Raise the batch size to B and the weights are still read once, the time barely changes, and the throughput multiplies by B: this is the economics of continuous batching. Prefill a 2000-token prompt instead and the intensity is about 2000, above the ridge, so the lower bound becomes 2 × 7.57 × 10<sup>9</sup> × 2000 ÷ 121 × 10<sup>12</sup> ≈ 0.25 s, set by compute. Note that 256 tokens is still below the ridge on an L4; it takes several hundred tokens or more to be truly compute-bound. All of these are lower bounds derived from published specifications, not measurements.</p>
   <p lang="zh-CN"><strong>注意力是例外</strong>：每个请求有自己的 KV 缓存，解码注意力的字节随批大小一起增长，运算强度停在约 4 FLOP/字节（Qwen3-8B 的 GQA 每 4 个查询头共用一组 KV），批得再大也一样。所以长上下文、大批量时，解码的时间越来越多花在读 KV 上。能减少这些字节的，是让许多请求共用同一段前缀的 KV（RadixAttention 与级联注意力，Phase 1）、压缩 KV（DeepSeek 的 MLA，Phase 2）或把 KV 量化（Phase 6）。</p>
@@ -132,6 +159,35 @@
   <p lang="en">The comparison table below matches each idea’s requirement with the library or file that meets it at v0.5.22; the last column says which phase of this topic covers it in depth.</p>
   <p lang="zh-CN">延伸阅读：Huyen《AI Engineering》讲推理优化的一章（批处理、提示缓存、推测解码，服务层面的视角）；书里不讲内核这一侧，内核一侧依据的是 SGLang 论文和 PagedAttention 论文。</p>
   <p lang="en">Further reading: the chapter on inference optimization in Huyen’s <em>AI Engineering</em> (batching, prompt caching and speculative decoding, from the serving side); the book does not cover the kernel side, which rests on the SGLang and PagedAttention papers.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>SGLang 分四层：前端（<code>lang/</code>）、运行时（调度器与 <code>RadixCache</code>）、模型执行器（按 <code>ForwardMode</code> 跑前向、重放 CUDA 图）和内核（<code>python/sglang/kernels/</code> 加 FlashInfer 等上游库）。</li>
+      <li>Qwen3-8B 批大小 1 的一步解码读约 15.7 GB、只做 17.6 GFLOP，强度约 1 FLOP/字节。</li>
+      <li>拐点 = 峰值算力 ÷ 带宽，L4 约 400 FLOP/字节；强度低于拐点时，时间等于字节数 ÷ 带宽。</li>
+      <li>批处理让所有请求共用一次权重读取，所以批大小 4 只多花约 11% 的时间却出 4 个 token；解码注意力是例外，强度停在 GQA 组大小 4。</li>
+      <li>每个运行时想法都给内核提一条要求：前缀共享要求按索引数组收集 KV，连续批处理要求接受变长的批，CUDA 图要求不做主机同步、形状固定。</li>
+    </ul>
+    <ul lang="en">
+      <li>SGLang has four layers: the frontend (<code>lang/</code>), the runtime (the scheduler and <code>RadixCache</code>), the model executor (forward passes by <code>ForwardMode</code>, CUDA graph replay) and the kernels (<code>python/sglang/kernels/</code> plus upstream libraries such as FlashInfer).</li>
+      <li>One decode step of Qwen3-8B at batch size 1 reads about 15.7 GB for only 17.6 GFLOP, an intensity of about 1 FLOP per byte.</li>
+      <li>The ridge point is peak compute ÷ bandwidth, about 400 FLOP per byte on an L4, and below it time equals bytes ÷ bandwidth.</li>
+      <li>Batching lets every request share one read of the weights, so batch size 4 costs only about 11% more time for 4 tokens; decode attention is the exception, stuck at the GQA group size of 4.</li>
+      <li>Every runtime idea places a requirement on the kernels: prefix sharing means gathering KV through index arrays, continuous batching means accepting ragged batches, and CUDA graphs mean no host sync and fixed shapes.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：运算量只有 17.6 GFLOP，一张 121 TFLOPS 的卡解码一定很快。→ 实际：批大小 1 时时间由读 15.7 GB 决定，L4 上下限约 52 ms，算力闲着三百多倍。</li>
+      <li>误解：批大小翻 4 倍，每步时间也翻 4 倍。→ 实际：权重只读一次，按上面的下限只多约 11%；多出来的只是每个请求自己的 KV。</li>
+      <li>误解：本专题的「内核」就是操作系统内核。→ 实际：这里指在 GPU 上启动的计算程序，与 Kernel Engineering 专题的操作系统内核只是同名。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: with only 17.6 GFLOP of work, a 121 TFLOPS card must decode fast. → Fact: at batch size 1 the time is set by reading 15.7 GB, a lower bound of about 52 ms on an L4, while the compute idles by a factor of over three hundred.</li>
+      <li>Myth: four times the batch size makes each step four times as long. → Fact: the weights are read once, so by the bounds above the step grows only about 11%; what is added is each request’s own KV.</li>
+      <li>Myth: a “kernel” in this topic is the operating-system kernel. → Fact: here it is a compute program launched on the GPU, which merely shares a name with the operating-system kernel of the Kernel Engineering topic.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：运行时想法 ↔ 内核要求 ↔ 满足它的库</h2><h2 id="compare-en" lang="en">Comparison: runtime idea ↔ kernel requirement ↔ the library that meets it</h2>
   <div class="table-wrap">

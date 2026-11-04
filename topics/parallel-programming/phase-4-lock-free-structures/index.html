@@ -55,6 +55,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">一把锁的持有者被调度器换下，等这把锁的每个线程都跟着停。能不能写出一种结构，任何一个线程停在任何位置都挡不住别人？Phase 3 的 compare-exchange 看起来就是答案，可一个只用 CAS 的栈在 Lab A 里 100 次试验坏了 100 次，TSan 却一声不吭；节点 pop 出来以后什么时候能释放，也没人说得清。不用锁时，「别人还能前进」到底指什么，靠什么保证结构不坏、内存能回收，又在什么时候值得这样做？</p>
+    <p lang="en">When a lock holder is switched out by the scheduler, every thread waiting for that lock stops with it. Can you write a structure in which no thread, stopped anywhere, holds up the rest? Phase 3’s compare-exchange looks like the answer, yet a stack built only on CAS broke in 100 of 100 trials in Lab A while TSan said nothing, and no one could say when a popped node may be freed. Without locks, what does “the others can still make progress” actually mean, what keeps the structure intact and the memory reclaimable, and when is it worth doing?</p>
+    <p lang="zh-CN">概念 1 定义进度保证，概念 2 的 Treiber 栈和带计数的指针解决 ABA，概念 4 的 hazard pointer、epoch 和 RCU 回答回收，概念 5 和 6 说明什么时候它比锁快、什么时候不如锁。</p>
+    <p lang="en">Concept 1 defines the progress guarantees, the Treiber stack and the tagged pointer of concept 2 solve ABA, the hazard pointers, epochs and RCU of concept 4 answer reclamation, and concepts 5 and 6 show when it beats a lock and when it loses.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 进度保证：阻塞、无阻碍、无锁、无等待</h3><h3 lang="en">1. Progress guarantees: blocking, obstruction-free, lock-free, wait-free</h3>
   <p lang="zh-CN">「无锁」不是「代码里没有 <code>mutex</code>」，而是一个关于<strong>进度</strong>的承诺：当某些线程被调度器换下、停住甚至死掉时，其余线程还能不能完成操作。Herlihy 等人的书把它们定义为对方法调用的保证（定义来自 Herlihy 1991、1993 和 Herlihy、Luchangco、Moir 2003；McKenney 第 14.2 节逐条列出并引用了这些出处）：</p>
   <p lang="en">“Lock-free” does not mean “no <code>mutex</code> in the code”; it is a promise about <strong>progress</strong>: when some threads are descheduled, stalled or even dead, can the remaining threads still complete their operations? Herlihy et al. define these as guarantees on method calls (the definitions come from Herlihy 1991 and 1993 and from Herlihy, Luchangco and Moir 2003; McKenney’s section 14.2 lists them one by one with these citations):</p>
@@ -93,11 +100,34 @@
   <p lang="zh-CN"><strong>修法</strong>：</p>
   <p lang="en"><strong>Fixes</strong>:</p>
   <ul>
-    <li lang="zh-CN"><strong>带计数的指针（tagged pointer）</strong>：把 <code>top</code> 换成「指针 + 64 位计数」的 16 字节结构，每次成功的 CAS 让计数加 1。T1 手里是 <code>{A, 5}</code>，现在的值是 <code>{A, 7}</code>，CAS 失败、重读。本机 <code>std::atomic&lt;Tagged&gt;</code> 的 <code>is_lock_free()</code> 为 1，CAS 编译成 <code>caspa</code> / <code>caspl</code>（一对 64 位寄存器的 CAS），acquire 读编译成 <code>ldp</code> 加 <code>dmb ishld</code>（FEAT_LSE2 让对齐的 16 字节 <code>ldp</code> 成为单次原子访问）。x86-64 上对应的是 <code>cmpxchg16b</code>，GCC 和 clang 要加 <code>-mcx16</code> 才会内联它，这个选项只对 x86 有意义。</li>
-    <li lang="en"><strong>A tagged pointer</strong>: replace <code>top</code> with a 16-byte “pointer plus 64-bit counter” and have every successful CAS add 1 to the counter. T1 holds <code>{A, 5}</code>, the current value is <code>{A, 7}</code>, so the CAS fails and T1 rereads. On this Mac <code>std::atomic&lt;Tagged&gt;</code> reports <code>is_lock_free()</code> as 1; the CAS compiles to <code>caspa</code> / <code>caspl</code> (a CAS on a pair of 64-bit registers), and the acquire load to <code>ldp</code> plus <code>dmb ishld</code> (FEAT_LSE2 makes an aligned 16-byte <code>ldp</code> a single atomic access). On x86-64 the counterpart is <code>cmpxchg16b</code>, which GCC and clang inline only with <code>-mcx16</code>, an option that means something only on x86.</li>
+    <li lang="zh-CN"><strong>带计数的指针（tagged pointer）</strong>：把 <code>top</code> 换成「指针 + 64 位计数」的 16 字节结构，每次成功的 CAS 让计数加 1。T1 手里是 <code>{A, 5}</code>，现在的值是 <code>{A, 8}</code>，CAS 失败、重读。本机 <code>std::atomic&lt;Tagged&gt;</code> 的 <code>is_lock_free()</code> 为 1，CAS 编译成 <code>caspa</code> / <code>caspl</code>（一对 64 位寄存器的 CAS），acquire 读编译成 <code>ldp</code> 加 <code>dmb ishld</code>（FEAT_LSE2 让对齐的 16 字节 <code>ldp</code> 成为单次原子访问）。x86-64 上对应的是 <code>cmpxchg16b</code>，GCC 和 clang 要加 <code>-mcx16</code> 才会内联它，这个选项只对 x86 有意义。</li>
+    <li lang="en"><strong>A tagged pointer</strong>: replace <code>top</code> with a 16-byte “pointer plus 64-bit counter” and have every successful CAS add 1 to the counter. T1 holds <code>{A, 5}</code>, the current value is <code>{A, 8}</code>, so the CAS fails and T1 rereads. On this Mac <code>std::atomic&lt;Tagged&gt;</code> reports <code>is_lock_free()</code> as 1; the CAS compiles to <code>caspa</code> / <code>caspl</code> (a CAS on a pair of 64-bit registers), and the acquire load to <code>ldp</code> plus <code>dmb ishld</code> (FEAT_LSE2 makes an aligned 16-byte <code>ldp</code> a single atomic access). On x86-64 the counterpart is <code>cmpxchg16b</code>, which GCC and clang inline only with <code>-mcx16</code>, an option that means something only on x86.</li>
     <li lang="zh-CN"><strong>不让地址在被引用时复用</strong>：如果还有线程可能拿着 A，就不释放、不复用 A。这正是概念 4 的回收机制做的事，所以 hazard pointer 和 epoch 同时解决了 ABA。</li>
     <li lang="en"><strong>Never reuse an address while it may be referenced</strong>: if any thread may still hold A, do not free or reuse A. That is exactly what the reclamation schemes of concept 4 do, so hazard pointers and epochs solve ABA as well.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把动画 (a) 第 3 到 6 步按 Lab A 的 <code>treiber.cpp</code> 逐个 CAS 走一遍，带计数和不带计数各一次。起始计数 5 是示意用的值；代码里每次成功的 CAS 让计数加 1（<code>old.tag + 1</code>）：</p>
+    <p lang="en">Walk steps 3 to 6 of diagram (a) one CAS at a time as Lab A’s <code>treiber.cpp</code> does them, once tagged and once untagged. The starting count of 5 is a value chosen for illustration; in the code every successful CAS adds 1 to the count (<code>old.tag + 1</code>):</p>
+    <pre>start        stack A → B → C          top = {A, 5}
+T1 reads     old = {A, 5}, next = B   (then descheduled before its CAS)
+T2 pop A     CAS {A,5} → {B,6}        top = {B, 6}
+T2 pop B     CAS {B,6} → {C,7}        top = {C, 7}
+T2 push A    A.next = C; CAS → {A,8}  top = {A, 8}
+untagged T1: top == A  → CAS(A → B) succeeds, top = B (held by T2), C lost
+tagged   T1: {A, 8} ≠ {A, 5} → CAS fails, old = {A, 8}, next = C, retry succeeds</pre>
+    <ol lang="zh-CN">
+      <li>T1 读到栈顶 A 和 A 的 next B，算好新值 B，还没来得及 CAS 就被换下。</li>
+      <li>T2 做了三次成功的 CAS：pop A、pop B、再 push A。A 回到栈顶，下面却已经是 C，B 在 T2 手里。</li>
+      <li>不带计数时 CAS 只比较地址：<code>top</code> 又是 A，T1 的 CAS 成功，把 T2 正在用的 B 设成栈顶，C 从此不可达。Lab A 里这样坏了 100 次中的 100 次。</li>
+      <li>带计数时 T1 期望 <code>{A, 5}</code>，实际是 <code>{A, 8}</code>，16 字节的 <code>caspa</code> 失败并把 <code>old</code> 更新成当前值。T1 重读 A 的 next 得到 C，再 CAS 就对了。Lab A 带计数的版本 100 次里 0 次损坏。</li>
+    </ol>
+    <ol lang="en">
+      <li>T1 reads the top, A, and A’s next, B, computes the new value B, and is switched out before it can CAS.</li>
+      <li>T2 makes three successful CASes: pop A, pop B, push A. A is back on top, but C is now beneath it, and B is in T2’s hands.</li>
+      <li>Untagged, the CAS compares only the address: <code>top</code> is A again, T1’s CAS succeeds and makes the B that T2 is using the top, and C can no longer be reached. In Lab A this broke in 100 of 100 trials.</li>
+      <li>Tagged, T1 expects <code>{A, 5}</code> but finds <code>{A, 8}</code>; the 16-byte <code>caspa</code> fails and updates <code>old</code> to the current value. T1 rereads A’s next, gets C, and the next CAS is right. The tagged version in Lab A broke in 0 of 100 trials.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>TSan 帮不上忙</strong>：Lab A 里所有共享访问都是原子操作，没有数据竞争，所以带 <code>-fsanitize=thread</code> 运行不带计数的版本，栈照样损坏，TSan 不输出任何报告，退出码 0（2026-10-31 实测）。ABA 是算法错误，不是数据竞争。</p>
   <p lang="en"><strong>TSan cannot help</strong>: every shared access in Lab A is atomic, so there is no data race; running the untagged version under <code>-fsanitize=thread</code> still corrupts the stack, and TSan prints no report and exits 0 (measured 2026-10-31). ABA is an algorithm bug, not a data race.</p>
   <p lang="zh-CN">延伸阅读：Herlihy 等书中讲栈与消除（elimination）的一章，以及讲队列、内存管理与 ABA 问题的一章；Williams《C++ Concurrency in Action》讲设计无锁并发数据结构的一章（无锁栈）；Bos《Rust Atomics and Locks》第 2 章的「Compare-and-Exchange Operations」和第 7 章「Understanding the Processor」的「ARM load-exclusive and store-exclusive」「Compare-and-exchange on ARM」两节。</p>
@@ -144,6 +174,29 @@
     <li lang="zh-CN"><strong>读者</strong>：以 acquire 读 <code>seq</code> 得到 <code>s1</code>，是奇数就重来；复制数据；acquire 栅栏；再读 <code>seq</code>，等于 <code>s1</code> 才算读到一份完整的副本，否则扔掉重读。读者不写任何共享内存，所以那条缓存行可以同时在所有读者的 L1 里，读者数增加不会互相拖慢。</li>
     <li lang="en"><strong>Reader</strong>: load <code>seq</code> with acquire into <code>s1</code>, and start over if it is odd; copy the data; issue an acquire fence; read <code>seq</code> again, and only if it still equals <code>s1</code> is the copy whole, otherwise throw it away and reread. Readers write no shared memory, so the cache line can sit in every reader’s L1 at once and adding readers does not slow them down.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">一个读者撞上一次写，再看 Lab B 怎样把这件事数出来。序号 4 和 6 是示意用的值，后两行是 Lab B 的实测：</p>
+    <p lang="en">One reader runs into one write, and then Lab B counts how often that happens. The sequence numbers 4 and 6 are values chosen for illustration; the last two lines are Lab B measurements:</p>
+    <pre>seq = 4                     even: the record is stable
+reader:  s1 = load(seq) = 4 → copy the 8 words
+writer:  seq = 5 (odd) → write the 8 words → seq = 6
+reader:  acquire fence; load(seq) = 6 ≠ 4 → discard the copy, retry
+reader:  s1 = 6 → copy → load(seq) = 6 == s1 → accept
+writer every 1000 ns, R = 4:  retry/read 0.577, seqlock torn 0 %, nocheck torn 5.29 %
+writer non-stop,      R = 1:  retry/read 4039.9, 0.3 M reads/s (mutex reader 14.6 M/s)</pre>
+    <ol lang="zh-CN">
+      <li>读者看到偶数 4，开始复制。复制到一半时写者把序号改成奇数 5，写完 8 个字，再改成 6。</li>
+      <li>读者复制完，过 acquire 栅栏重读序号得到 6，和开头的 4 不等，说明复制期间有写，手里的副本可能是半新半旧，整份扔掉。</li>
+      <li>重来一次时没有写插进来，前后两次都读到 6，这份副本完整。读者全程没有写任何共享内存。</li>
+      <li>Lab B 里写者每微秒写一次、4 个读者时，平均每次成功的读只扔掉 0.577 次尝试；去掉检查的 <code>nocheck</code> 有 5.29 % 的副本是撕裂的。写者不停地写时，1 个读者每成功一次要扔掉约 4040 次，每秒只读到 0.3 百万次，同样条件下 mutex 读者是 14.6 百万次。</li>
+    </ol>
+    <ol lang="en">
+      <li>The reader sees the even value 4 and starts copying. Halfway through, the writer makes the sequence number odd, 5, writes the 8 words, and sets it to 6.</li>
+      <li>The reader finishes the copy, passes the acquire fence and rereads the sequence number: 6, not the 4 it started with, so a write happened during the copy and the copy may be half old, half new. The whole copy is thrown away.</li>
+      <li>On the retry no write gets in, both reads see 6, and the copy is whole. At no point did the reader write any shared memory.</li>
+      <li>In Lab B, with one write per microsecond and 4 readers, each successful read throws away only 0.577 attempts on average, and <code>nocheck</code>, which skips the check, has 5.29 % torn copies. With the writer writing non-stop, 1 reader throws away about 4040 attempts per success and manages only 0.3 million reads per second, against 14.6 million for a mutex reader under the same conditions.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>在 C++ 内存模型里怎样写对</strong>：读者在写者写的同时读数据，如果数据是普通变量，那就是数据竞争、是未定义行为，哪怕读到的副本随后会被丢掉。所以 Lab B 把 8 个数据字都声明为 <code>std::atomic&lt;uint64_t&gt;</code>，用 relaxed 读写，再用两个栅栏建立顺序。这是 Hans Boehm 在 2012 年的论文「Can Seqlocks Get Along with Programming Language Memory Models?」里分析过的写法。本机编译结果（Lab B 第 3 步）：relaxed 原子读写就是普通的 <code>ldr</code>、<code>str</code>，写者只多一条 <code>dmb ish</code> 和一条 <code>stlr</code>，读者只多一条 <code>ldapr</code> 和一条 <code>dmb ishld</code>。</p>
   <p lang="en"><strong>Getting it right under the C++ memory model</strong>: readers read the data while the writer is writing it; if the data were plain variables that would be a data race and undefined behaviour, even though the copy is thrown away afterwards. So Lab B declares all eight data words as <code>std::atomic&lt;uint64_t&gt;</code>, reads and writes them relaxed, and orders them with two fences. This is the approach Hans Boehm analysed in his 2012 paper “Can Seqlocks Get Along with Programming Language Memory Models?”. What this Mac’s compiler emits (Lab B step 3): relaxed atomic loads and stores are plain <code>ldr</code> and <code>str</code>; the writer adds only one <code>dmb ish</code> and one <code>stlr</code>, and the reader only one <code>ldapr</code> and one <code>dmb ishld</code>.</p>
   <p lang="zh-CN"><strong>限制</strong>：读者在重查 <code>seq</code> 之前看到的可能是写到一半的数据，所以不能拿它去解引用指针、做除数或当数组下标。Linux 内核文档（docs.kernel.org 的 Sequence counters and sequential locks）写明 seqlock 不能用于含指针的数据，因为写者可能让读者正在跟随的指针失效。内核用 <code>seqcount_t</code> / <code>seqlock_t</code>，读者写成 <code>read_seqbegin</code> … <code>read_seqretry</code> 循环。另一个限制是读者可能饿死：写得太频繁时读者永远对不上序号，内核为此提供 <code>read_seqbegin_or_lock</code>，先无锁试一次，失败后改为加锁读。Lab B 量出了这个饿死。</p>
@@ -166,6 +219,37 @@
   <p lang="en"><strong>Where lock-free really pays</strong>: when reads far outnumber writes (seqlocks and RCU: in Lab B, with one write per microsecond, 10 seqlock readers are 40 to 90 times faster than a mutex); in contexts that must not block (signal handlers, real-time audio threads, interrupt handlers, where failing to get a lock is a disaster); and where a thread may be descheduled for a long time while the others must not wait for it. Everywhere else, start with a lock and replace it only once data proves it is the bottleneck.</p>
   <p lang="zh-CN">延伸阅读：McKenney 第 9 章 9.6「Which to Choose?」（Overview、Details、Production Use 三小节）和 14.2.2「Applicability of NBS Benefits」；Bos 第 7 章「Understanding the Processor」的「Impact on Performance」一节。</p>
   <p lang="en">Further reading: McKenney, Chapter 9, section 9.6, “Which to Choose?” (the Overview, Details and Production Use subsections), and 14.2.2, “Applicability of NBS Benefits”; the “Impact on Performance” section of Bos, Chapter 7, “Understanding the Processor”.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>无锁是一个进度承诺：任何时刻至少一个线程在有限步内完成；无等待要求每个线程都如此，「读、算、CAS、失败重试」的循环只是无锁。</li>
+      <li>Treiber 栈的 push 用 release 的 CAS 发布新节点，pop 用 acquire 读栈顶，那次成功的 CAS 就是操作的线性化点。</li>
+      <li>CAS 只比较值，节点地址被复用时就会 ABA：Lab A 不带计数 100 次坏 100 次，带计数的 16 字节指针 0 次，TSan 两次都不报告。</li>
+      <li>无锁结构必须回答节点什么时候能释放：hazard pointer 给垃圾设上界，epoch 读端更便宜但怕停住的线程，RCU 的读者什么都不写。</li>
+      <li>seqlock 的读者不写共享内存、对不上序号就重读，读多写少时比 mutex 快 40 到 90 倍，写者不停时却会饿死。</li>
+      <li>无锁不等于更快：默认先用一把锁，用数据证明它是瓶颈再换。</li>
+    </ul>
+    <ul lang="en">
+      <li>Lock-free is a progress promise: at every moment at least one thread completes in a finite number of steps; wait-free demands that of every thread, and a read, compute, CAS, retry loop is only lock-free.</li>
+      <li>A Treiber push publishes the new node with a release CAS, a pop reads the top with acquire, and the successful CAS is the operation’s linearization point.</li>
+      <li>CAS compares only values, so reused node addresses give ABA: in Lab A the untagged stack broke in 100 of 100 trials, the 16-byte tagged pointer in 0, and TSan reported neither.</li>
+      <li>A lock-free structure must answer when a node may be freed: hazard pointers bound the garbage, epochs have a cheaper read side but fear a stalled thread, and RCU readers write nothing at all.</li>
+      <li>Seqlock readers write no shared memory and reread when the sequence number does not match, which makes them 40 to 90 times faster than a mutex when reads dominate, but they starve under a non-stop writer.</li>
+      <li>Lock-free does not mean faster: start with a lock, and replace it only once data proves it is the bottleneck.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：无锁就是代码里没有 <code>mutex</code>，所以一定比锁快。→ 实际：它承诺的是进度，不是速度；写者不停时 1 个 mutex 读者比 1 个 seqlock 读者快 50 到 160 倍（Lab B）。</li>
+      <li>误解：TSan 跑干净，无锁代码就是对的。→ 实际：Lab A 所有共享访问都是原子的，没有数据竞争，栈照样每次都坏；ABA 是算法错误，TSan 看不见。</li>
+      <li>误解：<code>is_lock_free()</code> 返回 true，我的算法就是无锁的。→ 实际：它只说这一个原子对象的操作不是用锁模拟的，算法的进度要按概念 1 的定义自己判断。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: lock-free means no <code>mutex</code> in the code, so it must beat a lock. → Fact: it promises progress, not speed; with a non-stop writer one mutex reader beats one seqlock reader by 50 to 160 times (Lab B).</li>
+      <li>Myth: if TSan runs clean, the lock-free code is correct. → Fact: in Lab A every shared access is atomic and there is no data race, yet the stack breaks every time; ABA is an algorithm bug that TSan cannot see.</li>
+      <li>Myth: if <code>is_lock_free()</code> returns true, my algorithm is lock-free. → Fact: it says only that one atomic object’s operations are not emulated with a lock; the algorithm’s progress must be judged against the definitions of concept 1.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：无锁 ↔ 无等待 ↔ 阻塞</h2><h2 id="compare-en" lang="en">Comparison: lock-free ↔ wait-free ↔ blocking</h2>
   <div class="table-wrap">
@@ -191,14 +275,14 @@
            "3. ABA 开始：栈是 A、B、C。T1 读到 top = A、A.next = B，准备 CAS(top: A → B)，就在 CAS 之前被调度器换下。",
            "4. T2 连续 pop A、pop B，再把 A push 回去。现在栈顶又是 A，但 A.next 已经是 C，而 B 还在 T2 手里。",
            "5. T1 醒来执行 CAS(top: A → B)。top 的值确实是 A，CAS 只比较地址，于是成功：栈顶变成 T2 正在使用的 B，C 再也找不到。Lab A 里这样的故障在 100 次试验中出现了 100 次，每次最后都在链表里成环。",
-           "6. 修法：top 带一个计数，每次成功的 CAS 加 1。T1 手里是 {A, 5}，现在的值是 {A, 7}，地址相同但计数不同，CAS 失败，T1 重读后重试。本机这个 16 字节的 CAS 编译成 caspa 和 caspl，Lab A 带计数的版本 100 次试验 0 次损坏。"]'
+           "6. 修法：top 带一个计数，每次成功的 CAS 加 1。T1 手里是 {A, 5}，现在的值是 {A, 8}，地址相同但计数不同，CAS 失败，T1 重读后重试。本机这个 16 字节的 CAS 编译成 caspa 和 caspl，Lab A 带计数的版本 100 次试验 0 次损坏。"]'
          data-captions-en='["The whole picture: the top row is a normal push and pop; the four panels below show how ABA happens and how a tagged pointer fixes it. Boxes are nodes, arrows are next pointers, and top is the only atomic variable. Press Play to step through.",
            "1. push(N): first point N.next at the current top, A, then run CAS(top: A → N). The CAS succeeds only if top is still A; on failure, reread top and retry. The successful CAS is a release, so the contents of N become visible before top points to it.",
            "2. pop(): read top = N with acquire, then read N.next = A, and run CAS(top: N → A). On success N belongs to the caller. On this Mac this CAS compiles to casa.",
            "3. ABA begins: the stack is A, B, C. T1 reads top = A and A.next = B and is about to run CAS(top: A → B) when the scheduler takes it off its core, just before the CAS.",
            "4. T2 pops A, pops B, then pushes A back. The top is A again, but A.next is now C, and B is still held by T2.",
            "5. T1 wakes and runs CAS(top: A → B). top really is A and the CAS compares only the address, so it succeeds: the top becomes the B that T2 is using, and C can no longer be reached. In Lab A this failure happened in 100 of 100 trials, each ending with a cycle in the list.",
-           "6. The fix: top carries a counter that every successful CAS increments. T1 holds {A, 5} while the current value is {A, 7}: the same address but a different count, so the CAS fails and T1 rereads and retries. On this Mac the 16-byte CAS compiles to caspa and caspl, and the tagged version in Lab A corrupted in 0 of 100 trials."]'>
+           "6. The fix: top carries a counter that every successful CAS increments. T1 holds {A, 5} while the current value is {A, 8}: the same address but a different count, so the CAS fails and T1 rereads and retries. On this Mac the 16-byte CAS compiles to caspa and caspl, and the tagged version in Lab A corrupted in 0 of 100 trials."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -272,12 +356,12 @@
       <g data-step="6">
         <text x="705" y="204" lang="zh-CN">6. 带计数的 top</text><text x="705" y="204" lang="en">6. A tagged top</text>
         <text x="705" y="222" class="small" lang="zh-CN">每次成功的 CAS 计数加 1</text><text x="705" y="222" class="small" lang="en">every successful CAS adds 1</text>
-        <rect class="box" x="705" y="236" width="74" height="26"/><text x="742" y="254" class="mono" text-anchor="middle">{A, 7}</text>
+        <rect class="box" x="705" y="236" width="74" height="26"/><text x="742" y="254" class="mono" text-anchor="middle">{A, 8}</text>
         <rect class="box" x="717" y="276" width="50" height="26"/><text x="742" y="294" class="mono" text-anchor="middle">A</text>
         <rect class="box" x="717" y="316" width="50" height="26"/><text x="742" y="334" class="mono" text-anchor="middle">C</text>
         <path class="arrow" d="M742 262 L742 272"/><path class="arrow" d="M742 302 L742 312"/>
         <text x="790" y="292" class="mono">T1: {A, 5}</text>
-        <text x="790" y="312" class="small">5 ≠ 7</text>
+        <text x="790" y="312" class="small">5 ≠ 8</text>
         <text x="790" y="330" class="small" lang="zh-CN">CAS 失败，重读</text><text x="790" y="330" class="small" lang="en">CAS fails, reread</text>
         <text x="705" y="370" class="small" lang="zh-CN">本机 caspa / caspl；0/100 次损坏</text><text x="705" y="370" class="small" lang="en">caspa / caspl here; 0 of 100</text>
       </g>
@@ -643,7 +727,7 @@ nocheck   4      2320.2        5.35      0.000   46.96</pre>
       <p lang="en">2. In Lab A the untagged stack corrupted in 100 of 100 trials and the 16-byte “pointer plus counter” version in 0. What actually made the difference?</p>
       <label><input type="radio" name="q2" value="a"> <span lang="zh-CN"><code>caspa</code> 比 <code>casa</code> 的内存序更强，阻止了重排</span><span lang="en"><code>caspa</code> has stronger memory ordering than <code>casa</code> and prevents reordering</span></label>
       <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">16 字节的 CAS 更慢，线程之间的争用变少了，ABA 的时间窗口碰不上</span><span lang="en">The 16-byte CAS is slower, so contention drops and the ABA window is never hit</span></label>
-      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">每次成功的 CAS 都让计数加 1，所以 T1 手里的旧值 {A, 5} 不再等于现在的 {A, 7}，即使地址相同</span><span lang="en">Every successful CAS adds 1 to the counter, so T1’s stale {A, 5} no longer equals the current {A, 7}, even though the address is the same</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">每次成功的 CAS 都让计数加 1，所以 T1 手里的旧值 {A, 5} 不再等于现在的 {A, 8}，即使地址相同</span><span lang="en">Every successful CAS adds 1 to the counter, so T1’s stale {A, 5} no longer equals the current {A, 8}, even though the address is the same</span></label>
       <div class="why" hidden><span lang="zh-CN">ABA 的根源是 CAS 只比较地址；加上计数后，「这期间被改过」变成了值的一部分。a 错：两者都带 acquire（<code>casa</code> 的 a 和 <code>caspa</code> 的 a 意思相同），内存序没有变化，p 只表示一对寄存器。b 错：变慢可能让窗口更难碰到，但不可能把 100 次降到 0 次；而且只要窗口存在，正确性就不能靠运气。</span><span lang="en">The root of ABA is that a CAS compares only the address; with a counter, “it changed in the meantime” becomes part of the value. a is wrong: both carry acquire (the a in <code>casa</code> and in <code>caspa</code> means the same thing), the ordering is unchanged, and the p only means a pair of registers. b is wrong: being slower might make the window harder to hit, but cannot take 100 failures to 0, and as long as the window exists correctness cannot rest on luck.</span></div>
     </div>
     <div class="q" data-answer="a">

@@ -61,6 +61,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">Phase 0 把数组平均切成 N 份，Phase 1 的线程池让所有人抢一个队列。可在这台 Mac 上，就算矩阵乘法的每一行一样贵，平均切成 10 份也要 27 ms，做完一份再领下一份只要 22.5 ms；递归 fib 事先不知道有多少份活，切得太细时 920 多万个任务把时间从约 60 ms 拉到约 170 ms。工作不均匀、或者事先不知道有多少时，该怎样把它分给核，才能让领活的代价不吃掉干活的收益，还能让每个分出去的工作都在作用域结束前收回来？</p>
+    <p lang="en">Phase 0 split an array into N equal parts, and Phase 1’s thread pool had everyone fight over one queue. Yet on this Mac, even when every row of a matrix multiply costs the same, ten equal parts take 27 ms while taking the next piece when one is done takes 22.5 ms; recursive fib does not know in advance how much work there is, and cut too fine, its more than 9.2 million tasks stretch the time from about 60 ms to about 170 ms. When work is uneven or unknown in advance, how should it be handed to cores so that taking work does not eat the gain from doing it, and every piece handed out is collected before its scope ends?</p>
+    <p lang="zh-CN">概念 1 的 fork-join 给出结构和上限，概念 2 的 schedule 和概念 7 的粒度回答循环怎样分，概念 4 的 task 和概念 6 的 work stealing 回答递归怎样分。</p>
+    <p lang="en">Fork-join in concept 1 gives the structure and the bound, the schedules of concept 2 and the granularity of concept 7 answer how to split a loop, and the tasks of concept 4 and the work stealing of concept 6 answer how to split a recursion.</p>
+  </div>
+
   <h3 lang="zh-CN">1. fork-join：结构化的并行</h3><h3 lang="en">1. Fork-join: parallelism with structure</h3>
   <p lang="zh-CN">fork-join 只有一条规则：在一个作用域里分出去（fork）的工作，必须在同一个作用域结束前全部汇合（join）。于是并行的那一段只有一个入口、一个出口，像结构化编程里的循环和函数一样可以嵌套、可以推理。Phase 1 的 <code>detach</code> 和「放进队列就不管」的 <code>dispatch_async</code> 不是结构化的；<code>std::jthread</code> 在作用域结束时 join、<code>dispatch_apply</code> 返回前等所有迭代做完、OpenMP 并行区结尾的隐式屏障（implicit barrier），都是结构化的。</p>
   <p lang="en">Fork-join has one rule: work that is forked inside a scope must all be joined before that scope ends. The parallel part then has one entry and one exit, and can be nested and reasoned about like loops and functions in structured programming. Phase 1’s <code>detach</code> and fire-and-forget <code>dispatch_async</code> are not structured; <code>std::jthread</code> joining at the end of its scope, <code>dispatch_apply</code> waiting for every iteration before it returns, and the implicit barrier at the end of an OpenMP parallel region all are.</p>
@@ -88,6 +95,30 @@
     <li lang="zh-CN"><strong><code>schedule(runtime)</code></strong>：到运行时再读 <code>OMP_SCHEDULE</code> 环境变量，例如 <code>OMP_SCHEDULE="dynamic,16"</code>。Lab A 用它，一个二进制比较所有调度方式。</li>
     <li lang="en"><strong><code>schedule(runtime)</code></strong>: read the <code>OMP_SCHEDULE</code> environment variable at run time, for example <code>OMP_SCHEDULE="dynamic,16"</code>. Lab A uses this to compare every schedule with one binary.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">用图解 (a) 的示意数字算一遍：下三角循环 16 行、4 个线程，第 i 行的代价是 i+1 个单位，总共 1 + 2 + … + 16 = 136 个单位，理想情况每个线程 34 个。动态调度时，最早空下来的线程领下一行，同时空下来就按线程编号：</p>
+    <p lang="en">Work it out with diagram (a)’s sketch numbers: a lower-triangular loop of 16 rows on 4 threads, row i costing i+1 units, 1 + 2 + … + 16 = 136 units in all, 34 per thread in the ideal case. Under the dynamic schedule the first thread to fall idle takes the next row, with ties going to the lower thread number:</p>
+    <pre>static:   T0 rows 0-3   = 1+2+3+4     = 10
+          T1 rows 4-7   = 5+6+7+8     = 26
+          T2 rows 8-11  = 9+10+11+12  = 42
+          T3 rows 12-15 = 13+14+15+16 = 58   → loop ends at 58
+dynamic,1: T0 rows 0 4 8 12  ends at 1+5+9+13  = 28
+           T1 rows 1 5 9 13  ends at 2+6+10+14 = 32
+           T2 rows 2 6 10 14 ends at 3+7+11+15 = 36
+           T3 rows 3 7 11 15 ends at 4+8+12+16 = 40   → loop ends at 40</pre>
+    <ol lang="zh-CN">
+      <li>静态调度进入循环时就把连续的 4 行分给每个线程，T3 拿到最贵的 12 到 15 行，一共 58 个单位。T0 在 10 就做完了，之后只能等。</li>
+      <li>动态调度时，0 到 3 行先发给 4 个线程；T0 在时刻 1 最早做完，领第 4 行，T1 在时刻 2 领第 5 行，依此类推。因为每行比上一行贵 1，四个线程轮流领，每个线程正好拿到每 4 行中的一行。</li>
+      <li>动态在 40 结束，比静态的 58 短约 31 %，离理想的 34 还差一点：最后一行是最贵的 16 个单位，没法再拆。代价是 16 次去共享计数器领活。</li>
+      <li>换成实测（1024 行、10 个线程，Lab A 和 Lab B）：手写线程静态 15.5–16.3 ms，动态每次 8 行 11.5–11.7 ms，形状和这 16 行一样。</li>
+    </ol>
+    <ol lang="en">
+      <li>The static schedule hands each thread 4 contiguous rows on entry; T3 gets the most expensive rows 12 to 15, 58 units in all. T0 is done at 10 and can only wait after that.</li>
+      <li>Under the dynamic schedule rows 0 to 3 go to the 4 threads first; T0 finishes first, at time 1, and takes row 4, T1 takes row 5 at time 2, and so on. Because each row costs 1 more than the last, the four threads take turns and each gets exactly one row in every four.</li>
+      <li>Dynamic ends at 40, about 31 % shorter than static’s 58 and still a little above the ideal 34: the last row is the most expensive at 16 units and cannot be split. The price is 16 trips to a shared counter.</li>
+      <li>In the measurements (1024 rows on 10 threads, Labs A and B), hand-written threads take 15.5–16.3 ms static and 11.5–11.7 ms dynamic with 8 rows per take, the same shape as these 16 rows.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">不写 <code>schedule</code> 时用哪种，规范说由实现决定；LLVM 的 libomp 源码里默认值是 <code>kmp_sch_static</code>（<code>openmp/runtime/src/kmp.h</code>，2026-10-31 读的 main 分支）。两种调度在生成的代码里也看得出来。实验机没有 libomp，但 Apple clang 的前端认得 OpenMP 指令：用一个只声明了两三个函数的临时头文件代替 <code>omp.h</code>，<code>clang -Xclang -fopenmp -c</code> 能编出目标文件，<code>nm -u</code> 列出它要找 libomp 要的符号：</p>
   <p lang="en">Which kind applies when there is no <code>schedule</code> clause is, per the specification, implementation-defined; in LLVM’s libomp source the default is <code>kmp_sch_static</code> (<code>openmp/runtime/src/kmp.h</code>, the main branch read on 2026-10-31). The two kinds are visible in the generated code too. The lab Mac has no libomp, but Apple clang’s front end does understand OpenMP directives: with a throwaway header that declares just two or three functions in place of <code>omp.h</code>, <code>clang -Xclang -fopenmp -c</code> builds an object file, and <code>nm -u</code> lists the symbols it expects from libomp:</p>
 <pre data-lang="sh">$ clang -O2 -Xclang -fopenmp -Istub -c matmul_omp.c -o matmul_omp.o   # stub/omp.h 只是三行声明，不是真的 libomp 头文件
@@ -210,8 +241,28 @@ int main(int argc, char **argv) {
   </ul>
   <p lang="zh-CN">LLVM 的 libomp 就是这么做 OpenMP 任务的（<code>openmp/runtime/src/kmp_tasking.cpp</code>，2026-10-31 读的 main 分支）：每个线程一个带锁的 deque，<code>__kmp_remove_my_task</code> 从自己的尾部取，<code>__kmp_steal_task</code> 加锁后从对方的头部偷。Lab B 的 <code>ws_fib.cpp</code> 是同一个设计，每个 deque 一把 <code>std::mutex</code>，简单而且 TSan 检查干净。去掉锁的版本（Chase–Lev deque）要用到 Phase 3 的内存序和 Phase 4 那类无锁技巧，本页不展开。</p>
   <p lang="en">LLVM’s libomp runs OpenMP tasks exactly this way (<code>openmp/runtime/src/kmp_tasking.cpp</code>, the main branch read on 2026-10-31): one locked deque per thread, <code>__kmp_remove_my_task</code> takes from the thread’s own tail, and <code>__kmp_steal_task</code> takes the victim’s lock and steals from its head. Lab B’s <code>ws_fib.cpp</code> uses the same design with one <code>std::mutex</code> per deque, which is simple and comes out clean under TSan. The lock-free version (the Chase–Lev deque) needs Phase 3’s memory orders and Phase 4-style lock-free techniques, and this page does not cover it.</p>
-  <p lang="zh-CN">实测（fib(42)，10 个线程，cutoff 25）：每次运行生成 6764 个任务，只发生 146–179 次偷，用时约 59–60 ms，串行约 360 ms。</p>
-  <p lang="en">Measured (fib(42), 10 threads, cutoff 25): each run creates 6764 tasks but only 146–179 steals happen, taking about 59–60 ms against about 360 ms serial.</p>
+  <p lang="zh-CN">fib(42)、10 个线程、cutoff 25 时，每次运行生成 6764 个任务（算出），只发生 146–179 次偷（实测），用时约 59–60 ms，串行约 360 ms。</p>
+  <p lang="en">With fib(42), 10 threads and cutoff 25, each run creates 6764 tasks (computed) and 146–179 steals happen (measured), taking about 59–60 ms against about 360 ms serial.</p>
+  <div class="worked">
+    <p lang="zh-CN">6764 这个数可以事先算出来。按 <code>fib_omp.c</code> 和 Lab B 的 <code>ws_fib.cpp</code> 的写法，n 小于 cutoff c 时直接串行，n ≥ c 的每次调用生成 1 个任务（交出 fib(n-1)），再递归 n-1 和 n-2。记 K(n) 为 fib(n) 生成的任务数：</p>
+    <p lang="en">The 6764 can be worked out in advance. In <code>fib_omp.c</code> and Lab B’s <code>ws_fib.cpp</code>, a call with n below the cutoff c runs serially, and each call with n ≥ c creates 1 task (handing off fib(n-1)) and recurses on n-1 and n-2. Let K(n) be the number of tasks fib(n) creates:</p>
+    <pre>K(n) = 0 for n &lt; c;   K(n) = 1 + K(n-1) + K(n-2) for n ≥ c
+c = 25:  K(25) = 1, K(26) = 2, K(27) = 4, K(28) = 7, …  K(n) = F(n - c + 3) - 1
+fib(42), c = 25:  F(20) - 1 = 6765 - 1    = 6764      steals 146-179 (2.2-2.6 %)   59-60 ms
+fib(42), c = 10:  F(35) - 1 = 9227465 - 1 = 9227464   1364 times as many tasks    165-175 ms</pre>
+    <ol lang="zh-CN">
+      <li>K 满足和 Fibonacci 数一样的递推，只多一个 1，所以 K(n) + 1 就是 Fibonacci 数：K(25) + 1 = 2 = F(3)，往上一层多一个下标。</li>
+      <li>fib(42)、cutoff 25 时是 F(20) − 1 = 6764，和概念 6 引用的任务数一致（Lab B 的任务数就是按这个递归式算出的，程序只计偷的次数）。</li>
+      <li>6764 个任务里只有 146 到 179 个被偷，约 2.2–2.6 %：其余的都由生成它的线程从自己 deque 的尾部取回来做。每次偷拿的是对方头部最老、最大的子树，所以偷一次就够忙很久。</li>
+      <li>cutoff 降到 10 时是 F(35) − 1 = 9227464 个任务，多了约 1364 倍，计算量却一样：时间从 59–60 ms 涨到 165–175 ms，多出来的都是生成、入队和取任务的开销。</li>
+    </ol>
+    <ol lang="en">
+      <li>K follows the same recurrence as the Fibonacci numbers plus 1, so K(n) + 1 is a Fibonacci number: K(25) + 1 = 2 = F(3), and each level up moves one index along.</li>
+      <li>For fib(42) with cutoff 25 that gives F(20) − 1 = 6764, the task count concept 6 cites (Lab B computes its task counts from this recursion; the program counts only steals).</li>
+      <li>Only 146 to 179 of the 6764 tasks are stolen, about 2.2–2.6 %: the rest are taken back by the thread that created them, from the tail of its own deque. Each steal takes the oldest, biggest subtree at the victim’s head, so one steal keeps the thief busy for a long time.</li>
+      <li>With the cutoff lowered to 10 it is F(35) − 1 = 9227464 tasks, about 1364 times as many for the same computation: the time rises from 59–60 ms to 165–175 ms, and all of the extra is the cost of creating, queuing and taking tasks.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Herlihy 等讲调度与工作分配的一章（work-stealing deque 及其正确性）；Williams 讲高级线程管理的一章里 work stealing 线程池的部分。</p>
   <p lang="en">Further reading: the chapter on scheduling and work distribution in Herlihy et al. (work-stealing deques and their correctness); the part on work-stealing thread pools in Williams’s chapter on advanced thread management.</p>
 
@@ -261,6 +312,37 @@ int main(int argc, char **argv) {
   <p lang="zh-CN">延伸阅读：McKenney Partitioning and Synchronization Design 一章的 Partitioning, Parallelism, and Optimization 一节；Phase 0 的 Amdahl 与 Gustafson。</p>
   <p lang="en">Further reading: the section Partitioning, Parallelism, and Optimization in McKenney’s chapter Partitioning and Synchronization Design; Amdahl and Gustafson in Phase 0.</p>
 
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>fork-join 要求在一个作用域里分出去的工作都在作用域结束前汇合，work T<sub>1</sub> 和 span T<sub>∞</sub> 给出上限 T<sub>P</sub> ≤ T<sub>1</sub>/P + T<sub>∞</sub>。</li>
+      <li><code>schedule(static)</code> 进入循环时一次分完、开销最小，<code>dynamic</code> 和 <code>guided</code> 做完再领，能吸收迭代代价和核速度的不均。</li>
+      <li><code>reduction</code> 给每个线程一份私有副本，共享写只发生 T 次而不是 N 次，浮点结果可能和串行差最后几位。</li>
+      <li>事先不知道有多少活时用 task，cutoff 把底下的小任务改回串行。</li>
+      <li>work stealing 让主人从自己 deque 的尾部取、小偷从别人的头部偷，fib(42) 的 6764 个任务只偷了 146 到 179 次。</li>
+      <li>块数取线程数的十倍上下、每块至少几十微秒；libc++ 的 <code>std::execution::par</code> 每 256 个元素才切一块，元素很贵时要自己选块数。</li>
+    </ul>
+    <ul lang="en">
+      <li>Fork-join requires everything forked in a scope to join before the scope ends, and work T<sub>1</sub> and span T<sub>∞</sub> give the bound T<sub>P</sub> ≤ T<sub>1</sub>/P + T<sub>∞</sub>.</li>
+      <li><code>schedule(static)</code> divides the loop once on entry at the lowest overhead, while <code>dynamic</code> and <code>guided</code> take more when done and absorb uneven iteration costs and core speeds.</li>
+      <li><code>reduction</code> gives each thread a private copy so that shared writes happen T times instead of N, and a floating-point result may differ from the serial one in the last bits.</li>
+      <li>Use tasks when the amount of work is not known in advance, with a cutoff that turns the small tasks at the bottom back into serial code.</li>
+      <li>Work stealing has the owner take from the tail of its own deque and thieves steal from the head of others, and fib(42)’s 6764 tasks needed only 146 to 179 steals.</li>
+      <li>Aim for about ten times as many chunks as threads, each at least tens of microseconds; libc++’s <code>std::execution::par</code> cuts only one chunk per 256 elements, so choose the chunk count yourself when elements are expensive.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：每次迭代一样贵，静态平分就是最好的。→ 实际：本机 6 个 E 核比 P 核慢约 1.6 倍，完整矩阵乘法静态 27.0–27.1 ms，动态每次 8 行 22.5–22.6 ms。</li>
+      <li>误解：任务越多，并行度越高，就越快。→ 实际：fib(42) 的 cutoff 从 25 降到 10，任务从 6764 个变成 9227464 个，时间从 59–60 ms 涨到 165–175 ms。</li>
+      <li>误解：<code>std::execution::par</code> 会自动用满所有核。→ 实际：本机 libc++ 默认根本编不过，加 <code>-fexperimental-library</code> 后 1024 行只切 4 块，34.0–34.5 ms，比 <code>dispatch_apply</code> 切 100 块的 23 ms 慢。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: when every iteration costs the same, an even static split is best. → Fact: the 6 E cores here are about 1.6 times slower than the P cores, and the full matrix multiply takes 27.0–27.1 ms static against 22.5–22.6 ms dynamic with 8 rows per take.</li>
+      <li>Myth: more tasks mean more parallelism and so more speed. → Fact: lowering fib(42)’s cutoff from 25 to 10 takes the task count from 6764 to 9227464 and the time from 59–60 ms to 165–175 ms.</li>
+      <li>Myth: <code>std::execution::par</code> uses all the cores automatically. → Fact: the libc++ here does not even compile it by default, and with <code>-fexperimental-library</code> 1024 rows are cut into only 4 chunks, 34.0–34.5 ms, slower than the 23 ms of <code>dispatch_apply</code> with 100 chunks.</li>
+    </ul>
+  </div>
+
   <h2 id="compare" lang="zh-CN">对照表：OpenMP ↔ GCD ↔ 手写线程</h2><h2 id="compare-en" lang="en">Comparison: OpenMP ↔ GCD ↔ hand-written threads</h2>
   <div class="table-wrap">
   <table class="cmp">
@@ -286,13 +368,13 @@ int main(int argc, char **argv) {
            "1. schedule(static)：每个线程一段连续的 4 行，进入循环时就分好。T0 拿到最便宜的 0 到 3 行，T3 拿到最贵的 12 到 15 行。",
            "2. T0、T1、T2 早早做完，只能空等 T3。整个循环到 58 个单位才结束，虚线框都是浪费掉的核时间。",
            "3. schedule(dynamic,1)：谁先做完谁去领下一行。贵的行自然分散到四个线程上。",
-           "4. 四个线程在 28 到 40 个单位之间先后做完，循环在 40 结束，比静态短约 30 %。代价是每一行都要去共享计数器领一次活。",
+           "4. 四个线程在 28 到 40 个单位之间先后做完，循环在 40 结束，比静态短约 31 %。代价是每一行都要去共享计数器领一次活。",
            "5. 实测，下三角 1024 行、10 个线程：GCD 切 10 块 16.4 到 17.7 ms，切 100 块 11.3 到 11.6 ms；手写线程静态 15.5 到 16.3 ms，动态每次 8 行 11.5 到 11.7 ms。"]'
          data-captions-en='["The whole picture: one lower-triangular loop, 16 rows on 4 threads (a sketch, not the measured 1024 rows on 10 threads). Row i costs i+1 units, and time runs left to right. The static schedule is on top, the dynamic one below. Press Play to step through.",
            "1. schedule(static): each thread gets one contiguous block of 4 rows, fixed on entry. T0 gets the cheapest rows 0 to 3, T3 the most expensive rows 12 to 15.",
            "2. T0, T1 and T2 finish early and can only wait for T3. The loop ends only at 58 units, and every dashed box is wasted core time.",
            "3. schedule(dynamic,1): whoever finishes first takes the next row. The expensive rows spread across all four threads by themselves.",
-           "4. The four threads finish between 28 and 40 units and the loop ends at 40, about 30 % shorter than static. The price is one trip to a shared counter for every row.",
+           "4. The four threads finish between 28 and 40 units and the loop ends at 40, about 31 % shorter than static. The price is one trip to a shared counter for every row.",
            "5. Measured, triangular 1024 rows on 10 threads: GCD with 10 chunks 16.4 to 17.7 ms, with 100 chunks 11.3 to 11.6 ms; hand-written threads static 15.5 to 16.3 ms, dynamic with 8 rows per take 11.5 to 11.7 ms."]'>
       <text x="20" y="28" class="mono">schedule(static)</text>
       <text x="760" y="28" class="small" lang="zh-CN">时间 →</text><text x="760" y="28" class="small" lang="en">time →</text>
@@ -375,7 +457,7 @@ int main(int argc, char **argv) {
            "4. W1 在自己这边做同样的事：fib(40) 和 fib(38) 进了它自己的 deque，它在算 fib(37)。偷一次就够它忙很久。",
            "5. W0 做完 fib(36)，从自己的尾部取最新的 fib(37)，之后再取 fib(39)。最新任务的数据还在这个核的 cache 里。",
            "6. W0 回到 fib(42) 的 taskwait：fib(41) 在 W1 手里，自己的 deque 也空了。它不睡，去偷 W1 的头部 fib(40)。",
-           "7. 实测 fib(42)，10 个线程：cutoff 25 时每次 6764 个任务，只偷了 146 到 179 次，59 到 60 ms，串行 360 ms。cutoff 10 时 9227464 个任务，165 到 175 ms。"]'
+           "7. fib(42)，10 个线程：cutoff 25 时每次 6764 个任务（算出），实测只偷了 146 到 179 次，59 到 60 ms，串行 360 ms。cutoff 10 时 9227464 个任务（算出），实测 165 到 175 ms。"]'
          data-captions-en='["The whole picture: two worker threads, W0 and W1, each with a deque; the left end is the head (oldest task) and the right end the tail (newest task). Below are the fib(42) measurements. Press Play to watch one steal.",
            "1. W0 starts fib(42): it pushes fib(41) as a task onto the tail of its own deque and goes on with fib(40) itself.",
            "2. W0 keeps descending, pushing n-1 onto the tail at each level and doing n-2 itself. Its deque now holds fib(41), fib(39), fib(37) from head to tail, and it is computing fib(36).",
@@ -383,7 +465,7 @@ int main(int argc, char **argv) {
            "4. W1 does the same on its side: fib(40) and fib(38) go into its own deque while it computes fib(37). One steal keeps it busy for a long time.",
            "5. W0 finishes fib(36) and takes the newest task, fib(37), from its own tail, then fib(39). The newest task has its data still in this core cache.",
            "6. W0 returns to the taskwait of fib(42): fib(41) is with W1, and its own deque is empty. It does not sleep; it steals fib(40) from the head of W1.",
-           "7. Measured, fib(42) on 10 threads: with cutoff 25 each run makes 6764 tasks but only 146 to 179 steals, 59 to 60 ms against 360 ms serial. With cutoff 10 it makes 9227464 tasks and takes 165 to 175 ms."]'>
+           "7. fib(42) on 10 threads: with cutoff 25 each run makes 6764 tasks (computed) but only 146 to 179 steals (measured), 59 to 60 ms against 360 ms serial (measured). With cutoff 10 it makes 9227464 tasks (computed) and takes 165 to 175 ms (measured)."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>

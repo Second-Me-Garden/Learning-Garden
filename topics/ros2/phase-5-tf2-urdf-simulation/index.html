@@ -60,6 +60,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">雷达装在底盘前方 8 cm 处，一帧扫描在 12.35 s 测得，50 ms 后才到你的回调，而这段时间里机器人一直在开。要把这帧扫描画进地图，你需要雷达在<em>测量那一刻</em>相对地图的位姿，可这个位姿由三段拼成：雷达在底盘上的固定安装位置、底盘相对起点的位姿、起点相对地图的修正，它们由三个不同的节点按三种频率发布。系统怎样把它们对到同一时刻再拼起来？在仿真里，底盘相对起点的那一段又是谁算出来的？</p>
+    <p lang="en">The lidar sits 8 cm ahead of the centre of the base, one scan is measured at 12.35 s and reaches your callback 50 ms later, and the robot has been driving all the while. To draw that scan into the map you need the lidar pose relative to the map <em>at the moment of measurement</em>, yet that pose is made of three pieces: the lidar’s fixed mounting on the base, the base pose relative to its starting point, and the correction from that starting point to the map, published by three different nodes at three different rates. How does the system bring them to the same instant and put them together? And in simulation, who computes the piece from the starting point to the base?</p>
+    <p lang="zh-CN">概念 2 的 tf2 缓冲区与按时间查询回答第一问，概念 7 的差速驱动插件回答第二问。</p>
+    <p lang="en">Concept 2, the tf2 buffer and lookups at a given time, answers the first question, and concept 7, the differential-drive plugin, answers the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 坐标系约定：REP 103 与 REP 105</h3><h3 lang="en">1. Frame conventions: REP 103 and REP 105</h3>
   <p lang="zh-CN">两个人写的节点要能对上，先得对坐标轴达成一致。<strong>REP 103</strong> 规定：坐标系都是右手系；相对机器人本体，<strong>x 向前、y 向左、z 向上</strong>；单位用米、弧度、秒。所以一台机器人「向前开」就是沿自己的 +x，「左转」就是绕 +z 的正角速度，<code>/cmd_vel</code> 里的 <code>linear.x</code> 和 <code>angular.z</code> 正是这个意思。</p>
   <p lang="en">Before nodes written by different people can fit together, they must agree on the axes. <strong>REP 103</strong> says: all frames are right-handed; relative to the robot body, <strong>x forward, y left, z up</strong>; units are metres, radians and seconds. So “drive forward” means along the robot’s own +x, and “turn left” means a positive angular velocity about +z, which is exactly what <code>linear.x</code> and <code>angular.z</code> in <code>/cmd_vel</code> mean.</p>
@@ -101,6 +108,31 @@
     <li lang="zh-CN">t = 0（C++ 的 <code>tf2::TimePointZero</code>，Python 的 <code>rclpy.time.Time()</code>）不是「1970 年」，而是「最新可用」：tf2 取路径上所有边都有数据的最晚共同时刻。它方便调试，但对传感器数据不对，因为那不是测量的时刻。</li>
     <li lang="en">t = 0 (<code>tf2::TimePointZero</code> in C++, <code>rclpy.time.Time()</code> in Python) does not mean 1970; it means “latest available”: tf2 takes the latest time at which every link on the path has data. It is handy for debugging but wrong for sensor data, because it is not the time of the measurement.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把下方图解 (a) 的那次查询算一遍：<code>lookup_transform('map', 'lidar', t)</code>，t 是扫描的时间戳 12.35 s。样本时刻取自图解：odom → base_link 是 50 Hz，样本在 12.34 s 和 12.36 s，最新的是 12.38 s；map → odom 是 5 Hz，样本在 12.20 s 和 12.40 s。base_link → lidar 来自 Lab A 的 URDF，<code>lidar_joint</code> 的 origin 是 x = 0.08 m。各样本的 x 值是为了举例假设的：机器人沿 x 以 0.2 m/s 直行、不转弯，所以只看 x。</p>
+    <p lang="en">Work out the lookup of diagram (a) below: <code>lookup_transform('map', 'lidar', t)</code>, with t the scan stamp 12.35 s. The sample times come from the diagram: odom → base_link runs at 50 Hz with samples at 12.34 s and 12.36 s and the newest at 12.38 s; map → odom runs at 5 Hz with samples at 12.20 s and 12.40 s. base_link → lidar comes from the URDF of Lab A, where the origin of <code>lidar_joint</code> is x = 0.08 m. The x values of the samples are assumed for illustration: the robot drives straight along x at 0.2 m/s without turning, so only x matters.</p>
+    <pre>path        lidar → base_link → odom → map
+odom→base   12.34 s: x = 1.000   12.36 s: x = 1.004   w = (12.35 − 12.34) / 0.02 = 0.5   → 1.002
+map→odom    12.20 s: x = 0.10    12.40 s: x = 0.14    w = (12.35 − 12.20) / 0.20 = 0.75  → 0.13
+base→lidar  static: x = 0.08 for every t
+compose     lidar in map: 0.13 + 1.002 + 0.08 = 1.212 m
+t = 12.45   newest odom→base sample 12.38 &lt; 12.45   → extrapolation into the future
+t = 0       latest common time = min(12.38, 12.40) = 12.38 s</pre>
+    <ol lang="zh-CN">
+      <li>tf2 先在树上找到从 lidar 到 map 的路径：lidar 的父是 base_link，base_link 的父是 odom，odom 的父是 map，一共三条边。</li>
+      <li>odom → base_link 在 12.34 s 和 12.36 s 之间，12.35 s 正好在中点，权重 0.5，x 线性插值得 1.002 m。</li>
+      <li>map → odom 的两个样本相隔 0.2 s，12.35 s 落在四分之三处，权重 0.75，x 得 0.10 + 0.75 × 0.04 = 0.13 m。频率低的边也照样插值，不需要它在 12.35 s 恰好有样本。</li>
+      <li>base_link → lidar 是静态边，对任何时刻都返回 0.08 m。三条边都取同一时刻后首尾组合，雷达在 map 里的 x 是 1.212 m。旋转一般不为零，那时旋转部分用 slerp 插值，组合也要做矩阵乘法而不是简单相加。</li>
+      <li>如果用「现在」12.45 s 去查，odom → base_link 最新的样本只到 12.38 s，tf2 不外推，于是报 extrapolation into the future。用 t = 0 则取所有边都有数据的最晚时刻，即 12.38 s 和 12.40 s 中较小的 12.38 s。</li>
+    </ol>
+    <ol lang="en">
+      <li>tf2 first finds the path from lidar to map in the tree: the parent of lidar is base_link, the parent of base_link is odom and the parent of odom is map, three links in all.</li>
+      <li>odom → base_link has samples at 12.34 s and 12.36 s, and 12.35 s lies exactly halfway, so the weight is 0.5 and linear interpolation gives x = 1.002 m.</li>
+      <li>The two map → odom samples are 0.2 s apart and 12.35 s lies three quarters of the way, so the weight is 0.75 and x = 0.10 + 0.75 × 0.04 = 0.13 m. A slow link is interpolated just the same; it does not need a sample at exactly 12.35 s.</li>
+      <li>base_link → lidar is a static link and returns 0.08 m for any time. With all three links taken at the same instant and composed end to end, the lidar x in map is 1.212 m. Rotations are usually not zero; then the rotation part is interpolated by slerp, and composing takes a matrix product rather than a plain sum.</li>
+      <li>A lookup at “now”, 12.45 s, finds the newest odom → base_link sample at only 12.38 s, and tf2 does not extrapolate, so it raises extrapolation into the future. With t = 0 it takes the latest time at which every link has data, the smaller of 12.38 s and 12.40 s, which is 12.38 s.</li>
+    </ol>
+  </div>
   <div class="note" lang="zh-CN">两个查错工具：<code>ros2 run tf2_tools view_frames</code> 听几秒 tf，生成一份 PDF 画出整棵树，每条边标着发布者和频率；<code>ros2 run tf2_ros tf2_echo map base_link</code> 持续打印 base_link 在 map 里的位姿（第一个参数是 target，第二个是 source，和 lookup 的顺序一样）。树断开时，view_frames 里会看到两棵互不相连的树。</div>
   <div class="note" lang="en">Two debugging tools: <code>ros2 run tf2_tools view_frames</code> listens to tf for a few seconds and writes a PDF of the whole tree, with each link labelled by its publisher and rate; <code>ros2 run tf2_ros tf2_echo map base_link</code> keeps printing the pose of base_link in map (the first argument is the target and the second the source, in the same order as a lookup). When the tree is broken, view_frames shows two trees that do not connect.</div>
   <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲 TF 的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Tf2.html">About tf2</a>、教程 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Learning-About-Tf2-And-Time-Cpp.html">Learning about tf2 and time</a> 与 <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/Tf2/Debugging-Tf2-Problems.html">Debugging tf2 problems</a>。</p>
@@ -183,12 +215,67 @@
     <li lang="zh-CN"><strong>输出</strong>：反过来从两个轮子实际转过的角度积分出底盘位姿，也就是<strong>轮式里程计</strong>，以 <code>&lt;odom_publish_frequency&gt;</code>（默认 50 Hz）发两样东西：一条 <code>gz.msgs.Odometry</code> 到 <code>&lt;odom_topic&gt;</code>（默认 <code>/model/&lt;模型名&gt;/odometry</code>），以及同一个位姿作为一条变换、以 <code>gz.msgs.Pose_V</code> 发到 <code>&lt;tf_topic&gt;</code>（默认 <code>/model/&lt;模型名&gt;/tf</code>）。桥把后者转成 <code>tf2_msgs/msg/TFMessage</code> 接到 ROS 的 <code>/tf</code> 上，它就是 tf 树里的 odom → base_link。</li>
     <li lang="en"><strong>Output</strong>: in the other direction it integrates the base pose from how far the two wheels actually turned — <strong>wheel odometry</strong> — and at <code>&lt;odom_publish_frequency&gt;</code> (default 50 Hz) publishes two things: a <code>gz.msgs.Odometry</code> on <code>&lt;odom_topic&gt;</code> (default <code>/model/&lt;model name&gt;/odometry</code>), and the same pose as a transform, a <code>gz.msgs.Pose_V</code>, on <code>&lt;tf_topic&gt;</code> (default <code>/model/&lt;model name&gt;/tf</code>). The bridge turns the latter into a <code>tf2_msgs/msg/TFMessage</code> on ROS <code>/tf</code>, and that is the odom → base_link of the tf tree.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">用 Lab B 的 DiffDrive 参数算一条指令的两个方向：<code>wheel_separation</code> L = 0.23 m，<code>wheel_radius</code> r = 0.05 m，<code>odom_publish_frequency</code> 50 Hz。指令 v = 0.2 m/s、ω = 1.0 rad/s 是为了举例选的，即一边前进一边左转。假设轮子完全跟上了指令、没有打滑。</p>
+    <p lang="en">Use the DiffDrive parameters of Lab B to work one command through both directions: <code>wheel_separation</code> L = 0.23 m, <code>wheel_radius</code> r = 0.05 m and <code>odom_publish_frequency</code> 50 Hz. The command v = 0.2 m/s, ω = 1.0 rad/s is chosen for illustration: driving forward while turning left. Assume the wheels follow the command exactly, with no slip.</p>
+    <pre>input     ω · L/2 = 1.0 × 0.115 = 0.115 m/s
+          left  = 0.2 − 0.115 = 0.085 m/s  → 0.085 / 0.05 = 1.7 rad/s
+          right = 0.2 + 0.115 = 0.315 m/s  → 0.315 / 0.05 = 6.3 rad/s
+output    one period 1 / 50 Hz = 0.02 s
+          left  arc 1.7 × 0.02 × 0.05 = 0.0017 m   right arc 6.3 × 0.02 × 0.05 = 0.0063 m
+          Δs = (0.0017 + 0.0063) / 2 = 0.004 m     Δθ = (0.0063 − 0.0017) / 0.23 = 0.02 rad</pre>
+    <ol lang="zh-CN">
+      <li>输入方向：DiffDrive 收到 <code>/cmd_vel</code> 后算出 ω·L/2 = 0.115 m/s，左轮慢一些、右轮快一些，所以机器人向左（+z，REP 103）转。</li>
+      <li>两轮的线速度除以轮半径 0.05 m，得到左轮 1.7 rad/s、右轮 6.3 rad/s，交给物理引擎去转 <code>left_wheel_joint</code> 和 <code>right_wheel_joint</code>。</li>
+      <li>输出方向：每 0.02 s 发一次里程计。这段时间里左轮滚过 0.0017 m、右轮滚过 0.0063 m，两者的平均就是底盘前进的 0.004 m，两者之差除以轮距就是转过的 0.02 rad。</li>
+      <li>这两个增量正好等于 v × 0.02 s 和 ω × 0.02 s，说明正反两个方向用的是同一组 L 和 r。DiffDrive 把增量累加进 odom → base_link，以 50 Hz 发出，也就是概念 2 例子里 odom → base_link 样本相隔 20 ms 的原因。</li>
+      <li>真实仿真里轮子会打滑、物理有误差，算出的位姿会慢慢偏离真值，这就是 REP 105 说 odom 会漂移的来源。</li>
+    </ol>
+    <ol lang="en">
+      <li>Input direction: on a <code>/cmd_vel</code> message DiffDrive computes ω·L/2 = 0.115 m/s, so the left wheel goes a little slower and the right one faster, and the robot turns left (+z, REP 103).</li>
+      <li>Dividing each wheel’s linear speed by the 0.05 m radius gives 1.7 rad/s for the left wheel and 6.3 rad/s for the right, which go to the physics engine to turn <code>left_wheel_joint</code> and <code>right_wheel_joint</code>.</li>
+      <li>Output direction: odometry is published every 0.02 s. In that time the left wheel rolls 0.0017 m and the right one 0.0063 m; their mean is the 0.004 m the base moves forward, and their difference divided by the wheel separation is the 0.02 rad it turns.</li>
+      <li>These two increments equal exactly v × 0.02 s and ω × 0.02 s, which shows that both directions use the same L and r. DiffDrive adds each increment into odom → base_link and publishes it at 50 Hz, which is why the odom → base_link samples in the concept 2 example are 20 ms apart.</li>
+      <li>In a real simulation the wheels slip and the physics has errors, so the computed pose slowly moves away from the truth; this is where the drift of odom in REP 105 comes from.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>一处必须改的默认值</strong>：DiffDrive 发出的这条变换，父坐标系默认叫 <code>&lt;模型名&gt;/odom</code>，子坐标系默认叫 <code>&lt;模型名&gt;/&lt;link 名&gt;</code>（gz-sim8 的 <code>DiffDrive.hh</code> 注释，2026-10-31 核对）。如果不改，ROS 里会出现一条 <code>bot/odom</code> → <code>bot/base_link</code>，和 URDF 里的 <code>base_link</code> 是两棵不相连的树。所以 Lab B 用 <code>&lt;frame_id&gt;odom&lt;/frame_id&gt;</code> 和 <code>&lt;child_frame_id&gt;base_link&lt;/child_frame_id&gt;</code> 把它们改成 REP 105 的名字。轮子自己的转角则由另一个系统 JointStatePublisher（<code>gz-sim-joint-state-publisher-system</code>）发出，经桥变成 <code>/joint_states</code>，<code>robot_state_publisher</code> 再算出轮子的 tf——和 Lab A 里滑条做的事一样，只是来源换成了仿真器。</p>
   <p lang="en"><strong>One default that must change</strong>: the transform DiffDrive publishes has a parent frame named <code>&lt;model name&gt;/odom</code> and a child frame named <code>&lt;model name&gt;/&lt;link name&gt;</code> by default (comments in gz-sim8 <code>DiffDrive.hh</code>, checked 2026-10-31). Left alone, ROS gets a <code>bot/odom</code> → <code>bot/base_link</code> link, a tree that does not connect to the URDF’s <code>base_link</code>. So Lab B renames them to the REP 105 names with <code>&lt;frame_id&gt;odom&lt;/frame_id&gt;</code> and <code>&lt;child_frame_id&gt;base_link&lt;/child_frame_id&gt;</code>. The wheels’ own angles come from another system, JointStatePublisher (<code>gz-sim-joint-state-publisher-system</code>), which the bridge turns into <code>/joint_states</code>, from which <code>robot_state_publisher</code> computes the wheel tf — the same job as the sliders in Lab A, with the simulator as the source.</p>
   <div class="note" lang="zh-CN">Phase 6 会换一种做法：用 ros2_control 的 <code>diff_drive_controller</code> 代替这个 Gazebo 插件，odom → base_link 改由控制器在 ROS 一侧发布。两种做法不要同时开，否则 odom → base_link 有两个发布者，tf 会在两个值之间来回跳。</div>
   <div class="note" lang="en">Phase 6 takes another route: ros2_control’s <code>diff_drive_controller</code> replaces this Gazebo plugin, and odom → base_link is published by the controller on the ROS side. Do not run both at once, or odom → base_link gets two publishers and tf jumps back and forth between their values.</div>
   <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲在 Gazebo 里仿真自定义机器人的章节；官方 <a href="https://gazebosim.org/docs/harmonic/moving_robot/">Moving the robot</a> 教程与 <a href="https://github.com/gazebosim/gz-sim/blob/gz-sim8/src/systems/diff_drive/DiffDrive.hh">DiffDrive.hh</a>（每个参数和默认值的权威来源）。</p>
   <p lang="en">Further reading: the chapters on simulating a custom robot in Gazebo in Renard, <em>ROS 2 From Scratch</em>; the official <a href="https://gazebosim.org/docs/harmonic/moving_robot/">Moving the robot</a> tutorial and <a href="https://github.com/gazebosim/gz-sim/blob/gz-sim8/src/systems/diff_drive/DiffDrive.hh">DiffDrive.hh</a> (the authoritative list of parameters and defaults).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>REP 103 规定 x 向前、y 向左、z 向上，REP 105 规定 map → odom → base_link 这条链，odom 连续但漂移，map 不漂移但会跳。</li>
+      <li>tf2 是 <code>/tf</code>、<code>/tf_static</code> 两个话题加每个进程里一份默认保留 10 s 的缓冲区，没有中心服务器。</li>
+      <li>查变换要用传感器消息的时间戳，tf2 对路径上每条边分别插值再组合，只内插不外推。</li>
+      <li>仿真时系统里每个节点都要设 <code>use_sim_time:=true</code>，并把 Gazebo 的 <code>/clock</code> 桥过来。</li>
+      <li><code>ros_gz_bridge</code> 只转换声明过的类型对，任何一侧类型不符都是不报错、没数据。</li>
+      <li>DiffDrive 把 <code>/cmd_vel</code> 换算成左右轮速度，再从轮子实际转角积分出 odom → base_link。</li>
+    </ul>
+    <ul lang="en">
+      <li>REP 103 sets x forward, y left and z up, and REP 105 sets the chain map → odom → base_link, where odom is continuous but drifts and map does not drift but can jump.</li>
+      <li>tf2 is two topics, <code>/tf</code> and <code>/tf_static</code>, plus one buffer per process that keeps 10 s by default, with no central server.</li>
+      <li>A lookup uses the sensor message’s timestamp, and tf2 interpolates each link on the path separately, then composes them, interpolating only and never extrapolating.</li>
+      <li>In simulation every node in the system needs <code>use_sim_time:=true</code>, and the Gazebo <code>/clock</code> must be bridged across.</li>
+      <li><code>ros_gz_bridge</code> converts only the declared type pairs, and a type mismatch on either side means no error and no data.</li>
+      <li>DiffDrive turns <code>/cmd_vel</code> into left and right wheel speeds, and integrates odom → base_link from the angles the wheels actually turned.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：查变换用 t = 0 最保险，因为它总能查到。→ 实际：t = 0 是所有边都有数据的最晚时刻，不是测量时刻，机器人转弯时会把扫描画歪。</li>
+      <li>误解：定位模块发布 map → base_link。→ 实际：它发布 map → odom 这段修正量，odom → base_link 归里程计，因为每个坐标系只能有一个父。</li>
+      <li>误解：URDF 一加载，轮子的 tf 就有了。→ 实际：continuous 关节要有人发 <code>/joint_states</code>，<code>robot_state_publisher</code> 才算得出轮子的变换。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a lookup at t = 0 is safest because it always succeeds. → Fact: t = 0 is the latest time every link has data, not the time of measurement, so a turning robot draws its scans skewed.</li>
+      <li>Myth: the localization component publishes map → base_link. → Fact: it publishes the correction map → odom, and odom → base_link belongs to odometry, because each frame may have only one parent.</li>
+      <li>Myth: once the URDF is loaded, the wheel tf exists. → Fact: continuous joints need someone to publish <code>/joint_states</code> before <code>robot_state_publisher</code> can compute the wheel transforms.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：URDF ↔ SDF</h2><h2 id="compare-en" lang="en">Comparison: URDF ↔ SDF</h2>
   <div class="table-wrap">

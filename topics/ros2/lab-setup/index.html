@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">你要在一台 Apple Silicon Mac 上跑八个阶段的 ROS 2：Jazzy、Gazebo、Nav2、ros2_control，还要有 RViz2 的图形界面和 Phase 2 的实时调度。可 Jazzy 的正式平台是 Ubuntu 24.04，几百个包不该装进你每天用的系统，而默认的发现多播会让同一个 Wi-Fi 上的人看到你的话题。那么怎样得到一个和 Tier 1 平台一样的 Linux、能在浏览器里看到桌面、只在本机内发现，并且弄坏了可以一条命令重建？</p>
+    <p lang="en">You want to run eight phases of ROS 2 on an Apple Silicon Mac: Jazzy, Gazebo, Nav2 and ros2_control, plus the RViz2 GUI and the real-time scheduling of Phase 2. Yet Jazzy’s official platform is Ubuntu 24.04, hundreds of packages should not go into the system you use every day, and the default discovery multicast lets anyone on the same Wi-Fi see your topics. So how do you get a Linux that matches a Tier 1 platform, shows its desktop in a browser, discovers only within the machine, and can be rebuilt with one command when it breaks?</p>
+    <p lang="zh-CN">概念 1 的 arm64 容器回答这个问题，概念 2 和 3 的镜像与 <code>compose.yaml</code> 把它的每一项要求落到具体设置上。</p>
+    <p lang="en">The arm64 container of concept 1 answers it, and the image and <code>compose.yaml</code> of concepts 2 and 3 turn each requirement into a concrete setting.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 三个选项，首选容器</h3><h3 lang="en">1. Three options, container first</h3>
   <p lang="zh-CN">本课程固定在 <strong>ROS 2 Jazzy Jalisco</strong>（LTS，2024-05-23 发布，2029 年 5 月停止支持）、<strong>Ubuntu 24.04 arm64</strong> 和 <strong>Gazebo Harmonic</strong>（Jazzy 推荐的仿真器）上，2026-10-31 核对。三种环境按推荐顺序：</p><p lang="en">This course is pinned to <strong>ROS 2 Jazzy Jalisco</strong> (LTS, released 2024-05-23, end of life May 2029), <strong>Ubuntu 24.04 arm64</strong> and <strong>Gazebo Harmonic</strong> (the recommended simulator for Jazzy), checked on 2026-10-31. The three environments, in order of recommendation:</p>
   <ul>
@@ -231,7 +238,62 @@ esac</pre>
     <li lang="zh-CN"><strong>资源预算（推断）</strong>：镜像装完大约数 GB 到十几 GB；在 Docker Desktop 的设置里给它的 VM 至少 8 GB 内存和 4 个 CPU，Gazebo 软件渲染很吃 CPU。不做实验时 <code>./lab.sh down</code> 并退出 Docker Desktop。</li>
     <li lang="en"><strong>Resource budget (inference)</strong>: the finished image is roughly several GB to over ten GB; in Docker Desktop’s settings give its VM at least 8 GB of memory and 4 CPUs, since Gazebo’s software rendering is CPU-hungry. When not doing labs, run <code>./lab.sh down</code> and quit Docker Desktop.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">镜像已经建好，跟着一次 <code>./lab.sh up</code> 走到浏览器里出现桌面，再进一个 shell。这里的每个数字都来自本页上面的四个文件。</p>
+    <p lang="en">With the image already built, follow one <code>./lab.sh up</code> until the desktop appears in the browser, then open a shell. Every number here comes from the four files above on this page.</p>
+    <pre>./lab.sh up      → docker compose up -d       container ros2-lab, image ros2-lab:jazzy
+CMD              → start-desktop.sh
+                   Xtigervnc :1  -rfbport 5901  -geometry 1600x900  -localhost
+                   sleep 2;  startxfce4 on DISPLAY=:1
+                   websockify 6080 → localhost:5901
+ports            → 127.0.0.1:6080 on the Mac → 6080 in the container
+browser          → http://localhost:6080/vnc.html
+./lab.sh shell   → docker compose exec ros bash   ROS_DOMAIN_ID=42, LOCALHOST</pre>
+    <ol lang="zh-CN">
+      <li>第 1 步，<code>lab.sh</code>：先 <code>cd</code> 到脚本所在目录、<code>mkdir -p share</code>，再执行 <code>docker compose up -d</code>，在后台按 <code>compose.yaml</code> 起名为 <code>ros2-lab</code> 的容器：<code>linux/arm64</code>、<code>/dev/shm</code> 4 GB、<code>SYS_NICE</code> 加 rtprio 99、<code>ws</code> 卷挂到 <code>/root/ws</code>、<code>./share</code> 挂到 <code>/share</code>。</li>
+      <li>第 2 步，容器的 <code>CMD</code>：<code>start-desktop.sh</code> 开虚拟显示 <code>:1</code>，1600 × 900、24 位色，VNC 只在容器内的 5901 端口上听；等 2 s 后在这个显示上起 XFCE。</li>
+      <li>第 3 步，<code>exec websockify</code>：它取代 shell 成为容器的主进程，在 6080 端口提供 noVNC 网页，并把浏览器的 WebSocket 转到 <code>localhost:5901</code>。它一退出，容器就停。</li>
+      <li>第 4 步，端口发布：compose 把容器的 6080 只发布到 Mac 的 <code>127.0.0.1:6080</code>，所以浏览器打开 <code>http://localhost:6080/vnc.html</code> 能看到桌面，同一网络里的其他机器看不到。</li>
+      <li>第 5 步，<code>./lab.sh shell</code>：<code>docker compose exec ros bash</code> 在同一个容器里开一个 bash，<code>.bashrc</code> 已经 <code>source /opt/ros/jazzy/setup.bash</code>，环境里是 <code>ROS_DOMAIN_ID=42</code> 和 <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>。再开第二个 shell，进的也是这个容器，所以两边的 talker 和 listener 能互相发现。</li>
+    </ol>
+    <ol lang="en">
+      <li>Step 1, <code>lab.sh</code>: it <code>cd</code>s to the script’s directory, runs <code>mkdir -p share</code>, then <code>docker compose up -d</code>, which starts the container <code>ros2-lab</code> in the background from <code>compose.yaml</code>: <code>linux/arm64</code>, a 4 GB <code>/dev/shm</code>, <code>SYS_NICE</code> plus rtprio 99, the <code>ws</code> volume on <code>/root/ws</code> and <code>./share</code> on <code>/share</code>.</li>
+      <li>Step 2, the container’s <code>CMD</code>: <code>start-desktop.sh</code> opens the virtual display <code>:1</code> at 1600 × 900 and 24-bit colour, with VNC listening only inside the container on port 5901; after 2 s it starts XFCE on that display.</li>
+      <li>Step 3, <code>exec websockify</code>: it replaces the shell as the container’s main process, serves the noVNC page on port 6080 and forwards the browser’s WebSocket to <code>localhost:5901</code>. When it exits, the container stops.</li>
+      <li>Step 4, port publishing: compose publishes the container’s 6080 only on the Mac’s <code>127.0.0.1:6080</code>, so the browser at <code>http://localhost:6080/vnc.html</code> sees the desktop and other machines on the network do not.</li>
+      <li>Step 5, <code>./lab.sh shell</code>: <code>docker compose exec ros bash</code> opens a bash in the same container; <code>.bashrc</code> already sources <code>/opt/ros/jazzy/setup.bash</code>, and the environment has <code>ROS_DOMAIN_ID=42</code> and <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code>. A second shell enters the same container too, so a talker in one and a listener in the other discover each other.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：《ROS 2 From Scratch》讲工作区和 colcon 构建的章节（<code>~/ws</code> 里以后放什么）。</p><p lang="en">Further reading: the chapters of <em>ROS 2 From Scratch</em> on workspaces and building with colcon (what goes into <code>~/ws</code> later).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>宿主 Mac 不装 ROS 2，所有 ROS 都在一个 <code>ros:jazzy-ros-base</code> 之上建出的 arm64 容器里，它就是 Jazzy 的 Tier 1 平台 Ubuntu 24.04 arm64。</li>
+      <li>桌面经 TigerVNC、XFCE 和 noVNC 送到浏览器，端口只发布到 Mac 的 <code>127.0.0.1:6080</code>，因为 VNC 没有密码。</li>
+      <li><code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> 让发现只在容器的网络命名空间里进行，<code>ROS_DOMAIN_ID</code> 再把不同的 ROS 图分开。</li>
+      <li>容器共用 Docker Desktop VM 的内核，<code>SYS_NICE</code> 加 rtprio 99 能让 <code>SCHED_FIFO</code> 生效，但 <code>PREEMPT_RT</code> 在这里做不到。</li>
+      <li>代码放在命名卷 <code>ws</code> 里，<code>./lab.sh snapshot</code> 只存容器的文件系统、不含这个卷，所以卷要另外打包备份。</li>
+    </ul>
+    <ul lang="en">
+      <li>The host Mac gets no ROS 2; all of ROS lives in an arm64 container built on <code>ros:jazzy-ros-base</code>, which is Jazzy’s Tier 1 platform, Ubuntu 24.04 arm64.</li>
+      <li>The desktop reaches the browser through TigerVNC, XFCE and noVNC, and the port is published only on the Mac’s <code>127.0.0.1:6080</code>, because VNC has no password.</li>
+      <li><code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> keeps discovery inside the container’s network namespace, and <code>ROS_DOMAIN_ID</code> further separates different ROS graphs.</li>
+      <li>Containers share the kernel of Docker Desktop’s VM, so <code>SYS_NICE</code> plus rtprio 99 makes <code>SCHED_FIFO</code> work, but <code>PREEMPT_RT</code> is not possible here.</li>
+      <li>Code lives in the named volume <code>ws</code>, and <code>./lab.sh snapshot</code> saves only the container’s filesystem without that volume, so the volume needs its own archive as a backup.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：在容器里 <code>apt install</code> 一个 RT 内核包，就有了 <code>PREEMPT_RT</code>。→ 实际：容器从不引导内核，它用的是 Docker Desktop 那台 VM 的内核，而那个内核你换不了。</li>
+      <li>误解：<code>ROS_LOCALHOST_ONLY=1</code> 和 <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> 一样，用哪个都行。→ 实际：前者是从 Iron 起弃用的旧名，Jazzy 仍照办但每个节点都打印警告，而且设为 1 时会压过新变量和 <code>ROS_STATIC_PEERS</code>。</li>
+      <li>误解：<code>./lab.sh snapshot</code> 把我的代码也存下来了。→ 实际：<code>docker commit</code> 不包括命名卷，<code>ws</code> 卷里的工作区要用 <code>tar</code> 另外备份。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: running <code>apt install</code> for an RT kernel package inside the container gives you <code>PREEMPT_RT</code>. → Fact: a container never boots a kernel; it uses the kernel of Docker Desktop’s VM, and you cannot replace that kernel.</li>
+      <li>Myth: <code>ROS_LOCALHOST_ONLY=1</code> and <code>ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST</code> are the same, so either will do. → Fact: the former is the old name deprecated since Iron; Jazzy still honours it but every node prints a warning, and when set to 1 it overrides the new variable and <code>ROS_STATIC_PEERS</code>.</li>
+      <li>Myth: <code>./lab.sh snapshot</code> saves my code too. → Fact: <code>docker commit</code> does not include named volumes, so the workspace in the <code>ws</code> volume needs a separate <code>tar</code> backup.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

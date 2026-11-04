@@ -54,6 +54,13 @@
   </ul>
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <div class="crux">
+    <p lang="zh-CN">一个解码步除了矩阵乘和注意力，还有一长串逐元素算子：残差加法、RMSNorm、SiLU-and-mul、RoPE、写 KV 缓存，最后还要从 151936 个概率里抽一个 token。每个这样的算子运算很少，时间几乎全花在搬字节上；两个算子一前一后时，前一个把结果写回显存，后一个原样读回来，再各付一次内核发射。融合要做到的是：中间结果不出寄存器，内核数变少；采样要做到的是：不为抽一个 token 把整行概率排一遍序。</p>
+    <p lang="en">Besides the matmuls and attention, a decode step runs a long chain of elementwise operators: the residual add, RMSNorm, SiLU-and-mul, RoPE, the KV-cache write, and at the end a draw of one token from 151936 probabilities. Each of these does little arithmetic and spends almost all its time moving bytes; when two of them run back to back, the first writes its result to memory, the second reads it straight back, and each pays a kernel launch. Fusion has to keep the intermediate in registers and cut the number of kernels; sampling has to draw one token without sorting the whole row of probabilities.</p>
+    <p lang="zh-CN">概念 1 的融合原理回答前一件，概念 2 到 5 是它的四个实例；概念 6 的不排序拒绝采样回答后一件。</p>
+    <p lang="en">The fusion principle of concept 1 answers the first, and concepts 2 to 5 are four instances of it; the sorting-free rejection sampling of concept 6 answers the second.</p>
+  </div>
   <p lang="zh-CN">下文 SGLang 的源码路径和行号都在 <code>v0.5.22</code> 标签下，FlashInfer 的在 <code>v0.7.1</code> 标签下（SGLang 钉的版本），都是 2026-11-01 从 raw.githubusercontent.com 取回后读的；FlashInfer 的采样博客（2025-03-10）和 Qwen3-0.6B 在 Hugging Face 上的 <code>config.json</code> 也是同一天读的。字节数一律按 Qwen3-0.6B 算：hidden size <code>h</code> = 1024，intermediate size <code>I</code> = 3072，16 个 Q 头、8 个 KV 头、head_dim 128，词表 151936，28 层，BF16 每个元素 2 字节。只数激活的读写；RMSNorm 的权重每 token 只有 2 KiB，而且整批共用、多半在缓存里，不计入。</p><p lang="en">Every SGLang source path and line number below is at the <code>v0.5.22</code> tag, and FlashInfer’s at <code>v0.7.1</code> (the version SGLang pins); all were fetched from raw.githubusercontent.com and read on 2026-11-01, as were FlashInfer’s sampling blog post (2025-03-10) and the <code>config.json</code> of Qwen3-0.6B on Hugging Face. Byte counts all use Qwen3-0.6B: hidden size <code>h</code> = 1024, intermediate size <code>I</code> = 3072, 16 Q heads, 8 KV heads, head_dim 128, a vocabulary of 151936, 28 layers, and 2 bytes per BF16 element. Only activation reads and writes are counted; the RMSNorm weight is just 2 KiB, shared by the whole batch and most likely cached, so it is left out.</p>
 
   <h3 lang="zh-CN">1. 为什么融合能省显存流量</h3><h3 lang="en">1. Why fusion cuts memory traffic</h3>
@@ -67,7 +74,27 @@
     <li lang="zh-CN"><strong>一个融合内核</strong>：读 <code>x</code> 和 <code>r</code>，写 <code>r′</code>（下一层还要用残差）和 <code>y</code>，共 8 KiB。省掉的是把 <code>r′</code> 读回来的那 2 KiB 和一次发射。</li>
     <li lang="en"><strong>One fused kernel</strong>: reads <code>x</code> and <code>r</code>, writes <code>r′</code> (the next layer still needs the residual) and <code>y</code>, 8 KiB in all. What is saved is the 2 KiB of reading <code>r′</code> back, plus one launch.</li>
   </ul>
-  <p lang="zh-CN">这些字节什么时候变成时间，取决于 token 数。Qwen3-0.6B 每层有两个残差 + RMSNorm、一个 SiLU-and-mul，28 层再加最后一个归一化，相对于「两个内核」的写法，每个 token 每步约省 57 × 2 KiB + 28 × 12 KiB ≈ 450 KiB。57 的数法是每个 RMSNorm 处都算：每层 2 处、28 层 56 处，再加最后一个归一化；第 0 层的输入归一化没有残差可加，所以真正的「残差加归一化」应少一处（推断，没有逐行核对 Qwen3 的模型代码），这里按 57 处粗算。批大小为 1 的解码一步要读一遍约 0.6B 个 BF16 参数，约 1.2 GB（模型卡写的是 0.6B 参数，词嵌入和输出头共用），450 KiB 只占其中约 0.04%，这时融合的收益主要是少发射内核；预填充 4096 个 token 时，450 KiB × 4096 ≈ 1.8 GB，已经和权重相当，字节就成了主角（推断，按上面的字节数相乘）。Lab B 在 Metal 上把这两种情形都量出来了。</p><p lang="en">When those bytes turn into time depends on the token count. Each Qwen3-0.6B layer has two residual + RMSNorm sites and one SiLU-and-mul; over 28 layers plus the final norm, against the two-kernel style, each token saves about 57 × 2 KiB + 28 × 12 KiB ≈ 450 KiB per step. The 57 counts every RMSNorm site: two per layer, 56 over 28 layers, plus the final norm; layer 0’s input norm has no residual to add, so the true count of residual + norm sites should be one fewer (an inference; Qwen3’s model code was not checked line by line), and 57 is used here as a round figure. A decode step at batch size 1 reads about 0.6B BF16 parameters once, about 1.2 GB (the model card gives 0.6B parameters, with the embedding shared as the output head), so 450 KiB is about 0.04% of it, and the benefit of fusion there is mostly fewer kernel launches; for a 4096-token prefill, 450 KiB × 4096 ≈ 1.8 GB, comparable to the weights, and the bytes take over (inference, multiplying the byte counts above). Lab B measures both regimes in Metal.</p>
+  <p lang="zh-CN">这些字节什么时候变成时间，取决于 token 数。Qwen3-0.6B 每层有两个残差 + RMSNorm、一个 SiLU-and-mul，28 层再加最后一个归一化，相对于「两个内核」的写法，每个 token 每步约省 57 × 2 KiB + 28 × 12 KiB ≈ 450 KiB。57 的数法是每个 RMSNorm 处都算：每层 2 处、28 层 56 处，再加最后一个归一化；第 0 层的输入归一化没有残差可加，所以真正的「残差加归一化」应少一处（推断，没有逐行核对 Qwen3 的模型代码），这里按 57 处粗算。批大小为 1 的解码一步要读一遍约 0.6B 个 BF16 参数，约 1.2 GB（模型卡写的是 0.6B 参数，词嵌入和输出头共用），450 KiB 只占其中约 0.04%，这时融合的收益主要是少发射内核；预填充 4096 个 token 时，450 KiB × 4096 ≈ 1.9 GB，已经和权重相当，字节就成了主角（推断，按上面的字节数相乘）。Lab B 在 Metal 上把这两种情形都量出来了。</p><p lang="en">When those bytes turn into time depends on the token count. Each Qwen3-0.6B layer has two residual + RMSNorm sites and one SiLU-and-mul; over 28 layers plus the final norm, against the two-kernel style, each token saves about 57 × 2 KiB + 28 × 12 KiB ≈ 450 KiB per step. The 57 counts every RMSNorm site: two per layer, 56 over 28 layers, plus the final norm; layer 0’s input norm has no residual to add, so the true count of residual + norm sites should be one fewer (an inference; Qwen3’s model code was not checked line by line), and 57 is used here as a round figure. A decode step at batch size 1 reads about 0.6B BF16 parameters once, about 1.2 GB (the model card gives 0.6B parameters, with the embedding shared as the output head), so 450 KiB is about 0.04% of it, and the benefit of fusion there is mostly fewer kernel launches; for a 4096-token prefill, 450 KiB × 4096 ≈ 1.9 GB, comparable to the weights, and the bytes take over (inference, multiplying the byte counts above). Lab B measures both regimes in Metal.</p>
+  <div class="worked">
+    <p lang="zh-CN">把上一段的账按 Qwen3-0.6B 的一个 token 一层一层算一遍。每处残差 + RMSNorm 省 2 KiB（图解 (a) 第 2 步和第 4 步：两个内核 10 KiB，融合 8 KiB），每处 SiLU-and-mul 省 12 KiB（概念 3：30 KiB 对 18 KiB）。</p>
+    <p lang="en">Redo the accounting of the paragraph above for one Qwen3-0.6B token, layer by layer. Each residual + RMSNorm site saves 2 KiB (steps 2 and 4 of diagram (a): 10 KiB for two kernels, 8 KiB fused), and each SiLU-and-mul saves 12 KiB (concept 3: 30 KiB against 18 KiB).</p>
+    <pre>per layer : 2 x 2 KiB (add+norm) + 1 x 12 KiB (silu*up) = 16 KiB
+28 layers : 28 x 16 KiB = 448 KiB, + final norm 2 KiB  = 450 KiB per token
+decode, 1 token   : 450 KiB      vs weights 0.6e9 x 2 B = 1.2 GB  -&gt; about 0.04%
+prefill, 4096 tok : 450 KiB x 4096 = 1843200 KiB, about 1.9 GB     -&gt; same order as the weights</pre>
+    <ol lang="zh-CN">
+      <li>一层里有两处残差 + RMSNorm（注意力之前和 MLP 之前）和一处 SiLU-and-mul，按「两个内核」的写法为基准，一层省 16 KiB。</li>
+      <li>28 层是 448 KiB，加上最后一个归一化的 2 KiB，是正文里的 450 KiB；57 处归一化里第 0 层那一处没有残差，所以这是略偏大的粗算。</li>
+      <li>批大小 1 的解码一步要读约 1.2 GB 的权重，450 KiB 只占约 0.04%，省下的字节换不来可见的时间，收益主要是每处少一次发射，一步约 57 + 28 = 85 次。</li>
+      <li>预填充 4096 个 token 时，同样的每 token 450 KiB 乘上 4096，约 1.9 GB，已经超过一遍权重，字节成了主角。图解 (a) 第 5 步引用的 Lab B 实测正是这一侧：16384 个 token 时时间比正好是 10 比 8，和字节比相同。</li>
+    </ol>
+    <ol lang="en">
+      <li>A layer has two residual + RMSNorm sites (before attention and before the MLP) and one SiLU-and-mul; against the two-kernel baseline, one layer saves 16 KiB.</li>
+      <li>Twenty-eight layers make 448 KiB, and the final norm adds 2 KiB, giving the 450 KiB of the text; layer 0’s norm has no residual, so this is a slight overcount.</li>
+      <li>A decode step at batch size 1 reads about 1.2 GB of weights, so 450 KiB is about 0.04% of it: the saved bytes buy no visible time, and the gain is mostly one launch fewer per site, about 57 + 28 = 85 per step.</li>
+      <li>For a 4096-token prefill the same 450 KiB per token times 4096 is about 1.9 GB, more than one pass over the weights, and the bytes take over. The Lab B measurement quoted in step 5 of diagram (a) is on this side: at 16384 tokens the time ratio is exactly 10 to 8, the same as the byte ratio.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">SGLang 把每个可融合的算子写成一个 <code>BaseFusedOp</code>（<code>python/sglang/kernels/fused_op.py</code>）：同一个算子有一个必备的纯 PyTorch 参考实现 <code>forward_native</code>，再加按平台的 <code>forward_cuda</code> 等和按来源的 <code>forward_jit</code>、<code>forward_aot</code>、<code>forward_flashinfer</code> 等实现，在第一次调用时选定并缓存（第 23–50 行）。环境变量 <code>SGLANG_FORCE_FUSED_OP_BACKEND</code> 能把整个进程里的这类算子强制切到某一个来源（第 26–30、222–234 行）；它的取值是 <code>KernelBackend</code> 枚举的值，参考实现那一项是 <code>torch</code>（<code>kernels/spec.py</code> 第 40 行），<code>srt/environ.py</code> 第 1355–1357 行的注释也写的是 <code>"torch"</code>。<code>fused_op.py</code> 文档字符串里举的例子 <code>native</code> 不是枚举里的值（2026-11-01 在 <code>spec.py</code> 里核对，枚举只有 <code>torch</code>、<code>torch_compile</code>、<code>triton</code>、<code>jit</code>、<code>aot</code> 等）。Lab A 用 <code>torch</code> 做不融合的对照。</p><p lang="en">SGLang writes every fusable operator as a <code>BaseFusedOp</code> (<code>python/sglang/kernels/fused_op.py</code>): one operator with a required pure-PyTorch reference, <code>forward_native</code>, plus per-platform paths such as <code>forward_cuda</code> and per-provenance ones such as <code>forward_jit</code>, <code>forward_aot</code> and <code>forward_flashinfer</code>, one of which is chosen on the first call and cached (lines 23–50). The environment variable <code>SGLANG_FORCE_FUSED_OP_BACKEND</code> forces every such operator in the process onto one provenance (lines 26–30 and 222–234); its value is a value of the <code>KernelBackend</code> enum, where the reference is <code>torch</code> (line 40 of <code>kernels/spec.py</code>), which is also what the comment at lines 1355–1357 of <code>srt/environ.py</code> says. The example <code>native</code> in the <code>fused_op.py</code> docstring is not an enum value (checked in <code>spec.py</code> on 2026-11-01: the enum has <code>torch</code>, <code>torch_compile</code>, <code>triton</code>, <code>jit</code>, <code>aot</code> and so on). Lab A uses <code>torch</code> as the unfused baseline.</p>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 5 章 Memory architecture and data locality（为什么减少对全局内存的访问是第一位的优化）和第 6 章 Performance considerations；Hennessy &amp; Patterson 第 4 章的 Roofline 一节（算术强度和屋脊点）。</p><p lang="en">Further reading: chapter 5, Memory architecture and data locality, of PMPP 5th ed. (why cutting global-memory accesses comes first) and chapter 6, Performance considerations; the Roofline section of chapter 4 of Hennessy &amp; Patterson (arithmetic intensity and the ridge point).</p>
 
@@ -122,7 +149,58 @@ Step 2:
     <li lang="en"><strong>Narrow</strong>: otherwise, if <code>pivot_1</code> passes the test, the range becomes <code>(pivot_0, pivot_1]</code>; if not, <code>low</code> rises to <code>pivot_1</code> (lines 1322–1331). Either way the range at least halves.</li>
   </ol>
   <p lang="zh-CN">FlashInfer 的博客 <em>Sorting-Free GPU Kernels for LLM Sampling</em>（2025-03-10）把这叫 Dual Pivot Rejection Sampling，说它从 v0.2.3 开始使用，轮数最坏是 O(log(1/ε))，并证明了输出分布正好等于「先截断、再在剩下的 token 里按概率抽」；它也说实际需要的轮数通常很少。所以每轮最多读两遍这一行，没有排序、没有中间张量。博客里的单卡 H100 评测说采样时间减少了一半以上，这是博客自己的数字，本页没有复现。v0.7.1 的默认 <code>top_k_first</code> 另有一条快路径：先用基数 top-k 选出 k 个，再在这 k 个上做 top-p（第 1547–1605 行）；SGLang 传的是 <code>joint</code>，不走它。</p><p lang="en">FlashInfer’s blog post <em>Sorting-Free GPU Kernels for LLM Sampling</em> (2025-03-10) calls this Dual Pivot Rejection Sampling, says it has been used since v0.2.3 with a worst case of O(log(1/ε)) rounds, and proves that the output distribution is exactly that of truncating first and then sampling among the remaining tokens by probability; it also says the number of rounds needed is usually small. So each round reads the row at most twice, with no sort and no intermediate tensors. The post’s evaluation on one H100 reports sampling time cut by more than half; that is the post’s own figure and was not reproduced here. The default <code>top_k_first</code> order of v0.7.1 has a separate fast path, which selects k entries with a radix top-k first and then runs top-p over those k (lines 1547–1605); SGLang passes <code>joint</code> and does not take it.</p>
+  <div class="worked">
+    <p lang="zh-CN">把一次 <code>flashinfer</code> 后端的采样调用从 Python 一路追到内核，用图解 (b) 那一行 10 个 token 的概率（示意值，真实词表是 151936 个），<code>top_k = 4</code>、<code>top_p = 0.6</code>。</p>
+    <p lang="en">Trace one sampling call on the <code>flashinfer</code> backend from Python down to the kernel, using the 10-token row of diagram (b) (illustrative values; the real vocabulary has 151936), with <code>top_k = 4</code> and <code>top_p = 0.6</code>.</p>
+    <pre>round  range         q     u     candidate    above pivot_0       result
+1      (0, 1]        1.00  0.52  t4 (0.08)    4 tokens            reject, range (0.08, 0.54]
+2      (0.08, 0.54]  0.77  0.70  t7 (0.10)    3 tokens, mass 0.67 reject, range (0.10, 0.32]
+3      (0.10, 0.32]  0.67  0.50  t5 (0.25)    1 token,  mass 0.30 accept t5</pre>
+    <ol lang="zh-CN">
+      <li><code>layers/sampler.py</code> 第 288–291 行原地做 softmax，这一行概率留在显存里，不排序。</li>
+      <li>第 429–434 行调 <code>top_k_top_p_sampling_from_probs(..., filter_apply_order="joint")</code>，进入 FlashInfer v0.7.1，发射 <code>TopKTopPSamplingFromProbKernel</code>，一个线程块负责这一个请求。</li>
+      <li>第 1 轮按词表顺序累加，在 t4 处超过 0.52；概率大于 0.08 的有 4 个，不少于 k，拒绝，范围收窄到 (0.08, 0.54]。</li>
+      <li>第 2 轮只累加大于 0.08 的 token，候选 t7；它上面 3 个 token 的和是 0.67，不小于 p，拒绝，范围变成 (0.10, 0.32]。</li>
+      <li>第 3 轮候选 t5，它上面只有 t1，1 个、和 0.30，两个条件都满足，接受 t5（<code>sampling.cuh</code> 第 1318–1321 行），内核结束。按真实词表算，每轮最多读两遍 593.5 KiB 的行，三轮都在同一个内核里。</li>
+    </ol>
+    <ol lang="en">
+      <li>Lines 288–291 of <code>layers/sampler.py</code> do the softmax in place, and the row of probabilities stays in memory unsorted.</li>
+      <li>Lines 429–434 call <code>top_k_top_p_sampling_from_probs(..., filter_apply_order="joint")</code>, which enters FlashInfer v0.7.1 and launches <code>TopKTopPSamplingFromProbKernel</code>, one thread block for this request.</li>
+      <li>Round 1 adds up probabilities in vocabulary order and passes 0.52 at t4; 4 tokens lie above 0.08, not fewer than k, so it rejects and the range narrows to (0.08, 0.54].</li>
+      <li>Round 2 adds only tokens above 0.08 and lands on t7; the 3 tokens above it have mass 0.67, not below p, so it rejects and the range becomes (0.10, 0.32].</li>
+      <li>Round 3 lands on t5, with only t1 above it, 1 token of mass 0.30; both tests pass, t5 is accepted (lines 1318–1321 of <code>sampling.cuh</code>) and the kernel ends. With the real vocabulary each round reads the 593.5 KiB row at most twice, and all three rounds run in the one kernel.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Raschka 第 5 章 5.3 节（控制随机性的解码策略：5.3.1 温度缩放、5.3.2 top-k 采样）讲的是要算什么；PMPP 第 5 版第 11 章 Prefix sum (scan) 讲逆变换采样里的块内前缀和，第 13 章 Sorting 讲被省掉的排序要花多少。</p><p lang="en">Further reading: section 5.3 of chapter 5 of Raschka (decoding strategies to control randomness: 5.3.1 temperature scaling and 5.3.2 top-k sampling) covers what is being computed; chapter 11 of PMPP 5th ed., Prefix sum (scan), covers the block prefix sums of inverse transform sampling, and chapter 13, Sorting, what the avoided sort would cost.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>逐元素算子的时间约等于读写的字节除以显存带宽，融合把中间结果留在寄存器里，省掉一写一读和一次发射。</li>
+      <li>残差 + RMSNorm 融合后每 token 每处从 10 KiB 降到 8 KiB，SiLU-and-mul 从 30 KiB 降到 18 KiB，按 Qwen3-0.6B 每个 token 每步约省 450 KiB。</li>
+      <li>批大小 1 的解码里这些字节只占读权重的约 0.04%，收益主要是少发射内核；token 多的预填充里字节才是主角。</li>
+      <li>v0.5.22 里 RoPE + 写 KV 缓存的融合只有部分模型会用，稠密的 Qwen3 不传那个参数；all-reduce + 残差 + RMSNorm 要多卡和 SM90 或 SM100。</li>
+      <li>默认的 <code>flashinfer</code> 采样后端不排序：一个线程块做多轮拒绝采样，每轮最多读两遍这一行，范围至少减半，输出分布与先截断再抽样相同。</li>
+    </ul>
+    <ul lang="en">
+      <li>An elementwise operator’s time is roughly the bytes it reads and writes divided by memory bandwidth, and fusion keeps the intermediate in registers, saving one write, one read and one launch.</li>
+      <li>Fused, residual + RMSNorm drops from 10 KiB to 8 KiB per token per site and SiLU-and-mul from 30 KiB to 18 KiB, about 450 KiB per token per step for Qwen3-0.6B.</li>
+      <li>In a decode at batch size 1 those bytes are about 0.04% of the weight reads, so the gain is mostly fewer launches; in a prefill with many tokens the bytes take over.</li>
+      <li>At v0.5.22 the RoPE + KV-cache-write fusion is used only by some models, and the dense Qwen3 does not pass its argument; all-reduce + residual + RMSNorm needs several GPUs and SM90 or SM100.</li>
+      <li>The default <code>flashinfer</code> sampling backend does not sort: one thread block runs rounds of rejection sampling, each reading the row at most twice and at least halving the range, and the output distribution equals truncating first and then sampling.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：融合省掉了算子本身的计算。→ 实际：运算一样多，省掉的是中间结果写回显存再读回来的字节和内核发射；融合后的 RMSNorm 仍然要写出 <code>r′</code>，因为下一层还要用残差。</li>
+      <li>误解：CUDA 图已经省掉了发射开销，所以融合没必要。→ 实际：CUDA 图省掉的是 CPU 那一份，GPU 上内核之间的那一份和中间结果的显存流量都还在；融合减少的是内核数本身。</li>
+      <li>误解：不排序的采样只是近似。→ 实际：FlashInfer 的博客证明了输出分布正好等于先按 top-k 和 top-p 截断、再在剩下的 token 里按概率抽。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: fusion saves the operators’ own arithmetic. → Fact: the arithmetic is the same; what goes is the bytes of writing the intermediate to memory and reading it back, plus the launch, and the fused RMSNorm still writes <code>r′</code> because the next layer needs the residual.</li>
+      <li>Myth: CUDA graphs already removed the launch cost, so fusion is unnecessary. → Fact: CUDA graphs remove the CPU share; the share spent on the GPU between kernels and the memory traffic of the intermediates remain, and fusion reduces the number of kernels itself.</li>
+      <li>Myth: sorting-free sampling is only an approximation. → Fact: FlashInfer’s blog post proves the output distribution is exactly that of truncating by top-k and top-p first and then sampling among the remaining tokens by probability.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：融合 ↔ 每 token 省下的字节 ↔ 在哪里</h2><h2 id="compare-en" lang="en">Comparison: fusion ↔ bytes saved per token ↔ where it lives</h2>
   <div class="table-wrap">

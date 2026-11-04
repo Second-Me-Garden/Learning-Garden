@@ -53,6 +53,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">内核出了问题，你手里的工具比用户态少得多：没有一个能 attach 的调试器进程，<code>printk</code> 本身会改变时序，一崩溃整台机器就停了。一个 bug 可能只在某个提交之后、某种并发交错下才出现，留给你的常常只是一屏寄存器和十六进制地址。要定位它，你得能在不惊动内核的前提下把它停住或观察它，能把崩溃时的地址翻回源码行，还能把「哪个改动引入的」缩小到一个提交。</p>
+    <p lang="en">When the kernel goes wrong, you have far fewer tools than in user space: there is no debugger process to attach, <code>printk</code> itself changes the timing, and a crash stops the whole machine. A bug may appear only after one particular commit and under one particular interleaving, and often all you are left with is a screenful of registers and hexadecimal addresses. To pin it down you need to stop or observe the kernel without disturbing it, to turn the addresses at the crash back into source lines, and to narrow “which change introduced it” down to one commit.</p>
+    <p lang="zh-CN">概念 4 的停机调试器和概念 5 的崩溃分析回答「停住它、读懂它」，概念 2–3 的打印与追踪回答「不停机地看」，概念 6–7 的二分与最小复现回答「缩小范围」。</p>
+    <p lang="en">Concept 4, stop-mode debuggers, and concept 5, crash analysis, answer “stop it and read it”; concepts 2–3, printing and tracing, answer “watch without stopping”; concepts 6–7, bisection and minimal reproducers, answer “narrow it down”.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 高效读内核源码</h3><h3 lang="en">1. Reading kernel source efficiently</h3>
   <p lang="zh-CN">内核源码太大，不能「从头读」。有效的读法是<strong>从入口追数据结构</strong>：先找到用户态能触发的入口（系统调用表、ioctl、fault handler），沿调用链往下，每遇到一个结构体就去看它在哪里分配、谁持有引用、谁加锁。工具只是让「跳到定义 / 列出调用者」这两个动作足够快。</p>
   <p lang="en">Kernel source is too big to read “from the beginning”. The effective way is to <strong>follow data structures from an entry point</strong>: first find an entry user space can trigger (the system call table, an ioctl, a fault handler), go down the call chain, and for every structure you meet, look at where it is allocated, who holds references to it and who locks it. Tools only make the two actions “jump to definition / list callers” fast enough.</p>
@@ -86,6 +93,28 @@
   <h3 lang="zh-CN">4. 交互式调试器</h3><h3 lang="en">4. Interactive debuggers</h3>
   <p lang="zh-CN"><strong>QEMU gdbstub</strong>：<code>-s</code> 是 <code>-gdb tcp::1234</code> 的简写，<code>-S</code> 让虚拟 CPU 在第一条指令前停住。gdb 用 GDB Remote Serial Protocol（RSP）通过 TCP 读写寄存器和内存、设断点——被调试的是<em>整台虚拟机</em>，内核毫不知情，所以从第一条指令起就能调。要点：内核要带完整调试信息（arm64 <code>defconfig</code> 默认开了 <code>CONFIG_DEBUG_INFO_REDUCED</code>，要关掉）、开 <code>CONFIG_GDB_SCRIPTS</code> 并 <code>make scripts_gdb</code>，命令行加 <code>nokaslr</code>（否则符号地址对不上；内核文档对直接 <code>-kernel</code> 启动的建议是干脆关掉 <code>CONFIG_RANDOMIZE_BASE</code>）。断在 <code>start_kernel</code> 这种 MMU 打开前后的地方用 <code>hbreak</code>（硬件断点），软件断点要往内存里写 <code>brk</code>，地址未映射时写不进去。<code>vmlinux-gdb.py</code> 提供 <code>lx-symbols</code>、<code>lx-dmesg</code>、<code>lx-ps</code> 等辅助命令。</p>
   <p lang="en"><strong>QEMU gdbstub</strong>: <code>-s</code> is shorthand for <code>-gdb tcp::1234</code>, and <code>-S</code> holds the virtual CPU before its first instruction. gdb uses the GDB Remote Serial Protocol (RSP) over TCP to read and write registers and memory and to set breakpoints — what is being debugged is <em>the whole virtual machine</em>, and the kernel knows nothing about it, so you can debug from the very first instruction. Key points: the kernel needs full debug info (arm64 <code>defconfig</code> enables <code>CONFIG_DEBUG_INFO_REDUCED</code> by default, so turn it off), enable <code>CONFIG_GDB_SCRIPTS</code> and run <code>make scripts_gdb</code>, and add <code>nokaslr</code> to the command line (otherwise the symbol addresses do not match; for direct <code>-kernel</code> boots the kernel documentation recommends simply turning off <code>CONFIG_RANDOMIZE_BASE</code>). To stop in places around MMU enable such as <code>start_kernel</code>, use <code>hbreak</code> (a hardware breakpoint): a software breakpoint has to write <code>brk</code> into memory, which fails when the address is not mapped. <code>vmlinux-gdb.py</code> provides helper commands such as <code>lx-symbols</code>, <code>lx-dmesg</code> and <code>lx-ps</code>.</p>
+  <div class="worked">
+    <p lang="zh-CN">追一次 <code>hbreak start_kernel</code> 加 <code>continue</code>，看 gdb 和 QEMU 在 TCP 1234 上实际交换的 RSP 包。包格式出自 GDB 手册「Remote Protocol」一章的 Overview、Packets、Stop Reply Packets 三节，QEMU 一侧的代码在 <code>gdbstub/gdbstub.c</code> 和 <code>gdbstub/system.c</code>。</p>
+    <p lang="en">Trace one <code>hbreak start_kernel</code> plus <code>continue</code>, and look at the RSP packets gdb and QEMU actually exchange over TCP 1234. The packet formats come from the Overview, Packets and Stop Reply Packets sections of the “Remote Protocol” chapter of the GDB manual; the QEMU side of the code is in <code>gdbstub/gdbstub.c</code> and <code>gdbstub/system.c</code>.</p>
+    <pre>qemu-system-aarch64 … -append "… nokaslr" -s -S   # 停在第一条指令前 / held before the first instruction
+(gdb) target remote :1234
+(gdb) hbreak start_kernel
+(gdb) continue</pre>
+    <ol lang="zh-CN">
+      <li>包的格式是 <code>$数据#校验和</code>：校验和是 <code>$</code> 与 <code>#</code> 之间所有字符之和对 256 取模，写成两位十六进制，收方回 <code>+</code> 表示收到。字符 <code>c</code> 是 0x63，所以最简的继续执行包是 <code>$c#63</code>；读全部寄存器的 <code>g</code> 是 0x67，包是 <code>$g#67</code>。</li>
+      <li>连上后 gdb 发 <code>$?#3f</code>（<code>?</code> 是 0x3f），问目标为什么停着。因为有 <code>-S</code>，虚拟 CPU 一条指令都还没执行，QEMU 回一个停止原因。</li>
+      <li><code>hbreak start_kernel</code> 变成 <code>Z1,&lt;start_kernel 的地址&gt;,4</code>。<code>Z0</code> 是软件断点，要往目标内存里写断点指令；<code>Z1</code> 是硬件断点，不改内存，所以地址还没映射时也能设。QEMU 的 <code>handle_insert_bp</code> 回 <code>OK</code>。</li>
+      <li><code>continue</code> 发出 <code>vCont;c</code>，旧式写法就是 <code>c</code>。虚拟 CPU 开始跑，执行到 <code>start_kernel</code> 时 QEMU 停住整台 VM，回 <code>T05thread:…;</code>，05 是 GDB 的信号号 SIGTRAP（<code>system.c</code> 里的 <code>GDB_SIGNAL_TRAP</code>）。</li>
+      <li>gdb 再发 <code>g</code> 取寄存器、发 <code>m 地址,长度</code> 读栈和变量，用 <code>vmlinux</code> 的 DWARF 把它们显示成源码行。整个过程中内核没有执行任何调试代码，停住的是虚拟 CPU。也正因如此，<code>nokaslr</code> 必不可少：gdb 按 <code>vmlinux</code> 里的链接地址算出 <code>start_kernel</code>，内核若被随机挪走，这个硬件断点永远不会命中。</li>
+    </ol>
+    <ol lang="en">
+      <li>A packet looks like <code>$data#checksum</code>: the checksum is the sum of all characters between <code>$</code> and <code>#</code> modulo 256, written as two hex digits, and the receiver answers <code>+</code> to acknowledge. The character <code>c</code> is 0x63, so the shortest continue packet is <code>$c#63</code>; <code>g</code>, which reads all registers, is 0x67, giving <code>$g#67</code>.</li>
+      <li>After connecting, gdb sends <code>$?#3f</code> (<code>?</code> is 0x3f) to ask why the target is stopped. Because of <code>-S</code>, the virtual CPU has not executed a single instruction yet, and QEMU replies with a stop reason.</li>
+      <li><code>hbreak start_kernel</code> becomes <code>Z1,&lt;address of start_kernel&gt;,4</code>. <code>Z0</code> is a software breakpoint, which writes a breakpoint instruction into target memory; <code>Z1</code> is a hardware breakpoint, which leaves memory alone and can therefore be set even before the address is mapped. QEMU’s <code>handle_insert_bp</code> replies <code>OK</code>.</li>
+      <li><code>continue</code> sends <code>vCont;c</code>, whose older form is plain <code>c</code>. The virtual CPU starts running; when it reaches <code>start_kernel</code>, QEMU stops the whole VM and replies <code>T05thread:…;</code>, where 05 is GDB’s signal number for SIGTRAP (<code>GDB_SIGNAL_TRAP</code> in <code>system.c</code>).</li>
+      <li>gdb then sends <code>g</code> for the registers and <code>m address,length</code> to read the stack and variables, and uses the DWARF in <code>vmlinux</code> to show them as source lines. The kernel runs no debugging code at any point: what is stopped is the virtual CPU. That is also why <code>nokaslr</code> is essential: gdb computes <code>start_kernel</code> from the link address in <code>vmlinux</code>, and if the kernel were moved at random, this hardware breakpoint would never hit.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>kgdb</strong> 是内核<em>自带</em>的调试桩（<code>CONFIG_KGDB</code>），用于真机：通过串口（<code>kgdboc=ttyAMA0,115200</code>，加 <code>kgdbwait</code> 则启动时等待）与 host 上的 gdb 通信，运行中用 <code>echo g &gt; /proc/sysrq-trigger</code> 进入。代价是调试器本身依赖内核状态，内核坏得太厉害时就进不去。</p>
   <p lang="en"><strong>kgdb</strong> is the debug stub <em>built into</em> the kernel (<code>CONFIG_KGDB</code>), used on real hardware: it talks to gdb on the host over a serial port (<code>kgdboc=ttyAMA0,115200</code>; add <code>kgdbwait</code> to wait at boot), and at run time you enter it with <code>echo g &gt; /proc/sysrq-trigger</code>. The cost is that the debugger itself depends on kernel state, so when the kernel is too badly broken you cannot get in.</p>
   <p lang="zh-CN"><strong>XNU 两机调试</strong>：被调试的「target Mac」跑 KDK 里的 development 内核，通过 boot-arg <code>debug=</code> 打开调试标志（位定义在 <code>osfmk/kern/debug.h</code>：如 <code>DB_NMI 0x4</code>、<code>DB_ARP 0x40</code>、<code>DB_KERN_DUMP_ON_PANIC 0x400</code>）。当它 panic 或收到 NMI 时停下等待调试器；「host Mac」上的 lldb 用 <code>kdp-remote &lt;ip&gt;</code> 通过 <strong>KDP</strong>（Kernel Debugging Protocol，UDP 41139，<code>osfmk/kdp/kdp_protocol.h</code> 里的 <code>KDP_CONNECT</code>、<code>KDP_READREGS</code>、<code>KDP_READMEM64</code>、<code>KDP_BREAKPOINT64_SET</code>……）连上。KDK 的 dSYM 里带着 <code>tools/lldbmacros/</code> 那套 Python 宏，提供 <code>showalltasks</code>、<code>showallstacks</code>、<code>paniclog</code>、<code>showbootargs</code> 等命令。Apple Silicon 上改 boot-args、引导非默认内核都要先在 recoveryOS 里降低安全级别（Reduced Security）；具体步骤随 macOS 版本变化，以 KDK 自带的说明为准。没有第二台 Mac 时，可以对 macOS 虚拟机（XNU 的 <code>VMAPPLE</code> 机型配置）练习，大致路径。</p>
@@ -96,6 +125,30 @@
   <h3 lang="zh-CN">5. 崩溃分析</h3><h3 lang="en">5. Crash analysis</h3>
   <p lang="zh-CN"><strong>Linux oops</strong>：内核态访问出错且查不到异常修复表时，arm64 打印 <code>Unable to handle kernel NULL pointer dereference at virtual address …</code>（或 paging request），随后 <code>Internal error: Oops</code>、寄存器（<code>pc</code>、<code>lr</code>、<code>sp</code>、x0–x29）、<code>Call trace:</code>（每帧形如 <code>func+0x24/0x80</code>，即函数内偏移/函数长度）、<code>Tainted:</code> 标志（加载过专有模块、之前已有 warning 等）。oops 默认只杀掉当前任务，<code>panic_on_oops=1</code> 才升级为 <code>Kernel panic - not syncing</code>；arm64 panic 时还打印 <code>Kernel Offset: 0x… from 0x…</code>（KASLR 偏移）。<code>scripts/faddr2line vmlinux func+0x24/0x80</code> 和 <code>scripts/decode_stacktrace.sh vmlinux &lt; oops.txt</code> 把「符号+偏移」翻译成源码行——因为是相对函数的偏移，KASLR 不影响它。</p>
   <p lang="en"><strong>Linux oops</strong>: when a kernel-mode access faults and no exception fixup entry is found, arm64 prints <code>Unable to handle kernel NULL pointer dereference at virtual address …</code> (or paging request), followed by <code>Internal error: Oops</code>, the registers (<code>pc</code>, <code>lr</code>, <code>sp</code>, x0–x29), the <code>Call trace:</code> (each frame looks like <code>func+0x24/0x80</code>, i.e. offset within the function / function length) and the <code>Tainted:</code> flags (a proprietary module was loaded, there was an earlier warning, and so on). By default an oops kills only the current task; only <code>panic_on_oops=1</code> escalates it to <code>Kernel panic - not syncing</code>; on a panic arm64 also prints <code>Kernel Offset: 0x… from 0x…</code> (the KASLR offset). <code>scripts/faddr2line vmlinux func+0x24/0x80</code> and <code>scripts/decode_stacktrace.sh vmlinux &lt; oops.txt</code> translate “symbol + offset” into source lines — because the offset is relative to the function, KASLR does not affect it.</p>
+  <div class="worked">
+    <p lang="zh-CN">把一帧「符号 + 偏移」翻回源码行。例子原样取自内核文档 <code>Documentation/admin-guide/bug-hunting.rst</code>，那是一个 x86 内核的 oops，算法在 arm64 上完全一样。</p>
+    <p lang="en">Turn one “symbol + offset” frame back into a source line. The example is taken verbatim from the kernel document <code>Documentation/admin-guide/bug-hunting.rst</code>; it is an oops from an x86 kernel, and the arithmetic is exactly the same on arm64.</p>
+    <pre>EIP is at vt_ioctl+0xda8/0x1482
+
+(gdb) p vt_ioctl
+$1 = {int (struct tty_struct *, unsigned int, unsigned long)} 0xae0 &lt;vt_ioctl&gt;
+(gdb) l *vt_ioctl+0xda8
+0x1888 is in vt_ioctl (drivers/tty/vt/vt_ioctl.c:293).</pre>
+    <ol lang="zh-CN">
+      <li>读帧：<code>vt_ioctl+0xda8/0x1482</code> 说出事的指令在函数 <code>vt_ioctl</code> 起点之后 0xda8 字节，函数总长 0x1482 字节。0xda8 小于 0x1482，偏移落在函数内部，这一帧可信。</li>
+      <li>找起点：在带调试信息的同一份构建里，<code>p vt_ioctl</code> 给出函数起点 0xae0。</li>
+      <li>相加：0xae0 + 0xda8 = 0x1888（十进制 2784 + 3496 = 6280），gdb 把 0x1888 落到 <code>drivers/tty/vt/vt_ioctl.c</code> 第 293 行，即 <code>if (VT_BUSY(vc_num))</code>。<code>scripts/faddr2line</code> 做的是同一步加法再查行号表；它还核对函数长度，帧里的 0x1482 与符号表不符时会报 size mismatch 并跳过，防止拿错版本的 <code>vmlinux</code> 得出错的行号。</li>
+      <li>KASLR 为什么不碍事：启动时整个内核镜像一起滑动，函数起点和出事地址挪动同样多，差值 0xda8 不变。XNU 的 panic log 给的是滑动后的绝对地址，所以要先减去 <code>Kernel slide</code> 才能和 KDK 里的符号对上，道理相同。</li>
+      <li>arm64 上多一种读法：指令固定 4 字节，所以 <code>func+0x24/0x80</code> 指的是第 0x24 / 4 = 9 条指令之后，也就是函数的第 10 条指令，整个函数共 0x80 / 4 = 32 条。</li>
+    </ol>
+    <ol lang="en">
+      <li>Read the frame: <code>vt_ioctl+0xda8/0x1482</code> says the faulting instruction is 0xda8 bytes past the start of the function <code>vt_ioctl</code>, and that the function is 0x1482 bytes long. 0xda8 is less than 0x1482, so the offset falls inside the function and the frame is credible.</li>
+      <li>Find the start: in the same build with debug info, <code>p vt_ioctl</code> gives the function start, 0xae0.</li>
+      <li>Add: 0xae0 + 0xda8 = 0x1888 (2784 + 3496 = 6280 in decimal), and gdb places 0x1888 at line 293 of <code>drivers/tty/vt/vt_ioctl.c</code>, <code>if (VT_BUSY(vc_num))</code>. <code>scripts/faddr2line</code> does the same addition and then looks up the line table; it also checks the function length, and when the 0x1482 in the frame disagrees with the symbol table it reports a size mismatch and skips the frame, so a <code>vmlinux</code> from the wrong build cannot give you a wrong line.</li>
+      <li>Why KASLR does not get in the way: at boot the whole kernel image slides together, so the function start and the faulting address move by the same amount and the difference 0xda8 stays the same. XNU’s panic log gives slid absolute addresses, so you first subtract <code>Kernel slide</code> to match the symbols in the KDK; the principle is the same.</li>
+      <li>One more reading on arm64: instructions are a fixed 4 bytes, so <code>func+0x24/0x80</code> means after 0x24 / 4 = 9 instructions, that is the function’s 10th instruction, in a function of 0x80 / 4 = 32 instructions.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>kdump</strong>：启动参数 <code>crashkernel=</code> 预留一块内存，用 <code>kexec -p</code> 预先装入一个「捕获内核」；panic 时直接跳进它（不经固件），原内核的内存以 <code>/proc/vmcore</code>（ELF core 格式）呈现，<code>makedumpfile</code> 过滤压缩后保存。分析用 <code>crash vmlinux vmcore</code>：<code>bt</code>、<code>log</code>、<code>ps</code>、<code>kmem</code>、<code>struct</code>——相当于对已死的内核跑一个调试器。</p>
   <p lang="en"><strong>kdump</strong>: the boot parameter <code>crashkernel=</code> reserves a block of memory, and <code>kexec -p</code> preloads a “capture kernel” into it; on panic the system jumps straight into it (without going through the firmware), the original kernel’s memory is presented as <code>/proc/vmcore</code> (ELF core format), and <code>makedumpfile</code> filters, compresses and saves it. Analyse it with <code>crash vmlinux vmcore</code>: <code>bt</code>, <code>log</code>, <code>ps</code>, <code>kmem</code>, <code>struct</code> — the equivalent of running a debugger on a dead kernel.</p>
   <p lang="zh-CN"><strong>macOS panic</strong>：XNU 在 <code>osfmk/kern/debug.c</code> 里生成 panic log：第一行 <code>panic(cpu N caller 0x…): </code> + panic 字符串（如 arm64 内核数据访问异常的 <code>Kernel data abort.</code>）；之后有 <code>Kernel version</code>、<code>Kernel slide</code>、<code>Kernel text base</code>、出事的任务（<code>Panicked task</code>）和以 <code>lr: 0x… fp: 0x…</code> 逐帧列出的回溯（<code>osfmk/arm/model_dep.c</code>）。日志先存在保留区域，重启后写成 <code>/Library/Logs/DiagnosticReports/</code> 下的 <code>.panic</code> 文件（Console 的 Crash Reports 也能看到）。回溯里是<em>滑动后</em>的运行地址：减去 <code>Kernel slide</code> 才能对上 KDK 里未滑动的符号；或者让工具替你做（<code>atos -l</code>、lldb 的 <code>target modules load --slide</code>）。</p>
@@ -114,6 +167,37 @@
   <p lang="en">A good reproducer is <strong>a single file, dependency-free, deterministic, and triggers within a few seconds</strong>; run it in QEMU on a kernel with KASAN (KASAN reports an out-of-bounds access or use-after-free <em>the moment it happens</em>, instead of leaving you with a random crash much later). To shrink it, keep deleting: remove a system call, a thread, an argument, and see whether it still triggers; for multithreaded races, pin threads to cores with <code>sched_setaffinity</code> and widen the window with loops.</p>
   <p lang="zh-CN">syzkaller 的 C 复现程序是很好的范本：它直接 <code>syscall(__NR_xxx, …)</code> 绕过 libc，把参数放在固定地址（常见 <code>mmap(0x20000000, …)</code> 映射出的区域），用很多小线程和循环重复竞态；syzbot 的 dashboard（<code>syzkaller.appspot.com</code>）上每个 bug 都附带复现程序、内核配置和 KASAN 报告，可以拿来练习「读报告 → 本地复现 → 定位」。syzkaller 也有 Darwin 目标（仓库 <code>docs/darwin/</code>），XNU 侧对应的是 KASAN 内核配置（XNU 的 <code>SUPPORTED_KERNEL_CONFIGS</code> 里有 <code>KASAN</code>）。</p>
   <p lang="en">syzkaller’s C reproducers are a very good model: they call <code>syscall(__NR_xxx, …)</code> directly to bypass libc, put arguments at fixed addresses (commonly a region mapped with <code>mmap(0x20000000, …)</code>), and repeat races with many small threads and loops; on the syzbot dashboard (<code>syzkaller.appspot.com</code>) every bug comes with a reproducer, the kernel config and the KASAN report, which you can use to practise “read the report → reproduce locally → locate the bug”. syzkaller also has a Darwin target (<code>docs/darwin/</code> in the repository), and the XNU-side counterpart is the KASAN kernel configuration (<code>KASAN</code> is in XNU’s <code>SUPPORTED_KERNEL_CONFIGS</code>).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>读内核源码要从用户态能触发的入口出发，沿调用链追每个数据结构的分配、引用和加锁。</li>
+      <li><code>printk</code> 和 <code>os_log</code> 最便宜，但在高频路径上要换成 <code>trace_printk</code>、ftrace 或 kdebug 这类低开销通道。</li>
+      <li>ftrace、perf、eBPF、dtrace、ktrace 都不停机，生产问题主要靠它们加崩溃转储。</li>
+      <li>QEMU gdbstub 和 KDP 都是停机调试，停住的是整台机器，所以能从第一条指令起调。</li>
+      <li>Linux 回溯里的「函数 + 偏移」不受 KASLR 影响，XNU panic log 里的绝对地址要先减去 <code>Kernel slide</code>。</li>
+      <li><code>git bisect run</code> 用大约 log<sub>2</sub>(N) 轮把回归缩小到一个提交，测试脚本返回 125 表示跳过这一轮。</li>
+    </ul>
+    <ul lang="en">
+      <li>Read kernel source starting from an entry that user space can trigger, and follow each data structure’s allocation, references and locking down the call chain.</li>
+      <li><code>printk</code> and <code>os_log</code> are the cheapest, but on hot paths switch to low-overhead channels such as <code>trace_printk</code>, ftrace or kdebug.</li>
+      <li>ftrace, perf, eBPF, dtrace and ktrace never stop the machine, and production problems are handled mainly with them plus crash dumps.</li>
+      <li>The QEMU gdbstub and KDP are both stop-mode debugging: they stop the whole machine, which is why you can debug from the first instruction.</li>
+      <li>The “function + offset” in a Linux backtrace is unaffected by KASLR, while the absolute addresses in an XNU panic log need <code>Kernel slide</code> subtracted first.</li>
+      <li><code>git bisect run</code> narrows a regression down to one commit in about log<sub>2</sub>(N) rounds, and a test script that returns 125 skips that round.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：多加几条 <code>printk</code> 总能看清并发 bug。→ 实际：<code>printk</code> 会改变时序，竞态常常因此消失；高频路径要用 <code>trace_printk</code> 或 ftrace 事件。</li>
+      <li>误解：开了 KASLR，oops 回溯就对不上源码。→ 实际：Linux 回溯是函数加偏移，和滑动无关；只有绝对地址，例如 XNU 的 panic log 或 gdb 要设的断点地址，才需要减去偏移或关掉 KASLR。</li>
+      <li>误解：bisect 停下的提交就是 bug 所在的代码。→ 实际：它只是第一个让测试失败的提交；偶发问题只测一次就判 good，或 <code>.config</code> 在中途变了，结果会落到无关的提交上。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a few more <code>printk</code> calls will always reveal a concurrency bug. → Fact: <code>printk</code> changes the timing and often makes the race disappear; on hot paths use <code>trace_printk</code> or ftrace events.</li>
+      <li>Myth: with KASLR on, an oops backtrace cannot be matched to the source. → Fact: a Linux backtrace is function plus offset, independent of the slide; only absolute addresses, such as those in an XNU panic log or a breakpoint address for gdb, need the offset subtracted or KASLR turned off.</li>
+      <li>Myth: the commit where bisect stops is the code that contains the bug. → Fact: it is only the first commit that makes the test fail; if an intermittent problem is tested once and called good, or the <code>.config</code> changes midway, the result lands on an unrelated commit.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

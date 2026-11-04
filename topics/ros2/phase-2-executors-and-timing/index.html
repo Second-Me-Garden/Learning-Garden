@@ -58,6 +58,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">节点上登记了一个 10 ms 的定时器和一个 <code>/cmd</code> 订阅，可你的代码从来没有调用过它们的回调。那么是谁在什么时候调用它们、两个同时就绪时谁先跑？如果其中一个回调跑了 30 ms，那个本该每 10 ms 一次的定时器会怎样：排队补上、整体后移，还是直接丢掉几次？</p>
+    <p lang="en">A node has a 10 ms timer and a <code>/cmd</code> subscription registered on it, yet your code never calls their callbacks. So who calls them and when, and which goes first when both are ready? And if one callback runs for 30 ms, what happens to the timer that should fire every 10 ms: do the missed calls queue up, does everything shift later, or are some calls simply dropped?</p>
+    <p lang="zh-CN">概念 1 的执行器循环回答前两问，概念 4 的定时器规则回答最后一问。</p>
+    <p lang="en">Concept 1, the executor loop, answers the first two questions, and concept 4, the timer rules, answers the last.</p>
+  </div>
+
   <h3 lang="zh-CN">1. spin、执行器循环与 wait set</h3><h3 lang="en">1. spin, the executor loop and the wait set</h3>
   <p lang="zh-CN">节点自己不会调用任何回调。你创建的 subscription、timer、service、client 只是登记在节点上的<strong>实体</strong>（entity）；真正调用回调的是<strong>执行器</strong>。<code>rclcpp::spin(node)</code> 就是：建一个 <code>rclcpp::executors::SingleThreadedExecutor</code>，<code>executor.add_node(node)</code>，再在当前线程里 <code>executor.spin()</code>——一个直到关闭（例如 Ctrl+C）才返回的循环。每一轮做三件事：</p>
   <p lang="en">A node never calls any callback by itself. The subscriptions, timers, services and clients you create are only <strong>entities</strong> registered on the node; what actually calls the callbacks is the <strong>executor</strong>. <code>rclcpp::spin(node)</code> means: create an <code>rclcpp::executors::SingleThreadedExecutor</code>, <code>executor.add_node(node)</code>, then <code>executor.spin()</code> in the current thread — a loop that returns only at shutdown (for example on Ctrl+C). Each round does three things:</p>
@@ -81,6 +88,35 @@
     <li lang="zh-CN"><strong>一个线程一次只做一件事。</strong>单线程执行器里，一个跑了 30 ms 的回调会把其他所有回调都推迟 30 ms。</li>
     <li lang="en"><strong>One thread does one thing at a time.</strong> In a single-threaded executor, a callback that runs for 30 ms delays every other callback by 30 ms.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把下方图解 (a) 的节点放进 <code>rclcpp::spin(node)</code> 走两轮：单线程执行器，一个 10 ms 定时器（t = 0 创建，所以第一次到期在 t = 10 ms），一个 <code>/cmd</code> 订阅。假设一条 <code>/cmd</code> 消息恰好在 t = 10 ms 到达，定时器回调用 1 ms，订阅回调用 30 ms（就是上面第三条后果里的那个慢回调）。</p>
+    <p lang="en">Put the node of diagram (a) below into <code>rclcpp::spin(node)</code> and walk two rounds: a single-threaded executor, a 10 ms timer (created at t = 0, so it first expires at t = 10 ms) and a <code>/cmd</code> subscription. Suppose a <code>/cmd</code> message arrives right at t = 10 ms, the timer callback takes 1 ms and the subscription callback takes 30 ms (the slow callback of the third consequence above).</p>
+    <pre>round 1
+t =  0 ms  collect; nearest next_call_time = 10 ms  → rmw_wait timeout 10 ms, thread asleep (S)
+t = 10 ms  wake: timer ready, sub /cmd ready
+t = 10 ms  timer first: rcl_timer_call, next_call_time = 10 + 10 = 20 ms → timer cb runs 10–11 ms
+t = 11 ms  sub next: rcl_take one message                    → sub cb runs 11–41 ms
+round 2
+t = 41 ms  collect; next_call_time 20 ms already passed      → rmw_wait returns at once, timer ready
+t = 41 ms  rcl_timer_call: 20 + 10 = 30 ≤ 41
+           now_ahead = 41 − 30 = 11, periods_ahead = 1 + 11 / 10 = 2 (integer division)
+           next_call_time = 30 + 2 × 10 = 50 ms              → timer cb runs 41–42 ms
+t = 42 ms  collect; timeout = 50 − 42 = 8 ms                 → asleep until t = 50 ms</pre>
+    <ol lang="zh-CN">
+      <li>第 1 轮在 <code>rmw_wait</code> 里睡 10 ms：超时取的是最近一个定时器的到期时刻，所以不需要消息也会按时醒。</li>
+      <li>两项同时就绪，Jazzy 的 <code>get_next_ready_executable</code> 先扫 timer，再扫 subscription，所以定时器回调先跑，消息等它 1 ms。这是按类型扫描，不是按到达先后。</li>
+      <li><code>rcl_timer_call</code> 在回调开始前就把下一次到期定为 20 ms，是从计划时刻 10 ms 加一个周期，而不是从实际开始时刻算。</li>
+      <li>订阅回调占住唯一的线程 30 ms。本该在 t = 20 ms 跑的定时器回调直到 t = 41 ms 才开始，晚了 21 ms，两次定时器回调之间隔了 31 ms 而不是 10 ms。</li>
+      <li>第 2 轮里 rcl 发现已错过不止一个周期，把到期时刻一次推到 50 ms：t = 30 和 t = 40 的两次调用被跳过，不会连发补上。从 t = 50 ms 起定时器回到原来的 10 ms 节拍上。</li>
+    </ol>
+    <ol lang="en">
+      <li>Round 1 sleeps 10 ms in <code>rmw_wait</code>: the timeout is the nearest timer expiry, so the thread wakes on time even with no message.</li>
+      <li>Both entries are ready, and Jazzy’s <code>get_next_ready_executable</code> scans timers before subscriptions, so the timer callback runs first and the message waits 1 ms for it. This is a scan by kind, not by order of arrival.</li>
+      <li><code>rcl_timer_call</code> sets the next expiry to 20 ms before the callback starts: the scheduled time 10 ms plus one period, not the actual start time plus one period.</li>
+      <li>The subscription callback holds the only thread for 30 ms. The timer callback due at t = 20 ms does not start until t = 41 ms, 21 ms late, and the gap between two timer callbacks is 31 ms instead of 10 ms.</li>
+      <li>In round 2, rcl sees that more than one period has been missed and moves the expiry to 50 ms in one step: the calls due at t = 30 and t = 40 are skipped, not fired back to back. From t = 50 ms the timer is back on its original 10 ms beat.</li>
+    </ol>
+  </div>
   <div class="note" lang="zh-CN">和 Kernel Engineering 的连接：执行器线程睡在 <code>rmw_wait</code> 里时，在内核看来就是一个状态为 <code>S</code> 的 task，大致是在一个条件变量上做 futex 等待（Fast DDS 的 rmw 实现大致如此，以源码为准）。DDS 的接收线程从 <code>recvmsg()</code> 返回、把数据放进队列后通知这个条件变量，内核把执行器线程放回运行队列；它<em>什么时候</em>真正上 CPU，由 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a> 的调度器决定（概念 4，EEVDF），futex 本身见 <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a> 的概念 8。</div>
   <div class="note" lang="en">The connection to Kernel Engineering: while an executor thread sleeps in <code>rmw_wait</code>, the kernel sees a task in state <code>S</code>, approximately doing a futex wait on a condition variable (roughly how the Fast DDS rmw implementation does it; the source is authoritative). When a DDS receive thread returns from <code>recvmsg()</code> and puts the data in a queue, it notifies that condition variable and the kernel puts the executor thread back on a run queue; <em>when</em> it actually gets the CPU is decided by the scheduler from <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a> (concept 4, EEVDF), and the futex itself is concept 8 of <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Kernel Phase 3</a>.</div>
   <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲第一批节点、<code>spin</code> 与执行器的章节；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Executors.html">Executors</a> 概念页（含调度语义一节）。</p>
@@ -233,6 +269,37 @@ executor.spin()</pre>
   <p lang="en">The official rclcpp real-time guidance is the Jazzy docs page <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Real-Time-Programming.html">Understanding real-time programming</a> (the pendulum demo: locking memory, preallocating, setting priorities); the background is the design article <a href="https://design.ros2.org/articles/realtime_background.html">Introduction to Real-time Systems</a>.</p>
   <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ros2_control 实时更新循环的章节；<a href="https://man7.org/linux/man-pages/man7/sched.7.html">sched(7)</a> 手册（调度策略、优先级、<code>RLIMIT_RTPRIO</code>）。</p>
   <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on the real-time update loop of ros2_control; the <a href="https://man7.org/linux/man-pages/man7/sched.7.html">sched(7)</a> man page (scheduling policies, priorities, <code>RLIMIT_RTPRIO</code>).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>节点只登记实体，调用回调的是执行器：每轮收集实体进 wait set，在 <code>rmw_wait</code> 里睡到有事或最近的定时器到期，再一个个执行就绪项。</li>
+      <li>就绪项按类型扫描（timer、subscription、service、client、waitable），不按到达先后；执行期间到达的消息要等下一轮。</li>
+      <li>多线程执行器的线程数只是并行的上限，callback group 才决定谁能同时跑，而默认组是 MutuallyExclusive。</li>
+      <li>在单线程执行器的回调里阻塞等服务响应会死锁，因为完成那个 future 的正是被阻塞的线程。</li>
+      <li>定时器的下一次到期从计划时刻加一个周期算起，错过的周期会被跳过，所以迟到不累积，但也不补发。</li>
+      <li>抖动来自定时器、执行器队列、调度器和内存分配四处，<code>SCHED_FIFO</code> 只能消掉同一个 Linux VM 里的调度排队和 timer slack。</li>
+    </ul>
+    <ul lang="en">
+      <li>A node only registers entities and the executor calls the callbacks: each round it collects the entities into a wait set, sleeps in <code>rmw_wait</code> until something is ready or the nearest timer expires, then runs the ready items one by one.</li>
+      <li>Ready items are scanned by kind (timers, subscriptions, services, clients, waitables), not by order of arrival, and messages that arrive during execution wait for the next round.</li>
+      <li>The thread count of a multithreaded executor is only a ceiling on parallelism; callback groups decide who may run together, and the default group is MutuallyExclusive.</li>
+      <li>Blocking on a service response inside a callback of a single-threaded executor deadlocks, because the thread that would complete the future is the one that is blocked.</li>
+      <li>A timer’s next expiry is the scheduled time plus one period and missed periods are skipped, so lateness does not accumulate but missed calls are not made up either.</li>
+      <li>Jitter comes from the timer, the executor queue, the scheduler and memory allocation, and <code>SCHED_FIFO</code> removes only the scheduler queueing inside the same Linux VM and the timer slack.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：换成 <code>MultiThreadedExecutor</code>，一个节点的回调就会并行。→ 实际：不指定 group 的实体都在节点的默认组里，默认组是 MutuallyExclusive，回调仍然一个接一个跑。</li>
+      <li>误解：Reentrant 组让回调变得线程安全。→ 实际：它只是允许并行，同一个回调的两个实例可以同时写同一个成员，锁要自己加。</li>
+      <li>误解：定时器晚了会把错过的几次连着补上。→ 实际：Jazzy 的 <code>rcl_timer_call</code> 把到期时刻一次推过当前时间，错过的调用直接跳过。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: switching to <code>MultiThreadedExecutor</code> makes the callbacks of one node run in parallel. → Fact: entities created without a group sit in the node’s default group, which is MutuallyExclusive, so the callbacks still run one after another.</li>
+      <li>Myth: a Reentrant group makes callbacks thread-safe. → Fact: it only allows parallelism; two instances of the same callback can write the same member at once, and the lock is yours to add.</li>
+      <li>Myth: a late timer fires the missed calls back to back to catch up. → Fact: Jazzy’s <code>rcl_timer_call</code> moves the expiry past the current time in one step, and the missed calls are skipped.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：执行器类型</h2><h2 id="compare-en" lang="en">Comparison: executor types</h2>
   <div class="table-wrap">

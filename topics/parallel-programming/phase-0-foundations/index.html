@@ -55,6 +55,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">这台 Mac 有 10 个核。把一个 512 MiB 的求和平均分给 10 个线程，它能快 10 倍吗？Lab A 实测只快 5.84 倍；换成四个累加器，单线程快了 3 倍，10 线程却只比单线程快 2.46 倍。再让两个线程各加各的计数器，什么都不共享，却比隔开以后慢 7 倍。那么，是什么决定了多加一个核能换回多少速度，又是什么在悄悄吃掉它？</p>
+    <p lang="en">This Mac has 10 cores. Split a 512 MiB sum evenly across 10 threads: does it get 10 times faster? Lab A measures only 5.84 times; with four accumulators one thread gets 3 times faster, yet 10 threads beat one thread by only 2.46 times. Then two threads each add to their own counter, sharing nothing, and run 7 times slower than when the counters are moved apart. So what decides how much speed one more core buys, and what quietly eats it?</p>
+    <p lang="zh-CN">概念 2 的 Amdahl 与 Gustafson 定律给出上限，概念 3 的核心、缓存和缓存行说明实测为什么够不着它。</p>
+    <p lang="en">The laws of Amdahl and Gustafson in concept 2 give the upper bound, and the cores, caches and cache lines of concept 3 explain why the measurements fall short of it.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 为什么要并行，以及并行有几种</h3><h3 lang="en">1. Why parallel, and what kinds of parallel there are</h3>
   <p lang="zh-CN">动态功耗大致与 C·V²·f 成正比（电容、电压的平方、频率）。晶体管缩小时电压也跟着降的那段时期（Dennard scaling）在 2000 年代中期结束，此后再提频率就要付出不成比例的功耗和发热，于是单核频率停在几 GHz，多出来的晶体管变成了更多的核。结果是：一个单线程程序在新机器上不会自动变快很多，想用上全部核，程序必须自己把工作分出去。</p>
   <p lang="en">Dynamic power is roughly proportional to C·V²·f (capacitance, voltage squared, frequency). The period in which voltage fell as transistors shrank (Dennard scaling) ended in the mid-2000s; after that, raising the clock cost disproportionate power and heat, so single-core frequency stalled at a few GHz and the extra transistors became more cores. The consequence: a single-threaded program no longer gets much faster on a new machine by itself; to use all the cores, the program has to split its own work.</p>
@@ -80,6 +87,27 @@
   <p lang="en">With s′ = 0.1 and N = 10, S = 9.1. The two laws do not contradict each other: Amdahl’s s is measured on the single-core run, Gustafson’s s′ on the N-core run, and as the parallel part grows with N, the single-core s that corresponds to a given s′ keeps shrinking.</p>
   <p lang="zh-CN"><strong>Strong scaling 与 weak scaling</strong>：总问题规模固定、看时间随核数怎样下降，叫强扩展，上限由 Amdahl 给出；每个核分到的问题规模固定、总规模随核数一起涨，看时间能否保持不变，叫弱扩展，由 Gustafson 描述。下面的对照表把两者并排列出。两条定律都假设并行部分「完美」并行，而 Lab A 会显示，真实机器上还有别的东西在限制加速比：核不一样快，内存带宽有上限，创建线程也要时间。</p>
   <p lang="en"><strong>Strong and weak scaling</strong>: keeping the total problem size fixed and watching how the time falls with more cores is strong scaling, bounded by Amdahl; keeping the problem size per core fixed, so the total grows with the core count, and checking whether the time stays flat is weak scaling, described by Gustafson. The comparison table below puts the two side by side. Both laws assume the parallel part is “perfectly” parallel, and Lab A shows that a real machine has other limits on speedup: the cores are not equally fast, memory bandwidth has a ceiling, and creating threads takes time.</p>
+  <div class="worked">
+    <p lang="zh-CN">把两条公式代进图解 (a) 的三条曲线，再拿 Lab A 一个累加器的实测去对：单线程 31.20 ms，10 线程 5.34 ms，S = 5.84。</p>
+    <p lang="en">Plug the two formulas into the three curves of diagram (a), then hold them against Lab A’s one-accumulator measurement: 31.20 ms on one thread, 5.34 ms on 10, S = 5.84.</p>
+    <pre>Amdahl,    s  = 0.1, N = 10:  1 / (0.1 + 0.9/10)  = 1 / 0.19  ≈ 5.26
+Amdahl,    s  = 0.5, N = 10:  1 / (0.5 + 0.5/10)  = 1 / 0.55  ≈ 1.82
+Gustafson, s′ = 0.1, N = 10:  0.1 + 0.9 × 10                  = 9.1
+measured S = 5.84  →  1/5.84 = s + (1 − s)/10  →  s ≈ 0.08
+real serial part ≈ 0.15 ms / 31.20 ms ≈ 0.005  →  Amdahl S(10) ≈ 9.6</pre>
+    <ol lang="zh-CN">
+      <li>s = 0.1 时分母是 0.1 + 0.09 = 0.19，S ≈ 5.26：串行那 0.1 在分母里一点也没变小，并行那 0.9 才被除以 10。</li>
+      <li>同样的 s = 0.1 放进 Gustafson，问题随 N 放大，S = 9.1。两者差在 s 是在哪次运行上量的，不是谁对谁错。</li>
+      <li>反过来用 Amdahl 拟合实测的 5.84，解出 s ≈ 0.08。可程序真正的串行部分只有建 10 个线程和最后的几次加法，约 0.12–0.15 ms（概念 4），只占单线程 31.20 ms 的约 0.5 %，按 Amdahl 应该到约 9.6 倍。</li>
+      <li>差出来的那部分来自核（Lab A 第 4 步：每秒约 1.4 G 次加法，对比 2.15 G 次）。最慢的那份落在 E 核上，P 核做完了只能等。拟合出来的 s 只是曲线的形状，不是原因。</li>
+    </ol>
+    <ol lang="en">
+      <li>With s = 0.1 the denominator is 0.1 + 0.09 = 0.19 and S ≈ 5.26: the serial 0.1 does not shrink in the denominator at all; only the parallel 0.9 is divided by 10.</li>
+      <li>Put the same s = 0.1 into Gustafson, with the problem growing with N, and S = 9.1. The difference lies in which run s is measured on, not in which law is right.</li>
+      <li>Run Amdahl backwards on the measured 5.84 and you get s ≈ 0.08. Yet the program’s real serial part is only creating 10 threads and the last few additions, about 0.12–0.15 ms (concept 4), about 0.5 % of the 31.20 ms single-thread run, for which Amdahl predicts about 9.6 times.</li>
+      <li>The missing part comes from the cores (Lab A step 4: about 1.4 G against 2.15 G adds per second). The slowest piece sits on an E core, and the P cores finish and wait. The fitted s describes the shape of the curve, not its cause.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Herlihy 等《The Art of Multiprocessor Programming》引言章中关于 Amdahl 定律的一节；McKenney 第 2 章「Introduction」中关于性能目标的一节。</p>
   <p lang="en">Further reading: the section on Amdahl’s law in the introductory chapter of Herlihy et al., <em>The Art of Multiprocessor Programming</em>; the section on the performance goal in McKenney, Chapter 2, “Introduction”.</p>
 
@@ -111,6 +139,27 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
     <li lang="zh-CN"><strong>本机没有的东西</strong>：没有 SMT（x86 上一个物理核常跑 2 个硬件线程，共享执行单元和 L1）；没有 NUMA（多路 x86 服务器每个插槽有自己的内存，访问别的插槽的内存更慢，线程和数据放在哪个节点要一起考虑）。在这些机器上，本页的数字和曲线形状都会不同。</li>
     <li lang="en"><strong>What this Mac does not have</strong>: no SMT (on x86 one physical core often runs 2 hardware threads that share execution units and L1); no NUMA (on multi-socket x86 servers each socket has its own memory, memory on another socket is slower, and where threads and data live has to be planned together). On those machines both the numbers and the shapes of the curves on this page will differ.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">按 Lab B 的三种布局算一遍两个计数器落在哪条 128 字节行里（packed 与图解 (c) 第 1 到 4 步相同，padded 与第 5 步相同），再把实测的中位数换成每次加法的时间。每个线程做 1 亿次 <code>fetch_add</code>：</p>
+    <p lang="en">Work out which 128-byte line the two counters fall in for each of Lab B’s three layouts (packed is the scene of steps 1 to 4 of diagram (c), padded that of step 5), then turn the measured medians into time per add. Each thread does 100 million <code>fetch_add</code>s:</p>
+    <pre>layout   offset a, b   line of a, b (offset / 128)   median     per add
+packed   0, 8         0, 0  same line               1144.0 ms  11.4 ns
+half     0, 64         0, 0  same line                156.0 ms   1.56 ns
+padded   0, 128        0, 1  two lines                155.8 ms   1.56 ns
+1144.0 / 155.8 ≈ 7.3        bg (E cores): half 610.9 / padded 211.6 ≈ 2.9</pre>
+    <ol lang="zh-CN">
+      <li><code>packed</code>：b 只比 a 晚 8 字节，两者在同一条行里。P0 每次写 a 都要先独占这一行、让 P1 的副本作废，P1 写 b 时再把整行抢回去：每次加法约 11.4 ns，大部分花在这一行的来回搬运上。</li>
+      <li><code>padded</code>：b 在下一条行里，各核独占自己的行，写入不必通知对方，每次加法约 1.56 ns，快约 7.3 倍。</li>
+      <li><code>half</code>：b 偏移 64 字节，按 <code>hw.cachelinesize</code> 仍在同一条 128 字节行里。默认 QoS 下它和 <code>padded</code> 一样快，两个线程都在 E 核上时却慢约 2.9 倍。所以在这台 Mac 上，隔开一整条 128 字节行才在两种核上都安全。</li>
+    </ol>
+    <ol lang="en">
+      <li><code>packed</code>: b sits only 8 bytes after a, in the same line. Every write of a by P0 must first take the line exclusively and invalidate P1’s copy, and P1’s write of b takes the whole line back: about 11.4 ns per add, most of it spent moving that one line back and forth.</li>
+      <li><code>padded</code>: b is in the next line, each core owns its own line, and a write needs no message to the other core: about 1.56 ns per add, about 7.3 times faster.</li>
+      <li><code>half</code>: b is 64 bytes in, which by <code>hw.cachelinesize</code> is still the same 128-byte line. At the default QoS it is as fast as <code>padded</code>, but with both threads on E cores it is about 2.9 times slower. So on this Mac only a full 128-byte line between them is safe on both kinds of core.</li>
+    </ol>
+  </div>
+  <p lang="zh-CN">图解 (c) 把 packed 和 padded 两种布局下每次写入时这一行在两个核里的状态一步步画了出来。</p>
+  <p lang="en">Diagram (c) steps through the state of the line in both cores on every write, for the packed and the padded layout.</p>
   <p lang="zh-CN">缓存和内存层级在内核一侧怎样管理（页、TLB、页缓存），见 Kernel Engineering <a href="../../kernel-engineering/phase-2-memory/index.html">Phase 2 · Memory</a>。</p>
   <p lang="en">For how the kernel side manages caches and the memory hierarchy (pages, the TLB, the page cache), see Kernel Engineering <a href="../../kernel-engineering/phase-2-memory/index.html">Phase 2 · Memory</a>.</p>
   <p lang="zh-CN">延伸阅读：McKenney 第 3 章「Hardware and its Habits」（缓存未命中、原子操作和内存屏障各要付出什么代价）；Bos《Rust Atomics and Locks》第 7 章「Understanding the Processor」中的「Cache Coherence」和「Impact on Performance」两节。</p>
@@ -143,6 +192,37 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
   </ul>
   <p lang="zh-CN">延伸阅读：Williams《C++ Concurrency in Action》中讲设计并发代码的一章（影响并发代码性能的因素：处理器数量、数据争用、cache ping-pong、伪共享）；McKenney 第 3 章「Hardware and its Habits」中各类操作代价的对比。</p>
   <p lang="en">Further reading: the chapter on designing concurrent code in Williams, <em>C++ Concurrency in Action</em> (the factors that affect the performance of concurrent code: the number of processors, data contention, cache ping-pong, false sharing); the comparison of operation costs in McKenney, Chapter 3, “Hardware and its Habits”.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>Amdahl 定律 S = 1 / (s + (1 − s)/N) 固定问题规模，串行比例 s 定下 1/s 的天花板：s = 0.1 时 10 核只有 5.26 倍。</li>
+      <li>Gustafson 定律 S = s′ + (1 − s′)·N 让问题随核数变大，s′ 在 N 核运行上量，同样的 0.1 得到 9.1 倍。</li>
+      <li>这台 M5 是 4 个 P 核加 6 个 E 核，平均切分时最慢的那份落在 E 核上，所以 Lab A 一个累加器到 10 线程只有 5.84 倍。</li>
+      <li>扫描一个远大于缓存的数组，瓶颈会从加法延迟移到内存带宽：P 簇约 83 GB/s 封顶，两个簇一起约 131 GB/s。</li>
+      <li>两个线程写同一条 128 字节缓存行里的不同变量就是 false sharing，按 <code>hw.cachelinesize</code> 对齐后快 7 倍多。</li>
+      <li>测量要预热、取多次运行的中位数、只用墙钟时间算加速比，并把结果打印出来，免得编译器删掉整个循环。</li>
+    </ul>
+    <ul lang="en">
+      <li>Amdahl’s law S = 1 / (s + (1 − s)/N) fixes the problem size, and the serial fraction s sets a ceiling of 1/s: with s = 0.1, 10 cores give only 5.26 times.</li>
+      <li>Gustafson’s law S = s′ + (1 − s′)·N lets the problem grow with the core count, s′ is measured on the N-core run, and the same 0.1 gives 9.1 times.</li>
+      <li>This M5 has 4 P cores plus 6 E cores, an even split leaves the slowest piece on an E core, and so Lab A with one accumulator reaches only 5.84 times at 10 threads.</li>
+      <li>Scanning an array far larger than the caches moves the bottleneck from add latency to memory bandwidth: the P cluster tops out at about 83 GB/s, both clusters together at about 131 GB/s.</li>
+      <li>Two threads writing different variables in the same 128-byte cache line is false sharing, and aligning to <code>hw.cachelinesize</code> makes it more than 7 times faster.</li>
+      <li>A measurement needs a warm-up, the median of repeated runs, wall time only for speedup, and a printed result so the compiler cannot delete the loop.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：N 个核就能快 N 倍，达不到说明代码写得不好。→ 实际：Amdahl 的串行部分、不一样快的核和共享的内存带宽都在限制加速比，同一个正确的求和在本机只有 5.84 倍或 2.46 倍。</li>
+      <li>误解：用 Amdahl 拟合出 s ≈ 0.08，就说明程序有 8 % 的串行代码。→ 实际：Lab A 真正的串行部分约 0.5 %，曲线变缓来自 E 核和带宽；拟合只给形状，原因要靠测量找。</li>
+      <li>误解：线程之间没有共享变量，就不会互相拖慢。→ 实际：缓存一致性按整行工作，两个无关的计数器落在同一条 128 字节行里，Lab B 就慢了 7 倍多。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: N cores should make it N times faster, and falling short means bad code. → Fact: Amdahl’s serial part, cores of unequal speed and shared memory bandwidth all limit speedup; the same correct sum reaches only 5.84 or 2.46 times on this Mac.</li>
+      <li>Myth: fitting Amdahl and getting s ≈ 0.08 means the program has 8 % serial code. → Fact: Lab A’s real serial part is about 0.5 %, and the curve flattens because of the E cores and bandwidth; a fit gives the shape, and only measurement finds the cause.</li>
+      <li>Myth: threads that share no variable cannot slow each other down. → Fact: cache coherence works on whole lines, and two unrelated counters in one 128-byte line make Lab B more than 7 times slower.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：strong scaling ↔ weak scaling</h2><h2 id="compare-en" lang="en">Comparison: strong scaling ↔ weak scaling</h2>
   <div class="table-wrap">
@@ -238,23 +318,15 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
     </svg>
   </div>
 
-  <h3 lang="zh-CN">(b) 内存层级，以及两个核共用的一条 128 字节缓存行</h3><h3 lang="en">(b) The memory hierarchy, and one 128-byte cache line shared by two cores</h3>
+  <h3 lang="zh-CN">(b) 本机的内存层级</h3><h3 lang="en">(b) The memory hierarchy of this Mac</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
-         data-captions='["全图：上半部分是本机的内存层级，下半部分放大一条 128 字节的缓存行。左下是计数器 a 和 b 挤在同一行里，右下是把它们隔开 128 字节。按播放逐步看。",
+    <svg data-diagram viewBox="0 0 900 202" data-interval="2600"
+         data-captions='["全图：本机的内存层级，左边是 P 簇，右边是 E 簇。按播放逐步看。",
            "1. 核与 L1：4 个 P 核各有 128 KB L1D，6 个 E 核各有 64 KB L1D（sysctl 读出）。每个核只直接读写自己的 L1。",
-           "2. L2 与内存：P 簇共享 16 MB L2，E 簇共享 6 MB L2，两个簇共用 32 GB 统一内存。Lab A 实测：只用 P 簇时带宽停在约 83 GB/s，两个簇一起约 131 GB/s。",
-           "3. 一条缓存行：a 和 b 是两个 8 字节计数器，地址只差 8 字节，落在同一条 128 字节行里。两个核都读过它们，于是 P0 和 P1 的 L1 里各有这一行的一份副本。",
-           "4. P0 写 a：写之前必须独占这一行，于是 P1 里的副本作废。P1 下一次访问 b 时只能从 P0 那里重新取回整行。",
-           "5. P1 写 b：同样要独占这一行，于是整行搬到 P1，P0 的副本作废。两个线程各加 1 亿次，这一行就在两个核之间反复搬运。实测中位数 1144 ms。",
-           "6. 对齐到 128 字节：b 落在下一条行里，两个核各自独占自己的行，写入不必通知对方。同样的工作中位数 156 ms，快 7 倍多。只隔开 64 字节时，P 核上同样快，但两个线程都在 E 核上时仍慢约 3 倍，见 Lab B。"]'
-         data-captions-en='["The whole picture: the top half is the memory hierarchy of this Mac, the bottom half zooms into one 128-byte cache line. Bottom left, counters a and b share one line; bottom right, they are 128 bytes apart. Press Play to step through.",
+           "2. L2 与内存：P 簇共享 16 MB L2，E 簇共享 6 MB L2，两个簇共用 32 GB 统一内存。Lab A 实测：只用 P 簇时带宽停在约 83 GB/s，两个簇一起约 131 GB/s。"]'
+         data-captions-en='["The whole picture: the memory hierarchy of this Mac, the P cluster on the left and the E cluster on the right. Press Play to step through.",
            "1. Cores and L1: the 4 P cores have 128 KB of L1D each, the 6 E cores 64 KB of L1D each (read with sysctl). Each core reads and writes only its own L1 directly.",
-           "2. L2 and memory: the P cluster shares a 16 MB L2, the E cluster a 6 MB L2, and both clusters share 32 GB of unified memory. Measured in Lab A: with the P cluster alone, bandwidth stops at about 83 GB/s; with both clusters, about 131 GB/s.",
-           "3. One cache line: a and b are two 8-byte counters whose addresses differ by only 8 bytes, so they sit in the same 128-byte line. Both cores have read them, so the L1 of P0 and the L1 of P1 each hold a copy of the line.",
-           "4. P0 writes a: before writing it must own the line exclusively, so the copy in P1 is invalidated. The next time P1 touches b it has to fetch the whole line back from P0.",
-           "5. P1 writes b: it too must own the line, so the whole line moves to P1 and the copy in P0 is invalidated. With each thread adding 100 million times, the line keeps travelling between the two cores. Measured median: 1144 ms.",
-           "6. Aligned to 128 bytes: b lands in the next line, each core owns its own line, and a write needs no message to the other core. The same work has a median of 156 ms, more than 7 times faster. With only 64 bytes between them it is just as fast on P cores, but still about 3 times slower when both threads run on E cores; see Lab B."]'>
+           "2. L2 and memory: the P cluster shares a 16 MB L2, the E cluster a 6 MB L2, and both clusters share 32 GB of unified memory. Measured in Lab A: with the P cluster alone, bandwidth stops at about 83 GB/s; with both clusters, about 131 GB/s."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -285,45 +357,88 @@ hw.memsize: 34359738368               # 32 GB 统一内存</pre>
         <text x="45" y="146" class="small" lang="zh-CN">只用 P 簇：实测 ≈ 83 GB/s 封顶</text><text x="45" y="146" class="small" lang="en">P cluster alone: tops out ≈ 83 GB/s</text>
         <text x="680" y="146" class="small" lang="zh-CN">两个簇一起：≈ 131 GB/s</text><text x="680" y="146" class="small" lang="en">both clusters: ≈ 131 GB/s</text>
         <rect class="box" x="250" y="158" width="400" height="34"/><text x="450" y="180" text-anchor="middle" lang="zh-CN">统一内存 DRAM · 32 GB（与 GPU 共用）</text><text x="450" y="180" text-anchor="middle" lang="en">unified memory DRAM · 32 GB (shared with the GPU)</text></g>
+    </svg>
+  </div>
 
-      <line x1="30" y1="206" x2="870" y2="206" class="lane"/>
-      <text x="40" y="228" lang="zh-CN">packed：a 和 b 在同一条 128 字节行里</text><text x="40" y="228" lang="en">packed: a and b share one 128-byte line</text>
-      <text x="480" y="228" lang="zh-CN">padded：a 和 b 相隔 128 字节</text><text x="480" y="228" lang="en">padded: a and b 128 bytes apart</text>
+  <h3 lang="zh-CN">(c) 同一条缓存行上的两个计数器：每次写入时一致性协议做了什么</h3><h3 lang="en">(c) Two counters on one cache line: what the coherence protocol does on every write</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：上半部分是 packed 布局下 P0 和 P1 各自 L1 里的同一条缓存行，从左到右是先后三次写入，最右是之后的情形。下半部分左边是内存里的这条 128 字节行（a 在偏移 0，b 在偏移 8），右边是 padded 布局。M（Modified）表示这个核独占该行、可以直接写；I（Invalid）表示这份副本已作废，用 ✕ 和虚线标出。这是 MESI 一族协议里的两个状态，本图只画一点：写权按整行取得。",
+           "1. P0 写 a：写之前必须独占整行，于是 P0 的副本变为 M；P1 如果有这一行的副本，就变为 I。",
+           "2. P1 写 b：b 和 a 在同一行，P1 的副本已作废，只能把整行取过来。P0 的副本变为 I，P1 的变为 M。",
+           "3. P0 再写 a：整行又搬回 P0，P0 变为 M，P1 变为 I。两个线程从未碰过对方的变量。",
+           "4. 两个线程各做 1 亿次加法，这一行就这样在两个核之间来回搬运。Lab B 实测 packed 的中位数 1144 ms，即每次加法约 11.4 ns，大部分时间花在搬运上。",
+           "5. padded：b 在偏移 128，落在下一条行里。P0 一直持有行 0 的 M，P1 一直持有行 1 的 M，写入不必通知对方，没有来回搬运。中位数 155.8 ms，每次加法约 1.56 ns，快约 7.3 倍。"]'
+         data-captions-en='["The whole picture: the top half shows the same cache line in the L1 of P0 and of P1 under the packed layout, three writes from left to right and what follows on the far right. Bottom left is that 128-byte line in memory (a at offset 0, b at offset 8), bottom right the padded layout. M (Modified) means this core owns the line and may write it directly; I (Invalid) means the copy is void, marked with ✕ and a dashed outline. These are two states of the MESI family of protocols, and the diagram shows only one point: write ownership is taken a whole line at a time.",
+           "1. P0 writes a: before writing it must own the whole line, so the copy in P0 becomes M, and the copy in P1, if it has one, becomes I.",
+           "2. P1 writes b: b is in the same line as a and the copy in P1 is void, so P1 must fetch the whole line. The copy in P0 becomes I and the copy in P1 becomes M.",
+           "3. P0 writes a again: the whole line moves back to P0, which becomes M, and P1 becomes I. Neither thread ever touched the variable of the other.",
+           "4. Each thread does 100 million adds, and the line keeps bouncing between the two cores like this. Lab B measured a packed median of 1144 ms, about 11.4 ns per add, most of it spent moving the line.",
+           "5. Padded: b is at offset 128, in the next line. P0 keeps line 0 in M and P1 keeps line 1 in M, a write needs no message to the other core, and nothing bounces. Median 155.8 ms, about 1.56 ns per add, about 7.3 times faster."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="40" class="small" lang="zh-CN">packed，各核 L1</text><text x="30" y="40" class="small" lang="en">packed, each L1</text>
+      <rect class="box" x="30" y="56" width="130" height="48"/><text x="42" y="76" class="mono">P0</text><text x="42" y="94" class="small" lang="zh-CN">线程 1 只加 a</text><text x="42" y="94" class="small" lang="en">thread 1 adds to a</text>
+      <rect class="box" x="30" y="130" width="130" height="48"/><text x="42" y="150" class="mono">P1</text><text x="42" y="168" class="small" lang="zh-CN">线程 2 只加 b</text><text x="42" y="168" class="small" lang="en">thread 2 adds to b</text>
 
-      <!-- step 3: one line, a copy in each core -->
+      <!-- step 1 -->
+      <g data-step="1">
+        <text x="180" y="40" lang="zh-CN">1. P0 写 a</text><text x="180" y="40" lang="en">1. P0 writes a</text>
+        <rect class="box" x="180" y="56" width="110" height="48"/><rect x="190" y="68" width="56" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="190" y="68" width="16" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="206" y="68" width="16" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><text x="194" y="85" class="mono">a</text><text x="210" y="85" class="mono">b</text><text x="254" y="87" class="mono" style="font-size: 16px">M</text>
+        <rect class="box" x="180" y="130" width="110" height="48"/><rect x="190" y="142" width="56" height="24" style="fill: var(--surface); stroke: var(--ink-3); stroke-width: 1.4; stroke-dasharray: 4 3"/><path d="M206 142 V166 M222 142 V166" style="stroke: var(--ink-3); stroke-width: 1.4; stroke-dasharray: 4 3"/><text x="194" y="159" class="mono">a</text><text x="210" y="159" class="mono">b</text><text x="254" y="161" class="mono" style="font-size: 16px; fill: var(--ink-2)">I ✕</text>
+        <text x="284" y="68" class="small" text-anchor="end">P0</text><text x="284" y="142" class="small" text-anchor="end">P1</text>
+        <text x="180" y="200" class="small" lang="zh-CN">P0 独占该行</text><text x="180" y="200" class="small" lang="en">P0 owns the line</text></g>
+      <!-- step 2 -->
+      <g data-step="2">
+        <text x="310" y="40" lang="zh-CN">2. P1 写 b</text><text x="310" y="40" lang="en">2. P1 writes b</text>
+        <rect class="box" x="310" y="56" width="110" height="48"/><rect x="320" y="68" width="56" height="24" style="fill: var(--surface); stroke: var(--ink-3); stroke-width: 1.4; stroke-dasharray: 4 3"/><path d="M336 68 V92 M352 68 V92" style="stroke: var(--ink-3); stroke-width: 1.4; stroke-dasharray: 4 3"/><text x="324" y="85" class="mono">a</text><text x="340" y="85" class="mono">b</text><text x="384" y="87" class="mono" style="font-size: 16px; fill: var(--ink-2)">I ✕</text>
+        <rect class="box" x="310" y="130" width="110" height="48"/><rect x="320" y="142" width="56" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="320" y="142" width="16" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="336" y="142" width="16" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><text x="324" y="159" class="mono">a</text><text x="340" y="159" class="mono">b</text><text x="384" y="161" class="mono" style="font-size: 16px">M</text>
+        <path class="arrow" d="M365 105 L365 129"/>
+        <text x="414" y="68" class="small" text-anchor="end">P0</text><text x="414" y="142" class="small" text-anchor="end">P1</text>
+        <text x="310" y="200" class="small" lang="zh-CN">整行搬到 P1</text><text x="310" y="200" class="small" lang="en">line moves to P1</text></g>
+      <!-- step 3 -->
       <g data-step="3">
-        <text x="40" y="264" class="small">P0 L1</text>
-        <rect class="box" x="90" y="246" width="256" height="26"/>
-        <rect x="90" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="106" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
-        <text x="94" y="264" class="mono">a</text><text x="110" y="264" class="mono">b</text>
-        <text x="40" y="308" class="small">P1 L1</text>
-        <rect class="box" x="90" y="290" width="256" height="26"/>
-        <rect x="90" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="106" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
-        <text x="94" y="308" class="mono">a</text><text x="110" y="308" class="mono">b</text>
-        <text x="218" y="334" class="small" text-anchor="middle" lang="zh-CN">一条行 = 128 字节，a、b 各 8 字节</text><text x="218" y="334" class="small" text-anchor="middle" lang="en">one line = 128 bytes; a and b are 8 bytes each</text></g>
-      <!-- step 4: P0 writes a -->
+        <text x="440" y="40" lang="zh-CN">3. P0 再写 a</text><text x="440" y="40" lang="en">3. P0 writes a</text>
+        <rect class="box" x="440" y="56" width="110" height="48"/><rect x="450" y="68" width="56" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="450" y="68" width="16" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="466" y="68" width="16" height="24" style="fill: var(--surface); stroke: var(--ink-3)"/><text x="454" y="85" class="mono">a</text><text x="470" y="85" class="mono">b</text><text x="514" y="87" class="mono" style="font-size: 16px">M</text>
+        <rect class="box" x="440" y="130" width="110" height="48"/><rect x="450" y="142" width="56" height="24" style="fill: var(--surface); stroke: var(--ink-3); stroke-width: 1.4; stroke-dasharray: 4 3"/><path d="M466 142 V166 M482 142 V166" style="stroke: var(--ink-3); stroke-width: 1.4; stroke-dasharray: 4 3"/><text x="454" y="159" class="mono">a</text><text x="470" y="159" class="mono">b</text><text x="514" y="161" class="mono" style="font-size: 16px; fill: var(--ink-2)">I ✕</text>
+        <path class="arrow" d="M495 129 L495 105"/>
+        <text x="544" y="68" class="small" text-anchor="end">P0</text><text x="544" y="142" class="small" text-anchor="end">P1</text>
+        <text x="440" y="200" class="small" lang="zh-CN">整行搬回 P0</text><text x="440" y="200" class="small" lang="en">moves back to P0</text></g>
+
+      <!-- step 4: the bounce repeats -->
       <g data-step="4">
-        <text x="356" y="308" class="small" style="fill: var(--ink-2)" lang="zh-CN">✕ 作废</text><text x="356" y="308" class="small" style="fill: var(--ink-2)" lang="en">✕ invalid</text>
-        <text x="40" y="358" class="small" lang="zh-CN">1. P0 写 a：P1 的副本作废</text><text x="40" y="358" class="small" lang="en">1. P0 writes a: the copy in P1 is invalidated</text></g>
-      <!-- step 5: P1 writes b, ping-pong -->
+        <text x="590" y="40" lang="zh-CN">4. 之后每次写都如此</text><text x="590" y="40" lang="en">4. and so on, every write</text>
+        <rect class="box" x="590" y="56" width="120" height="48"/><text x="602" y="76" class="mono">P0</text><text x="602" y="94" class="mono">M I M I …</text>
+        <rect class="box" x="590" y="130" width="120" height="48"/><text x="602" y="150" class="mono">P1</text><text x="602" y="168" class="mono">I M I M …</text>
+        <path class="arrow flow" d="M716 84 C 746 100, 746 134, 716 150" style="marker-start: url(#arr)"/>
+        <text x="756" y="104" class="mono">11.4 ns</text>
+        <text x="756" y="122" class="small" lang="zh-CN">每次加法，packed</text><text x="756" y="122" class="small" lang="en">per add, packed</text>
+        <text x="756" y="150" class="small" lang="zh-CN">中位数 1144 ms</text><text x="756" y="150" class="small" lang="en">median 1144 ms</text>
+        <text x="756" y="166" class="small" lang="zh-CN">每线程 1 亿次</text><text x="756" y="166" class="small" lang="en">1e8 adds per thread</text></g>
+
+      <line x1="30" y1="236" x2="870" y2="236" class="lane"/>
+      <text x="30" y="262" lang="zh-CN">内存，packed：一条 128 字节行</text><text x="30" y="262" lang="en">memory, packed: one 128-byte line</text>
+      <rect x="30" y="274" width="384" height="28" style="fill: var(--surface-2); stroke: var(--ink-3)"/>
+      <rect x="30" y="274" width="24" height="28" style="fill: var(--surface); stroke: var(--ink-3)"/><rect x="54" y="274" width="24" height="28" style="fill: var(--surface); stroke: var(--ink-3)"/>
+      <text x="38" y="293" class="mono">a</text><text x="62" y="293" class="mono">b</text>
+      <text x="228" y="293" class="small" text-anchor="middle" lang="zh-CN">行 0</text><text x="228" y="293" class="small" text-anchor="middle" lang="en">line 0</text>
+      <text x="30" y="318" class="small">0</text><text x="54" y="318" class="small">8</text><text x="414" y="318" class="small" text-anchor="end">128</text>
+      <text x="30" y="344" class="small" lang="zh-CN">a、b 各 8 字节，偏移 0 和 8，同在行 0</text><text x="30" y="344" class="small" lang="en">a and b are 8 bytes each, at offsets 0 and 8, both in line 0</text>
+
+      <!-- step 5: padded -->
       <g data-step="5">
-        <text x="356" y="264" class="small" style="fill: var(--ink-2)" lang="zh-CN">✕ 作废</text><text x="356" y="264" class="small" style="fill: var(--ink-2)" lang="en">✕ invalid</text>
-        <path class="arrow flow" d="M418 258 C 442 268, 442 292, 418 302" style="marker-start: url(#arr)"/>
-        <text x="40" y="378" class="small" lang="zh-CN">2. P1 写 b：整行搬到 P1，P0 的副本作废</text><text x="40" y="378" class="small" lang="en">2. P1 writes b: the line moves to P1, the P0 copy is invalidated</text>
-        <text x="40" y="400" class="small" lang="zh-CN">实测：1144 ms（每线程 1 亿次加法，中位数）</text><text x="40" y="400" class="small" lang="en">measured: 1144 ms (1e8 adds per thread, median)</text></g>
-      <!-- step 6: padded -->
-      <g data-step="6">
-        <text x="480" y="264" class="small">P0 L1</text>
-        <rect class="box" x="530" y="246" width="256" height="26"/>
-        <rect x="530" y="246" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
-        <text x="534" y="264" class="mono">a</text><text x="794" y="264" class="small" lang="zh-CN">行 X</text><text x="794" y="264" class="small" lang="en">line X</text>
-        <text x="480" y="308" class="small">P1 L1</text>
-        <rect class="box" x="530" y="290" width="256" height="26"/>
-        <rect x="530" y="290" width="16" height="26" style="fill: var(--surface); stroke: var(--ink-3)"/>
-        <text x="534" y="308" class="mono">b</text><text x="794" y="308" class="small" lang="zh-CN">行 Y</text><text x="794" y="308" class="small" lang="en">line Y</text>
-        <text x="480" y="358" class="small" lang="zh-CN">a 在行 X，b 在下一条行 Y：各核独占自己的行</text><text x="480" y="358" class="small" lang="en">a in line X, b in the next line Y: each core owns its line</text>
-        <text x="480" y="378" class="small" lang="zh-CN">写入不必通知对方，没有搬运</text><text x="480" y="378" class="small" lang="en">a write needs no message to the other core</text>
-        <text x="480" y="400" class="small" lang="zh-CN">实测：156 ms（同样的工作）</text><text x="480" y="400" class="small" lang="en">measured: 156 ms (the same work)</text></g>
+        <text x="520" y="262" lang="zh-CN">5. padded：b 在偏移 128</text><text x="520" y="262" lang="en">5. padded: b at offset 128</text>
+        <rect x="520" y="274" width="150" height="28" style="fill: var(--surface-2); stroke: var(--ink-3)"/><rect x="520" y="274" width="24" height="28" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <text x="528" y="293" class="mono">a</text><text x="595" y="293" class="small" text-anchor="middle" lang="zh-CN">行 0</text><text x="595" y="293" class="small" text-anchor="middle" lang="en">line 0</text>
+        <rect x="700" y="274" width="150" height="28" style="fill: var(--surface-2); stroke: var(--ink-3)"/><rect x="700" y="274" width="24" height="28" style="fill: var(--surface); stroke: var(--ink-3)"/>
+        <text x="708" y="293" class="mono">b</text><text x="775" y="293" class="small" text-anchor="middle" lang="zh-CN">行 1</text><text x="775" y="293" class="small" text-anchor="middle" lang="en">line 1</text>
+        <text x="520" y="318" class="small">0</text><text x="700" y="318" class="small">128</text>
+        <rect class="box" x="520" y="330" width="150" height="40"/><text x="532" y="355" class="mono" lang="zh-CN">P0 L1：行 0  M</text><text x="532" y="355" class="mono" lang="en">P0 L1: line 0  M</text>
+        <rect class="box" x="700" y="330" width="150" height="40"/><text x="712" y="355" class="mono" lang="zh-CN">P1 L1：行 1  M</text><text x="712" y="355" class="mono" lang="en">P1 L1: line 1  M</text>
+        <text x="520" y="394" class="small" lang="zh-CN">各自独占自己的行，不来回搬运：每次加法约 1.56 ns</text><text x="520" y="394" class="small" lang="en">each keeps its own line in M, no bouncing: 1.56 ns per add</text></g>
     </svg>
   </div>
 
@@ -494,7 +609,7 @@ padded  offset(b)=128  median=  211.6 ms  min=  195.7  max=  235.0</pre></li>
       <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">两个计数器在同一条缓存行里，一致性按行工作，这一行在两个核之间来回搬运</span><span lang="en">Both counters sit in one cache line, coherence works per line, and the line travels back and forth between the two cores</span></label>
       <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">原子加法指令本身就慢，与布局无关</span><span lang="en">The atomic add instruction is slow in itself, whatever the layout</span></label>
       <label><input type="radio" name="q3" value="c"> <span lang="zh-CN"><code>std::atomic&lt;long&gt;</code> 内部用了一把锁，两个线程在抢它</span><span lang="en"><code>std::atomic&lt;long&gt;</code> uses a lock internally, and the two threads fight over it</span></label>
-      <div class="why" hidden><span lang="zh-CN">同样的原子加法在 <code>padded</code> 布局下只要 156 ms，所以不是指令本身慢；本机上 <code>std::atomic&lt;long&gt;::is_always_lock_free</code> 为真（编译时 <code>static_assert</code> 通过），没有锁。差别只在两个计数器是否共用一条行。</span><span lang="en">The same atomic adds take only 156 ms in the <code>padded</code> layout, so the instruction itself is not slow; on this Mac <code>std::atomic&lt;long&gt;::is_always_lock_free</code> is true (a compile-time <code>static_assert</code> passes), so there is no lock. The only difference is whether the two counters share a line.</span></div>
+      <div class="why" hidden><span lang="zh-CN">同样的原子加法在 <code>padded</code> 布局下只要 155.8 ms，所以不是指令本身慢；本机上 <code>std::atomic&lt;long&gt;::is_always_lock_free</code> 为真（编译时 <code>static_assert</code> 通过），没有锁。差别只在两个计数器是否共用一条行。</span><span lang="en">The same atomic adds take only 155.8 ms in the <code>padded</code> layout, so the instruction itself is not slow; on this Mac <code>std::atomic&lt;long&gt;::is_always_lock_free</code> is true (a compile-time <code>static_assert</code> passes), so there is no lock. The only difference is whether the two counters share a line.</span></div>
     </div>
     <div class="q" data-answer="b">
       <p lang="zh-CN">4. 你把核数翻倍，同时把总问题规模也翻倍，运行时间保持不变。这说明什么？</p>

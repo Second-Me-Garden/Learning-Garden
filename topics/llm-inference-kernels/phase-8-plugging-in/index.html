@@ -56,6 +56,14 @@
   </ul>
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+
+  <div class="crux">
+    <p lang="zh-CN">前七个阶段的实验里写过的内核，不进引擎就只是一个独立的基准。进引擎有两道坎。第一道是从哪个口子进、守什么契约：口子选错，SGLang 根本调不到你的算子；契约没守住，它在解码图捕获时就出错。第二道是进去之后引擎到底快了多少：Lab B 里单独快 1.87 倍的融合算子，放进一个 17.3 ms 的解码步，只省下 0.2% 左右。所以问题是：一个写好的内核怎样被 SGLang 调到，又怎样证明它让端到端变快？</p>
+    <p lang="en">The kernels written in the labs of the first seven phases are only standalone benchmarks until they enter the engine. Getting in has two hurdles. The first is which opening to use and which contract to keep: pick the wrong opening and SGLang never calls your op; break the contract and it fails when the decode graph is captured. The second is how much faster the engine actually gets: in Lab B a fused op that is 1.87 times as fast on its own saves only about 0.2% of a 17.3 ms decode step. So the question is: how does a finished kernel get called by SGLang, and how do you prove it makes the engine faster end to end?</p>
+    <p lang="zh-CN">概念 2 和概念 3 回答前一半（内核库里的 torch 算子和 AttentionBackend 这两个口子及其契约），概念 5 用四种工具和阿姆达尔定律回答后一半。</p>
+    <p lang="en">Concepts 2 and 3 answer the first half (the two openings, a torch op in the kernel library and an AttentionBackend, with their contracts), and concept 5 answers the second half with four tools and Amdahl’s law.</p>
+  </div>
+
   <p lang="zh-CN">下文 SGLang 的源码路径和行号都在 <code>v0.5.22</code> 标签下，2026-11-01 用 curl 从 raw.githubusercontent.com 取回后读的；FlashInfer 的 <code>flashinfer/decode.py</code> 在 <code>v0.7.1</code> 标签下（SGLang 钉的版本），它的 <code>CONTRIBUTING.md</code> 在 <code>main</code> 分支上；PyTorch 的文档是 2.14 版（SGLang 钉 <code>torch==2.14.1</code>），Nsight Systems 用户指南是 2026.4 版，Nsight Compute 命令行文档是 2026.3.1 版，都是同一天读的。路径省略了前缀 <code>python/sglang/</code>。</p><p lang="en">Every SGLang source path and line number below is at the <code>v0.5.22</code> tag, fetched with curl from raw.githubusercontent.com and read on 2026-11-01; FlashInfer’s <code>flashinfer/decode.py</code> is at the <code>v0.7.1</code> tag (the version SGLang pins) and its <code>CONTRIBUTING.md</code> on the <code>main</code> branch; the PyTorch documentation is the 2.14 version (SGLang pins <code>torch==2.14.1</code>), the Nsight Systems User Guide version 2026.4 and the Nsight Compute CLI documentation version 2026.3.1, all read the same day. Paths drop the <code>python/sglang/</code> prefix.</p>
 
   <h3 lang="zh-CN">1. 四个接入点在栈上的位置</h3><h3 lang="en">1. Where the four plug-in points sit on the stack</h3>
@@ -88,6 +96,22 @@
     <li lang="en"><strong>Expose the Python interface in <code>python/sgl_kernel/</code></strong>: <code>silu_and_mul</code> at lines 258–270 of <code>sgl_kernel/elementwise.py</code> checks the shapes and 16-byte alignment, allocates the output if needed, then calls <code>torch.ops.sgl_kernel.silu_and_mul.default(out, input)</code>. Step 6 is adding tests and benchmarks, and the README recommends timing with <code>triton.testing.do_bench_cudagraph</code> (lines 106–113).</li>
   </ol>
   <p lang="zh-CN">schema 是这条路的关键。<code>Tensor!</code> 告诉 PyTorch 这个参数会被原地修改，返回 <code>()</code> 说明结果写在传进来的张量里；README 第 64–70 行的注释说 schema 是给 <code>torch.compile</code> 用的。另一半是 C++ 类型：PyTorch 的绑定只认 <code>int64_t</code> 和 <code>double</code>，第三方库用 <code>int</code> 和 <code>float</code> 时要用 <code>make_pytorch_shim</code> 转换（第 72–94 行）。</p><p lang="en">The schema is the key to this route. <code>Tensor!</code> tells PyTorch the argument is modified in place, and returning <code>()</code> says the results are written into tensors passed in; the comment at lines 64–70 of the README says the schema is there for <code>torch.compile</code>. The other half is C++ types: PyTorch bindings accept only <code>int64_t</code> and <code>double</code>, so a third-party library that uses <code>int</code> and <code>float</code> is wrapped with <code>make_pytorch_shim</code> (lines 72–94).</p>
+  <div class="worked">
+    <p lang="zh-CN">跟一次真实的调用从 Python 走到内核发射：<code>SiluAndMul.forward_cuda</code> 把 <code>input</code> 和一个预先分配好的 <code>out</code> 交给 <code>sgl_kernel</code> 的 <code>silu_and_mul</code>。设 <code>input</code> 是 8 个 token、每行 2048 个 BF16，<code>out</code> 就是每行 1024 个，前一半过 SiLU 再乘后一半（这个形状是为演示设的，不来自某个模型）。</p>
+    <p lang="en">Follow one real call from Python down to the kernel launch: <code>SiluAndMul.forward_cuda</code> hands <code>input</code> and a preallocated <code>out</code> to <code>silu_and_mul</code> in <code>sgl_kernel</code>. Let <code>input</code> be 8 tokens of 2048 BF16 values per row, so <code>out</code> has 1024 per row, the first half through SiLU times the second half (the shape is chosen for the demonstration, not taken from a model).</p>
+    <ol lang="zh-CN">
+      <li><code>sgl_kernel/elementwise.py</code> 第 258–270 行：检查形状（<code>out</code> 每行 1024 = 2048 ÷ 2）和 16 字节对齐；<code>out</code> 已经给了，所以不走 <code>torch.empty</code>，内核路径上没有分配。</li>
+      <li>调 <code>torch.ops.sgl_kernel.silu_and_mul.default(out, input)</code>。PyTorch 按 <code>common_extension.cc</code> 第 71–72 行登记的 schema <code>silu_and_mul(Tensor! out, Tensor input) -&gt; ()</code> 解析参数：<code>out</code> 会被原地写，返回值为空；张量在 CUDA 上，于是分派到 <code>m.impl</code> 绑定在 <code>torch::kCUDA</code> 上的那个函数。</li>
+      <li>进入 <code>activation.cu</code> 第 85 行的 <code>silu_and_mul(at::Tensor&amp; out, at::Tensor&amp; input)</code>：从 <code>getCurrentCUDAStream()</code> 取流，一个 token 一个线程块，在这个流上发射 FlashInfer 的 <code>act_and_mul_kernel</code>，这里是 8 个线程块。</li>
+      <li>解码图捕获时，当前流就是 SGLang 正在捕获的那个流，所以这次发射被录成图里的一个节点；之后每次重放都执行它，结果写在 <code>out</code> 里，Python 侧什么也不返回。</li>
+    </ol>
+    <ol lang="en">
+      <li>Lines 258–270 of <code>sgl_kernel/elementwise.py</code>: check the shapes (1024 per row of <code>out</code> = 2048 ÷ 2) and the 16-byte alignment; <code>out</code> was given, so <code>torch.empty</code> is skipped and the kernel path allocates nothing.</li>
+      <li>Call <code>torch.ops.sgl_kernel.silu_and_mul.default(out, input)</code>. PyTorch reads the arguments against the schema registered at lines 71–72 of <code>common_extension.cc</code>, <code>silu_and_mul(Tensor! out, Tensor input) -&gt; ()</code>: <code>out</code> is written in place and nothing is returned; the tensors are on CUDA, so the call dispatches to the function that <code>m.impl</code> bound to <code>torch::kCUDA</code>.</li>
+      <li>Enter <code>silu_and_mul(at::Tensor&amp; out, at::Tensor&amp; input)</code> at line 85 of <code>activation.cu</code>: take the stream from <code>getCurrentCUDAStream()</code> and launch FlashInfer’s <code>act_and_mul_kernel</code> on it with one thread block per token, 8 blocks here.</li>
+      <li>During decode-graph capture the current stream is the very stream SGLang is capturing, so this launch is recorded as one node of the graph; every replay then runs it, the result lands in <code>out</code>, and nothing comes back to Python.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">即时编译（JIT）的算子走另一条路，不经过 torch 算子。<code>kernels/ops/elementwise/add_constant.py</code> 用 <code>load_jit(…, cuda_files=["elementwise/add_constant.cuh"], …)</code> 在第一次调用时编译，返回的是 <code>tvm_ffi</code> 模块（源码 <code>kernels/jit/csrc/elementwise/add_constant.cuh</code> 包含的是 <code>tvm/ffi</code> 头文件）。两条路的算子最后都通过 <code>kernels/registry.py</code> 第 76 行的 <code>register_kernel(KernelSpec(…))</code> 登记：登记只记元数据（算子名、后端、导入路径），不导入 torch，也不触发编译（<code>kernels/README.md</code> 第 79–82 行）。</p><p lang="en">Just-in-time (JIT) ops take another route that does not go through torch ops. <code>kernels/ops/elementwise/add_constant.py</code> compiles on first call with <code>load_jit(…, cuda_files=["elementwise/add_constant.cuh"], …)</code> and gets back a <code>tvm_ffi</code> module (its source, <code>kernels/jit/csrc/elementwise/add_constant.cuh</code>, includes <code>tvm/ffi</code> headers). Ops from both routes end up registered with <code>register_kernel(KernelSpec(…))</code> (line 76 of <code>kernels/registry.py</code>); registration records metadata only (op name, backend, import path) and neither imports torch nor triggers a build (lines 79–82 of <code>kernels/README.md</code>).</p>
   <p lang="zh-CN">算子还得能放进解码图。按 Phase 3 的规矩：用当前流（<code>getCurrentCUDAStream()</code>，SGLang 捕获的就是这个流），内核路径上不分配显存、不做主机同步、不读 <code>.item()</code>，形状只取决于输入张量。<code>silu_and_mul</code> 的 Python 包装在输出缺省时会 <code>torch.empty</code>，但调用方 <code>SiluAndMul.forward_cuda</code> 每次都传入预先分配的输出（Phase 5 概念 3）。</p><p lang="en">The op also has to fit inside the decode graph. Phase 3’s rules apply: use the current stream (<code>getCurrentCUDAStream()</code>, the very stream SGLang captures), allocate no memory, do no host sync and read no <code>.item()</code> on the kernel path, and let shapes depend only on the input tensors. The Python wrapper of <code>silu_and_mul</code> calls <code>torch.empty</code> when no output is given, but its caller, <code>SiluAndMul.forward_cuda</code>, always passes a preallocated output (Phase 5, concept 3).</p>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 10 章 Reduction（Lab A 里那个算子的块内归约）。参考书目里没有书讲 torch 算子的注册，这部分以 <code>kernels/aot/README.md</code> 和 PyTorch 2.14 的 <code>torch.library</code> 文档为准，见资料。</p><p lang="en">Further reading: chapter 10, Reduction, of PMPP 5th ed. (the block-wide reduction inside Lab A’s op). No book in the bibliography covers torch op registration; that part rests on <code>kernels/aot/README.md</code> and the PyTorch 2.14 <code>torch.library</code> documentation; see Resources.</p>
@@ -144,7 +168,30 @@
     <li lang="zh-CN"><strong>Nsight Compute</strong>（<code>ncu</code>）：一次只看一个内核，回答「它为什么慢」：带宽用了多少、停顿在哪。用 <code>-k regex:&lt;名字&gt;</code> 选内核，<code>--launch-skip</code> 和 <code>--launch-count</code> 跳过预热、只录一次，<code>--set full</code> 收全部分节（不写时只收 basic 集）。它会重放内核，比原来慢得多，所以只对已经从前三种工具里挑出来的那个内核用。</li>
     <li lang="en"><strong>Nsight Compute</strong> (<code>ncu</code>): one kernel at a time, answering “why is it slow”: how much bandwidth it uses and where it stalls. <code>-k regex:&lt;name&gt;</code> selects the kernel, <code>--launch-skip</code> and <code>--launch-count</code> skip the warm-up and record one launch, and <code>--set full</code> collects every section (without it only the basic set is collected). It replays the kernel and runs far slower, so use it only on the kernel the first three tools have already singled out.</li>
   </ul>
-  <p lang="zh-CN">把内核时间换算成端到端，用的是阿姆达尔定律：一个占整步比例 <code>f</code> 的部分快了 <code>s</code> 倍，整步只快 <code>1 / ((1 − f) + f / s)</code> 倍。32 的数法：OLMoE 16 层，每层 2 处归一化，第 0 层的输入归一化没有残差、不算，最后一个归一化带残差、算上，合计 32 处残差 + RMSNorm；Lab B 的替身每层直接跑 2 处，总数相同。替身里，这 32 处按批大小 1 的单独测量合计约 60–120 µs，占 17.3 ms 一步的约 0.4–0.7%（推断，按 Lab B 第一部分的中位数相乘）；就算它们快到零，整步也只快 0.7% 以内。所以作品项目要求报告先给出这个预测，再给出测量值。</p><p lang="en">Converting kernel time into end-to-end time is Amdahl’s law: if a part that takes a fraction <code>f</code> of the step becomes <code>s</code> times faster, the step becomes only <code>1 / ((1 − f) + f / s)</code> times faster. The 32 is counted this way: OLMoE has 16 layers with 2 norms each; layer 0’s input norm has no residual and is left out, and the final norm has one and is counted, giving 32 residual + RMSNorm sites; Lab B’s stand-in simply runs 2 per layer, the same total. In the stand-in, those 32 sites, measured alone at batch size 1, add up to about 60–120 µs, about 0.4–0.7% of a 17.3 ms step (inference, multiplying the medians of Lab B’s first part); even if they took no time at all, the step would be less than 0.7% faster. That is why the capstone asks the report to give this prediction first and the measurement second.</p>
+  <p lang="zh-CN">把内核时间换算成端到端，用的是阿姆达尔定律：一个占整步比例 <code>f</code> 的部分快了 <code>s</code> 倍，整步只快 <code>1 / ((1 − f) + f / s)</code> 倍。32 的数法：OLMoE 16 层，每层 2 处归一化，第 0 层的输入归一化没有残差、不算，最后一个归一化带残差、算上，合计 32 处残差 + RMSNorm；Lab B 的替身每层直接跑 2 处，总数相同。替身里，这 32 处按批大小 1 的单独测量合计约 60–120 µs，占 17.3 ms 一步的约 0.4–0.7%（推断，按 Lab B 第一部分的中位数相乘）；就算它们快到零，整步也只快约 0.7%。所以作品项目要求报告先给出这个预测，再给出测量值。</p><p lang="en">Converting kernel time into end-to-end time is Amdahl’s law: if a part that takes a fraction <code>f</code> of the step becomes <code>s</code> times faster, the step becomes only <code>1 / ((1 − f) + f / s)</code> times faster. The 32 is counted this way: OLMoE has 16 layers with 2 norms each; layer 0’s input norm has no residual and is left out, and the final norm has one and is counted, giving 32 residual + RMSNorm sites; Lab B’s stand-in simply runs 2 per layer, the same total. In the stand-in, those 32 sites, measured alone at batch size 1, add up to about 60–120 µs, about 0.4–0.7% of a 17.3 ms step (inference, multiplying the medians of Lab B’s first part); even if they took no time at all, the step would be at most about 0.7% faster. That is why the capstone asks the report to give this prediction first and the measurement second.</p>
+  <div class="worked">
+    <p lang="zh-CN">用 Lab B 第一次干净运行的原始输出把这条公式算一遍：批大小 1 时，不融合一处 3.84 µs，融合一处 2.05 µs；不融合时整步 17.278 ms，融合时 17.243 ms。假设每处归一化在步里花的时间和单独量时一样，这也是 Lab B 程序打印预测时用的假设。</p>
+    <p lang="en">Run the formula on the raw output of Lab B’s first clean run: at batch size 1 one unfused site takes 3.84 µs and one fused site 2.05 µs; the whole step takes 17.278 ms with unfused norms and 17.243 ms with fused ones. Assume each norm site costs inside the step what it cost alone, the same assumption the Lab B program makes when it prints its prediction.</p>
+    <pre>s          = 3.84 / 2.05                       = 1.87
+32 sites   = 32 x 3.84 us                      = 122.9 us
+f          = 122.9 us / 17278 us               = 0.0071   (0.71%)
+speedup    = 1 / ((1 - 0.0071) + 0.0071 / 1.87) = 1 / 0.99668 = 1.0033
+saving     = 32 x (3.84 - 2.05) us             = 57.3 us  (0.33% of the step)
+s -&gt; inf   = 1 / (1 - 0.0071)                  = 1.0072   (at most 122.9 us)
+measured   = 17.278 ms - 17.243 ms             = 0.035 ms (printed +34.7 us, 0.20%)</pre>
+    <ol lang="zh-CN">
+      <li>先求 s 和 f：算子单独快 1.87 倍，可 32 处加起来只占整步的 0.71%。</li>
+      <li>代进阿姆达尔定律：整步快 1.0033 倍，也就是省 57.3 µs，正是程序打印的 <code>predicted from Part 1: 32 sites x 1.79 us = 57.3 us</code>。</li>
+      <li>再看上限：就算融合版快到不花时间，整步也最多少 122.9 µs，即 0.71%，因为其余 99.29% 的时间不归归一化管，几乎全花在读权重上。</li>
+      <li>最后对测量：这一次测到 34.7 µs，在预测之内。三次运行里批大小 1 的不融合中位数从 1.92 抖到 3.86 µs，所以预测本身也是一个范围，17.6–57.8 µs，测量的 24.8–40.8 µs 都落在里面。</li>
+    </ol>
+    <ol lang="en">
+      <li>First find s and f: the op alone is 1.87 times as fast, yet all 32 sites together take only 0.71% of the step.</li>
+      <li>Put them into Amdahl’s law: the step becomes 1.0033 times as fast, a saving of 57.3 µs, exactly the <code>predicted from Part 1: 32 sites x 1.79 us = 57.3 us</code> the program prints.</li>
+      <li>Then the ceiling: even if the fused op took no time at all, the step would shrink by at most 122.9 µs, that is 0.71%, because the other 99.29% of the time is not the norms’ to save and goes almost entirely on reading weights.</li>
+      <li>Finally, compare with the measurement: this run measured 34.7 µs, inside the prediction. Across the three runs the unfused median at batch size 1 jittered from 1.92 to 3.86 µs, so the prediction is itself a range, 17.6–57.8 µs, and the measured 24.8–40.8 µs all fall inside it.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 6 章 Performance considerations；Hennessy &amp; Patterson 第 1 章 1.9 节 Quantitative Principles of Computer Design（阿姆达尔定律）和第 4 章的 Roofline 一节。</p><p lang="en">Further reading: chapter 6, Performance considerations, of PMPP 5th ed.; section 1.9 of chapter 1 of Hennessy &amp; Patterson, Quantitative Principles of Computer Design (Amdahl’s law), and the Roofline section of its chapter 4.</p>
 
   <h3 lang="zh-CN">6. 语言：CUDA、CuTe 与 CuTe DSL、Triton、TileLang</h3><h3 lang="en">6. The languages: CUDA, CuTe and the CuTe DSL, Triton, TileLang</h3>
@@ -160,6 +207,37 @@
   </ul>
   <p lang="zh-CN">怎么选：要和 PyTorch 之外的引擎共享、或者要逐条指令控制，写 CUDA；矩阵乘和注意力这类以 tensor core 为中心的分块内核，CuTe DSL 和 CUTLASS 给出现成的布局代数；想快速试一个融合，Triton 最省事。这是常见的分工，不是规则（推断，依据是 v0.5.22 里各类内核实际所在的位置）。</p><p lang="en">How to choose: write CUDA when the kernel is shared with engines beyond PyTorch or needs instruction-by-instruction control; for tensor-core-centred tiled kernels such as GEMMs and attention, the CuTe DSL and CUTLASS provide a ready-made layout algebra; to try a fusion quickly, Triton is the least effort. This is a common division of labour, not a rule (inference, from where each kind of kernel actually sits in v0.5.22).</p>
   <p lang="zh-CN">延伸阅读：参考书目里没有书讲 Triton、CuTe DSL 或 TileLang。这一概念以各仓库的 README 和 CuTe DSL 的官方文档为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers Triton, the CuTe DSL or TileLang. This concept rests on each repository’s README and the official CuTe DSL documentation; see Resources.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>v0.5.22 里内核从四处接入：内核库里的算子、一个 AttentionBackend、钉住版本的上游库，以及证明这一切的工具。</li>
+      <li>AOT 算子靠带 <code>Tensor!</code> 的 schema 注册成 <code>torch.ops.sgl_kernel.*</code>，要用当前流、不分配显存、不做主机同步，才能被捕获进解码图。</li>
+      <li>AttentionBackend 在 <code>_out_graph</code> 里把运行时的批翻译成内核要的 indptr 和 indices（FlashInfer 的 <code>plan()</code>），图里只做静态形状的 GPU 工作（<code>run()</code>）。</li>
+      <li>给上游库的贡献要等 SGLang 挪动 <code>python/pyproject.toml</code> 里钉住的版本才进得来。</li>
+      <li><code>one_batch</code> 和 torch profiler 回答一步里有哪些内核，Nsight Systems 给出时间线，Nsight Compute 只深入挑出来的那一个。</li>
+      <li>端到端加速是 <code>1 / ((1 − f) + f / s)</code>：Lab B 里 f 约 0.71%、s 约 1.87，公式预测整步只快约 0.33%，实测约 0.2%。</li>
+    </ul>
+    <ul lang="en">
+      <li>At v0.5.22 a kernel plugs in at four places: an op in the kernel library, an AttentionBackend, an upstream library at a pinned version, and the tools that prove it all.</li>
+      <li>An AOT op registers as <code>torch.ops.sgl_kernel.*</code> through a schema with <code>Tensor!</code>, and it can be captured into the decode graph only if it uses the current stream, allocates no memory and does no host sync.</li>
+      <li>An AttentionBackend translates the runtime’s batch into the indptr and indices its kernel wants in <code>_out_graph</code> (FlashInfer’s <code>plan()</code>) and does only static-shape GPU work inside the graph (<code>run()</code>).</li>
+      <li>A contribution to an upstream library arrives only once SGLang moves the version pinned in <code>python/pyproject.toml</code>.</li>
+      <li><code>one_batch</code> and the torch profiler say which kernels a step runs, Nsight Systems gives the timeline, and Nsight Compute goes deep on the one kernel already singled out.</li>
+      <li>The end-to-end speedup is <code>1 / ((1 − f) + f / s)</code>: in Lab B, with f about 0.71% and s about 1.87, the formula predicts a step only about 0.33% faster, and the measurement was about 0.2%.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：单独快 1.87 倍的融合算子，放进引擎也会让解码明显变快。→ 实际：Lab B 的替身整步只快 0.14–0.24%，因为这一步几乎全在读 2.15 GB 权重，32 处归一化本来只占约 0.4–0.7%。</li>
+      <li>误解：Nsight Systems 的 trace 里找不到你的内核，说明它没换进去。→ 实际：<code>--cuda-graph-trace</code> 默认是 <code>graph</code>，整张图只记一项；加 <code>--cuda-graph-trace=node</code> 或关掉解码图才看得到单个内核。</li>
+      <li>误解：在上游 FlashInfer 合进去的改动，下次装 SGLang 就有了。→ 实际：v0.5.22 钉的是 <code>flashinfer_python[cu13]==0.7.1</code>，要等 SGLang 把钉住的版本挪过去才生效。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a fused op that is 1.87 times as fast on its own will make decode noticeably faster inside the engine. → Fact: Lab B’s stand-in step is only 0.14–0.24% faster, because the step goes almost entirely on reading 2.15 GB of weights and the 32 norm sites took only about 0.4–0.7% of it.</li>
+      <li>Myth: if your kernel is missing from the Nsight Systems trace, it was not swapped in. → Fact: <code>--cuda-graph-trace</code> defaults to <code>graph</code>, which records a whole graph as one item; add <code>--cuda-graph-trace=node</code> or turn the decode graph off to see individual kernels.</li>
+      <li>Myth: a change merged into upstream FlashInfer is there the next time you install SGLang. → Fact: v0.5.22 pins <code>flashinfer_python[cu13]==0.7.1</code>, so the change takes effect only after SGLang moves the pin.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：接入点 ↔ 在哪里 ↔ 契约 ↔ 怎么证明</h2><h2 id="compare-en" lang="en">Comparison: plug-in point ↔ where ↔ contract ↔ how to prove it</h2>
   <div class="table-wrap">

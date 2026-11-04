@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">你在一个终端里启动 talker，在另一个终端里启动 listener，没有先启动任何中心服务器，listener 却很快打印出 <code>I heard</code>。它是怎么知道 talker 在哪个进程、哪个端口的？如果同一个局域网里另一组人也在跑 talker，你的 listener 为什么不会收到他们的消息，你又该怎么故意把两组隔开？</p>
+    <p lang="en">You start a talker in one terminal and a listener in another, with no central server started first, and the listener soon prints <code>I heard</code>. How did it learn which process and which port the talker is on? And if another group on the same LAN is also running a talker, why does your listener not receive their messages, and how would you keep the two groups apart on purpose?</p>
+    <p lang="zh-CN">概念 2 的 DDS 分布式发现回答第一问，概念 6 里由 <code>ROS_DOMAIN_ID</code> 算出端口的 RTPS port formula 回答第二问。</p>
+    <p lang="en">Concept 2, distributed DDS discovery, answers the first question, and concept 6, the RTPS port formula that turns <code>ROS_DOMAIN_ID</code> into ports, answers the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. ROS 2 是什么：中间件 + 工具 + 生态，不是操作系统</h3><h3 lang="en">1. What ROS 2 is: middleware + tools + ecosystem, not an operating system</h3>
   <p lang="zh-CN">名字里有 OS，但 ROS 2 不管理 CPU、内存和设备。一个运行中的 ROS 2 系统就是若干普通的 Linux 进程，每个进程里有一个或多个<strong>节点</strong>（node）；节点之间通过有名字、有类型的<strong>话题</strong>（topic）、<strong>服务</strong>（service）和<strong>动作</strong>（action）交换消息。这些节点和连接合起来叫 <strong>ROS graph</strong>。ROS 2 提供的是三样东西：</p>
   <p lang="en">The name contains OS, but ROS 2 does not manage the CPU, memory or devices. A running ROS 2 system is a set of ordinary Linux processes, each holding one or more <strong>nodes</strong>; nodes exchange messages over named, typed <strong>topics</strong>, <strong>services</strong> and <strong>actions</strong>. The nodes and their connections together are called the <strong>ROS graph</strong>. What ROS 2 provides is three things:</p>
@@ -170,12 +177,65 @@
     <li lang="zh-CN">例：domain 0 的第一个进程用 7400、7401 和 7410、7411；domain 1 用 7650、7651，第一个进程的单播是 7660、7661（与 Jazzy 文档的例子一致）。</li>
     <li lang="en">Example: the first process in domain 0 uses 7400 and 7401 plus 7410 and 7411; domain 1 uses 7650 and 7651, with 7660 and 7661 as the first process’s unicast ports (matching the example in the Jazzy docs).</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">实验环境默认 <code>ROS_DOMAIN_ID=42</code>（见 Lab B 第 2 步），所以你平时开的 talker 和 listener 都在 domain 42。用上面的公式算出这两个进程的端口，再算出同一 domain 最多能放几个进程。</p>
+    <p lang="en">The lab environment defaults to <code>ROS_DOMAIN_ID=42</code> (see Lab B step 2), so the talker and listener you normally start live in domain 42. Use the formula above to work out the ports of those two processes, then how many processes one domain can hold.</p>
+    <pre>d = 42:  base = 7400 + 250 × 42 = 7400 + 10500 = 17900
+  discovery multicast     17900       user-data multicast    17901
+  talker   (p = 0)        17910       17911
+  listener (p = 1)        17912       17913
+domain 0, last slot:  p = 119 → 7400 + 10 + 238 = 7648, 7649
+                      p = 120 → 7650 = discovery multicast of domain 1</pre>
+    <ol lang="zh-CN">
+      <li>domain 的基址是 7400 + 250 × d。d = 42 时是 17900，这就是两个进程都去听的发现多播端口，用户数据多播是 17901。</li>
+      <li>先启动的 talker 是这台机器上 domain 42 的第 0 个 participant，单播端口是 17900 + 10 + 0 = 17910 和 17900 + 11 + 0 = 17911。</li>
+      <li>后启动的 listener 是 p = 1，单播端口各加 2，即 17912 和 17913。发现范围设为 <code>SUBNET</code> 时，两个进程靠 17900 上的多播发现彼此，之后用户数据走对方的单播端口；实验环境默认的 <code>LOCALHOST</code> 下，rmw_fastrtps 清空多播发现 locator，并把 127.0.0.1 加为 initial peer，于是发现报文走本机按同一公式算出的单播发现端口（rmw_fastrtps_shared_cpp/src/participant.cpp，jazzy）。</li>
+      <li>换成 domain 0 的那组人用的是 7400、7410 这一段，和 17900 那一段没有任何重叠，所以你的 listener 根本收不到他们的报文：隔离首先来自端口不同，并不需要谁去过滤。</li>
+      <li>为什么概念里说一个 domain 大约 120 个进程：domain 0 里 p = 119 用 7648 和 7649，p = 120 的发现单播端口就是 7650，正好撞上 domain 1 的发现多播端口。</li>
+    </ol>
+    <ol lang="en">
+      <li>The base of a domain is 7400 + 250 × d. For d = 42 that is 17900, the discovery multicast port both processes listen on; user-data multicast is 17901.</li>
+      <li>The talker, started first, is participant 0 of domain 42 on this machine, so its unicast ports are 17900 + 10 + 0 = 17910 and 17900 + 11 + 0 = 17911.</li>
+      <li>The listener, started second, is p = 1, so each unicast port moves up by 2, to 17912 and 17913. With the discovery range set to <code>SUBNET</code>, the two processes find each other through multicast on 17900, and user data then goes to each other’s unicast ports; under the lab default <code>LOCALHOST</code>, rmw_fastrtps clears the multicast discovery locators and adds 127.0.0.1 as an initial peer, so discovery goes to this host’s unicast discovery ports computed with the same formula (rmw_fastrtps_shared_cpp/src/participant.cpp, jazzy).</li>
+      <li>A group using domain 0 sits on the 7400 and 7410 range, which does not overlap the 17900 range at all, so your listener never receives their packets: the isolation comes first from the different ports, with nothing needing to filter.</li>
+      <li>Why the concept says about 120 processes per domain: in domain 0, p = 119 uses 7648 and 7649, and the discovery unicast port of p = 120 would be 7650, exactly the discovery multicast port of domain 1.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">后果都能从公式推出来：端口是 16 位，所以 domain ID 最大 232；Linux 的临时端口范围默认是 32768–60999，官方建议在 Linux 上取 0–101，避开它；每个进程一个 participant、各占两个单播端口，一台机器上同一 domain 超过大约 120 个 ROS 2 进程，就会溢出到下一个 domain 的端口。来源：Jazzy 文档 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Domain-ID.html">The ROS_DOMAIN_ID</a>（2026-10-31 核对）。实际打开哪些端口还取决于 rmw 和配置，例如 Fast DDS 同机通信可能走共享内存，Lab B 以实际输出为准。</p>
   <p lang="en">The consequences all follow from the formula: ports are 16-bit, so the largest domain ID is 232; the default Linux ephemeral port range is 32768–60999, and the docs recommend 0–101 on Linux to stay clear of it; each process is one participant taking two unicast ports, so more than about 120 ROS 2 processes in one domain on one machine spill into the next domain’s ports. Source: the Jazzy docs page <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Domain-ID.html">The ROS_DOMAIN_ID</a> (checked 2026-10-31). Which ports are actually opened also depends on the rmw and its configuration — for example Fast DDS may use shared memory on one host — so in Lab B the real output wins.</p>
   <div class="note" lang="zh-CN">domain 只是隔离，不是安全：同一局域网、同一 domain ID 的任何机器都能看到并订阅你的话题。要防的是别人而不是误撞，就要用 SROS2（Phase 3）；只想限制在本机，Jazzy 有 <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code>（实验环境已默认设为 LOCALHOST，Phase 3 详讲）。</div>
   <div class="note" lang="en">A domain is isolation, not security: any machine on the same LAN with the same domain ID can see and subscribe to your topics. To guard against other people rather than accidents you need SROS2 (Phase 3); to stay on the local host only, Jazzy has <code>ROS_AUTOMATIC_DISCOVERY_RANGE</code> (the lab environment already sets LOCALHOST; Phase 3 covers it).</div>
   <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲 ROS 2 命令行工具的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Configuring-ROS2-Environment.html">Configuring environment</a>。</p>
   <p lang="en">Further reading: the chapter on the ROS 2 command-line tools in Renard, <em>ROS 2 From Scratch</em>; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Configuring-ROS2-Environment.html">Configuring environment</a>.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>ROS 2 是中间件、工具和生态三样东西，CPU、内存和设备仍由 Linux 内核管理。</li>
+      <li>ROS 2 没有 master：每个进程一个 DDS participant，靠 SPDP 和 SEDP 分布式地发现彼此，启动顺序无所谓。</li>
+      <li>一次 publish 依次经过 rclcpp、rcl、rmw、DDS，在 <code>sendmsg()</code> 或共享内存处第一次碰到内核；换中间件只需改 <code>RMW_IMPLEMENTATION</code>。</li>
+      <li>overlay 和 underlay 只是 <code>AMENT_PREFIX_PATH</code> 里的前缀顺序，排在前面的同名包胜出。</li>
+      <li><code>ROS_DOMAIN_ID</code> 通过 7400 + 250 × d 决定端口段，不同 domain 端口不重叠，所以互相看不见。</li>
+    </ul>
+    <ul lang="en">
+      <li>ROS 2 is three things, middleware, tools and an ecosystem, while the CPU, memory and devices are still managed by the Linux kernel.</li>
+      <li>ROS 2 has no master: each process is one DDS participant, and participants find each other in a distributed way through SPDP and SEDP, in any start order.</li>
+      <li>One publish passes through rclcpp, rcl, rmw and DDS, and first touches the kernel at <code>sendmsg()</code> or shared memory; swapping the middleware only takes <code>RMW_IMPLEMENTATION</code>.</li>
+      <li>Overlays and underlays are only the order of prefixes in <code>AMENT_PREFIX_PATH</code>, and the package of a given name that comes first wins.</li>
+      <li><code>ROS_DOMAIN_ID</code> picks a port range through 7400 + 250 × d, and different domains do not share ports, so they cannot see each other.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：<code>ros2 daemon</code> 就是 ROS 2 的 master。→ 实际：它只替命令行缓存发现结果，停掉它节点照样互通。</li>
+      <li>误解：换一个 <code>ROS_DOMAIN_ID</code> 就安全了。→ 实际：domain 只防误撞，同网段用同一个 ID 的任何人都能订阅你的话题，防人要用 SROS2。</li>
+      <li>误解：在已经 source 了 overlay 的终端里构建没关系。→ 实际：官方教程要求在没 source 这个 overlay 的终端里构建，否则 overlay 可能把自己当成 underlay。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: <code>ros2 daemon</code> is the ROS 2 master. → Fact: it only caches discovery results for the command line, and nodes still talk with it stopped.</li>
+      <li>Myth: switching to another <code>ROS_DOMAIN_ID</code> makes you secure. → Fact: a domain only prevents accidents; anyone on the subnet with the same ID can subscribe to your topics, and guarding against people takes SROS2.</li>
+      <li>Myth: building in a terminal that has already sourced the overlay is harmless. → Fact: the official tutorial says to build in a terminal that has not sourced that overlay, or the overlay may act as its own underlay.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：ROS 1 ↔ ROS 2</h2><h2 id="compare-en" lang="en">Comparison: ROS 1 ↔ ROS 2</h2>
   <div class="table-wrap">

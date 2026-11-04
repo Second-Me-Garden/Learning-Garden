@@ -56,6 +56,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">这台 Mac 上跑不了一行 CUDA，可本专题的每一课都有一个 CUDA 实验，从 Phase 4 起还要用读性能计数器的剖析器。免费的 notebook 不花钱，但会排队、会断线，计数器权限也不由你决定；租一台整机什么都能做，可它按小时收费，而且是一台挂在公网上的 root 主机。实验环境要做到三件事：每个实验都有一块能跑它的 GPU，只在真正需要的那几课花钱，并且花钱的那一层不泄露凭据、不忘记停机。</p>
+    <p lang="en">Not one line of CUDA runs on this Mac, yet every lesson of this topic has a CUDA lab, and from Phase 4 on the labs use profilers that read performance counters. A free notebook costs nothing but queues, drops sessions and leaves the counter permissions out of your hands; a rented full machine can do everything, but it bills by the hour and is a root host on the internet. The lab environment has to achieve three things: a GPU that can run every lab, money spent only on the lessons that truly need it, and a paid tier that leaks no credential and is never left running.</p>
+    <p lang="zh-CN">概念 1 的三层划分回答前两件，概念 5 的安全规则和费用预算回答第三件。</p>
+    <p lang="en">The three tiers of concept 1 answer the first two; the safety rules and cost budget of concept 5 answer the third.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 三层环境，各管哪几课</h3><h3 lang="en">1. Three tiers and the lessons each one serves</h3>
   <p lang="zh-CN">每一课有两个实验。Lab A 是 CUDA，在云端跑；Lab B 是同一个想法的 Metal 版本，在这台 Mac 上跑。云端分两层，分界线在 Phase 4，也就是开始用剖析器的地方：</p><p lang="en">Every lesson has two labs. Lab A is CUDA and runs in the cloud; Lab B is the Metal version of the same idea and runs on this Mac. The cloud has two tiers, and the line between them is Phase 4, where the profilers start:</p>
   <ul>
@@ -75,6 +82,28 @@
 !nvidia-smi       # GPU 型号（应为 Tesla T4）、驱动版本、显存 16 GB 左右
 !nvcc --version   # Colab 预装的 CUDA 版本；任何 13.x 都可以，本专题用不到更新的东西</pre>
   <p lang="zh-CN">Colab 的单元格默认是 Python。<code>!</code> 开头的一行交给 shell 执行；<code>%%writefile</code> 放在单元格第一行，把整个单元格写成一个文件。CUDA 实验就是这两步：一个单元格写源文件，下一个单元格编译并运行。Lab A 用的就是这个流程。</p><p lang="en">Colab cells are Python by default. A line starting with <code>!</code> goes to the shell; <code>%%writefile</code> on the first line of a cell writes the whole cell to a file. A CUDA lab is just those two steps: one cell writes the source file, the next one builds and runs it. Lab A uses exactly this flow.</p>
+  <div class="worked">
+    <p lang="zh-CN">把 Lab A 第三个单元格的一次运行按 <code>add.cu</code> 里的数走一遍（未运行；下面的数都由源码算出，不是测量值）。<code>n = 1 &lt;&lt; 20</code>，每 block 256 个线程，打印的是 <code>c[12345]</code>。</p>
+    <p lang="en">Walk one run of the third cell of Lab A through the numbers in <code>add.cu</code> (not run; every number below is computed from the source, none is a measurement). <code>n = 1 &lt;&lt; 20</code>, 256 threads per block, and the program prints <code>c[12345]</code>.</p>
+    <pre>n      = 1 &lt;&lt; 20 = 1048576 floats, bytes = 4 MiB per array
+blocks = (1048576 + 255) / 256 = 4096
+i      = 12345 = 48 * 256 + 57  -&gt; blockIdx.x = 48, threadIdx.x = 57
+c[i]   = a[i] + b[i] = 12345.0 + 2.0 = 12347.0</pre>
+    <ol lang="zh-CN">
+      <li><code>%%writefile add.cu</code> 把第二个单元格写成 <code>/content/add.cu</code>；这个文件只活到虚拟机被删除为止。</li>
+      <li><code>!nvcc -arch=sm_75 add.cu -o add</code> 交给 shell，为 T4 的 <code>sm_75</code> 生成设备代码。</li>
+      <li><code>./add</code> 在 GPU 上拷进两个 4 MiB 的数组，启动 4096 个 block，每个 256 线程，正好盖住 1048576 个下标，最后一个 block 也没有越界的线程。</li>
+      <li>下标 12345 由第 48 个 block 的第 57 号线程负责，它写出 12347.0；打印行里的 <code>c[12345]=12347.0</code> 就是 Lab A 的通过标准。</li>
+      <li>把 <code>threads</code> 改成 2048 时，启动在超过每 block 1024 的上限处被拒绝，<code>CHECK(cudaGetLastError())</code> 以 1 退出，<code>c[12345]</code> 根本不会打印。</li>
+    </ol>
+    <ol lang="en">
+      <li><code>%%writefile add.cu</code> writes the second cell to <code>/content/add.cu</code>, a file that lives only until the VM is deleted.</li>
+      <li><code>!nvcc -arch=sm_75 add.cu -o add</code> goes to the shell and builds device code for the T4’s <code>sm_75</code>.</li>
+      <li><code>./add</code> copies two 4 MiB arrays to the GPU and launches 4096 blocks of 256 threads, which cover the 1048576 indices exactly, so even the last block has no thread past the end.</li>
+      <li>Index 12345 belongs to thread 57 of block 48, which writes 12347.0; the <code>c[12345]=12347.0</code> in the printed line is the pass criterion of Lab A.</li>
+      <li>With <code>threads</code> changed to 2048, the launch is refused for exceeding the 1024 per-block limit, <code>CHECK(cudaGetLastError())</code> exits with 1, and <code>c[12345]</code> is never printed.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">免费层的限制，来自 Colab 的 FAQ（2026-10-31 读取）：资源不保证，用量上限会浮动；免费版对 GPU 这类昂贵资源限制很严；虚拟机空闲一段时间会被删除，并且有最长寿命。实际意义是：<code>/content</code> 里的文件会随虚拟机一起消失。每次实验结束前把源文件存进 Google Drive：</p><p lang="en">The limits of the free tier, from the Colab FAQ (read 2026-10-31): resources are not guaranteed and usage limits fluctuate; the free version heavily restricts expensive resources such as GPUs; virtual machines are deleted when idle for a while and have a maximum lifetime. In practice the files in <code>/content</code> vanish with the VM. Save your source files to Google Drive before every session ends:</p>
 <pre data-lang="py" data-file="Colab cell"># 未运行 · not run; assembled from the Colab documentation on 2026-10-31
 from google.colab import drive
@@ -162,6 +191,37 @@ $ echo $?
   </div>
   <p lang="zh-CN">按 NVIDIA L4（Ada，<code>sm_89</code>，24 GB）算：RunPod 的定价页 2026-10-31 列出 L4 每小时 0.44 美元（Community Cloud）和 0.59 美元（Secure Cloud），26 小时约 11 到 15 美元。GCP 的 G2 L4 实例按 2026-08-04 的记录约每小时 0.71 美元，26 小时约 19 美元（这个价格本页没有重新核对）。再加上停机期间的磁盘费。把这个数当上限的量级，不是报价。</p><p lang="en">At NVIDIA L4 rates (Ada, <code>sm_89</code>, 24 GB): RunPod’s pricing page on 2026-10-31 listed the L4 at 0.44 US dollars per hour (Community Cloud) and 0.59 (Secure Cloud), so 26 hours come to about 11 to 15 dollars. A GCP G2 L4 instance was about 0.71 dollars per hour in a record dated 2026-08-04, about 19 dollars for 26 hours (this page did not recheck that price). Add disk charges while the machine is stopped. Treat the figure as an order of magnitude for the ceiling, not a quote.</p>
   <p lang="zh-CN">延伸阅读：这一节没有对应的书章，规则来自文档：NVIDIA 的 ERR_NVGPUCTRPERM 说明页（计数器权限）、所选服务商的安全和计费文档（见资料）。</p><p lang="en">Further reading: no book chapter covers this section; the rules come from documentation: NVIDIA’s ERR_NVGPUCTRPERM page (counter permissions) and the security and billing documentation of the provider you choose (see Resources).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>每一课的 Lab A 是 CUDA、在云端跑，Lab B 是同一个想法的 Metal 版本、在这台 Mac 上跑。</li>
+      <li>云端的分界线在 Phase 4：Phase 0–3 用免费的 Colab T4，Phase 4–7 要读性能计数器，所以用一台自己说了算的租用机器。</li>
+      <li>所有 CUDA 实验都以 <code>sm_75</code> 为目标，它是 CUDA 13 还支持的最老架构，T4 和更新的卡都能跑。</li>
+      <li>Mac 上只有 Command Line Tools，所以 MSL 在运行时编译，计时只看 GPU 自己报的 <code>gpuStartTime</code> 到 <code>gpuEndTime</code>。</li>
+      <li>租用机器只用密钥登录、只开 22 端口、凭据只留在 Mac 上，用完在控制台停机并到账单页确认。</li>
+      <li>付费的只有 Phase 4–7 的 Lab A，估计约 26 小时，按 L4 的价格约 11 到 19 美元。</li>
+    </ul>
+    <ul lang="en">
+      <li>Lab A of every lesson is CUDA and runs in the cloud; Lab B is the Metal version of the same idea and runs on this Mac.</li>
+      <li>The cloud splits at Phase 4: Phases 0–3 use the free Colab T4, and Phases 4–7 read performance counters, so they use a rented machine you control.</li>
+      <li>Every CUDA lab targets <code>sm_75</code>, the oldest architecture CUDA 13 still supports, so both the T4 and newer cards run it.</li>
+      <li>The Mac has only the Command Line Tools, so MSL is compiled at run time and timing uses only the GPU’s own <code>gpuStartTime</code> to <code>gpuEndTime</code>.</li>
+      <li>A rented machine takes key logins only, opens only port 22, keeps every credential on the Mac, and is stopped in the console and checked on the billing page when you finish.</li>
+      <li>Only Lab A of Phases 4–7 is paid, an estimated 26 hours, which at L4 prices comes to about 11 to 19 dollars.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：关掉 SSH 窗口或在容器里 <code>exit</code> 就停止计费了。→ 实际：机器还在跑、还在收费；要在服务商控制台停止或销毁，停机后磁盘通常还按存储收费。</li>
+      <li>误解：租到一块 NVIDIA GPU 就一定能用 <code>ncu</code>。→ 实际：<code>ncu</code> 要读性能计数器的权限；容器式租用里这由主机决定，先用小 kernel 跑一次，报 <code>ERR_NVGPUCTRPERM</code> 就换整机。</li>
+      <li>误解：Mac 上的 Metal 实验只是 CUDA 的模拟。→ 实际：它在 Apple GPU 上真跑，数字是实测的，但那是 Apple GPU 的数字，不能拿来代替 T4 的；grid、threadgroup、SIMD-group 与 CUDA 的 grid、block、warp 一一对应。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: closing the SSH window or typing <code>exit</code> in the container stops the billing. → Fact: the machine keeps running and billing; stop or terminate it in the provider console, and a stopped machine usually still pays for its disk.</li>
+      <li>Myth: any rented NVIDIA GPU can run <code>ncu</code>. → Fact: <code>ncu</code> needs permission to read the performance counters; in a container-style rental the host decides, so run it once on a tiny kernel and switch to a full machine if it reports <code>ERR_NVGPUCTRPERM</code>.</li>
+      <li>Myth: the Metal labs on the Mac only simulate CUDA. → Fact: they really run on the Apple GPU and their numbers are measured, though they are Apple GPU numbers and no stand-in for the T4’s; grid, threadgroup and SIMD-group map one to one onto CUDA’s grid, block and warp.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

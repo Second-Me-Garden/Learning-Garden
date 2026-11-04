@@ -56,6 +56,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">内核实验天生会把机器弄坏：自写模块里一个空指针就是整机 panic，关掉 SIP 就降低了整台 Mac 的安全级别，跑一个漏洞复现程序就等于把攻击代码请进门。可这些实验又必须真的去做，光读代码学不会调试内核。那么，怎样搭一个环境，让每一次「弄坏」都只是几秒钟的重启或一次回滚，而宿主 Mac 从头到尾不受影响？</p>
+    <p lang="en">Kernel labs break machines by nature: one null pointer in a self-written module panics the whole machine, turning SIP off lowers the security level of the entire Mac, and running an exploit reproduction invites attack code in. Yet these labs have to be done for real, because nobody learns to debug a kernel by reading code alone. So how do you build an environment in which every breakage costs only a reboot of a few seconds or one rollback, and the host Mac is never affected?</p>
+    <p lang="zh-CN">概念 1 的三层环境回答这个问题，概念 2–4 逐层把它搭起来，概念 5 把边界写成规则。</p>
+    <p lang="en">Concept 1, the three layers, answers it; concepts 2–4 build it layer by layer; and concept 5 writes the boundaries down as rules.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 三层环境</h3><h3 lang="en">1. Three layers</h3>
   <p lang="zh-CN">宿主是你的 Apple Silicon Mac（macOS，arm64）。上面跑三类客体：</p><p lang="en">The host is your Apple Silicon Mac (macOS, arm64). Three kinds of guest run on it:</p>
   <ul>
@@ -107,6 +114,26 @@ exec qemu-system-aarch64 -M virt $CPU -smp 2 -m 2G -nographic \
   -drive file="$DISK",if=none,format=qcow2,id=hd0 \
   -device virtio-blk-pci,drive=hd0 \
   $SHARE $EXTRA</pre>
+  <div class="worked">
+    <p lang="zh-CN">追一次 <code>./run-vm.sh</code>（不带参数）从回车到 shell 提示符。地址来自 QEMU 的 <code>hw/arm/virt.c</code>（<code>base_memmap</code>）和 <code>hw/arm/boot.c</code>，启动约定来自 Linux 的 <code>Documentation/arch/arm64/booting.rst</code>。</p>
+    <p lang="en">Trace one <code>./run-vm.sh</code> (no argument) from pressing Return to the shell prompt. The addresses come from QEMU’s <code>hw/arm/virt.c</code> (<code>base_memmap</code>) and <code>hw/arm/boot.c</code>, and the boot convention from Linux’s <code>Documentation/arch/arm64/booting.rst</code>.</p>
+    <ol lang="zh-CN">
+      <li>建板子：RAM 从 <code>0x40000000</code> 开始，<code>-m 2G</code> 就是 <code>0x40000000</code>–<code>0xBFFFFFFF</code>。GIC 分发器在 <code>0x08000000</code>，PL011 串口在 <code>0x09000000</code>。PCIe ECAM 默认在高地址窗口：<code>virt.c</code> 的 <code>virt_set_high_memmap</code> 从 256 GiB 开始依次摆放 <code>extended_memmap</code>，64 MiB 的 <code>VIRT_HIGH_GIC_REDIST2</code> 占 <code>0x4000000000</code>，256 MiB 的 ECAM 向上对齐到 256 MiB，落在 <code>0x4010000000</code>；<code>0x3f000000</code> 是旧的低地址窗口，只在 <code>highmem=off</code> 或 CPU 的物理地址范围够不到高窗口时使用。<code>virtio-blk-pci</code> 磁盘挂在这条 PCIe 总线上。</li>
+      <li>装内核：QEMU 在 <code>Image</code> 头偏移 56 处认出魔数 <code>ARM\x64</code>，再读偏移 8 处的 <code>text_offset</code>。现在的内核把它设为 0，比 QEMU 留给自己小引导程序的 4 KB 还小，于是 Image 放在 RAM 起点加 2 MB，即 <code>0x40200000</code>。</li>
+      <li>装 initramfs：位置是 RAM 起点加上「内存的一半与 128 MB 中较小的那个」，即 <code>0x40000000 + 0x08000000 = 0x48000000</code>，前提是内核镜像没有长到这里。</li>
+      <li>写设备树：QEMU 把 <code>-append</code> 的字符串写进 <code>/chosen/bootargs</code>，把 initrd 的起止写进 <code>/chosen/linux,initrd-start</code> 和 <code>linux,initrd-end</code>。DTB 放在 initrd 末尾之后，向上对齐到 2 MB。</li>
+      <li>跳进内核：RAM 起点那段小引导程序把 DTB 的物理地址装进 <code>x0</code>，把 <code>x1</code>–<code>x3</code> 清零，再跳到 <code>0x40200000</code>，正是 <code>booting.rst</code> 要求的寄存器状态。</li>
+      <li>内核接手：<code>console=ttyAMA0</code> 让输出走 <code>0x09000000</code> 的 PL011，<code>nokaslr</code> 关掉地址随机化，<code>rdinit=/init</code> 让内核解开 initramfs 后执行 <code>/init</code>，busybox 的 shell 出现在终端里。磁盘显示为 <code>/dev/vda</code>，要在 shell 里自己挂载。</li>
+    </ol>
+    <ol lang="en">
+      <li>Build the board: RAM starts at <code>0x40000000</code>, so <code>-m 2G</code> is <code>0x40000000</code>–<code>0xBFFFFFFF</code>. The GIC distributor sits at <code>0x08000000</code>, and the PL011 UART at <code>0x09000000</code>. The PCIe ECAM sits in the high window by default: <code>virt_set_high_memmap</code> in <code>virt.c</code> lays out <code>extended_memmap</code> from 256 GiB upwards, the 64 MiB <code>VIRT_HIGH_GIC_REDIST2</code> takes <code>0x4000000000</code>, and the 256 MiB ECAM is rounded up to a 256 MiB boundary at <code>0x4010000000</code>; <code>0x3f000000</code> is the legacy low window, used only with <code>highmem=off</code> or a CPU whose physical-address range cannot reach the high window. The <code>virtio-blk-pci</code> disk hangs off that PCIe bus.</li>
+      <li>Load the kernel: QEMU recognises the magic <code>ARM\x64</code> at offset 56 of the <code>Image</code> header, then reads <code>text_offset</code> at offset 8. Current kernels set it to 0, which is less than the 4 KB QEMU reserves for its own small boot stub, so the Image goes at the start of RAM plus 2 MB, <code>0x40200000</code>.</li>
+      <li>Load the initramfs: it goes at the start of RAM plus the smaller of half the memory and 128 MB, <code>0x40000000 + 0x08000000 = 0x48000000</code>, provided the kernel image does not reach that far.</li>
+      <li>Write the device tree: QEMU writes the <code>-append</code> string into <code>/chosen/bootargs</code> and the start and end of the initrd into <code>/chosen/linux,initrd-start</code> and <code>linux,initrd-end</code>. The DTB goes after the end of the initrd, rounded up to 2 MB.</li>
+      <li>Jump into the kernel: the small boot stub at the start of RAM loads the DTB’s physical address into <code>x0</code>, zeroes <code>x1</code>–<code>x3</code> and jumps to <code>0x40200000</code>, which is exactly the register state <code>booting.rst</code> requires.</li>
+      <li>The kernel takes over: <code>console=ttyAMA0</code> sends output to the PL011 at <code>0x09000000</code>, <code>nokaslr</code> turns off address randomisation, and <code>rdinit=/init</code> makes the kernel unpack the initramfs and run <code>/init</code>, so the busybox shell appears in the terminal. The disk shows up as <code>/dev/vda</code>, which you mount yourself in the shell.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">调试时另开一个终端：<code>lldb vmlinux</code>，然后 <code>gdb-remote 1234</code>（或 GNU gdb 的 <code>target remote :1234</code>）。退出 QEMU：<kbd>Ctrl-a</kbd> <kbd>x</kbd>。</p><p lang="en">To debug, open another terminal: <code>lldb vmlinux</code>, then <code>gdb-remote 1234</code> (or GNU gdb's <code>target remote :1234</code>). To exit QEMU: <kbd>Ctrl-a</kbd> <kbd>x</kbd>.</p>
 
   <h3 lang="zh-CN">3. 构建容器</h3><h3 lang="en">3. The build container</h3>
@@ -178,6 +205,37 @@ make -C /src/linux M=/lab/share/hello LLVM=1 modules</pre>
   </table>
   </div>
   <p lang="zh-CN">经验：宿主至少留 60–100 GB 空闲再开始 macOS 客体实验；不跑实验时关掉 macOS 客体和容器后台 VM，它们是最大的内存占用。</p><p lang="en">Rule of thumb: keep at least 60–100 GB free on the host before starting the macOS guest labs; when not running labs, shut down the macOS guest and the container background VM — they are the largest memory users.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>宿主 Mac 只读源码、编译、跑虚拟机、当调试器一端，永远不关 SIP、不改 boot-args。</li>
+      <li>所有 Linux 内核实验和 <code>insmod</code> 都在 QEMU 虚拟机里做，容器只负责编译。</li>
+      <li>容器和其他容器共用一台后台 Linux VM 的内核，所以在容器里 <code>insmod</code> 会把模块装进那个共享内核。</li>
+      <li>内核和模块要用同一个编译器、同一份配置编，否则 <code>vermagic</code> 或符号版本对不上。</li>
+      <li>QEMU 用 qcow2 快照或 <code>-snapshot</code> 回滚，macOS 客体没有快照，用克隆 VM bundle 代替。</li>
+      <li>跑不可信代码时用 throwaway 模式，既丢弃磁盘写入，也不接共享目录。</li>
+    </ul>
+    <ul lang="en">
+      <li>The host Mac only reads source, compiles, runs the VMs and acts as the debugger end; it never turns SIP off and never changes boot-args.</li>
+      <li>Every Linux kernel lab and every <code>insmod</code> happens in the QEMU VM, and the container only compiles.</li>
+      <li>A container shares the kernel of one background Linux VM with every other container, so <code>insmod</code> in a container loads the module into that shared kernel.</li>
+      <li>Build the kernel and modules with the same compiler and the same configuration, or <code>vermagic</code> or the symbol versions will not match.</li>
+      <li>QEMU rolls back with qcow2 snapshots or <code>-snapshot</code>; the macOS guest has no snapshots, so cloning the VM bundle takes their place.</li>
+      <li>Run untrusted code in throwaway mode, which discards disk writes and attaches no shared directory.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：Docker 容器是隔离的，在里面 <code>insmod</code> 很安全。→ 实际：容器没有自己的内核，模块会进到 Docker Desktop、OrbStack 或 Lima 那台共享 VM 的内核里。</li>
+      <li>误解：在客体里 umount 共享目录，就可以放心跑可疑代码。→ 实际：9p 设备仍接在 VM 上，客体里随时能重新挂载；throwaway 模式根本不附加这个设备。</li>
+      <li>误解：关 SIP 只影响需要它的那几个实验。→ 实际：SIP 保护的是整台机器的系统文件、受保护进程和 kext 加载，所以只在 macOS 客体里关。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a Docker container is isolated, so <code>insmod</code> inside it is safe. → Fact: a container has no kernel of its own, and the module goes into the kernel of the shared VM run by Docker Desktop, OrbStack or Lima.</li>
+      <li>Myth: unmounting the shared directory inside the guest makes it safe to run suspicious code. → Fact: the 9p device is still attached to the VM and the guest can remount it at any time; throwaway mode does not attach the device at all.</li>
+      <li>Myth: turning SIP off affects only the few labs that need it. → Fact: SIP protects the system files, protected processes and kext loading of the whole machine, which is why it is turned off only in the macOS guest.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

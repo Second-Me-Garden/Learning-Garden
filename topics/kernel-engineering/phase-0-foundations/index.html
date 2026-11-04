@@ -55,11 +55,39 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">内核和你的程序跑在同一颗 CPU、同一套寄存器上。如果用户程序能随手改页表基址、关中断，任何一个 bug 都能拖垮整台机器；可如果它完全碰不到内核，又没法读文件、开网络。所以硬件必须同时做到两件事：平时把用户代码关在低特权级，又留一扇只能从固定位置进入、用完必须原路返回的门。</p>
+    <p lang="en">The kernel and your program run on the same CPU with the same registers. If a user program could casually change the page-table base or disable interrupts, any bug could bring down the whole machine; yet if it could never reach the kernel, it could not read a file or open a socket. So the hardware has to do two things at once: keep user code locked at a low privilege level, and leave one door that can only be entered at fixed places and must be exited the way it came.</p>
+    <p lang="zh-CN">回答它的是概念 1 的 exception level 与异常向量表，概念 2 的系统调用就是走这扇门的一次完整往返。</p>
+    <p lang="en">Concept 1, exception levels and the exception vector table, answers it; concept 2, the system call, is one complete round trip through that door.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 内核 = 运行在更高特权级上的那部分代码</h3><h3 lang="en">1. The kernel = the code that runs at a higher privilege level</h3>
   <p lang="zh-CN">CPU 硬件把执行分成若干特权级。ARM64 叫 <strong>exception level</strong>：<code>EL0</code> 用户程序、<code>EL1</code> 操作系统内核、<code>EL2</code> hypervisor、<code>EL3</code> secure monitor（固件）。x86 对应 ring 3 / ring 0（ring 1、2 现代 OS 不用），hypervisor 另有 VMX root mode。「内核态」就是 CPU 处于 EL1（或 ring 0）的状态，此时才能执行特权指令（改页表基址、关中断、访问设备寄存器）。</p>
   <p lang="en">CPU hardware divides execution into privilege levels. ARM64 calls them <strong>exception levels</strong>: <code>EL0</code> user programs, <code>EL1</code> the operating-system kernel, <code>EL2</code> the hypervisor, <code>EL3</code> the secure monitor (firmware). On x86 the counterparts are ring 3 / ring 0 (modern OSes do not use rings 1 and 2), with VMX root mode separately for the hypervisor. "Kernel mode" is the state in which the CPU is at EL1 (or ring 0); only then can it execute privileged instructions (changing the page-table base, disabling interrupts, accessing device registers).</p>
   <p lang="zh-CN">从 EL0 进入 EL1 <em>只有一条路</em>：触发 exception——同步的（<code>svc</code> 系统调用指令、缺页、非法指令）或异步的（IRQ/FIQ 中断、SError）。CPU 跳到 <code>VBAR_EL1</code> 指向的 <strong>exception vector table</strong>（16 个入口，每个 0x80 字节，按「来自哪个 EL × 哪类异常」排布），内核从那里接管。返回用户态也只有一条路：<code>eret</code>。</p>
   <p lang="en">There is <em>only one way</em> from EL0 into EL1: raising an exception — synchronous (the <code>svc</code> system-call instruction, a page fault, an illegal instruction) or asynchronous (IRQ/FIQ interrupts, SError). The CPU jumps to the <strong>exception vector table</strong> that <code>VBAR_EL1</code> points to (16 entries of 0x80 bytes each, laid out by "which EL it came from × which kind of exception"), and the kernel takes over from there. There is also only one way back to user mode: <code>eret</code>.</p>
+  <div class="worked">
+    <p lang="zh-CN">CPU 怎么在 16 个入口里挑一个？入口地址 = <code>VBAR_EL1</code> + 组基址 + 类型偏移。组由「从哪来」决定，类型由「哪类异常」决定，每个入口 0x80 字节（32 条指令），整张表 16 × 0x80 = 0x800 字节。下面三个例子对应下方图解 B。</p>
+    <p lang="en">How does the CPU pick one of the 16 entries? Entry address = <code>VBAR_EL1</code> + group base + type offset. The group is decided by "where it came from", the type by "which kind of exception"; each entry is 0x80 bytes (32 instructions), so the whole table is 16 × 0x80 = 0x800 bytes. The three examples below match diagram B further down.</p>
+    <pre>组基址 / group base             类型偏移 / type offset
+0x000  current EL, SP_EL0       +0x000  Synchronous
+0x200  current EL, SP_ELx       +0x080  IRQ
+0x400  lower EL, AArch64        +0x100  FIQ
+0x600  lower EL, AArch32        +0x180  SError</pre>
+    <ol lang="zh-CN">
+      <li>用户态（EL0，AArch64）执行 <code>svc #0</code>：同步异常，来自更低 EL 的 AArch64 → 0x400 + 0x000 = <code>VBAR_EL1 + 0x400</code>。</li>
+      <li>同一个用户程序运行时网卡来了 IRQ（路由到 EL1）：0x400 + 0x080 = <code>VBAR_EL1 + 0x480</code>。</li>
+      <li>内核自己在 EL1、用 <code>SP_EL1</code> 时来了 IRQ：当前 EL、SP_ELx 组 → 0x200 + 0x080 = <code>VBAR_EL1 + 0x280</code>（Arm 指南里正是这个例子）。</li>
+    </ol>
+    <ol lang="en">
+      <li>User mode (EL0, AArch64) executes <code>svc #0</code>: a synchronous exception from a lower EL in AArch64 → 0x400 + 0x000 = <code>VBAR_EL1 + 0x400</code>.</li>
+      <li>An IRQ from the network card arrives (routed to EL1) while the same user program runs: 0x400 + 0x080 = <code>VBAR_EL1 + 0x480</code>.</li>
+      <li>An IRQ arrives while the kernel itself runs at EL1 on <code>SP_EL1</code>: the current-EL, SP_ELx group → 0x200 + 0x080 = <code>VBAR_EL1 + 0x280</code> (exactly the example in the Arm guide).</li>
+    </ol>
+  </div>
+  <p lang="zh-CN">Linux 的 <code>arch/arm64/kernel/entry.S</code> 里 <code>vectors</code> 表的 16 行 <code>kernel_ventry</code> 就按这个顺序排列（EL1t、EL1h、64-bit EL0、32-bit EL0，每组 sync/irq/fiq/error）；XNU 的 <code>osfmk/arm64/locore.s</code> 只填了前 12 个入口，AArch32 那一组没有处理代码。</p>
+  <p lang="en">In Linux’s <code>arch/arm64/kernel/entry.S</code>, the 16 <code>kernel_ventry</code> lines of the <code>vectors</code> table are laid out in exactly this order (EL1t, EL1h, 64-bit EL0, 32-bit EL0, each group sync/irq/fiq/error); XNU’s <code>osfmk/arm64/locore.s</code> fills in only the first 12 entries and has no handler code for the AArch32 group.</p>
   <div class="note" lang="zh-CN">Apple Silicon 补充：据 Asahi Linux 的逆向文档，Apple 的 XNU 在 M 系列芯片上运行于 EL2 并启用 VHE（Virtualization Host Extensions），这样它既是内核也是 Hypervisor.framework 的宿主；用户态仍是 EL0。本阶段只区分 user / kernel 两级即可，EL2 细节放到 Phase 8。</div>
   <div class="note" lang="en">Apple Silicon addendum: according to Asahi Linux's reverse-engineering documentation, Apple's XNU runs at EL2 on M-series chips with VHE (Virtualization Host Extensions) enabled, so it is both the kernel and the host for Hypervisor.framework; user mode is still EL0. In this phase it is enough to tell the two levels user / kernel apart; EL2 details are left to Phase 8.</div>
   <p lang="zh-CN">延伸阅读：《Operating Systems: Three Easy Pieces》第 6 章「受限直接执行」；《Computer Systems: A Programmer's Perspective》第 8 章「异常控制流」。</p>
@@ -68,6 +96,26 @@
   <h3 lang="zh-CN">2. 系统调用：一次受控的「越级」</h3><h3 lang="en">2. System calls: a controlled jump in privilege</h3>
   <p lang="zh-CN">用户程序调 <code>write()</code>，libc 把系统调用号放进约定寄存器、参数放进 <code>x0–x5</code>，执行 <code>svc</code>（Linux 用 <code>svc #0</code>，XNU 的 libsystem 用 <code>svc #0x80</code>；立即数内核不看）。CPU 自动把返回地址存入 <code>ELR_EL1</code>、处理器状态存入 <code>SPSR_EL1</code>、异常原因存入 <code>ESR_EL1</code>，切到 EL1，跳到向量表「来自 lower EL（AArch64）的同步异常」入口（<code>VBAR_EL1 + 0x400</code>）。内核入口汇编把所有通用寄存器压到内核栈，再按号查表分发到具体处理函数；返回时把结果写回 <code>x0</code>，恢复寄存器，<code>eret</code>。下面的动画一步步走这条路，Linux 和 XNU 并排。</p>
   <p lang="en">A user program calls <code>write()</code>; libc puts the system call number in the agreed register and the arguments in <code>x0–x5</code>, then executes <code>svc</code> (Linux uses <code>svc #0</code>, XNU's libsystem uses <code>svc #0x80</code>; the kernel ignores the immediate). The CPU automatically saves the return address in <code>ELR_EL1</code>, the processor state in <code>SPSR_EL1</code> and the exception cause in <code>ESR_EL1</code>, switches to EL1, and jumps to the vector-table entry for "synchronous exception from a lower EL (AArch64)" (<code>VBAR_EL1 + 0x400</code>). The kernel entry assembly pushes all general-purpose registers onto the kernel stack, then looks the number up in a table and dispatches to the specific handler; on return it writes the result back to <code>x0</code>, restores the registers and executes <code>eret</code>. The diagram below walks this path step by step, Linux and XNU side by side.</p>
+  <div class="worked">
+    <p lang="zh-CN">追一次真实的调用：用户程序执行 <code>write(1, "hello\n", 6)</code>，往标准输出写 6 个字节。</p>
+    <p lang="en">Trace one real call: a user program executes <code>write(1, "hello\n", 6)</code>, writing 6 bytes to standard output.</p>
+    <ol lang="zh-CN">
+      <li>libc 装寄存器：<code>x0 = 1</code>（fd）、<code>x1</code> = 缓冲区地址、<code>x2 = 6</code>；Linux 放 <code>x8 = 64</code>（<code>scripts/syscall.tbl</code> 里 write 是 64），XNU 放 <code>x16 = 4</code>（<code>bsd/kern/syscalls.master</code> 里 write 是 4）。</li>
+      <li>执行 <code>svc #0</code>（XNU 是 <code>svc #0x80</code>）。硬件写 <code>ESR_EL1</code>：EC 位于 [31:26]，SVC64 的 EC 是 0x15；IL 位 [25] = 1 表示 32 位指令；ISS 的低 16 位是 svc 的立即数。所以 Linux 得到 <code>0x15 &lt;&lt; 26 | 1 &lt;&lt; 25 | 0 = 0x56000000</code>，XNU 得到 <code>0x56000080</code>。</li>
+      <li>PC 跳到 <code>VBAR_EL1 + 0x400</code>（上一个例子的第 1 行）。</li>
+      <li>Linux：<code>el0t_64_sync_handler</code> 读出 EC = 0x15 = <code>ESR_ELx_EC_SVC64</code> → <code>el0_svc</code> → <code>do_el0_svc</code> 取 <code>regs-&gt;regs[8]</code> = 64 → <code>invoke_syscall</code> → <code>sys_call_table[64]</code> = <code>__arm64_sys_write</code>。</li>
+      <li>XNU：<code>sleh_synchronous</code> 看到 <code>ESR_EC_SVC_64</code> → <code>handle_svc</code>，x16 = 4 不小于 0 → <code>unix_syscall</code> → <code>sysent[4]</code>。</li>
+      <li>写成功返回 6：结果写进保存的 <code>x0</code>，<code>eret</code> 回到 <code>svc</code> 的下一条指令，用户程序看到 <code>write</code> 返回 6。</li>
+    </ol>
+    <ol lang="en">
+      <li>libc loads the registers: <code>x0 = 1</code> (fd), <code>x1</code> = the buffer address, <code>x2 = 6</code>; Linux sets <code>x8 = 64</code> (write is 64 in <code>scripts/syscall.tbl</code>), XNU sets <code>x16 = 4</code> (write is 4 in <code>bsd/kern/syscalls.master</code>).</li>
+      <li>It executes <code>svc #0</code> (<code>svc #0x80</code> on XNU). The hardware writes <code>ESR_EL1</code>: EC sits in [31:26] and is 0x15 for SVC64; the IL bit [25] = 1 marks a 32-bit instruction; the low 16 bits of the ISS hold the svc immediate. So Linux gets <code>0x15 &lt;&lt; 26 | 1 &lt;&lt; 25 | 0 = 0x56000000</code>, and XNU gets <code>0x56000080</code>.</li>
+      <li>The PC jumps to <code>VBAR_EL1 + 0x400</code> (item 1 of the previous example).</li>
+      <li>Linux: <code>el0t_64_sync_handler</code> reads EC = 0x15 = <code>ESR_ELx_EC_SVC64</code> → <code>el0_svc</code> → <code>do_el0_svc</code> takes <code>regs-&gt;regs[8]</code> = 64 → <code>invoke_syscall</code> → <code>sys_call_table[64]</code> = <code>__arm64_sys_write</code>.</li>
+      <li>XNU: <code>sleh_synchronous</code> sees <code>ESR_EC_SVC_64</code> → <code>handle_svc</code>; x16 = 4 is not negative → <code>unix_syscall</code> → <code>sysent[4]</code>.</li>
+      <li>The write succeeds and returns 6: the result goes into the saved <code>x0</code>, <code>eret</code> returns to the instruction after <code>svc</code>, and the user program sees <code>write</code> return 6.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">一个细节值得记住：<strong>Linux arm64 用 <code>x8</code> 传系统调用号，XNU arm64 用 <code>x16</code></strong>；XNU 里正数是 BSD syscall（<code>sysent[]</code>），负数是 Mach trap（<code>mach_trap_table[]</code>）——这是 XNU「两个内核叠在一起」在 ABI 上的直接痕迹。延伸阅读：《Linux Kernel Development》第 5 章「系统调用」；《Understanding the Linux Kernel》第 10 章「系统调用」（x86 视角，流程同构）。</p>
   <p lang="en">One detail worth remembering: <strong>Linux arm64 passes the system call number in <code>x8</code>, XNU arm64 in <code>x16</code></strong>; in XNU positive numbers are BSD syscalls (<code>sysent[]</code>) and negative numbers are Mach traps (<code>mach_trap_table[]</code>) — a direct trace in the ABI of XNU being "two kernels stacked together". Further reading: <em>Linux Kernel Development</em> chapter 5, "System Calls"; <em>Understanding the Linux Kernel</em> chapter 10, "System Calls" (an x86 view; the flow has the same shape).</p>
 
@@ -116,7 +164,40 @@
   </table>
   </div>
 
-  <h2 id="diagram" lang="zh-CN">动画图解：一次系统调用的异常进入与返回（ARM64）</h2><h2 id="diagram-en" lang="en">Diagram: exception entry and return for one system call (ARM64)</h2>
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>用户程序跑在 EL0，内核跑在 EL1；只有 EL1 能执行改页表、关中断这类特权指令。</li>
+      <li>从 EL0 进 EL1 只能靠异常，返回只能靠 <code>eret</code>；系统调用就是用 <code>svc</code> 主动触发的同步异常。</li>
+      <li>CPU 按「从哪来 × 什么类型」在 <code>VBAR_EL1</code> 指向的 16 个入口里挑一个，从 64 位程序发出的用户态 <code>svc</code> 落在 <code>VBAR_EL1 + 0x400</code>（AArch32 的 EL0 落在 +0x600）。</li>
+      <li>硬件只保存返回地址（<code>ELR_EL1</code>）、PSTATE（<code>SPSR_EL1</code>）和原因（<code>ESR_EL1</code>），通用寄存器由入口汇编自己压栈。</li>
+      <li>Linux 用 <code>x8</code> 传系统调用号，XNU 用 <code>x16</code>，XNU 的负号是 Mach trap。</li>
+      <li>内核 C 没有 libc、栈只有 16 KB、默认不用浮点，一个空指针就是整机 panic。</li>
+    </ul>
+    <ul lang="en">
+      <li>User programs run at EL0 and the kernel at EL1; only EL1 can execute privileged instructions such as changing page tables or disabling interrupts.</li>
+      <li>The only way from EL0 into EL1 is an exception and the only way back is <code>eret</code>; a system call is a synchronous exception raised on purpose with <code>svc</code>.</li>
+      <li>The CPU picks one of the 16 entries at <code>VBAR_EL1</code> by "where from × which type", and a user-mode <code>svc</code> from a 64-bit program lands at <code>VBAR_EL1 + 0x400</code> (an AArch32 EL0 lands at +0x600).</li>
+      <li>The hardware saves only the return address (<code>ELR_EL1</code>), PSTATE (<code>SPSR_EL1</code>) and the cause (<code>ESR_EL1</code>); the entry assembly pushes the general-purpose registers itself.</li>
+      <li>Linux passes the system call number in <code>x8</code> and XNU in <code>x16</code>, where a negative number is a Mach trap.</li>
+      <li>Kernel C has no libc, a 16 KB stack and no floating point by default, and one null pointer panics the whole machine.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：向量表里存的是处理函数的地址。→ 实际：AArch64 向量表里存的是指令，每个入口最多 32 条，CPU 直接跳进去执行。</li>
+      <li>误解：<code>svc</code> 的立即数就是系统调用号。→ 实际：Linux 和 XNU 都不看立即数，号在 <code>x8</code> / <code>x16</code> 里；立即数只出现在 <code>ESR_EL1</code> 的 ISS 里。</li>
+      <li>误解：进内核时 CPU 会自动保存所有寄存器。→ 实际：硬件只存 PC、PSTATE 和原因，<code>x0–x30</code> 要入口汇编自己存；在 Linux 上 FP/SIMD 寄存器进入内核时不保存、按需惰性切换，XNU 则在每次进入时把 NEON 寄存器存进异常帧。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: the vector table holds the addresses of the handlers. → Fact: an AArch64 vector table holds instructions, up to 32 per entry, and the CPU jumps straight in and executes them.</li>
+      <li>Myth: the <code>svc</code> immediate is the system call number. → Fact: neither Linux nor XNU looks at the immediate; the number is in <code>x8</code> / <code>x16</code>, and the immediate only shows up in the ISS of <code>ESR_EL1</code>.</li>
+      <li>Myth: the CPU saves every register automatically on kernel entry. → Fact: the hardware saves only the PC, PSTATE and the cause; <code>x0–x30</code> are saved by the entry assembly; on Linux the FP/SIMD registers are not saved on kernel entry and are switched lazily, while XNU saves the NEON registers in the exception frame on every entry.</li>
+    </ul>
+  </div>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
+
+  <h3 lang="zh-CN">A · 一次系统调用的异常进入与返回（ARM64）</h3><h3 lang="en">A · Exception entry and return for one system call (ARM64)</h3>
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 420" data-interval="2000"
          data-captions='["全图：上半 EL0 用户态，下半 EL1 内核态；左列 Linux，右列 XNU。按「播放」逐步走。",
@@ -184,6 +265,101 @@
         <text x="512" y="383" class="mono">x0 = ret ; exception_return ; eret</text>
         <path class="arrow flow" d="M400 378 C 440 378, 440 95, 400 95"/>
         <path class="arrow flow" d="M840 378 C 880 378, 880 95, 840 95"/></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">B · CPU 怎么在向量表的 16 个入口里选一个</h3><h3 lang="en">B · How the CPU picks one of the 16 vector-table entries</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 440" data-interval="2200"
+         data-captions='["全图：右边是 VBAR_EL1 指向的向量表，4 行 × 4 列 = 16 个入口，每个 0x80 字节（32 条指令），共 0x800 字节。行是异常从哪来（组基址），列是什么类型（类型偏移）。第 1–3 步是 CPU 的选择过程（左列两步加上方的相加框），第 4–5 步是跳转和入口桩，例子是用户态的一条 svc。按「播放」逐步走。",
+           "1. 定来源：svc 在 EL0 执行，EL0 是 AArch64，异常进 EL1，属于来自更低 EL、AArch64 这一组，组基址 0x400。另外三组：当前 EL 用 SP_EL0 是 0x000，当前 EL 用 SP_ELx 是 0x200，更低 EL 全是 AArch32 是 0x600。",
+           "2. 分类：svc 是同步异常（Synchronous），类型偏移 +0x000。另外三列：IRQ +0x080、FIQ +0x100、SError +0x180。",
+           "3. 相加：0x400 + 0x000 = 0x400，第 3 行第 1 格亮起。换个例子：用户态时来 IRQ 是 0x400 + 0x080 = 0x480；内核在 EL1 用 SP_EL1 时来 IRQ 是 0x200 + 0x080 = 0x280。",
+           "4. 跳转：PC ← VBAR_EL1 + 0x400。VBAR_EL1 由内核启动时写入，低 11 位为 0，表按 2 KB 对齐。硬件到这里就停手，不看系统调用号。",
+           "5. 入口桩：一个入口只有 0x80 字节，放不下处理程序，只做最少的事再跳走。Linux：entry.S 的 vectors 表在 +0x400 处是 kernel_ventry 0, t, 64, sync，预留 pt_regs 栈空间后 b el0t_64_sync。XNU：locore.s 的 Lel0_synchronous_vector_64 先 MAP_KERNEL，再跳到 el0_synchronous_vector_64_long，进入 fleh_synchronous。"]'
+         data-captions-en='["The whole picture: on the right, the vector table that VBAR_EL1 points to, 4 rows × 4 columns = 16 entries of 0x80 bytes (32 instructions) each, 0x800 bytes in all. Rows say where the exception came from (group base), columns say which type it is (type offset). Steps 1–3 are the CPU choice (the two boxes in the left column plus the sum box above the table), steps 4–5 the jump and the entry stub, for one user-mode svc. Press Play to step through.",
+           "1. Find the origin: svc runs at EL0, EL0 is AArch64, and the exception is taken to EL1, so it belongs to the group from a lower EL in AArch64, group base 0x400. The other groups: current EL with SP_EL0 is 0x000, current EL with SP_ELx is 0x200, lower EL all AArch32 is 0x600.",
+           "2. Classify: svc is a synchronous exception, type offset +0x000. The other three columns: IRQ +0x080, FIQ +0x100, SError +0x180.",
+           "3. Add: 0x400 + 0x000 = 0x400, and the first cell of row 3 lights up. Other examples: an IRQ during user mode is 0x400 + 0x080 = 0x480; an IRQ while the kernel runs at EL1 on SP_EL1 is 0x200 + 0x080 = 0x280.",
+           "4. Jump: PC ← VBAR_EL1 + 0x400. The kernel writes VBAR_EL1 at boot; its low 11 bits are 0, so the table is 2 KB aligned. The hardware stops here and never looks at the system call number.",
+           "5. The entry stub: an entry is only 0x80 bytes, too small for a handler, so it does the minimum and branches away. Linux: at +0x400 the vectors table in entry.S holds kernel_ventry 0, t, 64, sync, which reserves pt_regs stack space and then does b el0t_64_sync. XNU: Lel0_synchronous_vector_64 in locore.s runs MAP_KERNEL, branches to el0_synchronous_vector_64_long and enters fleh_synchronous."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="250" y="22" class="small" lang="zh-CN">VBAR_EL1 指向的向量表（16 × 0x80 字节）：行 = 从哪来，列 = 什么类型</text><text x="250" y="22" class="small" lang="en">Vector table at VBAR_EL1 (16 × 0x80 bytes): rows = where from, columns = type</text>
+
+      <!-- left: the three choices -->
+      <g data-step="1"><rect class="box" x="20" y="40" width="210" height="90"/>
+        <text x="32" y="62" lang="zh-CN">1. 从哪来？</text><text x="32" y="62" lang="en">1. Where from?</text>
+        <text x="32" y="86" class="mono">EL0, AArch64 → EL1</text>
+        <text x="32" y="108" class="small" lang="zh-CN">更低 EL 组，基址 0x400</text><text x="32" y="108" class="small" lang="en">lower-EL group, base 0x400</text></g>
+      <g data-step="2"><rect class="box" x="20" y="145" width="210" height="90"/>
+        <text x="32" y="167" lang="zh-CN">2. 什么类型？</text><text x="32" y="167" lang="en">2. Which type?</text>
+        <text x="32" y="191" class="mono">svc → Synchronous</text>
+        <text x="32" y="213" class="small" lang="zh-CN">类型偏移 +0x000</text><text x="32" y="213" class="small" lang="en">type offset +0x000</text></g>
+      <g data-step="3"><rect class="box" x="250" y="40" width="200" height="40"/><text x="262" y="65" class="mono">0x400 + 0x000 = 0x400</text></g>
+
+      <!-- column headers: exception type -->
+      <g data-step="2 3"><rect class="box" x="460" y="40" width="101" height="40"/>
+        <text x="470" y="57" class="mono">Sync</text><text x="470" y="73" class="small">+0x000</text></g>
+      <rect class="box" x="565" y="40" width="101" height="40"/>
+      <text x="575" y="57" class="mono">IRQ</text><text x="575" y="73" class="small">+0x080</text>
+      <rect class="box" x="670" y="40" width="101" height="40"/>
+      <text x="680" y="57" class="mono">FIQ</text><text x="680" y="73" class="small">+0x100</text>
+      <rect class="box" x="775" y="40" width="101" height="40"/>
+      <text x="785" y="57" class="mono">SError</text><text x="785" y="73" class="small">+0x180</text>
+
+      <!-- row headers: origin group -->
+      <rect class="box" x="250" y="90" width="200" height="46"/>
+      <text x="260" y="109" class="mono">0x000</text>
+      <text x="260" y="127" class="small" lang="zh-CN">当前 EL，用 SP_EL0</text><text x="260" y="127" class="small" lang="en">current EL, SP_EL0</text>
+      <rect class="box" x="250" y="140" width="200" height="46"/>
+      <text x="260" y="159" class="mono">0x200</text>
+      <text x="260" y="177" class="small" lang="zh-CN">当前 EL，用 SP_ELx</text><text x="260" y="177" class="small" lang="en">current EL, SP_ELx</text>
+      <g data-step="1 3"><rect class="box" x="250" y="190" width="200" height="46"/>
+        <text x="260" y="209" class="mono">0x400</text>
+        <text x="260" y="227" class="small" lang="zh-CN">更低 EL，AArch64</text><text x="260" y="227" class="small" lang="en">lower EL, AArch64</text></g>
+      <rect class="box" x="250" y="240" width="200" height="46"/>
+      <text x="260" y="259" class="mono">0x600</text>
+      <text x="260" y="277" class="small" lang="zh-CN">更低 EL，AArch32</text><text x="260" y="277" class="small" lang="en">lower EL, AArch32</text>
+
+      <!-- the 16 entries -->
+      <rect class="box" x="460" y="90" width="101" height="46" style="fill: var(--surface)"/><text x="478" y="118" class="mono">0x000</text>
+      <rect class="box" x="565" y="90" width="101" height="46" style="fill: var(--surface)"/><text x="583" y="118" class="mono">0x080</text>
+      <rect class="box" x="670" y="90" width="101" height="46" style="fill: var(--surface)"/><text x="688" y="118" class="mono">0x100</text>
+      <rect class="box" x="775" y="90" width="101" height="46" style="fill: var(--surface)"/><text x="793" y="118" class="mono">0x180</text>
+      <rect class="box" x="460" y="140" width="101" height="46" style="fill: var(--surface)"/><text x="478" y="168" class="mono">0x200</text>
+      <rect class="box" x="565" y="140" width="101" height="46" style="fill: var(--surface)"/><text x="583" y="168" class="mono">0x280</text>
+      <rect class="box" x="670" y="140" width="101" height="46" style="fill: var(--surface)"/><text x="688" y="168" class="mono">0x300</text>
+      <rect class="box" x="775" y="140" width="101" height="46" style="fill: var(--surface)"/><text x="793" y="168" class="mono">0x380</text>
+      <rect class="box" x="460" y="190" width="101" height="46" style="fill: var(--surface)"/><g data-step="3 4"><rect class="hl" x="460" y="190" width="101" height="46"/></g><text x="478" y="218" class="mono">0x400</text>
+      <rect class="box" x="565" y="190" width="101" height="46" style="fill: var(--surface)"/><text x="583" y="218" class="mono">0x480</text>
+      <rect class="box" x="670" y="190" width="101" height="46" style="fill: var(--surface)"/><text x="688" y="218" class="mono">0x500</text>
+      <rect class="box" x="775" y="190" width="101" height="46" style="fill: var(--surface)"/><text x="793" y="218" class="mono">0x580</text>
+      <rect class="box" x="460" y="240" width="101" height="46" style="fill: var(--surface)"/><text x="478" y="268" class="mono">0x600</text>
+      <rect class="box" x="565" y="240" width="101" height="46" style="fill: var(--surface)"/><text x="583" y="268" class="mono">0x680</text>
+      <rect class="box" x="670" y="240" width="101" height="46" style="fill: var(--surface)"/><text x="688" y="268" class="mono">0x700</text>
+      <rect class="box" x="775" y="240" width="101" height="46" style="fill: var(--surface)"/><text x="793" y="268" class="mono">0x780</text>
+
+      <!-- step 4: the jump -->
+      <g data-step="4"><path class="arrow" d="M460 213 H455 V300"/>
+        <rect class="box" x="250" y="300" width="630" height="40"/>
+        <text x="262" y="325" class="mono">PC ← VBAR_EL1 + 0x400</text>
+        <text x="520" y="325" class="small" lang="zh-CN">VBAR_EL1 低 11 位为 0（2 KB 对齐）</text><text x="520" y="325" class="small" lang="en">VBAR_EL1 low 11 bits are 0 (2 KB aligned)</text></g>
+
+      <!-- step 5: the stubs -->
+      <g data-step="5"><path class="arrow" d="M350 340 L350 360"/>
+        <rect class="box linux" x="20" y="360" width="420" height="66"/>
+        <text x="32" y="383" class="mono">entry.S: kernel_ventry 0, t, 64, sync</text>
+        <text x="32" y="408" class="small" lang="zh-CN">预留 pt_regs → b el0t_64_sync</text><text x="32" y="408" class="small" lang="en">reserve pt_regs → b el0t_64_sync</text>
+        <text x="428" y="383" text-anchor="end" class="small" style="fill: var(--linux)">Linux</text></g>
+      <g data-step="5"><path class="arrow" d="M670 340 L670 360"/>
+        <rect class="box xnu" x="460" y="360" width="420" height="66"/>
+        <text x="472" y="383" class="mono">locore.s: Lel0_synchronous_vector_64</text>
+        <text x="472" y="408" class="small">MAP_KERNEL → el0_synchronous_vector_64_long → fleh_synchronous</text>
+        <text x="868" y="383" text-anchor="end" class="small" style="fill: var(--xnu)">XNU</text></g>
     </svg>
   </div>
 

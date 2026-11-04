@@ -53,6 +53,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">每个进程都以为自己独占从 0 开始的一大片地址，可物理内存只有一份，还要被几百个进程和内核分着用。如果程序直接用物理地址，一个越界写就能改掉别人的数据，<code>fork</code> 也得把整个进程的内存立刻复制一遍。硬件和内核需要一层翻译：每次访存都把进程看到的地址换成真实地址并检查权限，而且只在真正用到时才给物理页。</p>
+    <p lang="en">Every process believes it owns a large range of addresses starting at 0, yet there is only one physical memory, shared by hundreds of processes and the kernel. If programs used physical addresses directly, one out-of-bounds write could change someone else’s data, and <code>fork</code> would have to copy the whole process’s memory at once. Hardware and kernel need a layer of translation: on every access, turn the address the process sees into a real one and check the permissions, and hand out physical pages only when they are actually used.</p>
+    <p lang="zh-CN">概念 2 的页表遍历负责翻译，概念 3 的缺页路径负责「用到时才给」。</p>
+    <p lang="en">Concept 2, the page-table walk, does the translation; concept 3, the page-fault path, does "only when used".</p>
+  </div>
+
   <h3 lang="zh-CN">1. 虚拟内存与地址空间：ARM64 的两半</h3><h3 lang="en">1. Virtual memory and address spaces: the two halves of ARM64</h3>
   <p lang="zh-CN">ARM64 把 64 位虚拟地址空间切成两半，各用一个页表基址寄存器：<strong>低半（高位全 0）走 <code>TTBR0_EL1</code>，给用户态；高半（高位全 1）走 <code>TTBR1_EL1</code>，给内核</strong>。中间的「非规范」地址直接触发 translation fault。启用 Top Byte Ignore（TBI）时最高 8 位不参与翻译，选择哪个 TTBR 看 bit 55。好处：切换进程只需换 <code>TTBR0_EL1</code>，内核那一半所有进程共享、不用动。有效位数由 <code>TCR_EL1</code> 的 <code>T0SZ</code>/<code>T1SZ</code> 决定。</p>
   <p lang="en">ARM64 splits the 64-bit virtual address space into two halves, each with its own page-table base register: <strong>the low half (top bits all 0) goes through <code>TTBR0_EL1</code>, for user mode; the high half (top bits all 1) goes through <code>TTBR1_EL1</code>, for the kernel</strong>. “Non-canonical” addresses in between raise a translation fault directly. With Top Byte Ignore (TBI) enabled, the top 8 bits take no part in translation and bit 55 selects the TTBR. The benefit: switching processes only requires a new <code>TTBR0_EL1</code>; the kernel half is shared by every process and stays untouched. The number of significant bits is set by <code>T0SZ</code>/<code>T1SZ</code> in <code>TCR_EL1</code>.</p>
@@ -82,6 +89,28 @@ Linux user space 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff (256 TB); the k
     <li lang="zh-CN">L3 上 <code>0b11</code> = <strong>page</strong> 描述符：给出 4 KB 页的输出地址（OA）。</li>
     <li lang="en"><code>0b11</code> at L3 = a <strong>page</strong> descriptor: gives the output address (OA) of a 4 KB page.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把一个真实形状的用户地址走一遍：<code>VA = 0x0000_ffff_b7e1_2345</code>（48-bit VA、4 KB 粒度，与下方图解 A 相同）。</p>
+    <p lang="en">Walk one user address of a realistic shape: <code>VA = 0x0000_ffff_b7e1_2345</code> (48-bit VA, 4 KB granule, as in diagram A below).</p>
+    <pre>VA [63:48] = 0x0000          → TTBR0_EL1 (user half)
+L0 index [47:39] = 0x1ff = 511  → entry at L0 base + 511 × 8 = +0xff8
+L1 index [38:30] = 0x1fe = 510  → entry at L1 base + 0xff0
+L2 index [29:21] = 0x1bf = 447  → entry at L2 base + 0xdf8
+L3 index [20:12] = 0x012 = 18   → entry at L3 base + 0x090
+offset   [11:0]  = 0x345</pre>
+    <ol lang="zh-CN">
+      <li>高 16 位全 0，用 <code>TTBR0_EL1</code>（用户半边）。</li>
+      <li>每级取 9 位当下标，乘 8（描述符 8 字节）就是表内偏移：L0 取第 511 项，L1 第 510 项，L2 第 447 项，L3 第 18 项。L0–L2 的描述符低两位必须是 <code>0b11</code>（table），否则遍历在那一级结束。</li>
+      <li>假设 L3 描述符给出的输出地址是 <code>0x4_1234_5000</code>：PA = 输出地址 [47:12] 拼上 VA [11:0] = <code>0x4_1234_5345</code>。</li>
+      <li>一次 TLB miss 要读 4 个描述符，即 4 次额外访存；结果填进 TLB 后，同一 4 KB 页里的下一次访问不再遍历。</li>
+    </ol>
+    <ol lang="en">
+      <li>The top 16 bits are all 0, so <code>TTBR0_EL1</code> (the user half) is used.</li>
+      <li>Each level takes 9 bits as the index, and the index times 8 (8-byte descriptors) is the offset in the table: entry 511 at L0, 510 at L1, 447 at L2 and 18 at L3. The descriptors at L0–L2 must have <code>0b11</code> (table) in their low two bits, or the walk ends at that level.</li>
+      <li>Suppose the L3 descriptor gives the output address <code>0x4_1234_5000</code>: PA = output address [47:12] joined with VA [11:0] = <code>0x4_1234_5345</code>.</li>
+      <li>One TLB miss reads 4 descriptors, i.e. 4 extra memory accesses; once the result is in the TLB, the next access to the same 4 KB page does not walk again.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">block/page 描述符里的属性位决定「能不能访问、怎么缓存」：<code>AttrIndx[4:2]</code> 是一个下标，指向 <code>MAIR_EL1</code> 里 8 组内存类型之一（Normal Write-Back、Device-nGnRE……，页表里不直接写缓存属性）；<code>AP[7:6]</code> 管只读/可写与 EL0 是否可访问；<code>SH[9:8]</code> 共享域；<code>AF[10]</code> access flag，为 0 时第一次访问触发 access flag fault（内核借此统计「最近用过」，有 FEAT_HAFDBS 的 CPU 可由硬件自动置位）；<code>nG[11]</code>；高位的 <code>PXN[53]</code>/<code>UXN[54]</code> 分别禁止 EL1 / EL0 在此执行。</p>
   <p lang="en">The attribute bits in block/page descriptors decide “can it be accessed, and how is it cached”: <code>AttrIndx[4:2]</code> is an index pointing to one of the 8 memory types in <code>MAIR_EL1</code> (Normal Write-Back, Device-nGnRE…; the page table does not hold cache attributes directly); <code>AP[7:6]</code> controls read-only/writable and whether EL0 may access it; <code>SH[9:8]</code> is the shareability domain; <code>AF[10]</code> is the access flag — when it is 0, the first access raises an access flag fault (the kernel uses this to track “recently used”; on CPUs with FEAT_HAFDBS the hardware can set it automatically); <code>nG[11]</code>; and the high bits <code>PXN[53]</code>/<code>UXN[54]</code> forbid execution here at EL1 / EL0 respectively.</p>
   <p lang="zh-CN">改页表后 TLB 里的旧项不会自己消失：内核要发 <code>TLBI</code>（如按 VA+ASID 的 <code>tlbi vae1is</code>）再 <code>dsb ish</code>、<code>isb</code>。Linux 封装为 <code>flush_tlb_page()</code>/<code>flush_tlb_range()</code>（<code>arch/arm64/include/asm/tlbflush.h</code>）；XNU 在 <code>pmap</code> 层内部处理。Arm 还要求修改有效映射时遵守 break-before-make（先置无效、刷 TLB、再写新值）。延伸阅读：《Computer Systems: A Programmer's Perspective》第 9 章「虚拟内存」；《Operating Systems: Three Easy Pieces》第 18–20 章（分页、TLB、多级页表）。</p>
@@ -90,6 +119,22 @@ Linux user space 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff (256 TB); the k
   <h3 lang="zh-CN">3. 缺页路径：从 data abort 到重新执行</h3><h3 lang="en">3. The page-fault path: from data abort to re-execution</h3>
   <p lang="zh-CN">翻译失败或权限不符时，CPU 产生同步异常 <strong>data abort</strong>（取指失败则是 instruction abort）：<code>ESR_EL1.EC = 0x24</code> 表示来自更低 EL（用户态），<code>0x25</code> 表示同一 EL（内核自己访问出错，例如 <code>copy_from_user</code> 碰到未映射的用户页）。ISS 里的 <code>DFSC</code> 区分 translation / access flag / permission fault 以及出错的表级，<code>WnR</code> 位说明是读还是写；出错的虚拟地址在 <code>FAR_EL1</code>。<code>ELR_EL1</code> 指向出错的那条指令本身——修好映射后 <code>eret</code>，同一条指令重新执行，用户程序完全无感。</p>
   <p lang="en">When translation fails or the permissions do not match, the CPU raises a synchronous exception, a <strong>data abort</strong> (an instruction abort if an instruction fetch failed): <code>ESR_EL1.EC = 0x24</code> means it came from a lower EL (user mode), <code>0x25</code> the same EL (the kernel’s own access faulted, for example <code>copy_from_user</code> hitting an unmapped user page). <code>DFSC</code> in the ISS distinguishes translation / access flag / permission faults and the table level that faulted, and the <code>WnR</code> bit says whether it was a read or a write; the faulting virtual address is in <code>FAR_EL1</code>. <code>ELR_EL1</code> points at the faulting instruction itself — once the mapping is fixed, <code>eret</code> re-executes the same instruction, and the user program notices nothing.</p>
+  <div class="worked">
+    <p lang="zh-CN">追一次缺页（与下方图解 B 同一个场景）：用户程序刚 <code>mmap</code> 了一段匿名内存，第一次执行 <code>ldr x0, [x1]</code> 读它。假设 L0–L2 表已经存在，只有 L3 项无效。</p>
+    <p lang="en">Trace one page fault (the same scene as diagram B below): a user program has just <code>mmap</code>ped some anonymous memory and executes <code>ldr x0, [x1]</code> to read it for the first time. Assume the L0–L2 tables already exist and only the L3 entry is invalid.</p>
+    <ol lang="zh-CN">
+      <li>硬件写 <code>ESR_EL1</code>：EC = 0x24（来自更低 EL 的 data abort）位于 [31:26]，IL = 1，WnR = 0（读），DFSC = 0x07（level 3 translation fault）。合起来 <code>0x24 &lt;&lt; 26 | 1 &lt;&lt; 25 | 0x07 = 0x92000007</code>；换成写（<code>str</code>）则 WnR = 1，得到 <code>0x92000047</code>。<code>FAR_EL1</code> = <code>x1</code> 里的地址。</li>
+      <li><code>el0_da</code> → <code>do_mem_abort</code> 用 DFSC 当下标查 <code>fault_info[]</code>（<code>arch/arm64/mm/fault.c</code>）：第 7 项是 <code>"level 3 translation fault"</code>，处理函数 <code>do_translation_fault</code>，它对用户地址转进 <code>do_page_fault</code>。</li>
+      <li><code>do_page_fault</code> 找到覆盖该地址的 VMA，读权限允许 → <code>handle_mm_fault</code> → <code>do_anonymous_page</code>：这是读，映射共享的零页，不分配新页。</li>
+      <li><code>eret</code> 回到同一条 <code>ldr</code>，这次翻译成功，<code>x0</code> 读到 0。之后第一次写这页时触发 permission fault，那时才真正分配一页。</li>
+    </ol>
+    <ol lang="en">
+      <li>The hardware writes <code>ESR_EL1</code>: EC = 0x24 (a data abort from a lower EL) in [31:26], IL = 1, WnR = 0 (a read), DFSC = 0x07 (level 3 translation fault). Together <code>0x24 &lt;&lt; 26 | 1 &lt;&lt; 25 | 0x07 = 0x92000007</code>; for a write (<code>str</code>) WnR = 1 and the value is <code>0x92000047</code>. <code>FAR_EL1</code> = the address in <code>x1</code>.</li>
+      <li><code>el0_da</code> → <code>do_mem_abort</code> uses DFSC as the index into <code>fault_info[]</code> (<code>arch/arm64/mm/fault.c</code>): entry 7 is <code>"level 3 translation fault"</code> with handler <code>do_translation_fault</code>, which passes user addresses on to <code>do_page_fault</code>.</li>
+      <li><code>do_page_fault</code> finds the VMA covering the address, and read permission is allowed → <code>handle_mm_fault</code> → <code>do_anonymous_page</code>: this is a read, so it maps the shared zero page and allocates nothing.</li>
+      <li><code>eret</code> returns to the same <code>ldr</code>; this time translation succeeds and <code>x0</code> reads 0. The first write to the page later raises a permission fault, and only then is a page really allocated.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>Linux</strong>：<code>el0t_64_sync</code> → <code>el0t_64_sync_handler</code> 按 EC 分发到 <code>el0_da</code>（<code>arch/arm64/kernel/entry-common.c</code>）→ <code>do_mem_abort(far, esr, regs)</code> 按 DFSC 查 <code>fault_info[]</code> 表，translation fault 走 <code>do_translation_fault</code>，permission fault 直接进 <code>do_page_fault</code>（都在 <code>arch/arm64/mm/fault.c</code>）。<code>do_page_fault</code> 在当前进程的 <code>mm_struct</code> 里找覆盖该地址的 VMA（<code>vm_area_struct</code>，自 6.1 起存放在 <code>mm-&gt;mm_mt</code> maple tree 中；新内核先尝试 per-VMA 锁 <code>lock_vma_under_rcu</code>，失败再拿 <code>mmap_lock</code>），检查 VMA 权限，然后调通用的 <code>handle_mm_fault</code>（<code>mm/memory.c</code>）。后者逐级分配缺失的页表，最后在 <code>handle_pte_fault</code> 分情况：</p>
   <p lang="en"><strong>Linux</strong>: <code>el0t_64_sync</code> → <code>el0t_64_sync_handler</code> dispatches on EC to <code>el0_da</code> (<code>arch/arm64/kernel/entry-common.c</code>) → <code>do_mem_abort(far, esr, regs)</code> looks up the <code>fault_info[]</code> table by DFSC; translation faults go to <code>do_translation_fault</code>, permission faults straight to <code>do_page_fault</code> (both in <code>arch/arm64/mm/fault.c</code>). <code>do_page_fault</code> looks up the VMA covering the address in the current process’s <code>mm_struct</code> (a <code>vm_area_struct</code>, stored in the <code>mm-&gt;mm_mt</code> maple tree since 6.1; newer kernels first try the per-VMA lock <code>lock_vma_under_rcu</code> and take <code>mmap_lock</code> only if that fails), checks the VMA’s permissions, and then calls the generic <code>handle_mm_fault</code> (<code>mm/memory.c</code>). That function allocates any missing page tables level by level, and finally <code>handle_pte_fault</code> splits into cases:</p>
   <ul>
@@ -120,6 +165,37 @@ Linux user space 0x0000_0000_0000_0000 – 0x0000_ffff_ffff_ffff (256 TB); the k
   <p lang="en">User programs have only two kinds of system calls for getting memory: <code>brk</code> (move the top of the heap) and <code>mmap</code> (map a range of anonymous or file-backed memory). glibc <code>malloc</code> carves small blocks out of the heap (<code>brk</code>) and arenas, and uses <code>mmap</code> directly for large blocks (the threshold starts at 128 KB by default and is adjusted dynamically). On macOS, the BSD-layer <code>mmap</code> ends up in Mach’s <code>mach_vm_map</code>; you can also call the Mach interfaces <code>mach_vm_allocate</code>/<code>mach_vm_map</code> directly (old names <code>vm_allocate</code>/<code>vm_map</code>); libmalloc is built mainly on these VM regions rather than on <code>brk</code>.</p>
   <p lang="zh-CN">两个数字要分清：<strong>VSZ</strong>（虚拟大小）= 映射了多少地址；<strong>RSS</strong>（驻留集）= 其中当前真有物理页的部分。<code>mmap</code> 只改 VSZ，缺页才让 RSS 增长。macOS 上 Apple 更推荐看 <strong>footprint</strong>（<code>phys_footprint</code>：脏页 + 被压缩的页等，算「这个进程真正占的内存」），工具是 <code>vmmap</code> 和 <code>footprint</code>。</p>
   <p lang="en">Keep two numbers apart: <strong>VSZ</strong> (virtual size) = how many addresses are mapped; <strong>RSS</strong> (resident set size) = the part of that which currently has real physical pages. <code>mmap</code> changes only VSZ; only page faults make RSS grow. On macOS, Apple recommends looking at the <strong>footprint</strong> instead (<code>phys_footprint</code>: dirty pages + compressed pages and so on, counted as “the memory this process really occupies”); the tools are <code>vmmap</code> and <code>footprint</code>.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>ARM64 用 VA 高位选页表：低半走 <code>TTBR0_EL1</code> 给用户，高半走 <code>TTBR1_EL1</code> 给内核，切进程只换 <code>TTBR0_EL1</code>（Linux 上还要把 ASID 写进 <code>TTBR1_EL1</code>）。</li>
+      <li>48-bit VA、4 KB 页是 4 级表，每级 9 位下标、512 项；Apple Silicon 的 16 KB 页让 47-bit VA 只要 3 级。</li>
+      <li>TLB 缓存翻译结果，ASID 让不同进程的项共存；改页表后必须 <code>TLBI</code> 加屏障，旧项不会自己消失。</li>
+      <li>缺页是一次普通的同步异常，修好映射后 <code>eret</code> 让同一条指令重新执行。</li>
+      <li>Linux 的 VMA 和 XNU 的 <code>vm_map_entry</code> 是同一个概念；COW 在 Linux 是复制页，在 XNU 是叠 shadow object。</li>
+      <li>VSZ 是映射了多少地址，RSS 是其中真有物理页的部分，<code>mmap</code> 只涨前者。</li>
+    </ul>
+    <ul lang="en">
+      <li>ARM64 picks the page table by the top bits of the VA: the low half goes through <code>TTBR0_EL1</code> for user space, the high half through <code>TTBR1_EL1</code> for the kernel, and a process switch changes only <code>TTBR0_EL1</code> (plus the ASID in <code>TTBR1_EL1</code> on Linux).</li>
+      <li>A 48-bit VA with 4 KB pages uses 4 levels of tables with a 9-bit index and 512 entries per level; Apple Silicon’s 16 KB pages need only 3 levels for a 47-bit VA.</li>
+      <li>The TLB caches translations and ASIDs let entries of different processes coexist; after a page-table change you must issue <code>TLBI</code> plus barriers, because stale entries do not disappear on their own.</li>
+      <li>A page fault is an ordinary synchronous exception, and once the mapping is fixed <code>eret</code> re-executes the same instruction.</li>
+      <li>A Linux VMA and an XNU <code>vm_map_entry</code> are the same idea; COW copies a page on Linux and stacks a shadow object on XNU.</li>
+      <li>VSZ is how many addresses are mapped and RSS is the part with real physical pages; <code>mmap</code> grows only the first.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：<code>malloc</code> 或 <code>mmap</code> 返回时内存就已经分好了。→ 实际：只建了 VMA；物理页要等第一次访问触发缺页才分配，读访问甚至只映射零页。</li>
+      <li>误解：缺页就是程序出错了。→ 实际：绝大多数缺页是正常的按需分页和 COW，只有找不到 VMA 或权限不符才变成 <code>SIGSEGV</code>。</li>
+      <li>误解：切换进程必须清空整个 TLB。→ 实际：用户映射带 ASID，不同进程的项可以同时留在 TLB 里，内核映射是 global 的。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: when <code>malloc</code> or <code>mmap</code> returns, the memory has already been allocated. → Fact: only a VMA was created; physical pages are allocated when the first access raises a page fault, and a read may map only the zero page.</li>
+      <li>Myth: a page fault means the program did something wrong. → Fact: most page faults are normal demand paging and COW; only a missing VMA or a permission mismatch becomes <code>SIGSEGV</code>.</li>
+      <li>Myth: switching processes requires flushing the whole TLB. → Fact: user mappings carry an ASID, so entries of different processes can stay in the TLB together, and kernel mappings are global.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

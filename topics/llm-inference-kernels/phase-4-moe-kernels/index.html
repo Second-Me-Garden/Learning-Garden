@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">MoE 层把每个 token 送给 E 个专家里的 k 个，于是每个专家拿到几行完全由数据决定，解码时往往只有一两行。给每个专家各启动一次 GEMM，就是 E 次启动，每次都很小；想只启动一次，就得让每个 M 块只属于一个专家，而且缓冲区的大小要在 GPU 数完之前就定下来，CUDA 图才接得住。怎样把一张参差不齐的路由结果变成一次启动、固定大小的矩阵乘，又要为此多付多少算力？</p>
+    <p lang="en">An MoE layer sends each token to k of E experts, so how many rows each expert gets is decided entirely by the data, and in decode it is often one or two. Launching one GEMM per expert means E launches, each tiny; launching once requires every M block to belong to a single expert, and the buffers must be sized before the GPU has finished counting, or CUDA graphs cannot take them. How does a ragged routing result become one launch of fixed-size matrix products, and how much extra compute does that cost?</p>
+    <p lang="zh-CN">概念 2 的 <code>moe_align_block_size</code> 按专家排序补齐，概念 3 的分组 GEMM 一次算完所有专家，概念 5 算补齐的账。</p>
+    <p lang="en"><code>moe_align_block_size</code> in concept 2 sorts and pads by expert, the grouped GEMM of concept 3 computes every expert in one launch, and concept 5 does the accounting for the padding.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 路由与 top-k</h3><h3 lang="en">1. Routing and top-k</h3>
   <p lang="zh-CN">稀疏门控的 MoE 层由 Shazeer 等（arXiv:1701.06538，读的是 v1）提出，摘要的说法是：一个可训练的门控网络为每个样本决定用哪些专家的稀疏组合。今天的 LLM 里，每一层 MoE 对每个 token 做同样的几步：</p>
   <p lang="en">The sparsely gated MoE layer comes from Shazeer et al. (arXiv:1701.06538, read at v1), whose abstract puts it this way: a trainable gating network determines a sparse combination of experts to use for each example. In today’s LLMs, every MoE layer does the same few steps for every token:</p>
@@ -98,6 +105,33 @@
   </ol>
   <p lang="zh-CN">这就是一个直方图、一次扫描和一次分散写，没有真正的排序。有两个细节。第一，专家号进内核前都加了 1（第 39、106 行），包装函数相应地传入 <code>num_experts + 1</code>（第 153–163 行），注释说专家并行时被过滤掉的专家号是 −1，一共有 <code>num_experts + 1</code> 个号（第 103 行）：−1 落进第 0 个桶，GEMM 看到 −1 就跳过这一块。第二，缓冲区按最坏情况分配：每个桶最多补 BM − 1 行，所以上界是 T·k + (E + 1)(BM − 1)，再向上取整到 4 的倍数，因为补齐时用 int4 一次写 4 个（第 87–92 行）。这个上界在 CPU 上就能算出来，不必等 GPU 数完，CUDA 图（Phase 3）要的正是这样固定大小的缓冲区。</p>
   <p lang="en">This is a histogram, one scan and one scatter, with no real sort. Two details. First, every expert number is incremented by 1 on the way in (lines 39 and 106), and the wrapper accordingly passes <code>num_experts + 1</code> (lines 153–163); its comment says that under expert parallelism filtered experts have the number −1, giving <code>num_experts + 1</code> numbers in all (line 103): −1 lands in bucket 0, and the GEMM skips any block marked −1. Second, the buffers are sized for the worst case: each bucket pads at most BM − 1 rows, so the bound is T·k + (E + 1)(BM − 1), rounded up to a multiple of 4 because the padding is written four at a time with int4 stores (lines 87–92). The bound can be computed on the CPU without waiting for the GPU to count, and fixed-size buffers like this are exactly what CUDA graphs (Phase 3) need.</p>
+  <div class="worked">
+    <p lang="zh-CN">用动画 (a) 的数：6 个 token、E = 4、k = 2、BM = 4，路由结果是 t0 → E2、E0，t1 → E0、E1，t2 → E2、E3，t3 → E0、E2，t4 → E1、E0，t5 → E2、E0（这张路由表是动画为演示设的）。跟着第 9 项从展平一直走到分组 GEMM 里它读的那一行。只有 12 项时，主机端函数其实会选单个线程块的 small-batch 内核；下面按两个内核的通用路径走，计数、起点和 <code>expert_ids</code> 只由路由决定，与走哪条路径无关。</p>
+    <p lang="en">With the numbers of diagram (a): 6 tokens, E = 4, k = 2, BM = 4, and the routing t0 → E2, E0, t1 → E0, E1, t2 → E2, E3, t3 → E0, E2, t4 → E1, E0, t5 → E2, E0 (a routing table the diagram sets up for the demonstration). Follow entry 9 from the flatten all the way to the row it reads in the grouped GEMM. With only 12 entries the host function would in fact pick the single-block small-batch kernel; the walk below follows the general two-kernel path, and the counts, starts and <code>expert_ids</code> depend only on the routing, not on the path.</p>
+    <pre>entry 9  : token 9 // 2 = 4, expert E0
+counts   : E0 5   E1 2   E2 4   E3 1                12 entries
+padded   : 8      4      4      4    starts 0, 8, 12, 16    total 20
+sorted   : [1 2 6 9 | 11 P P P | 3 8 P P | 0 4 7 10 | 5 P P P]    P = 12
+experts  : [E0, E0, E1, E2, E3]
+block 0  : entries 1 2 6 9 → A rows 0 1 3 4 (i // 2), weight W_E0
+bound    : 12 + (4 + 1) × (4 − 1) = 27 → 28 = 7 blocks of 4; blocks 5 and 6 return at once</pre>
+    <ol lang="zh-CN">
+      <li>展平：第 9 项属于 token 9 // 2 = 4，即 t4 的第二个选择 E0。进内核时专家号加 1，E0 落进第 1 个桶，第 0 个桶留给专家并行时被过滤掉的 −1，这里是空的。</li>
+      <li>计数：第 0 号线程块在 shared memory 里用原子加数出 E0 5 项、E1 2 项、E2 4 项、E3 1 项。</li>
+      <li>补齐与扫描：向上取整到 4 的倍数得 8、4、4、4，前缀和给出起点 0、8、12、16，<code>num_tokens_post_padded</code> = 20；二分查找给 5 个块定专家：E0、E0、E1、E2、E3。</li>
+      <li>分散写：第 9 项对 E0 的游标做一次原子加，在动画里拿到位置 3，于是 <code>sorted_token_ids[3] = 9</code>。这个位置取决于原子操作的先后，换一次运行可能是 0 到 4 里的另一个。</li>
+      <li>分组 GEMM：第 0 块查 <code>expert_ids[0]</code> 得 E0，只读 W_E0；它的 4 行是项 1、2、6、9，A 的行地址是 i // 2 = 0、1、3、4。t4 的另一项 8 在第 2 块里用 E1 的权重，读的也是 A 的第 4 行，隐状态没有复制。</li>
+      <li>缓冲区：上界 27 按 4 取整为 28，网格在 M 方向开 7 块（每个 N 块各 7 块）；第 5、6 块的 <code>pid_m × BM</code> 是 20 和 24，不小于 20，一进来就返回。实际 12 项补成 20 行，浪费 8 / 20 = 40%。</li>
+    </ol>
+    <ol lang="en">
+      <li>Flatten: entry 9 belongs to token 9 // 2 = 4, the second choice of t4, E0. Expert numbers are incremented by 1 on the way into the kernel, so E0 lands in bucket 1, and bucket 0, kept for the −1 of experts filtered out under expert parallelism, is empty here.</li>
+      <li>Count: thread block 0 counts with atomic adds in shared memory: E0 5 entries, E1 2, E2 4 and E3 1.</li>
+      <li>Pad and scan: rounding up to multiples of 4 gives 8, 4, 4 and 4, the prefix sum gives the starts 0, 8, 12 and 16, and <code>num_tokens_post_padded</code> = 20; a binary search gives the 5 blocks their experts: E0, E0, E1, E2, E3.</li>
+      <li>Scatter: entry 9 does one atomic add on E0’s cursor and, in the diagram, gets position 3, so <code>sorted_token_ids[3] = 9</code>. The position depends on the order of the atomics, and another run may give another of 0 to 4.</li>
+      <li>Grouped GEMM: block 0 looks up <code>expert_ids[0]</code>, gets E0 and reads only W_E0; its 4 rows are entries 1, 2, 6 and 9, whose A row addresses are i // 2 = 0, 1, 3 and 4. The other entry of t4, entry 8, sits in block 2 with E1’s weights and reads the same row 4 of A, so the hidden state is never copied.</li>
+      <li>Buffers: the bound of 27, rounded up to 28, launches 7 M blocks for each N block; blocks 5 and 6 have <code>pid_m × BM</code> of 20 and 24, not below 20, so they return at once. The 12 real entries pad to 20 rows, a waste of 8 / 20 = 40%.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">v0.5.22 还有另外两条路。项数不超过 64 且专家多于 63 时，包装函数改用 Triton 写的单次启动内核 <code>moe_align_small_numel</code>（第 108–128 行；上限 <code>SMALL_NUMEL_LIMIT = 64</code> 在 <code>kernels/ops/moe/moe_align_small_numel.py</code> 第 19 行），批大小为 1 的解码正好落在这里。<code>kernels/ops/moe/moe_align.py</code> 是同一个算子的 JIT 版本，编译的是 <code>kernels/jit/csrc/moe/moe_align_kernel.cu</code>；默认路径不用它，只有打开实验性的 LoRA 优化开关时才走（包装函数第 130–151 行）。默认路径通过 <code>kernels/ops/moe/__init__.py</code> 的注册表（第 32–43、85–97 行）调用 <code>sgl_kernel</code> 轮子里那个 AOT 内核。</p>
   <p lang="en">v0.5.22 has two more paths. With at most 64 entries and more than 63 experts, the wrapper switches to a single-launch Triton kernel, <code>moe_align_small_numel</code> (lines 108–128; the limit <code>SMALL_NUMEL_LIMIT = 64</code> is on line 19 of <code>kernels/ops/moe/moe_align_small_numel.py</code>), which is exactly where decode at batch size 1 lands. <code>kernels/ops/moe/moe_align.py</code> is a JIT version of the same op, compiling <code>kernels/jit/csrc/moe/moe_align_kernel.cu</code>; the default path does not use it, and it is taken only when an experimental LoRA optimization switch is on (wrapper lines 130–151). The default path calls the AOT kernel in the <code>sgl_kernel</code> wheel through the registry in <code>kernels/ops/moe/__init__.py</code> (lines 32–43 and 85–97).</p>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 9 章 Parallel histogram（共享内存里的私有化计数和原子操作，正是第 0 号块数专家的做法）和第 11 章 Prefix sum (scan)（把补齐后的计数变成每个专家的起点）。</p>
@@ -166,6 +200,35 @@
   <p lang="en">So the BM trade is this: a small BM wastes less and gives more thread blocks; a large BM reuses more and makes each block more efficient, but pads more. The fastest BM depends on the row count, which is why SGLang’s configs are bucketed by M and tuned per GPU model (concept 3). There is a third way: the abstract of MegaBlocks (Gale et al., arXiv:2211.15841, v1) says existing frameworks force users to choose between dropping tokens and wasting computation and memory on padding, and it recasts MoE as block-sparse operations that never drop tokens. Lab B measures this trade on the M5: BM = 64 is fastest at 4096 tokens, and BM = 32 at 64 tokens.</p>
   <p lang="zh-CN">延伸阅读：Hennessy &amp; Patterson 第 4 章讲 Roofline 的一节（为什么解码时白算的行几乎不要钱）；PMPP 第 5 版第 5 章 Memory architecture and data locality 里的分块矩阵乘法（块越大复用越多）。</p>
   <p lang="en">Further reading: the Roofline section of Hennessy &amp; Patterson, Chapter 4 (why wasted rows cost almost nothing in decode); the tiled matrix multiplication in chapter 5, Memory architecture and data locality, of PMPP, 5th ed. (larger tiles, more reuse).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>路由给出 <code>topk_ids</code> 和 <code>topk_weights</code>；softmax、sigmoid、分组或带偏置的打分只改变这两样怎么算，后面的内核完全一样。</li>
+      <li><code>moe_align_block_size</code> 是一个直方图、一次前缀和和一次原子分散写，产出 <code>sorted_token_ids</code>、<code>expert_ids</code> 和 <code>num_tokens_post_padded</code>，缓冲区上界在 CPU 上就能算出。</li>
+      <li>分组 GEMM 只启动一次：每个 M 块从 <code>expert_ids</code> 查专家，A 的行地址是项号 // k，补齐行按掩码不读显存但照样占着矩阵乘的行。</li>
+      <li>DeepGEMM 的 contiguous 布局用于预填充，masked 布局用于开着 CUDA 图的解码；DeepEP 的 normal 内核用于预填充，low-latency 内核与 CUDA 图兼容，用于解码。</li>
+      <li>BM 的取舍随行数变：解码时补齐浪费比例高但几乎不花时间，预填充时浪费比例低但每一行都是真算力。</li>
+    </ul>
+    <ul lang="en">
+      <li>Routing produces <code>topk_ids</code> and <code>topk_weights</code>; softmax, sigmoid, grouped or biased scoring only change how those two are computed, and the kernels after them are identical.</li>
+      <li><code>moe_align_block_size</code> is one histogram, one prefix sum and one atomic scatter, producing <code>sorted_token_ids</code>, <code>expert_ids</code> and <code>num_tokens_post_padded</code>, with a buffer bound the CPU can compute in advance.</li>
+      <li>The grouped GEMM launches once: each M block looks up its expert in <code>expert_ids</code>, a row of A is addressed by entry number // k, and padding rows read no memory under the mask but still occupy rows of the matrix product.</li>
+      <li>DeepGEMM’s contiguous layout serves prefill and its masked layout serves decode with CUDA graphs on; DeepEP’s normal kernels serve prefill, and its low-latency kernels, compatible with CUDA graphs, serve decode.</li>
+      <li>The BM trade moves with the row count: in decode the padding share is high but costs almost no time, and in prefill the share is low but every padded row is real compute.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：<code>moe_align_block_size</code> 对 token 做了一次排序。→ 实际：它没有真正的排序，只有计数、扫描和原子分散写，同一专家段内的顺序每次可能不同。</li>
+      <li>误解：解码时 94% 的补齐浪费会让 MoE 层慢十几倍。→ 实际：Qwen3-30B-A3B 解码一个 token 的强度约 1 FLOP/字节，时间几乎全花在读约 75.5 MB 权重上，白算的行用的是闲着的算力（由 config 推出）。</li>
+      <li>误解：一个 token 选了 k 个专家，隐状态就要复制 k 份。→ 实际：内核用项号 // k 直接寻址同一行，上面例子里 t4 的两项都读 A 的第 4 行。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: <code>moe_align_block_size</code> sorts the tokens. → Fact: there is no real sort, only a count, a scan and an atomic scatter, and the order inside one expert’s segment may differ from run to run.</li>
+      <li>Myth: 94% padding waste in decode makes the MoE layer more than ten times slower. → Fact: decoding one token of Qwen3-30B-A3B has an intensity of about 1 FLOP per byte, its time goes almost entirely into reading about 75.5 MB of weights, and the wasted rows use idle compute (derived from the config).</li>
+      <li>Myth: a token that picks k experts has its hidden state copied k times. → Fact: the kernel addresses the same row by entry number // k, and in the example above both entries of t4 read row 4 of A.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：MoE 阶段 ↔ 内核 ↔ 库 ↔ 硬件层</h2><h2 id="compare-en" lang="en">Comparison: MoE stage ↔ kernel ↔ library ↔ hardware tier</h2>
   <div class="table-wrap">

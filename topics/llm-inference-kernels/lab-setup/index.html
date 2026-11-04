@@ -56,6 +56,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">本专题读的是 SGLang 在 NVIDIA GPU 上跑的 CUDA 内核，可这台 Mac 没有 NVIDIA GPU；免费的 Colab T4 计算能力只有 7.5，跑不了要求 8.0 的 Triton；FA3 和 DeepGEMM 至少要 Hopper，而同一档云里 H100 每小时是 L4 的 4.5 到 6.8 倍。另一头，推理服务器是一个网络服务，租来的机器又直接连在公网上，照抄文档示例就会把它开给整个互联网。所以问题是：怎样花尽量少的钱，让每一课的实验都有一台跑得动它的机器，同时不把服务暴露出去？</p>
+    <p lang="en">This topic reads the CUDA kernels SGLang runs on NVIDIA GPUs, but this Mac has no NVIDIA GPU; the free Colab T4 has compute capability 7.5 and cannot run Triton, which needs 8.0; FA3 and DeepGEMM need at least Hopper, and within the same cloud tier an H100 hour costs 4.5 to 6.8 times an L4 hour. On the other side, an inference server is a network service, the rented machine sits directly on the internet, and copying the documentation examples opens it to everyone. So the question is: how do you give every lesson’s labs a machine that can run them, for as little money as possible, without exposing the server?</p>
+    <p lang="zh-CN">概念 1 的三层分工回答前一半，概念 2 的只听本机和概念 5 的安全规则与费用回答后一半。</p>
+    <p lang="en">Concept 1’s three tiers answer the first half, and concept 2’s local-only listening with concept 5’s safety rules and cost answer the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 三层环境，各管哪些实验</h3><h3 lang="en">1. Three tiers and the labs each one serves</h3>
   <p lang="zh-CN">每一课有两个实验。Lab A 是 SGLang 或 CUDA，在云端跑；Lab B 是同一个内核想法的 Metal 版本，在这台 Mac 上跑。按本专题的大纲分配如下：</p><p lang="en">Every lesson has two labs. Lab A is SGLang or CUDA and runs in the cloud; Lab B is the Metal version of the same kernel idea and runs on this Mac. Following the syllabus of this topic, they are assigned like this:</p>
   <ul>
@@ -104,6 +111,22 @@ docker exec -it sglang-lab bash
 curl -s http://127.0.0.1:30000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "What is the capital of France?"}]}'</pre>
+  <div class="worked">
+    <p lang="zh-CN">把上面这一个请求从第二个终端跟到服务器再跟回来，顺便看清它为什么从外面到不了。这一路是根据命令和 v0.5.22 的源码推出来的，<strong>未运行</strong>。</p>
+    <p lang="en">Follow that one request from the second terminal to the server and back, and see along the way why nothing from outside can reach it. The path is worked out from the commands and the v0.5.22 source; it is <strong>not run</strong>.</p>
+    <ol lang="zh-CN">
+      <li><code>docker exec -it sglang-lab bash</code> 按名字进入 <code>docker run --name sglang-lab</code> 起的那个容器，和服务器在同一个网络命名空间里。</li>
+      <li><code>curl</code> 连 <code>127.0.0.1:30000</code>。这是容器自己的回环地址，服务器正在上面听：<code>--host 127.0.0.1 --port 30000</code>，和 <code>serving.py</code> 第 65–66 行的默认值相同。</li>
+      <li>请求体按 OpenAI 兼容的 <code>/v1/chat/completions</code> 格式发给 <code>Qwen/Qwen3-0.6B</code>，服务器做一次预填充和若干解码步，答案文本在返回 JSON 的 <code>choices[0].message.content</code> 里。</li>
+      <li>从外面看：<code>docker run</code> 没有 <code>-p</code>，主机上没有任何端口转到 30000；服务器又只听容器内的回环地址，所以主机的公网地址上 30000 端口什么也没有；按 GPU 专题环境页的安全表，对外只开 SSH 的 22 端口。</li>
+    </ol>
+    <ol lang="en">
+      <li><code>docker exec -it sglang-lab bash</code> enters, by name, the container started with <code>docker run --name sglang-lab</code>, in the same network namespace as the server.</li>
+      <li><code>curl</code> connects to <code>127.0.0.1:30000</code>. That is the container’s own loopback address, where the server is listening: <code>--host 127.0.0.1 --port 30000</code>, the same as the defaults at lines 65–66 of <code>serving.py</code>.</li>
+      <li>The body goes to <code>Qwen/Qwen3-0.6B</code> in the OpenAI-compatible <code>/v1/chat/completions</code> format; the server runs one prefill and a number of decode steps, and the answer text comes back in <code>choices[0].message.content</code> of the returned JSON.</li>
+      <li>From the outside: <code>docker run</code> had no <code>-p</code>, so no host port forwards to 30000; and the server listens only on the loopback address inside the container, so there is nothing on port 30000 at the host’s public address; under the safety table of the GPU topic’s lab page, the only port open to the world is SSH’s 22.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">三个测量工具，都来自 v0.5.22 的 <code>docs/docs/developer_guide/benchmark_and_profiling.mdx</code>：</p><p lang="en">Three measuring tools, all from <code>docs/docs/developer_guide/benchmark_and_profiling.mdx</code> at v0.5.22:</p>
   <ul>
     <li lang="zh-CN"><strong><code>bench_one_batch</code></strong> 是最底层的工具：不起服务器，直接建一个 <code>ModelRunner</code>，对一个固定的静态批次调用 <code>extend()</code> 和 <code>decode()</code>，绕过调度器。文档说它最适合剖析单个内核的性能。v0.5.22 里它的模块是 <code>sglang.benchmark.one_batch</code>（源码 <code>python/sglang/benchmark/one_batch.py</code>）。它自己加载模型，跑之前先停掉服务器，免得两份模型抢同一块显存（推断）。</li>
@@ -184,6 +207,37 @@ $ echo $?
   </div>
   <p lang="zh-CN">算一个例子（是例子，不是估算）：在 L4 上做 10 小时实验约 4.40 到 5.90 美元；在一块 H100 SXM 上做 3 小时约 8.07 到 11.97 美元。再加上镜像约 16 GB 的磁盘和停机期间的存储费。在同一档云里比，H100 每小时是 L4 的 4.5 到 6.8 倍，所以在 L4 上能做的事都在 L4 上做完，H100 上只跑必须的那几步。</p><p lang="en">One worked example (an example, not an estimate): 10 hours of labs on an L4 come to about 4.40 to 5.90 dollars; 3 hours on one H100 SXM, about 8.07 to 11.97 dollars. Add the disk for the roughly 16 GB image and storage charges while the machine is stopped. Within the same cloud tier, an H100 hour costs 4.5 to 6.8 times an L4 hour, so finish everything the L4 can do on the L4, and run only the steps that must run there on the H100.</p>
   <p lang="zh-CN">延伸阅读：这一节没有对应的书章，规则来自文档：SGLang 安装文档（端口和 Hugging Face token）、v0.5.22 源码里的默认监听地址、所选服务商的安全和计费文档（见资料）。</p><p lang="en">Further reading: no book chapter covers this section; the rules come from documentation: the SGLang install documentation (ports and the Hugging Face token), the default listening address in the v0.5.22 source, and the security and billing documentation of the provider you choose (see Resources).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>实验分三层：租用的 L4 跑所有 Lab A，租用的 H100 只跑要 Hopper 的 FA3 和 DeepGEMM 步骤，这台 Mac 跑每一课的 Lab B。</li>
+      <li>这台 Mac 跑不了 SGLang 的 CUDA 路径，Colab 的 T4（<code>sm_75</code>）达不到 Triton 要求的计算能力 8.0，所以最便宜的可用一层是 L4（<code>sm_89</code>）。</li>
+      <li>第一层用固定标签的 <code>lmsysorg/sglang:v0.5.23</code> 镜像，模型选不需要 token 的 <code>Qwen/Qwen3-0.6B</code>，权重约 1.5 GB。</li>
+      <li>服务器只听 <code>127.0.0.1</code>，容器不带 <code>-p</code>，请求用 <code>docker exec</code> 从容器里发。</li>
+      <li>Mac 上只有 Command Line Tools、没有离线的 <code>metal</code> 编译器，所以 MSL 在运行时用 <code>makeLibrary(source:options:)</code> 编译，计时只看 GPU 自己报的时间。</li>
+      <li>同一档云里 H100 每小时是 L4 的 4.5 到 6.8 倍，能在 L4 上做的都在 L4 上做，开机前查当天的价格。</li>
+    </ul>
+    <ul lang="en">
+      <li>The labs run on three tiers: a rented L4 runs every Lab A, a rented H100 runs only the FA3 and DeepGEMM steps that need Hopper, and this Mac runs Lab B of every lesson.</li>
+      <li>This Mac cannot run SGLang’s CUDA path and Colab’s T4 (<code>sm_75</code>) falls short of the compute capability 8.0 that Triton requires, so the cheapest usable tier is the L4 (<code>sm_89</code>).</li>
+      <li>Tier 1 uses the pinned <code>lmsysorg/sglang:v0.5.23</code> image and the <code>Qwen/Qwen3-0.6B</code> model, which needs no token and has about 1.5 GB of weights.</li>
+      <li>The server listens only on <code>127.0.0.1</code>, the container has no <code>-p</code>, and requests are sent from inside it with <code>docker exec</code>.</li>
+      <li>The Mac has only the Command Line Tools and no offline <code>metal</code> compiler, so MSL is compiled at run time with <code>makeLibrary(source:options:)</code> and timing uses only the time the GPU reports.</li>
+      <li>Within the same cloud tier an H100 hour costs 4.5 to 6.8 times an L4 hour, so do on the L4 everything the L4 can do, and check the price of the day before starting a machine.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：设了 <code>--api-key</code>，就可以照文档示例用 <code>--host 0.0.0.0</code> 和 <code>-p 30000:30000</code>。→ 实际：它只是第二道门（见上面安全表），本页用 <code>127.0.0.1</code> 并且不带 <code>-p</code>。</li>
+      <li>误解：SGLang 有 Apple Silicon 后端，所以这台 Mac 也能跑本专题的 Lab A。→ 实际：那个后端用的是 MLX，跑的不是本专题要读的 CUDA 内核；这台 Mac 只跑 Metal 孪生实验。</li>
+      <li>误解：免费的 Colab T4 够做本专题的实验。→ 实际：T4 的计算能力是 7.5，Triton v3.9.0 要 8.0 以上，本专题的 Triton 内核在上面都跑不了。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: with <code>--api-key</code> set, it is fine to use <code>--host 0.0.0.0</code> and <code>-p 30000:30000</code> as in the documentation examples. → Fact: it is only the second door (see the safety table above), so this page uses <code>127.0.0.1</code> and no <code>-p</code>.</li>
+      <li>Myth: SGLang has an Apple-silicon backend, so this Mac can run the topic’s Lab A. → Fact: that backend uses MLX and does not run the CUDA kernels this topic reads; this Mac runs only the Metal twins.</li>
+      <li>Myth: the free Colab T4 is enough for this topic’s labs. → Fact: the T4 has compute capability 7.5 and Triton v3.9.0 needs 8.0 or higher, so none of the topic’s Triton kernels run on it.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

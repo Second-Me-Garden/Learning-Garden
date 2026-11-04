@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">一块 GPU 上同时有几万个线程在读数据，而 global memory 在片外，最少一次搬 32 字节。一个线程只要 4 字节，如果同一个 warp 里的 32 个线程各要一个不同的 32 字节块，搬回来的 1024 字节里只有 128 字节有用；朴素矩阵乘还把同一个数从显存读 n 遍。kernel 要做到两件事：让每次传输里的字节都有线程要，并把会被反复用到的数据留在片上。</p>
+    <p lang="en">Tens of thousands of threads on one GPU read data at once, yet global memory is off chip and moves at least 32 bytes at a time. A thread wants only 4 bytes; if the 32 threads of a warp each want a different 32-byte block, only 128 of the 1024 bytes fetched are used, and the naive matrix multiply reads the same value from device memory n times over. A kernel has to achieve two things: make every byte of each transfer wanted by some thread, and keep data that will be reused on chip.</p>
+    <p lang="zh-CN">概念 2 的合并访问回答前一件，概念 4 的分块（靠概念 3 的 bank 规则让 shared memory 跑满）回答后一件。</p>
+    <p lang="en">Concept 2, coalescing, answers the first; concept 4, tiling (with the bank rule of concept 3 keeping shared memory at full speed), answers the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 内存空间：谁能看见、活多久、在哪里</h3><h3 lang="en">1. Memory spaces: who sees them, how long they live, where they sit</h3>
   <p lang="zh-CN">CUDA 的内存空间按两件事区分：<strong>作用域</strong>（哪些线程能访问）和<strong>位置</strong>（在 SM 片上还是在片外的显存里）。位置决定速度，作用域决定你能拿它做什么。下面的规格数字来自 CUDA Programming Guide 的 compute capability 附录（v13.4.2，2026-10-31 读取），按本专题的目标 <code>sm_75</code>（T4）给出：</p><p lang="en">CUDA tells its memory spaces apart by two things: <strong>scope</strong> (which threads can reach it) and <strong>location</strong> (on the SM chip or off chip in device memory). Location decides speed; scope decides what you can do with it. The figures below come from the compute-capability appendix of the CUDA Programming Guide (v13.4.2, read 2026-10-31), given for this topic’s target <code>sm_75</code> (the T4):</p>
   <ul>
@@ -88,6 +95,32 @@
     <li lang="zh-CN"><strong>步长为 s 个 float</strong>：步长 2 时 32 个地址分布在 256 字节里，要 8 个 sector，用到 50%；步长到 8（32 字节）时每个线程独占一个 sector，32 次传输共 1024 字节，用到 12.5%。再增大步长，sector 数不再增加（每个线程最多一个），按 sector 规则算的利用率也不再下降（推断：更大的步长还会碰到更多的 DRAM 行和 TLB 项，指南没有给这部分的数字）。</li>
     <li lang="en"><strong>A stride of s floats</strong>: at stride 2 the 32 addresses spread over 256 bytes and need 8 sectors, 50% used; by stride 8 (32 bytes) every thread has a sector of its own, 32 transactions moving 1024 bytes, 12.5% used. Larger strides add no more sectors (at most one per thread), so by the sector rule the use stops falling (inference: larger strides also touch more DRAM rows and TLB entries, for which the guide gives no figures).</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把下方图解 (a) 的两种访问按地址数一遍。设 <code>cudaMalloc</code> 返回 <code>a = 0x7000_0000</code>。Best Practices Guide 10.2.1.2 保证 <code>cudaMalloc</code> 的地址至少 256 字节对齐，所以 <code>a</code> 正好是一个 32 字节 sector 的开头，换任何对齐的地址结论都一样。一个地址落在哪个 sector，就看把它的低 5 位清零后是多少。</p>
+    <p lang="en">Count the two accesses of diagram (a) below by address. Suppose <code>cudaMalloc</code> returns <code>a = 0x7000_0000</code>. Section 10.2.1.2 of the Best Practices Guide guarantees that <code>cudaMalloc</code> addresses are aligned to at least 256 bytes, so <code>a</code> starts a 32-byte sector, and any aligned address gives the same answer. The sector an address falls in is the address with its low 5 bits cleared.</p>
+    <pre>coalesced: thread i reads a[i] at a + 4*i
+  t0  0x7000_0000 ... t7  0x7000_001c  -> sector 0x7000_0000
+  t8  0x7000_0020 ... t15 0x7000_003c  -> sector 0x7000_0020
+  t16 0x7000_0040 ... t23 0x7000_005c  -> sector 0x7000_0040
+  t24 0x7000_0060 ... t31 0x7000_007c  -> sector 0x7000_0060
+  4 sectors x 32 B = 128 B fetched, 32 x 4 B = 128 B used  -> 100%
+
+strided: thread i reads a[8i] at a + 32*i
+  t0 0x7000_0000, t1 0x7000_0020, t2 0x7000_0040, ..., t31 0x7000_03e0
+  32 sectors x 32 B = 1024 B fetched, 128 B used           -> 12.5%</pre>
+    <ol lang="zh-CN">
+      <li>合并：32 个线程的地址从 <code>0x7000_0000</code> 到 <code>0x7000_007c</code>，每 8 个线程共用一个 sector。warp 把 32 个请求合成 4 次 32 字节传输，与图解 (a) 第 2 步相同。</li>
+      <li>把起点错开一个 float，改读 <code>a[i+1]</code>：地址变成 <code>0x7000_0004</code> 到 <code>0x7000_0080</code>，t31 落进第五个 sector <code>0x7000_0080</code>，于是是 5 次传输，即 Best Practices Guide 10.2.1.2 的图 4。</li>
+      <li>步长 2，读 <code>a[2i]</code>：地址每隔 8 字节一个，从 <code>0x7000_0000</code> 到 <code>0x7000_00f8</code>，跨 256 字节，要 8 个 sector，每个 sector 里 4 个线程各用 4 字节，用到一半。</li>
+      <li>步长 8，读 <code>a[8i]</code>：相邻地址正好相隔 32 字节，每个 sector 只装一个线程要的 4 字节。32 次传输搬 1024 字节，有用 128 字节，与图解 (a) 第 3 步相同。</li>
+    </ol>
+    <ol lang="en">
+      <li>Coalesced: the 32 addresses run from <code>0x7000_0000</code> to <code>0x7000_007c</code>, and every 8 threads share one sector. The warp combines the 32 requests into 4 transactions of 32 bytes, as in step 2 of diagram (a).</li>
+      <li>Shift the start by one float and read <code>a[i+1]</code>: the addresses become <code>0x7000_0004</code> to <code>0x7000_0080</code>, t31 lands in a fifth sector at <code>0x7000_0080</code>, and it takes 5 transactions. That is Figure 4 of section 10.2.1.2 of the Best Practices Guide.</li>
+      <li>Stride 2, reading <code>a[2i]</code>: one address every 8 bytes, from <code>0x7000_0000</code> to <code>0x7000_00f8</code>, spanning 256 bytes. That needs 8 sectors, and in each one 4 threads use 4 bytes apiece, half the sector.</li>
+      <li>Stride 8, reading <code>a[8i]</code>: neighbouring addresses are exactly 32 bytes apart, so each sector carries only the 4 bytes one thread wants. Thirty-two transactions move 1024 bytes for 128 useful ones, as in step 3 of diagram (a).</li>
+    </ol>
+  </div>
   <p lang="zh-CN">二维数据最容易踩这个坑：按行存储的矩阵，线程沿行走是合并的，沿列走就是步长 n 的跨步访问。Lab B 在这台 M5 上量到了同样的形状：64 MB 拷贝从步长 1 到步长 2 带宽掉到约五分之一，之后每加倍再减半，到步长 16 后不再下降。Apple 没有公开它的传输粒度；拐点落在 8 和 16 个 float 之间，说明粒度在 32 到 64 字节之间（推断）。</p><p lang="en">Two-dimensional data is where this bites: in a row-major matrix, threads walking along a row are coalesced and threads walking down a column make a stride-n access. Lab B measured the same shape on this M5: for a 64 MB copy the bandwidth fell to about a fifth from stride 1 to stride 2, halved again with each doubling, and stopped falling from stride 16. Apple does not document its transfer granularity; the knee between 8 and 16 floats suggests a granule between 32 and 64 bytes (inference).</p>
   <p lang="zh-CN">延伸阅读：PMPP 第 6 章 Performance considerations（memory coalescing，以及把列访问改成行访问的 corner turning）；CUDA Best Practices Guide 10.2.1 Coalesced Access to Global Memory。</p><p lang="en">Further reading: chapter 6 of PMPP, Performance considerations (memory coalescing, and corner turning, which turns column accesses into row accesses); section 10.2.1 of the CUDA Best Practices Guide, Coalesced Access to Global Memory.</p>
 
@@ -106,6 +139,26 @@
 
   <h3 lang="zh-CN">4. 分块矩阵乘与 <code>__syncthreads()</code></h3><h3 lang="en">4. Tiled matrix multiply and <code>__syncthreads()</code></h3>
   <p lang="zh-CN">朴素的矩阵乘让每个线程算 C 的一个元素：读 A 的一行 n 个数和 B 的一列 n 个数。整个矩阵一共 2n<sup>3</sup> 次 global 读，而 A 和 B 合起来只有 2n<sup>2</sup> 个不同的数，每个数被读了 n 次。分块（tiling）的想法是让一个 block 把 A 和 B 各一块 TILE × TILE 的数据搬进 shared memory，块里的每个数在 shared 里被这个 block 的 TILE 个线程复用。每个 block 沿 k 方向走 n / TILE 步，每步搬两块，于是每个数从 global 读的次数从 n 降到 n / TILE，<strong>global 访问少了 TILE 倍</strong>。TILE = 16 时少 16 倍；代价是每个 block 2 × 16 × 16 × 4 = 2048 字节的 shared memory。</p><p lang="en">The naive matrix multiply has each thread compute one element of C, reading a row of n values of A and a column of n values of B. The whole product makes 2n<sup>3</sup> global reads, while A and B together hold only 2n<sup>2</sup> distinct values, so each one is read n times. Tiling has one block copy a TILE × TILE tile of A and one of B into shared memory, where TILE threads of the block reuse each value. Each block walks along k in n / TILE steps, two tiles per step, so each value is read from global memory n / TILE times instead of n: <strong>global accesses drop by the tile width</strong>. With TILE = 16 that is 16 times fewer; the price is 2 × 16 × 16 × 4 = 2048 bytes of shared memory per block.</p>
+  <div class="worked">
+    <p lang="zh-CN">用图解 (b) 的尺寸算一遍账：n = 64，TILE = 16，C 有 64 × 64 = 4096 个元素，每个线程算一个，一个 block 256 个线程，共 16 个 block。</p>
+    <p lang="en">Do the count with the sizes of diagram (b): n = 64 and TILE = 16, so C has 64 × 64 = 4096 elements, one per thread, with 256 threads per block and 16 blocks in all.</p>
+    <pre>naive : 4096 threads x (64 reads of A + 64 reads of B) = 524,288 global reads
+tiled : 4096 threads x 4 steps x (1 of A + 1 of B)     =  32,768 global reads
+distinct values in A and B: 2 x 64 x 64 = 8,192
+reads per value: naive 524,288 / 8,192 = 64 = n,  tiled 32,768 / 8,192 = 4 = n / TILE</pre>
+    <ol lang="zh-CN">
+      <li>朴素版：每个线程读 A 的一行 64 个数和 B 的一列 64 个数，128 次 global 读，乘 4096 个线程是 524,288 次。</li>
+      <li>分块版：k0 走 n / 16 = 4 步（图解 (b) 第 4 步），每步每个线程从 global 搬 A 的一个元素和 B 的一个元素进 shared，然后在 shared 里做 16 次乘加。每个线程只做 8 次 global 读，总共 32,768 次。</li>
+      <li>524,288 / 32,768 = 16 = TILE，正是图解 (b) 第 5 步说的「少了 16 倍」。每个值从 n = 64 次降到 4 次：A 的一个块被同一行的 4 个 block 各搬一次。</li>
+      <li>每一步搬块时，一个 warp 的 32 个线程读的是同一行上相邻的 16 个 float（两行各 16 个），正好落进概念 2 的合并规则：每 16 个 float 是 64 字节、对齐时 2 个 sector。</li>
+    </ol>
+    <ol lang="en">
+      <li>Naive: each thread reads a row of 64 values of A and a column of 64 values of B, 128 global reads, times 4096 threads is 524,288.</li>
+      <li>Tiled: k0 walks n / 16 = 4 steps (step 4 of diagram (b)); in each step each thread copies one element of A and one of B from global into shared memory, then does 16 multiply-adds out of shared memory. Each thread makes only 8 global reads, 32,768 in all.</li>
+      <li>524,288 / 32,768 = 16 = TILE, which is the 16-fold drop of step 5 of diagram (b). Each value is read 4 times instead of n = 64: one tile of A is copied once by each of the 4 blocks in its tile row.</li>
+      <li>When a tile is loaded, the 32 threads of a warp read 16 neighbouring floats along a row (16 in each of two rows), which is the coalescing rule of concept 2 at work: 16 floats are 64 bytes, two sectors when aligned.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">循环里的两个 <code>__syncthreads()</code> 各管一件事。指南的定义是：它让 block 里所有没退出的线程都到达同一个调用点后才继续，并且提供内存顺序，这次调用 happens-before 任何参与线程从等待中放行（<a href="../../parallel-programming/phase-3-memory-model-and-atomics/index.html">Parallel Programming 专题的 Phase 3</a> 讲过 happens-before）。于是：</p><p lang="en">The two <code>__syncthreads()</code> calls in the loop each guard one thing. The guide defines it as waiting until every non-exited thread of the block reaches the same call, and as providing memory ordering: the call happens-before any participating thread is released from the wait (<a href="../../parallel-programming/phase-3-memory-model-and-atomics/index.html">Phase 3 of Parallel Programming</a> covered happens-before). So:</p>
   <ul>
     <li lang="zh-CN"><strong>第一个</strong>防「写后读」：所有线程写完 <code>As</code>、<code>Bs</code> 之前，谁也不许开始读。没有它，快的线程会读到还没装进来的旧数据。</li>
@@ -132,6 +185,37 @@
   <p lang="zh-CN">这和 <a href="../../kernel-engineering/phase-2-memory/index.html">Kernel Engineering Phase 2</a> 的缺页路径是同一件事，只是「另一边」是 GPU 的显存，迁移走的是 PCIe。所以 CPU 初始化一大块统一内存后第一次在 GPU 上跑 kernel，时间里会混进一连串缺页和迁移；用 <code>cudaMemPrefetchAsync</code> 预先把数据搬过去可以避开它（Phase 6 量这件事）。你的 GPU 支持哪种统一内存，用 <code>cudaDeviceGetAttribute</code> 查 <code>cudaDevAttrConcurrentManagedAccess</code> 和 <code>cudaDevAttrPageableMemoryAccess</code>。</p><p lang="en">This is the same thing as the page-fault path of <a href="../../kernel-engineering/phase-2-memory/index.html">Kernel Engineering Phase 2</a>, except that the other side is GPU memory and the migration crosses PCIe. So the first kernel run after the CPU initialises a large unified allocation has a train of faults and migrations mixed into its time; prefetching with <code>cudaMemPrefetchAsync</code> avoids it (Phase 6 measures this). Which form of unified memory your GPU supports is answered by <code>cudaDeviceGetAttribute</code> with <code>cudaDevAttrConcurrentManagedAccess</code> and <code>cudaDevAttrPageableMemoryAccess</code>.</p>
   <p lang="zh-CN">Apple 的统一内存在物理上就是一块：CPU 和 GPU 共用同一组 DRAM。Lab B 用 <code>makeBuffer(length:)</code> 默认的共享存储模式（<code>MTLStorageModeShared</code>），CPU 写进去的数据 GPU 直接读，没有迁移，也没有拷贝。这也是 Lab B 里没有 <code>cudaMemcpy</code> 那一步的原因。</p><p lang="en">Apple’s unified memory is physically one pool: the CPU and the GPU share the same DRAM. Lab B uses the default shared storage mode of <code>makeBuffer(length:)</code> (<code>MTLStorageModeShared</code>), so what the CPU writes the GPU reads directly, with no migration and no copy. That is why Lab B has no step like <code>cudaMemcpy</code>.</p>
   <p lang="zh-CN">延伸阅读：《CUDA by Example》10.2 节 Page-Locked Host Memory；PMPP 第 22 章 Programming a heterogeneous computing cluster（主机与设备之间的拷贝）和第 24 章 Advanced practices and future evolution（统一内存，按章名推断）。</p><p lang="en">Further reading: section 10.2 of <em>CUDA by Example</em>, Page-Locked Host Memory; chapter 22 of PMPP, Programming a heterogeneous computing cluster (copies between host and device), and chapter 24, Advanced practices and future evolution (unified memory, inferred from the chapter title).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>CUDA 的内存空间按作用域和位置区分，「local」说的是作用域，它实际在片外的 device memory 里。</li>
+      <li>global memory 以 32 字节的 sector 为单位传输，一个 warp 的一次读要付几次传输，就看 32 个地址碰到几个不同的 sector。</li>
+      <li>相邻线程读相邻的 float 是 4 个 sector、100% 有用；步长 8 个 float 时是 32 个 sector、只用到 12.5%。</li>
+      <li>shared memory 有 32 个 bank，字节地址 <code>addr</code> 在 bank <code>(addr / 4) % 32</code>，同 bank 不同地址会串行化，补一列能消除它。</li>
+      <li>分块把每个值的 global 读取次数从 n 降到 n / TILE，两个 <code>__syncthreads()</code> 分别防写后读和读后写。</li>
+      <li>独立显卡上的统一内存靠缺页迁移维持一致，异步拷贝必须用 pinned 主机内存。</li>
+    </ul>
+    <ul lang="en">
+      <li>CUDA memory spaces differ in scope and location, and "local" names a scope: local memory actually lives off chip in device memory.</li>
+      <li>Global memory moves in 32-byte sectors, so the number of transactions a warp’s load costs is the number of distinct sectors its 32 addresses touch.</li>
+      <li>Neighbouring threads reading neighbouring floats touch 4 sectors, all bytes used; at a stride of 8 floats they touch 32 sectors and use 12.5%.</li>
+      <li>Shared memory has 32 banks, byte address <code>addr</code> sits in bank <code>(addr / 4) % 32</code>, different addresses in one bank are serialized, and one padding column removes the conflict.</li>
+      <li>Tiling cuts the global reads of each value from n to n / TILE, and the two <code>__syncthreads()</code> calls guard read-after-write and write-after-read.</li>
+      <li>Unified memory on a discrete card stays coherent through page-fault migration, and asynchronous copies need pinned host memory.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：合并要求线程 k 恰好读第 k 个字。→ 实际：Best Practices Guide 10.2.1.1 写明，线程在这 4 个 sector 内外怎样打乱顺序，compute capability 6.0 及以上都还是 4 次传输；要紧的是碰到几个 sector。</li>
+      <li>误解：「一个 warp 一条 128 字节」是一次传输。→ 实际：传输单位是 32 字节，128 字节是 4 个 sector；错开一个 float 就变成 5 次。</li>
+      <li>误解：多个线程读 shared memory 的同一个地址就是 bank 冲突。→ 实际：同一地址是广播，不算冲突；冲突是同一个 bank 里的不同地址。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: coalescing needs thread k to read exactly word k. → Fact: section 10.2.1.1 of the Best Practices Guide says that however the threads are permuted within or across the four sectors, compute capability 6.0 and later still use 4 transactions; what counts is how many sectors are touched.</li>
+      <li>Myth: "one 128-byte line per warp" is one transaction. → Fact: the unit is 32 bytes, so 128 bytes are 4 sectors, and a shift of one float makes it 5.</li>
+      <li>Myth: several threads reading the same shared-memory address is a bank conflict. → Fact: the same address is a broadcast, not a conflict; a conflict is different addresses in the same bank.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

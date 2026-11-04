@@ -56,6 +56,12 @@
   </ul>
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+  <div class="crux">
+    <p lang="zh-CN">批小时一步解码是几百个很短的内核，CPU 从 Python 里逐个发射它们，GPU 可能在内核之间空等。把整步录下来一次性重放，就省掉了逐个发射的开销；可录下来的东西是死的，每个内核的网格、形状和指针都定在录制那一刻，而批大小和每个请求的长度每一步都在变。一份固定的录像，怎么用来跑每一步都不一样的输入？</p>
+    <p lang="en">At a small batch, one decode step is several hundred very short kernels, and while the CPU launches them one by one from Python the GPU may sit idle between them. Recording the whole step once and replaying it removes the per-launch cost; but a recording is frozen, with every kernel’s grid, shapes and pointers fixed at the moment of capture, while the batch size and every request’s length change from step to step. How can one fixed recording run inputs that differ at every step?</p>
+    <p lang="zh-CN">概念 3 的按批大小分桶填充解决形状，概念 4 和 5 的「图外由 indices 更新器写地址固定的缓冲区、plan() 算调度，run() 在图里读」解决每步变化的长度。</p>
+    <p lang="en">Padding to bucketed batch sizes in concept 3 deals with the shapes, and concepts 4 and 5, with the indices updater writing fixed-address buffers and plan() computing the schedule outside the graph, and run() reading them inside it, deal with the lengths that change every step.</p>
+  </div>
   <p lang="zh-CN">下文 SGLang 的源码路径和行号都在 <code>v0.5.22</code> 标签下，FlashInfer 的在 <code>v0.7.1</code> 标签下（SGLang 钉的版本），PyTorch 的说明文档在 <code>v2.14.1</code> 标签下（同样是 SGLang 钉的版本），都是 2026-11-01 从 raw.githubusercontent.com 取回后读的。CUDA 的说法来自 CUDA Programming Guide v13.4.2 的 4.2 节 CUDA Graphs（2026-10-31 读取）。</p><p lang="en">Every SGLang source path and line number below is at the <code>v0.5.22</code> tag, FlashInfer’s at its <code>v0.7.1</code> tag (the version SGLang pins), and the PyTorch notes at <code>v2.14.1</code> (also SGLang’s pin); all were fetched from raw.githubusercontent.com and read on 2026-11-01. Statements about CUDA come from section 4.2, CUDA Graphs, of the CUDA Programming Guide v13.4.2 (read 2026-10-31).</p>
 
   <h3 lang="zh-CN">1. 为什么要捕获解码步：发射开销对微秒级内核</h3><h3 lang="en">1. Why decode steps are captured: launch overhead against microsecond-class kernels</h3>
@@ -96,6 +102,31 @@
     <li lang="zh-CN"><strong>重放和裁剪</strong>（<code>execute</code>，第 1598 行）：<code>self.backend.replay(...)</code>（第 1628 行），然后输出只取前 <code>raw_num_token</code> 行（第 1649 行），填充行的结果丢掉。</li>
     <li lang="en"><strong>Replay and slicing</strong> (<code>execute</code>, line 1598): <code>self.backend.replay(...)</code> (line 1628), after which only the first <code>raw_num_token</code> rows of the output are kept (line 1649), and the results of the padding rows are thrown away.</li>
   </ol>
+  <div class="worked">
+    <p lang="zh-CN">走一遍动画 (a) 的那一步：L4 上按推断的 <code>max_bs = 48</code>，捕获表是 <code>[1, 2, 4, 8, 12, 16, 24, 32, 40, 48]</code>，这一步有 5 个真实请求。5 个请求的序列长度 37、120、8、512、64 是为演示设的，不来自任何测量。</p>
+    <p lang="en">Walk the step of diagram (a): on an L4 with the inferred <code>max_bs = 48</code>, the capture list is <code>[1, 2, 4, 8, 12, 16, 24, 32, 40, 48]</code>, and this step has 5 real requests. Their sequence lengths, 37, 120, 8, 512 and 64, are chosen for the demonstration and come from no measurement.</p>
+    <pre>can_run_graph : 5 ≤ max_bs 48                       → use a graph
+_pad_to_bucket: bisect_left(capture_bs, 5) = 3      → bs = capture_bs[3] = 8
+seq_lens      : [37, 120, 8, 512, 64 | 1, 1, 1]      padding rows get fill value 1
+seq_lens_sum  : 741 + (8 − 5) × 1 = 744
+kv_indptr     : [0, 37, 157, 165, 677, 741, 742, 743, 744]   9 = bs + 1 entries
+replay        : graph for bs 8, one launch for all 28 layers; keep output rows 0..4
+other batches : 13 → 16 (3 padding rows);  50 &gt; 48 → no graph, eager launches</pre>
+    <ol lang="zh-CN">
+      <li><code>can_run_graph</code>：默认的填充模式只看批大小是否不超过 <code>max_bs</code>，5 ≤ 48，可以用图。</li>
+      <li><code>_pad_to_bucket</code>：<code>bisect_left</code> 在表里找到第一个不小于 5 的位置，下标 3，值 8，于是用尺寸 8 的那张图，多出 3 行填充。</li>
+      <li><code>fill_from</code> 把 5 行真实输入拷进图的静态缓冲区；FlashInfer 后端给填充行的长度是 1，<code>seq_lens_sum</code> 从 741 变成 744。</li>
+      <li>图外，<code>init_forward_metadata_out_graph</code> 里的 indices 更新器按这 8 行求前缀和，得到 9 个数的 <code>kv_indptr</code>，并把 744 个 <code>int32</code> 槽位号（2976 字节）直接写进尺寸 8 那组包装器的固定缓冲区；随后 <code>fast_decode_plan</code> 在 CPU 上算调度。图里的 28 层 <code>run()</code> 读的就是这几块缓冲区。</li>
+      <li>重放一次，输出只留前 5 行。批大小 13 会填到 16，也浪费 3 行；批大小 50 超过 48，<code>can_run_graph</code> 为假，这一步回到逐个发射。</li>
+    </ol>
+    <ol lang="en">
+      <li><code>can_run_graph</code>: the default padding mode checks only that the batch size does not exceed <code>max_bs</code>; 5 ≤ 48, so a graph can be used.</li>
+      <li><code>_pad_to_bucket</code>: <code>bisect_left</code> finds the first entry of the list not less than 5, at index 3 with value 8, so the size-8 graph is used with 3 padding rows.</li>
+      <li><code>fill_from</code> copies the 5 real input rows into the static buffers of the graph; the FlashInfer backend gives padding rows a length of 1, so <code>seq_lens_sum</code> goes from 741 to 744.</li>
+      <li>Outside the graph, the indices updater in <code>init_forward_metadata_out_graph</code> takes the prefix sum over these 8 rows, giving a 9-number <code>kv_indptr</code>, and writes the 744 <code>int32</code> slot numbers (2976 bytes) straight into the fixed buffers of the size-8 wrapper set; <code>fast_decode_plan</code> then computes the schedule on the CPU. These buffers are what <code>run()</code> of the 28 layers reads inside the graph.</li>
+      <li>One replay, and only the first 5 output rows are kept. A batch of 13 would pad to 16, also wasting 3 rows; a batch of 50 exceeds 48, so <code>can_run_graph</code> is false and the step falls back to launching kernels one by one.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">这里有一组取舍：表越密，填充浪费越少，但要捕获的图越多，启动越慢、图占的显存越多。<code>memory_hook.py</code> 第 65–66 行的文档字符串估计，激活和 CUDA 图缓冲区大约占 <code>chunked_prefill_size × 1.5 + max_bs × 2</code>（按 GB 计的粗估，原文如此），所以显存小的卡 <code>max_bs</code> 也小。</p><p lang="en">There is a trade-off here: a denser list wastes less on padding but means more graphs to capture, a slower start and more memory held by graphs. The docstring at lines 65–66 of <code>memory_hook.py</code> estimates the activations and CUDA graph buffers at about <code>chunked_prefill_size × 1.5 + max_bs × 2</code> (a rough estimate in GB, as written there), which is why smaller cards get a smaller <code>max_bs</code>.</p>
   <p lang="zh-CN">延伸阅读：Chip Huyen《AI Engineering》讲推理优化的第 9 章里关于批处理的部分（为什么服务端要把请求攒成批，以及批大小和延迟的取舍）。按桶填充本身没有对应的书章，依据是上面引用的源码。</p><p lang="en">Further reading: the part on batching in chapter 9, on inference optimization, of Chip Huyen’s <em>AI Engineering</em> (why a server gathers requests into batches, and the trade-off between batch size and latency). Padding to buckets itself has no book chapter; it rests on the source cited above.</p>
 
@@ -131,6 +162,35 @@
   <p lang="zh-CN">SGLang 这一侧：<code>_create_decode_wrappers</code>（<code>flashinfer_backend.py</code> 第 1102–1115 行）为每个捕获尺寸建一组 <code>use_cuda_graph=True</code> 的包装器，<code>paged_kv_indptr_buffer</code> 是 <code>self.kv_indptr[i][: num_tokens + 1]</code>，<code>paged_kv_indices_buffer</code> 就是 <code>init_cuda_graph_state</code> 分配的那块 <code>cuda_graph_kv_indices</code>。捕获时第一次 <code>plan</code> 跑完之后，SGLang 把这些包装器的 <code>begin_forward</code> 换成 <code>partial(fast_decode_plan, w)</code>（第 817–821 行）；<code>fast_decode_plan</code> 是从 <code>flashinfer</code> 包导入的（第 76–81 行），定义在 FlashInfer <code>decode.py</code> 第 4395 行，文档字符串说它是 <code>plan</code> 的快速版本，去掉了对图缓冲区多余的设备到设备拷贝和元数据多余的主机到设备拷贝（第 4420–4423 行）；文档字符串说它是为多步草稿后端写的，而 v0.5.22 的主解码路径同样装上了它。之所以能省掉拷贝，是因为 SGLang 的 indices 更新器直接把 <code>kv_indices</code> 写进了图的缓冲区（Phase 1 的概念 5），并且自己维护长度的 CPU 副本 <code>seq_lens_cpu</code>，传入 <code>global_override_indptr_cpu</code>（第 1785–1817 行）。</p><p lang="en">On SGLang’s side, <code>_create_decode_wrappers</code> (lines 1102–1115 of <code>flashinfer_backend.py</code>) builds one set of <code>use_cuda_graph=True</code> wrappers per captured size, with <code>self.kv_indptr[i][: num_tokens + 1]</code> as <code>paged_kv_indptr_buffer</code> and the <code>cuda_graph_kv_indices</code> that <code>init_cuda_graph_state</code> allocated as <code>paged_kv_indices_buffer</code>. After the first <code>plan</code> at capture time, SGLang replaces the <code>begin_forward</code> of those wrappers with <code>partial(fast_decode_plan, w)</code> (lines 817–821); <code>fast_decode_plan</code> is imported from the <code>flashinfer</code> package (lines 76–81) and defined at line 4395 of FlashInfer’s <code>decode.py</code>, whose docstring calls it a faster version of <code>plan</code> that removes an unnecessary device-to-device copy for the graph buffers and an unnecessary host-to-device copy for the metadata (lines 4420–4423); the docstring says it was written for the multi-step draft backend, yet the main decode path of v0.5.22 installs it as well. The copies can go because SGLang’s indices updater already writes <code>kv_indices</code> straight into the graph’s buffer (concept 5 of Phase 1), and keeps its own CPU copy of the lengths, <code>seq_lens_cpu</code>, which it passes in as <code>global_override_indptr_cpu</code> (lines 1785–1817).</p>
   <p lang="zh-CN">延伸阅读：参考书目里没有书讲 plan/run 拆分。这一概念以 FlashInfer 论文 3.3、3.4 节和附录 D.1 CUDAGraph-Compatible Workspace Layout，以及 v0.7.1 的 <code>flashinfer/decode.py</code> 为准，见资料。CSR 数组本身见 PMPP 第 5 版第 15 章 Sparse matrix computation（Phase 1 已引）。</p><p lang="en">Further reading: no book in the bibliography covers the plan/run split. This concept rests on sections 3.3 and 3.4 and appendix D.1, CUDAGraph-Compatible Workspace Layout, of the FlashInfer paper, and on <code>flashinfer/decode.py</code> at v0.7.1; see Resources. For the CSR arrays themselves, see chapter 15, Sparse matrix computation, of PMPP 5th ed. (already cited in Phase 1).</p>
 
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>每个内核都要付一次发射开销，解码的内核又短又多，所以 CUDA 图的主要收益是省掉 CPU 开销，而不是让内核本身变快。</li>
+      <li>图每次重放都用同样的内核、参数和地址：图里不能有主机同步、依赖数据的控制流和动态形状。</li>
+      <li>SGLang 为一组批大小各捕获一张图，用 <code>bisect_left</code> 把真实批次填充到不小于它的最小尺寸，超过 <code>max_bs</code> 就不用图。</li>
+      <li>后端把元数据准备拆成图外的 <code>init_forward_metadata_out_graph</code> 和图内的 <code>init_forward_metadata_in_graph</code>，共享缓冲区由 <code>init_cuda_graph_state</code> 按最大尺寸一次分配。</li>
+      <li>FlashInfer 的 <code>plan()</code> 在 CPU 上算调度，把新内容拷进地址固定的缓冲区；图里的 <code>run()</code> 只读这些缓冲区，一份 plan 给所有层用。</li>
+    </ul>
+    <ul lang="en">
+      <li>Every kernel pays one launch overhead and decode kernels are short and many, so the main gain of a CUDA graph is the CPU overhead it removes, not faster kernels.</li>
+      <li>Every replay of a graph uses the same kernels, arguments and addresses, so a graph may hold no host sync, no data-dependent control flow and no dynamic shapes.</li>
+      <li>SGLang captures one graph per batch size in a list, pads the real batch to the smallest size not below it with <code>bisect_left</code>, and runs without a graph above <code>max_bs</code>.</li>
+      <li>The backend splits metadata preparation into <code>init_forward_metadata_out_graph</code> outside the graph and <code>init_forward_metadata_in_graph</code> inside it, with the shared buffers allocated once at the maximum size by <code>init_cuda_graph_state</code>.</li>
+      <li>FlashInfer’s <code>plan()</code> computes the schedule on the CPU and copies new contents into fixed-address buffers; <code>run()</code> inside the graph only reads those buffers, and one plan serves every layer.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：CUDA 图让每个内核在 GPU 上跑得快得多。→ 实际：PyTorch 说明写的是图里的内核只略快一点，主要收益是省掉 Python、C++ 和驱动的开销。</li>
+      <li>误解：捕获区里不能新建张量。→ 实际：可以，地址来自这张图私有的内存池并在重放时固定；不可以的是让大小依赖数据。</li>
+      <li>误解：一张捕获好的图能接任意批大小。→ 实际：一张图只认一个形状，所以要按表填充；图模式的 FlashInfer 包装器遇到批大小变了会抛 <code>ValueError</code>。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a CUDA graph makes each kernel run much faster on the GPU. → Fact: the PyTorch notes say kernels in a replay run only slightly faster, and the main gain is removing Python, C++ and driver overhead.</li>
+      <li>Myth: no tensor may be created inside the captured region. → Fact: it may, with an address from the graph’s private memory pool that stays fixed across replays; what is not allowed is a size that depends on data.</li>
+      <li>Myth: one captured graph can take any batch size. → Fact: a graph knows only one shape, hence the padding to a list of sizes, and a graph-mode FlashInfer wrapper raises <code>ValueError</code> when the batch size changes.</li>
+    </ul>
+  </div>
+
   <h2 id="compare" lang="zh-CN">对照表：图里禁止的 ↔ 为什么 ↔ 绕法</h2><h2 id="compare-en" lang="en">Comparison: forbidden in a graph ↔ why ↔ the workaround</h2>
   <div class="table-wrap">
   <table class="cmp">
@@ -152,7 +212,7 @@
            "2. 这一步有 5 个真实请求。can_run_graph 检查 5 不超过 max_bs 48，可以用图。",
            "3. _pad_to_bucket 用 bisect_left 找到不小于 5 的最小捕获尺寸：8。",
            "4. fill_from 把 5 行真实输入拷进图的静态缓冲区；第 5 到 7 行是填充行，FlashInfer 后端给它们的序列长度是 1。",
-           "5. 重放前在图外运行 init_forward_metadata_out_graph：plan() 按这 8 行写好 kv_indptr、kv_indices 等元数据，写进图认得的那几块缓冲区。",
+           "5. 重放前在图外运行 init_forward_metadata_out_graph：indices 更新器按这 8 行把 kv_indptr、kv_indices 写进图认得的那几块缓冲区，plan() 再算调度。",
            "6. 尺寸 8 的那张图重放一次：一次调用发出全部 28 层的内核，参数和指针都是捕获时录下的。",
            "7. 输出只取前 5 行，填充行的结果丢掉。代价是多算 3 行；表越密浪费越少，但图越多、占的显存越多。"]'
          data-captions-en='["The whole picture: at the top, the ten decode graphs captured at start-up, one per batch size; in the middle, the static input buffer of the graphs on the left and one replay on the right; at the bottom, the output. The example is a 24 GB L4, where max_bs comes out as 48 (inference). Press Play to walk through it.",
@@ -160,7 +220,7 @@
            "2. This step has 5 real requests. can_run_graph checks that 5 does not exceed max_bs 48, so a graph can be used.",
            "3. _pad_to_bucket uses bisect_left to find the smallest captured size not below 5: 8.",
            "4. fill_from copies the 5 real input rows into the static buffers of the graph; rows 5 to 7 are padding, and the FlashInfer backend gives them a sequence length of 1.",
-           "5. Before the replay, init_forward_metadata_out_graph runs outside the graph: plan() writes kv_indptr, kv_indices and the other metadata for these 8 rows into the buffers the graph knows.",
+           "5. Before the replay, init_forward_metadata_out_graph runs outside the graph: the indices updater writes kv_indptr and kv_indices for these 8 rows into the buffers the graph knows, and plan() then computes the schedule.",
            "6. The graph for size 8 is replayed once: a single call issues the kernels of all 28 layers, with the arguments and pointers recorded at capture.",
            "7. Only the first 5 output rows are kept, and the results of the padding rows are thrown away. The cost is 3 extra rows of work; a denser list wastes less, but means more graphs and more memory held by them."]'>
       <defs>

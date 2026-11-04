@@ -58,6 +58,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">一个 launch 文件同时拉起相机、滤波和检测三个节点。检测节点启动时滤波节点可能还没加载完参数，于是它先收到几帧半配置状态下的数据；而 launch 能看到的只有「进程已经起来了」。另一边，相机每秒发 20 张 1 MB 的图，每一跳都要序列化、穿过内核、再反序列化。怎样让一个外部管理者确定某个节点「已经准备好、可以开始发数据」，又怎样在不改节点代码的前提下去掉这些拷贝？</p>
+    <p lang="en">One launch file brings up three nodes: camera, filter and detector. When the detector starts, the filter may not have loaded its parameters yet, so the detector first sees a few frames from a half-configured system; and all launch can see is “the process is up”. Meanwhile the camera sends twenty 1 MB images a second, and every hop serializes them, crosses the kernel and deserializes them. How can an outside manager know that a node is “ready and allowed to send data”, and how can the copies be removed without changing the node code?</p>
+    <p lang="zh-CN">概念 4 的 lifecycle 状态机回答第一问，概念 5 的组合加上概念 6 的进程内通信回答第二问。</p>
+    <p lang="en">Concept 4, the lifecycle state machine, answers the first question, and concept 5, composition, together with concept 6, intra-process communication, answers the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. launch 文件在运行时是什么</h3><h3 lang="en">1. What a launch file is at run time</h3>
   <p lang="zh-CN">Python launch 文件不是「按顺序执行的启动脚本」，而是一个返回<strong>描述</strong>的函数。<code>ros2 launch</code> 加载这个文件，调用其中的 <code>generate_launch_description()</code>，拿到一个 <code>LaunchDescription</code>：一列<strong>动作</strong>（action），例如声明参数、启动节点、包含另一个 launch 文件、注册事件处理器。然后一个 launch 服务（<code>launch.LaunchService</code>）在一个 asyncio 事件循环里逐个「访问」这些动作：</p>
   <p lang="en">A Python launch file is not “a start-up script that runs in order”; it is a function that returns a <strong>description</strong>. <code>ros2 launch</code> loads the file, calls its <code>generate_launch_description()</code>, and gets a <code>LaunchDescription</code>: a list of <strong>actions</strong> such as declaring an argument, starting a node, including another launch file, or registering an event handler. A launch service (<code>launch.LaunchService</code>) then “visits” those actions one by one in an asyncio event loop:</p>
@@ -135,6 +142,30 @@
   </ol>
   <div class="note" lang="zh-CN">这些保证是<em>约定</em>，不是强制：状态机只保证回调按规则被调用、状态按规则转换。如果你在构造函数里就建定时器并发布，或者在 <code>on_activate</code> 里做耗时几秒的事，状态机不会拦你，但「Inactive 不产生数据」「激活很快」就不再成立。launch 里也可以用 <code>launch_ros.actions.LifecycleNode</code> 和状态转换事件自动驱动它（请查文档）；本页实验用 CLI 手动驱动，看得最清楚。</div>
   <div class="note" lang="en">These guarantees are a <em>convention</em>, not enforcement: the state machine guarantees only that callbacks are called and states change by the rules. If you create a timer and publish from the constructor, or do several seconds of work in <code>on_activate</code>, the machine will not stop you, but “Inactive produces no data” and “activation is quick” stop being true. Launch can also drive it automatically with <code>launch_ros.actions.LifecycleNode</code> and state-transition events (check the docs); the lab on this page drives it by hand with the CLI, which shows it most clearly.</div>
+  <div class="worked">
+    <p lang="zh-CN">用 Lab A 的 <code>managed_talker</code> 走一遍图解 (a)：构造函数只声明 <code>period_ms</code>（默认 500），<code>on_configure</code> 在它不大于 0 时返回 <code>FAILURE</code>，否则建发布者和定时器；定时器回调 <code>tick()</code> 每次先执行 <code>count_++</code> 再 publish。下面把 <code>period_ms</code> 先设成 0、再设成 200。configure 成功后隔 1.1 s 才 activate，这个间隔是为了举例假设的，其余数字都来自 Lab A 的代码。</p>
+    <p lang="en">Walk diagram (a) with the <code>managed_talker</code> of Lab A: the constructor only declares <code>period_ms</code> (default 500), <code>on_configure</code> returns <code>FAILURE</code> when it is not greater than 0 and otherwise creates the publisher and the timer, and the timer callback <code>tick()</code> always runs <code>count_++</code> before it publishes. Below, <code>period_ms</code> is set first to 0 and then to 200. The 1.1 s gap between a successful configure and activate is an assumption made for illustration; every other number comes from the Lab A code.</p>
+    <pre>period_ms = 0    configure → on_configure: 0 ≤ 0 → FAILURE        state unconfigured
+period_ms = 200  configure → on_configure: pub_, timer_ created   state inactive
+t = 0.2 … 1.0 s  tick() × 5: count_ 0, 1, 2, 3, 4 used, publish() sends nothing
+t = 1.1 s        activate → pub_-&gt;on_activate()                    state active
+t = 1.2 s        first message on /chatter: "managed hello 5"
+deactivate, cleanup → on_cleanup: timer_, pub_ reset, count_ = 0  state unconfigured</pre>
+    <ol lang="zh-CN">
+      <li><code>period_ms</code> 为 0 时，configure 让节点进入 Configuring，<code>on_configure</code> 返回 <code>FAILURE</code>，节点回到出发的主状态 Unconfigured。进程没死，参数可以改了再试。</li>
+      <li>改成 200 后 configure 成功，节点到达 Inactive。发布者已经存在，<code>ros2 topic info /chatter</code> 看得到它；定时器也已经在跑。</li>
+      <li>在 Inactive 的 1.1 s 里定时器触发了 5 次，每次 <code>count_++</code> 都照常执行，但 <code>LifecyclePublisher</code> 没被激活，<code>publish()</code> 什么都不发，只打印警告。</li>
+      <li>activate 调用 <code>pub_-&gt;on_activate()</code>，节点到达 Active。下一次 tick 在 t = 1.2 s，<code>/chatter</code> 上看到的第一条消息是 <code>managed hello 5</code>，而不是 0：计数器在 Inactive 期间一直在走。</li>
+      <li>deactivate 回到 Inactive，资源还在；cleanup 再回到 Unconfigured，<code>on_cleanup</code> 释放定时器和发布者并把 <code>count_</code> 清零，下次 configure 从头开始。</li>
+    </ol>
+    <ol lang="en">
+      <li>With <code>period_ms</code> at 0, configure puts the node into Configuring, <code>on_configure</code> returns <code>FAILURE</code>, and the node goes back to the primary state it started from, Unconfigured. The process is still alive, so the parameter can be changed and the transition retried.</li>
+      <li>After changing it to 200, configure succeeds and the node reaches Inactive. The publisher already exists, so <code>ros2 topic info /chatter</code> shows it, and the timer is already running.</li>
+      <li>During the 1.1 s in Inactive the timer fires 5 times, and each time <code>count_++</code> runs as usual, but the <code>LifecyclePublisher</code> is not activated, so <code>publish()</code> sends nothing and only logs a warning.</li>
+      <li>activate calls <code>pub_-&gt;on_activate()</code> and the node reaches Active. The next tick is at t = 1.2 s, and the first message seen on <code>/chatter</code> is <code>managed hello 5</code>, not 0: the counter kept running while the node was Inactive.</li>
+      <li>deactivate returns to Inactive with the resources kept; cleanup then returns to Unconfigured, and <code>on_cleanup</code> frees the timer and the publisher and resets <code>count_</code> to zero, so the next configure starts from scratch.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲 lifecycle 节点的章节；设计文章 <a href="https://design.ros2.org/articles/node_lifecycle.html">Managed nodes</a>；官方 demo <a href="https://github.com/ros2/demos/tree/jazzy/lifecycle">ros2/demos/lifecycle（jazzy 分支）</a>。</p>
   <p lang="en">Further reading: the chapters of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on lifecycle nodes; the design article <a href="https://design.ros2.org/articles/node_lifecycle.html">Managed nodes</a>; the official demo <a href="https://github.com/ros2/demos/tree/jazzy/lifecycle">ros2/demos/lifecycle (jazzy branch)</a>.</p>
 
@@ -171,8 +202,61 @@
   <p lang="en"><strong>Conditions for zero copy</strong> (per Jazzy’s rclcpp docs and source; the author did not verify each case, so check the docs): publishing with <code>publish(std::unique_ptr&lt;Msg&gt;)</code> hands over ownership, and with exactly one subscriber whose callback takes a <code>std::unique_ptr</code>, ownership moves straight across with zero copies; when all subscribers take a <code>const</code> shared pointer, they share one copy; when a subscriber that wants ownership coexists with others, the manager must copy for it; and publishing with <code>publish(const Msg &amp;)</code> makes rclcpp copy once before it can hand anything over. Intra-process communication also restricts QoS (history must be keep last, for example; check the docs for durability support), and it is an rclcpp feature: rclpy has no matching bypass.</p>
   <div class="note" lang="zh-CN">为什么这能显著降低延迟：一张 1 MB 的图像走 DDS，要做一次序列化（遍历并拷贝 1 MB）、一次或多次穿过内核（UDP 回环要分片，共享内存传输也有拷贝和通知）、一次反序列化（再拷贝 1 MB 并分配内存），还要唤醒 DDS 的接收线程。进程内只传一个指针，代价与消息大小基本无关。消息越大，差别越大；对几个字节的消息，差别主要来自省掉的线程切换。Lab B 用 1 MB 消息量这个差别。</div>
   <div class="note" lang="en">Why this cuts latency so much: a 1 MB image over DDS needs one serialization (walk and copy 1 MB), one or more trips through the kernel (UDP loopback fragments it, and shared-memory transport also copies and notifies), one deserialization (copy 1 MB again and allocate), and a wake-up of the DDS receive thread. Intra-process passes one pointer, at a cost that hardly depends on message size. The larger the message, the larger the gap; for a message of a few bytes the gap comes mostly from the thread switches saved. Lab B measures this gap with 1 MB messages.</div>
+  <div class="worked">
+    <p lang="zh-CN">把 Lab B 的 <code>Stamper</code> 和 <code>Probe</code> 按三种模式各跑一遍，数一数每条消息被拷贝了多少字节。<code>Stamper</code> 每 50 ms 用 <code>unique_ptr</code> 发一张 <code>bytes = 1000000</code> 的 <code>sensor_msgs/msg/Image</code>，<code>Probe</code> 用接收 <code>unique_ptr</code> 的回调收下；两边在序号为 100 的倍数时打印数据缓冲区的地址。下面的 <code>0xA…</code> 和 <code>0xB…</code> 是代替真实地址的占位符。</p>
+    <p lang="en">Run the <code>Stamper</code> and <code>Probe</code> of Lab B once in each of the three modes and count how many bytes each message is copied. <code>Stamper</code> publishes one <code>sensor_msgs/msg/Image</code> of <code>bytes = 1000000</code> every 50 ms through a <code>unique_ptr</code>, and <code>Probe</code> receives it with a callback that takes a <code>unique_ptr</code>; both sides print the address of the data buffer when the sequence number is a multiple of 100. The <code>0xA…</code> and <code>0xB…</code> below are placeholders for real addresses.</p>
+    <pre>rate        1000 ms / 50 ms = 20 msg/s  → 20 × 1 000 000 B = 20 MB/s of image data
+mode 1, 2   serialize 1 MB + deserialize 1 MB = 2 MB copied per message → 40 MB/s
+            seq 100: Stamper data at 0xA…, Probe data at 0xB…  (different buffers)
+mode 3      unique_ptr → one unique_ptr subscriber: 0 B copied, one pointer handed over
+            seq 100: Stamper data at 0xA…, Probe data at 0xA…  (expected: same buffer)
+Probe line  every 100 msgs = every 100 × 50 ms = 5 s</pre>
+    <ol lang="zh-CN">
+      <li>定时器周期 50 ms，所以每秒 20 条；每条的数据区是 1000000 字节，<code>Stamper</code> 每秒产出 20 MB 图像数据。<code>Probe</code> 每 100 条打印一行均值和最大值，也就是每 5 s 一行。</li>
+      <li>模式 1 是两个进程。<code>publish()</code> 下面的 rmw 把 1 MB 序列化成 CDR 字节，经内核送到另一个进程，那边的 rmw 再把它反序列化进一个新分配的消息对象。仅这两步就是每条 2 MB、每秒 40 MB 的拷贝，还不算内核里的传输，所以两边打印的地址不同。</li>
+      <li>模式 2 把两个组件装进同一个容器，但没开进程内通信。消息仍然走 rmw 和 DDS，序列化和反序列化一步都不少，地址依旧不同。只合并进程，省不掉这些拷贝。</li>
+      <li>模式 3 加上 <code>use_intra_process_comms:=true</code>。<code>Stamper</code> 交出 <code>unique_ptr</code>，话题上只有一个要所有权的订阅者，intra-process manager 把这个指针原样放进 <code>Probe</code> 的缓冲区。拷贝的字节数应为 0，同一序号两边应打印相同的地址（Lab B 第 6 步的预期，本页没有记录实际输出）。</li>
+      <li>如果再加一个接收 <code>unique_ptr</code> 的订阅者，manager 就必须为其中一个拷贝一份；如果 <code>Stamper</code> 改用 <code>publish(const Msg &amp;)</code>，rclcpp 也要先拷贝一次。零拷贝只在上面那种一对一的条件下成立。</li>
+    </ol>
+    <ol lang="en">
+      <li>The timer period is 50 ms, so 20 messages a second; each data area is 1000000 bytes, so <code>Stamper</code> produces 20 MB of image data a second. <code>Probe</code> prints one mean-and-max line every 100 messages, which is once every 5 s.</li>
+      <li>Mode 1 is two processes. The rmw under <code>publish()</code> serializes the 1 MB into CDR bytes, the kernel carries it to the other process, and the rmw there deserializes it into a freshly allocated message object. Those two steps alone copy 2 MB per message, 40 MB a second, before counting the transport through the kernel, so the two sides print different addresses.</li>
+      <li>Mode 2 loads both components into one container but leaves intra-process communication off. Messages still go through rmw and DDS with every serialization and deserialization step intact, and the addresses still differ. Merging the processes alone does not remove these copies.</li>
+      <li>Mode 3 adds <code>use_intra_process_comms:=true</code>. <code>Stamper</code> hands over a <code>unique_ptr</code>, the topic has one subscriber that wants ownership, and the intra-process manager puts that pointer as it is into the buffer of <code>Probe</code>. Zero bytes should be copied, and both sides should print the same address for the same sequence number (the expectation of Lab B step 6; the page records no actual output).</li>
+      <li>Add a second subscriber that takes a <code>unique_ptr</code> and the manager has to copy for one of them; switch <code>Stamper</code> to <code>publish(const Msg &amp;)</code> and rclcpp has to copy once first. Zero copy holds only under the one-to-one condition above.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲组件与进程内通信的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Intra-Process-Communication.html">Intra-Process Communication</a> demo；设计文章 <a href="https://design.ros2.org/articles/intraprocess_communications.html">Intra-process Communications in ROS 2</a>。</p>
   <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on components and intra-process communication; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Intra-Process-Communication.html">Intra-Process Communication</a> demo; the design article <a href="https://design.ros2.org/articles/intraprocess_communications.html">Intra-process Communications in ROS 2</a>.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>Python launch 文件返回一份动作描述，launch 服务在访问动作时才求值替换，每个 <code>Node</code> 动作派生一个子进程。</li>
+      <li>launch 关闭时依次发 <code>SIGINT</code>、5 s 后 <code>SIGTERM</code>、再 5 s 后 <code>SIGKILL</code>。</li>
+      <li>参数 YAML 按节点全名匹配，命名空间一变，那一段就悄悄不生效。</li>
+      <li>lifecycle 节点把启动拆成 configure 和 activate 两步，回调返回 <code>FAILURE</code> 时回到出发的主状态，外部可以重试。</li>
+      <li>组合把多个组件 <code>dlopen</code> 进一个容器进程，进程内通信再让 <code>unique_ptr</code> 一对一时零拷贝。</li>
+    </ul>
+    <ul lang="en">
+      <li>A Python launch file returns a description of actions, the launch service evaluates substitutions only when it visits an action, and every <code>Node</code> action spawns a child process.</li>
+      <li>On shutdown, launch sends <code>SIGINT</code>, then <code>SIGTERM</code> after 5 s, then <code>SIGKILL</code> after another 5 s.</li>
+      <li>Parameter YAML matches by full node name, so a changed namespace silently stops a section from applying.</li>
+      <li>A lifecycle node splits start-up into configure and activate, and a callback returning <code>FAILURE</code> goes back to the primary state it started from, so the manager can retry.</li>
+      <li>Composition uses <code>dlopen</code> to load several components into one container process, and intra-process communication then makes a one-to-one <code>unique_ptr</code> hand-over zero copy.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：<code>OnProcessStart</code> 触发时节点已经可以用了。→ 实际：它只说明进程已经 exec，节点内部是否配置好要看 lifecycle 状态。</li>
+      <li>误解：把节点装进同一个容器就自动零拷贝。→ 实际：不开 <code>use_intra_process_comms</code>，消息照样序列化后走 DDS。</li>
+      <li>误解：lifecycle 节点在 Inactive 时什么都不做。→ 实际：<code>LifecyclePublisher</code> 不发数据，但定时器和其余回调照常运行，Lab A 的计数器在 Inactive 期间也在增加。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: when <code>OnProcessStart</code> fires, the node is ready to use. → Fact: it only says the process has exec’d, and whether the node is configured is told by its lifecycle state.</li>
+      <li>Myth: loading nodes into one container makes them zero copy automatically. → Fact: without <code>use_intra_process_comms</code>, messages are still serialized and go through DDS.</li>
+      <li>Myth: a lifecycle node does nothing while Inactive. → Fact: the <code>LifecyclePublisher</code> sends no data, but timers and other callbacks keep running, and the counter of Lab A keeps rising while Inactive.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：一个节点一个进程 ↔ 组合在一个进程里</h2><h2 id="compare-en" lang="en">Comparison: one process per node ↔ composed nodes</h2>
   <div class="table-wrap">

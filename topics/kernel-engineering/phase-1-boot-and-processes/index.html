@@ -53,6 +53,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">一颗 CPU 核心同一时刻只执行一条指令流，可一台机器上有几百个线程都「在跑」。内核要怎样把 CPU 从一个线程手里拿走、过一会儿再原样还回去，让被打断的线程完全察觉不到？拿走之后又该交给谁，才能既不让任何线程饿死，又让交互任务及时响应？</p>
+    <p lang="en">A CPU core executes one instruction stream at a time, yet hundreds of threads on a machine are all "running". How does the kernel take the CPU away from one thread and later give it back exactly as it was, so that the interrupted thread never notices? And once it has the CPU, whom should it give it to, so that no thread starves and interactive work still responds promptly?</p>
+    <p lang="zh-CN">概念 3 的上下文切换回答第一个问题，概念 4 的调度器回答第二个；概念 1 先交代第一个线程从哪来。</p>
+    <p lang="en">Concept 3, the context switch, answers the first question and concept 4, the scheduler, the second; concept 1 first explains where the very first thread comes from.</p>
+  </div>
+
   <h3 lang="zh-CN">1. Boot chain：从 bootloader 到 PID 1</h3><h3 lang="en">1. Boot chain: from the bootloader to PID 1</h3>
   <p lang="zh-CN"><strong>Linux arm64</strong>（规范见 <code>Documentation/arch/arm64/booting.rst</code>）：</p>
   <p lang="en"><strong>Linux arm64</strong> (specified in <code>Documentation/arch/arm64/booting.rst</code>):</p>
@@ -124,6 +131,28 @@
   <h3 lang="zh-CN">3. 上下文切换</h3><h3 lang="en">3. Context switch</h3>
   <p lang="zh-CN">切换总发生在<strong>内核态</strong>，并且对被切走的线程来说只是「调用了一个函数，很久以后它返回了」。因为是函数调用，按 AAPCS64 只需保存 callee-saved 寄存器（<code>x19–x28</code>、<code>fp</code>=<code>x29</code>、<code>lr</code>=<code>x30</code>、<code>sp</code>）；用户态的全部寄存器早在异常入口就存进了内核栈上的 <code>pt_regs</code> / saved state（Phase 0）。</p>
   <p lang="en">A switch always happens in <strong>kernel mode</strong>, and to the thread being switched out it is just “I called a function, and much later it returned”. Because it is a function call, AAPCS64 only requires saving the callee-saved registers (<code>x19–x28</code>, <code>fp</code>=<code>x29</code>, <code>lr</code>=<code>x30</code>, <code>sp</code>); all user-mode registers were already saved into <code>pt_regs</code> / saved state on the kernel stack at exception entry (Phase 0).</p>
+  <div class="worked">
+    <p lang="zh-CN">逐条走一遍 Linux 的 <code>cpu_switch_to(prev, next)</code>（<code>arch/arm64/kernel/entry.S</code>），A 是 prev，B 是 next。进入时 <code>x0</code> 指向 A 的 <code>task_struct</code>，<code>x1</code> 指向 B 的。</p>
+    <p lang="en">Walk through Linux’s <code>cpu_switch_to(prev, next)</code> (<code>arch/arm64/kernel/entry.S</code>) one instruction group at a time, with A as prev and B as next. On entry <code>x0</code> points to A’s <code>task_struct</code> and <code>x1</code> to B’s.</p>
+    <pre>add x8, x0, x10        // x10 = THREAD_CPU_CONTEXT: &amp;A-&gt;thread.cpu_context
+stp x19,x20 / x21,x22 / x23,x24 / x25,x26 / x27,x28 / x29,x9(sp) ; str lr
+add x8, x1, x10        // &amp;B-&gt;thread.cpu_context
+ldp x19,x20 / ... / x29,x9 ; ldr lr ; mov sp, x9 ; msr sp_el0, x1 ; ret</pre>
+    <ol lang="zh-CN">
+      <li>保存 A：6 条 <code>stp</code> 加 1 条 <code>str</code>，存下 13 个寄存器：<code>x19–x28</code> 10 个、<code>fp</code>、<code>sp</code>、<code>lr</code>，共 13 × 8 = 104 字节，正好是 <code>struct cpu_context</code> 的 13 个字段（<code>lr</code> 存进 <code>pc</code> 字段）。</li>
+      <li>载入 B：从 B 的 <code>cpu_context</code> 读回同样 13 个值。<code>mov sp, x9</code> 之后，栈已经是 B 的内核栈。</li>
+      <li><code>msr sp_el0, x1</code>：Linux arm64 在内核态把 <code>SP_EL0</code> 当作 <code>current</code> 指针，这一条之后 <code>current</code> 就是 B。</li>
+      <li><code>ret</code> 跳到刚载入的 <code>lr</code>，也就是 B 上次调用 <code>cpu_switch_to</code> 时的返回点；B 若是新线程，这里是 <code>ret_from_fork</code>。</li>
+    </ol>
+    <ol lang="en">
+      <li>Save A: 6 <code>stp</code> and 1 <code>str</code> store 13 registers: the 10 of <code>x19–x28</code>, <code>fp</code>, <code>sp</code> and <code>lr</code>, 13 × 8 = 104 bytes, exactly the 13 fields of <code>struct cpu_context</code> (<code>lr</code> goes into the <code>pc</code> field).</li>
+      <li>Load B: read the same 13 values back from B’s <code>cpu_context</code>. After <code>mov sp, x9</code> the stack is already B’s kernel stack.</li>
+      <li><code>msr sp_el0, x1</code>: in kernel mode Linux arm64 uses <code>SP_EL0</code> as the <code>current</code> pointer, so after this instruction <code>current</code> is B.</li>
+      <li><code>ret</code> jumps to the <code>lr</code> just loaded, which is the return point of B’s last call to <code>cpu_switch_to</code>; for a new thread it is <code>ret_from_fork</code>.</li>
+    </ol>
+    <p lang="zh-CN">对比异常入口：那里要存全部 31 个通用寄存器加 <code>sp</code>、<code>pc</code>、PSTATE。切换只存 13 个，因为调用者按 AAPCS64 已经假定 <code>x0–x18</code> 会被破坏。</p>
+    <p lang="en">Compare exception entry, which must save all 31 general-purpose registers plus <code>sp</code>, <code>pc</code> and PSTATE. A switch saves only 13 because, under AAPCS64, the caller already assumes <code>x0–x18</code> may be clobbered.</p>
+  </div>
   <ul>
     <li lang="zh-CN"><strong>Linux arm64</strong>：<code>__schedule()</code> → <code>context_switch()</code>（<code>kernel/sched/core.c</code>）：先 <code>switch_mm_irqs_off()</code> 切地址空间（不同 <code>mm</code> 时写 <code>TTBR0_EL1</code> 换用户页表；ASID 放在哪个 TTBR 由 <code>TCR_EL1.A1</code> 决定，Linux arm64 放在 <code>TTBR1_EL1</code> 高位，靠它避免整表 TLB flush；内核线程借用前一个 mm），再 <code>switch_to()</code> → <code>__switch_to()</code>（<code>arch/arm64/kernel/process.c</code>，切 FP/SIMD、TLS 等）→ <code>cpu_switch_to(prev, next)</code>（<code>arch/arm64/kernel/entry.S</code>）：把 <code>x19–x28</code>、<code>fp</code>、<code>sp</code>、<code>lr</code> 存进 <code>prev->thread.cpu_context</code>，从 next 的 <code>cpu_context</code> 载入，<code>msr sp_el0</code> 更新 <code>current</code>，<code>ret</code>。</li>
     <li lang="en"><strong>Linux arm64</strong>: <code>__schedule()</code> → <code>context_switch()</code> (<code>kernel/sched/core.c</code>): first <code>switch_mm_irqs_off()</code> switches the address space (for a different <code>mm</code> it writes <code>TTBR0_EL1</code> to swap the user page tables; which TTBR holds the ASID is decided by <code>TCR_EL1.A1</code> — Linux arm64 puts it in the high bits of <code>TTBR1_EL1</code>, and this is what avoids a full TLB flush; kernel threads borrow the previous mm), then <code>switch_to()</code> → <code>__switch_to()</code> (<code>arch/arm64/kernel/process.c</code>, switches FP/SIMD, TLS and so on) → <code>cpu_switch_to(prev, next)</code> (<code>arch/arm64/kernel/entry.S</code>): stores <code>x19–x28</code>, <code>fp</code>, <code>sp</code>, <code>lr</code> into <code>prev->thread.cpu_context</code>, loads them from next’s <code>cpu_context</code>, updates <code>current</code> with <code>msr sp_el0</code>, and does <code>ret</code>.</li>
@@ -142,6 +171,22 @@
     <li lang="zh-CN"><strong>EEVDF</strong>（Linux 6.6 起取代 CFS）：仍然记 vruntime，另外算出队列的加权平均 <code>V</code>。任务的 <strong>lag</strong> = V − vruntime；lag ≥ 0 的任务才 <em>eligible</em>（没有多拿 CPU）。每个任务有<strong>虚拟截止时间</strong> vd = vruntime + slice / 权重；在 eligible 任务里选 vd 最早的。较短 slice 的任务 vd 更早，因此能更快被选中——延迟需求从此可以表达（任务自定义 slice 经 <code>sched_attr.sched_runtime</code>，约 6.12 起）。</li>
     <li lang="en"><strong>EEVDF</strong> (replaces CFS from Linux 6.6): still tracks vruntime, and also computes the queue’s weighted average <code>V</code>. A task’s <strong>lag</strong> = V − vruntime; only tasks with lag ≥ 0 are <em>eligible</em> (they have not taken more than their share of CPU). Each task has a <strong>virtual deadline</strong> vd = vruntime + slice / weight; among eligible tasks the one with the earliest vd is picked. A task with a shorter slice has an earlier vd and so is picked sooner — latency needs can now be expressed (a task sets a custom slice via <code>sched_attr.sched_runtime</code>, from about 6.12).</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">用真实权重算一次。Linux 的 nice → 权重表 <code>sched_prio_to_weight[]</code>（<code>kernel/sched/core.c</code>）里 nice 0 = 1024，nice 5 = 335；默认基础 slice <code>sysctl_sched_base_slice</code> = 0.7 ms（<code>kernel/sched/fair.c</code>，启动时还会乘以 1 + log2(在线 CPU 数)，CPU 数最多按 8 个计）。</p>
+    <p lang="en">Work it once with real weights. In Linux’s nice-to-weight table <code>sched_prio_to_weight[]</code> (<code>kernel/sched/core.c</code>), nice 0 = 1024 and nice 5 = 335; the default base slice <code>sysctl_sched_base_slice</code> is 0.7 ms (<code>kernel/sched/fair.c</code>, scaled at boot by 1 + log2 of the online CPU count, capped at 8 CPUs).</p>
+    <ol lang="zh-CN">
+      <li>任务 P（nice 0）和任务 Q（nice 5）各实际运行 2 ms。P 的 vruntime 涨 2 × 1024 / 1024 = 2 ms；Q 涨 2 × 1024 / 335 ≈ 6.11 ms。Q 的 vruntime 涨得约 3 倍快，所以长期只分到约 335 / (1024 + 335) ≈ 25 % 的 CPU。</li>
+      <li>虚拟截止时间同样按权重缩放：P 的 vd = vruntime + 0.7 × 1024 / 1024 = vruntime + 0.7 ms；Q 的 vd = vruntime + 0.7 × 1024 / 335 ≈ vruntime + 2.14 ms。</li>
+      <li>换成下方图解 (b) 的三个任务：vruntime 为 T1 = 10、T2 = 16、T3 = 34。T1 是 nice 5（权重 335），T2、T3 是 nice 0（1024）：V = (335×10 + 1024×16 + 1024×34) / 2383 ≈ 22.9，记作 V ≈ 23。lag = V − vruntime：T1 = 13、T2 = 7、T3 = −11，只有 T1、T2 eligible。</li>
+      <li>两者的 vd 是 T1 = 48、T2 = 28，选 vd 最早的 T2。CFS 只看最小 vruntime，会选 T1；EEVDF 让 T2 先跑，因为 T1 的低权重把同样的 slice 拉成了更长的虚拟时间。以 slice = 12 算，T1 的 vd = 10 + 12×1024/335 ≈ 46.7，T2 的 vd = 16 + 12 = 28；图里的 48 是取整后的标注。</li>
+    </ol>
+    <ol lang="en">
+      <li>Task P (nice 0) and task Q (nice 5) each actually run for 2 ms. P’s vruntime grows by 2 × 1024 / 1024 = 2 ms; Q’s grows by 2 × 1024 / 335 ≈ 6.11 ms. Q’s vruntime grows about 3 times as fast, so in the long run it gets only about 335 / (1024 + 335) ≈ 25 % of the CPU.</li>
+      <li>The virtual deadline is scaled by weight in the same way: P’s vd = vruntime + 0.7 × 1024 / 1024 = vruntime + 0.7 ms; Q’s vd = vruntime + 0.7 × 1024 / 335 ≈ vruntime + 2.14 ms.</li>
+      <li>Now take the three tasks of diagram (b) below: vruntime T1 = 10, T2 = 16, T3 = 34. T1 is nice 5 (weight 335), T2 and T3 nice 0 (1024): V = (335×10 + 1024×16 + 1024×34) / 2383 ≈ 22.9, written V ≈ 23. lag = V − vruntime: T1 = 13, T2 = 7, T3 = −11, so only T1 and T2 are eligible.</li>
+      <li>Their vd are T1 = 48 and T2 = 28, so T2, with the earliest vd, is picked. CFS looks only at the smallest vruntime and would pick T1; under EEVDF T2 runs first because T1’s low weight stretches the same slice into more virtual time. With a slice of 12, T1’s vd = 10 + 12×1024/335 ≈ 46.7 and T2’s vd = 16 + 12 = 28; the diagram label rounds T1’s value to 48.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>XNU</strong> 优先级 0–127，分 4 个带（<code>osfmk/kern/sched.h</code>）：96–127 实时、80–95 内核线程、64–79 保留（系统高优先级）、0–63 用户。用户线程的 QoS（User-Interactive、User-Initiated、Default、Utility、Background）映射到 0–63 里的基础优先级（大致：UI ≈ 46–47，Default 31，Background 4）。</p>
   <p lang="en"><strong>XNU</strong> priorities run 0–127 in 4 bands (<code>osfmk/kern/sched.h</code>): 96–127 real-time, 80–95 kernel threads, 64–79 reserved (system high priority), 0–63 user. A user thread’s QoS (User-Interactive, User-Initiated, Default, Utility, Background) maps to a base priority within 0–63 (roughly: UI ≈ 46–47, Default 31, Background 4).</p>
   <ul>
@@ -166,6 +211,35 @@
     <li lang="zh-CN">两边都看不到：vruntime / lag / deadline、clutch bucket 的 deadline——只有调度调试接口（Linux <code>/sys/kernel/debug/sched/debug</code>）或 tracing 能看。</li>
     <li lang="en">Invisible on both sides: vruntime / lag / deadline and the clutch bucket deadlines — only the scheduler debug interface (Linux <code>/sys/kernel/debug/sched/debug</code>) or tracing shows them.</li>
   </ul>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>两个内核的启动形状相同：汇编入口开 MMU，一个大的 C 初始化函数，第一个内核线程，最后 exec 用户态的 PID 1。</li>
+      <li>Linux 只有 <code>task_struct</code> 一种可调度实体，进程和线程的区别只在 <code>clone</code> 共享了什么；XNU 把资源（task）、执行（thread）和 POSIX 身份（proc）分成三样。</li>
+      <li>上下文切换是内核态里的一次函数调用，只需存 callee-saved 寄存器，Linux arm64 是 13 个。</li>
+      <li>切地址空间就是写 <code>TTBR0_EL1</code>（Linux 上还要把 ASID 写进 <code>TTBR1_EL1</code>），ASID 让不同进程的 TLB 项可以共存，不必整表刷新。</li>
+      <li>EEVDF 先用 lag 筛出没多拿 CPU 的任务，再在其中选虚拟截止时间最早的；XNU 先 RT 队列，再在 QoS bucket 间做 EDF。</li>
+    </ul>
+    <ul lang="en">
+      <li>Both kernels boot in the same shape: an assembly entry turns the MMU on, one big C initialisation function runs, the first kernel thread starts, and finally user-space PID 1 is exec’d.</li>
+      <li>Linux has a single schedulable entity, <code>task_struct</code>, and a process differs from a thread only in what <code>clone</code> shared; XNU splits resources (task), execution (thread) and POSIX identity (proc) into three objects.</li>
+      <li>A context switch is a function call inside kernel mode, so it saves only the callee-saved registers, 13 of them on Linux arm64.</li>
+      <li>Switching address spaces means writing <code>TTBR0_EL1</code> (plus the ASID in <code>TTBR1_EL1</code> on Linux), and ASIDs let TLB entries of different processes coexist without a full flush.</li>
+      <li>EEVDF first uses lag to keep only tasks that have not taken extra CPU, then picks the earliest virtual deadline among them; XNU checks the RT queue first, then runs EDF across the QoS buckets.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：上下文切换时内核把用户态的全部寄存器存一遍。→ 实际：用户寄存器在异常入口就已经存进 <code>pt_regs</code>；切换函数本身只存 13 个 callee-saved 寄存器。</li>
+      <li>误解：Linux 里线程是比进程更轻的另一种内核对象。→ 实际：两者都是 <code>task_struct</code>，线程只是用 <code>CLONE_VM</code> 等 flag 共享了 <code>mm</code> 和 fd 表。</li>
+      <li>误解：nice 值低的任务总是先跑，nice 值高的任务要等它跑完。→ 实际：nice 只设定权重，也就是份额；nice 5 的任务和 nice 0 的任务并排时仍能分到约 25 % 的 CPU，下一个跑谁要看 lag 和虚拟截止时间。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: on a context switch the kernel saves every user-mode register. → Fact: the user registers were already saved into <code>pt_regs</code> at exception entry; the switch function itself saves only 13 callee-saved registers.</li>
+      <li>Myth: on Linux a thread is a different, lighter kernel object than a process. → Fact: both are <code>task_struct</code>; a thread has merely shared the <code>mm</code> and the fd table through flags such as <code>CLONE_VM</code>.</li>
+      <li>Myth: a lower-nice task always runs first and a higher-nice task waits until it is done. → Fact: nice only sets the weight, that is the share; a nice 5 task next to a nice 0 task still gets about 25 % of the CPU, and which runs next depends on lag and the virtual deadline.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：Linux ↔ XNU</h2><h2 id="compare-en" lang="en">Comparison: Linux ↔ XNU</h2>
   <div class="table-wrap">

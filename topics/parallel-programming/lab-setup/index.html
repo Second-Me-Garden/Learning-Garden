@@ -54,6 +54,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">网上的并行教程大多默认一台 x86 Linux 机器：所有核一样快、cache line 64 字节、能用 <code>taskset</code> 绑核、编译器自带 OpenMP。把这些照搬到这台 Mac 上，程序照样能跑，数字却会悄悄出错：填充 64 字节挡不住 false sharing，线程落到 E 核让计时忽快忽慢，一次运行的时间被当成结论。动手之前要先知道：这台机器的哪些事实会改变实验结果，时间该怎么量才可信？</p>
+    <p lang="en">Most parallel tutorials assume an x86 Linux machine: every core equally fast, 64-byte cache lines, <code>taskset</code> for pinning, OpenMP built into the compiler. Copy those habits onto this Mac and the programs still run, but the numbers go quietly wrong: 64 bytes of padding does not stop false sharing, threads landing on E cores make timings jump, and one run’s time gets taken as a result. Before the labs you need to know which facts about this machine change the results, and how to measure time so it can be trusted.</p>
+    <p lang="zh-CN">概念 1 的核心布局和 128 字节 cache line、概念 3 的计时方法和概念 4 的 QoS 回答这两个问题。</p>
+    <p lang="en">The core layout and 128-byte cache line of concept 1, the timing method of concept 3 and the QoS classes of concept 4 answer those two questions.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 这台实验机</h3><h3 lang="en">1. The lab machine</h3>
   <p lang="zh-CN">下面是 2026-10-31 在实验机上读出的原始值。<code>perflevel0</code> 是性能核那一档，<code>perflevel1</code> 是能效核那一档：</p><p lang="en">These are the raw values read on the lab machine on 2026-10-31. <code>perflevel0</code> is the performance-core tier and <code>perflevel1</code> the efficiency-core tier:</p>
 <pre data-lang="sh">$ sysctl machdep.cpu.brand_string hw.ncpu hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu \
@@ -154,6 +161,28 @@ wall median 9.81 ms  min 9.79  max 10.15
 cpu total 108.3 ms for 11 runs
 # 2026-10-31 实验机输出；你的数字会不同，但中位数应当比最大值稳定得多</pre>
   <p lang="zh-CN">这个程序是单线程的，所以 11 次的 CPU 时间约等于 11 次墙钟时间之和。两次运行的最大值差了 1 ms，中位数只差 0.03 ms：这就是只报中位数的理由。</p><p lang="en">This program is single-threaded, so the CPU time for 11 runs is about the sum of the 11 wall times. The maximum differs by 1 ms between the two runs while the median differs by only 0.03 ms: that is why the median is what gets reported.</p>
+  <div class="worked">
+    <p lang="zh-CN">把上面第一次运行从程序走到输出，看每个数字是怎么来的：</p>
+    <p lang="en">Follow the first run above from the program to its output and see where each number comes from:</p>
+    <pre>warm-up: 3 × work()            not timed
+timed:   11 × work()           ms[0..10], sorted
+median = ms[5]  = 9.78 ms      (5 below, 5 above)
+min    = ms[0]  = 9.77 ms,  max = ms[10] = 11.28 ms
+sum of 11 walls ≥ 5 × 9.77 + 5 × 9.78 + 11.28 = 109.0 ms
+cpu total       = 110.0 ms</pre>
+    <ol lang="zh-CN">
+      <li>前 3 次 <code>work()</code> 不计时，按上面所说先把代码和数据拉进 cache，计时从第 4 次调用开始。</li>
+      <li>计时 11 次再排序。11 是奇数，中位数就是正中间那个 <code>ms[5]</code>，它两边各有 5 个样本，不需要求平均。</li>
+      <li>最大值 11.28 ms 比中位数慢 1.5 ms，大概是被调度或后台进程打断的一次；它只出现在 max 里，碰不到中位数。</li>
+      <li>排序后最小的 5 个样本不小于 9.77，接下来 5 个不小于 9.78，最大的是 11.28，所以墙钟总和至少 109.0 ms。CPU 总时间 110.0 ms 与它相近，说明这段代码只用了一个线程；一个 4 线程的版本若把墙钟砍到四分之一、CPU 时间仍约 110 ms，才说明工作被分摊了。</li>
+    </ol>
+    <ol lang="en">
+      <li>The first 3 calls of <code>work()</code> are not timed, so, as above, the code and data are pulled into cache before timing starts at the 4th call.</li>
+      <li>Eleven timed runs, then a sort. Eleven is odd, so the median is simply the middle element <code>ms[5]</code>, with 5 samples on each side and no averaging needed.</li>
+      <li>The maximum, 11.28 ms, is 1.5 ms slower than the median, most likely a run interrupted by scheduling or a background process; it shows up only in max and cannot touch the median.</li>
+      <li>After sorting, the lowest 5 samples are 9.77 or more, the next 5 are 9.78 or more and the largest is 11.28, so the wall times add up to at least 109.0 ms. The CPU total of 110.0 ms is close to that, which says the code used one thread; a 4-thread version that cut the wall time to a quarter while the CPU time stayed near 110 ms would show the work was shared out.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：McKenney 的 Validation 一章，其中 Performance Estimation 一节（基准测试和统计噪声）。</p><p lang="en">Further reading: the chapter Validation in McKenney, especially the section Performance Estimation (benchmarks and statistical noise).</p>
 
   <h3 lang="zh-CN">4. 不能绑核：用 QoS 表达意图</h3><h3 lang="en">4. No CPU pinning: express intent with QoS</h3>
@@ -202,6 +231,37 @@ $ TSAN_OPTIONS=abort_on_error=0 ./race &gt;/dev/null 2&gt;&amp;1; echo $?
 66
 # 2026-10-31 实验机输出</pre>
   <p lang="zh-CN">延伸阅读：Williams 讲测试与调试多线程程序（testing and debugging multithreaded applications）的一章。</p><p lang="en">Further reading: the chapter on testing and debugging multithreaded applications in Williams.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>本专题的实验都在真机上跑，因为加速比、false sharing 和带宽只有在真实的 P 核和 E 核上才有意义；只有 Linux <code>perf</code> 借用内核专题的 VM。</li>
+      <li>这台 M5 有 4 个 P 核和 6 个 E 核、没有 SMT、cache line 128 字节、页 16 KB，没有 NUMA。</li>
+      <li>false sharing 的对齐和填充一律按 128 字节，不是 x86 的 64 字节。</li>
+      <li>计时用单调时钟，先预热，再跑奇数次报中位数加最小和最大值，墙钟时间和 CPU 时间分开报。</li>
+      <li>macOS 不能绑核，只能用 QoS 告诉调度器有多急，而 QoS 是提示不是保证。</li>
+      <li>TSan 和 ASan 开箱即用但不能同时开，TSan 只用来找错，从不用来计时。</li>
+    </ul>
+    <ul lang="en">
+      <li>This topic’s labs run on the real machine, because speedup, false sharing and bandwidth only mean something on real P and E cores; only Linux <code>perf</code> borrows the kernel topic’s VM.</li>
+      <li>This M5 has 4 P cores and 6 E cores, no SMT, 128-byte cache lines, 16 KB pages and no NUMA.</li>
+      <li>Alignment and padding against false sharing always use 128 bytes, not the 64 bytes of x86.</li>
+      <li>Time with a monotonic clock, warm up first, run an odd number of times and report the median with the min and max, and report wall time and CPU time separately.</li>
+      <li>macOS cannot pin threads to cores; QoS only tells the scheduler how urgent the work is, and it is a hint, not a guarantee.</li>
+      <li>TSan and ASan work out of the box but not together, and TSan is for finding bugs, never for timing.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：按 64 字节填充就能消除 false sharing。→ 实际：这台机器的 <code>hw.cachelinesize</code> 是 128，相隔 64 字节的两个计数器仍在同一行。</li>
+      <li>误解：在 VM 里做实验更安全，数字也一样。→ 实际：本专题没有东西进内核，最坏是一个进程卡死；而 VM 的虚拟 CPU 看不到 P 核和 E 核，数字里混着宿主调度的噪声。</li>
+      <li>误解：设了 <code>QOS_CLASS_USER_INTERACTIVE</code>，线程就一定在 P 核上。→ 实际：QoS 是提示，偶尔仍会落到 E 核，所以那几次留在最大值里，结论看中位数。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: padding to 64 bytes removes false sharing. → Fact: this machine’s <code>hw.cachelinesize</code> is 128, so two counters 64 bytes apart still share a line.</li>
+      <li>Myth: labs in a VM are safer and give the same numbers. → Fact: nothing in this topic enters the kernel, so the worst case is a hung process; and a VM’s virtual CPUs cannot see P and E cores and carry the host scheduler’s noise.</li>
+      <li>Myth: with <code>QOS_CLASS_USER_INTERACTIVE</code> set, a thread is always on a P core. → Fact: QoS is a hint and a thread still lands on an E core now and then, so those runs stay in the maximum and the median carries the conclusion.</li>
+    </ul>
+  </div>
 
   <h2 id="diagram" lang="zh-CN">动画图解：实验机和观察点</h2><h2 id="diagram-en" lang="en">Animated diagram: the lab machine and where you observe it</h2>
   <div class="diagram">
