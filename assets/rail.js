@@ -116,24 +116,29 @@
     nav.appendChild(toc); panel.appendChild(nav);
   }
   if (tools.childNodes.length) panel.appendChild(tools);
-  // Current section: the last heading that has passed the top of the viewport (position based, so a page
-  // that loads or scrolls into the middle of a section still marks it; an intersection observer only saw
-  // headings while they crossed the viewport). Rebuilt with the rail on a language switch.
+  // Current section: the last heading that has risen into the reading band, the top quarter of the window
+  // (Founder 2026-11-04: a heading a quarter of the way down the page is the section being read, so the rail
+  // switches to it then, not only when it reaches the top edge). Position based, so a page that loads or
+  // scrolls into the middle of a section still marks it; an intersection observer only saw headings while
+  // they crossed the viewport. Rebuilt with the rail on a language switch.
   if (h2s.length) {
     const links = Array.from(panel.querySelectorAll('.rail-toc a'));
     let ticking = false;
     const markCurrent = () => {
       ticking = false;
-      const limit = window.scrollY + 24;   // the docked header is hidden at rail widths (1480 px and up), so a rail click lands the heading at the top and this band is only a tolerance
+      const vh = document.documentElement.clientHeight;
+      const band = vh * 0.25;
       let idx = -1;
       for (let i = 0; i < h2s.length; i++) {
-        const y = h2s[i].getBoundingClientRect().top + window.scrollY;
-        if (y <= limit) idx = i; else break;
+        if (h2s[i].getBoundingClientRect().top <= band) idx = i; else break;
       }
-      const atBottom = window.scrollY > 0 && document.documentElement.clientHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+      // A rail click (or a hash on load) lands the heading at the top edge; while that heading is still in the
+      // band it is the section being read, even when a short section lets the next heading into the band too.
+      const t = location.hash ? h2s.findIndex(h => '#' + h.id === location.hash) : -1;
+      if (t >= 0) { const top = h2s[t].getBoundingClientRect().top; if (top >= -4 && top <= band) idx = t; }
+      const atBottom = window.scrollY > 0 && vh + window.scrollY >= document.documentElement.scrollHeight - 2;
       if (atBottom) {   // at the bottom a short last section is being read although its heading sits below the band; a rail click on an on-screen heading still wins
-        const t = h2s.findIndex(h => '#' + h.id === location.hash && h.getBoundingClientRect().top < document.documentElement.clientHeight);
-        idx = t >= 0 ? t : h2s.length - 1;
+        idx = (t >= 0 && h2s[t].getBoundingClientRect().top < vh) ? t : h2s.length - 1;
       }
       links.forEach((a, i) => { if (i === idx) a.setAttribute('aria-current', 'location'); else a.removeAttribute('aria-current'); });
     };
