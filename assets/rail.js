@@ -123,23 +123,28 @@
   // they crossed the viewport. Rebuilt with the rail on a language switch.
   if (h2s.length) {
     const links = Array.from(panel.querySelectorAll('.rail-toc a'));
-    let ticking = false;
+    let ticking = false, last = -2;
     const markCurrent = () => {
       ticking = false;
       const vh = document.documentElement.clientHeight;
       const band = vh * 0.25;
       let idx = -1;
       for (let i = 0; i < h2s.length; i++) {
-        if (h2s[i].getBoundingClientRect().top <= band) idx = i; else break;
+        const r = h2s[i].getBoundingClientRect();
+        if (!r.height) continue;   // a hidden heading reports top 0 and would count as in the band
+        if (r.top <= band) idx = i; else break;
       }
       // A rail click (or a hash on load) lands the heading at the top edge; while that heading is still in the
       // band it is the section being read, even when a short section lets the next heading into the band too.
       const t = location.hash ? h2s.findIndex(h => '#' + h.id === location.hash) : -1;
-      if (t >= 0) { const top = h2s[t].getBoundingClientRect().top; if (top >= -4 && top <= band) idx = t; }
+      const tt = t >= 0 ? h2s[t].getBoundingClientRect().top : NaN;
+      if (tt >= -4 && tt <= band) idx = t;
       const atBottom = window.scrollY > 0 && vh + window.scrollY >= document.documentElement.scrollHeight - 2;
-      if (atBottom) {   // at the bottom a short last section is being read although its heading sits below the band; a rail click on an on-screen heading still wins
-        idx = (t >= 0 && h2s[t].getBoundingClientRect().top < vh) ? t : h2s.length - 1;
+      if (atBottom) {   // at the bottom a short last section is being read although its heading sits below the band; a rail click on a heading still on screen wins, a hash whose heading has left the window above does not
+        idx = (tt >= -4 && tt < vh) ? t : h2s.length - 1;
       }
+      if (idx === last) return;
+      last = idx;
       links.forEach((a, i) => { if (i === idx) a.setAttribute('aria-current', 'location'); else a.removeAttribute('aria-current'); });
     };
     const onScroll = () => { if (!ticking) { ticking = true; setTimeout(markCurrent, 16); } };   // a timer, not rAF: same cadence for readers, and it runs in headless checks
