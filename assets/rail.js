@@ -116,17 +116,33 @@
     nav.appendChild(toc); panel.appendChild(nav);
   }
   if (tools.childNodes.length) panel.appendChild(tools);
-  if (false) {
-    if ('IntersectionObserver' in window) {
-      const map = new Map(h2s.map((h, i) => [h, toc.children[i].firstChild]));
-      let current = null;
-      const io = new IntersectionObserver((entries) => {
-        for (const e of entries) if (e.isIntersecting) current = e.target;
-        if (!current) return;
-        for (const [h, a] of map) { if (h === current) a.setAttribute('aria-current', 'location'); else a.removeAttribute('aria-current'); }
-      }, { rootMargin: '-20% 0px -70% 0px' });
-      h2s.forEach(h => io.observe(h));
-    }
+  // Current section: the last heading that has passed the top of the viewport (position based, so a page
+  // that loads or scrolls into the middle of a section still marks it; an intersection observer only saw
+  // headings while they crossed the viewport). Rebuilt with the rail on a language switch.
+  if (h2s.length) {
+    const links = Array.from(panel.querySelectorAll('.rail-toc a'));
+    let ticking = false;
+    const markCurrent = () => {
+      ticking = false;
+      const limit = window.scrollY + 24;   // the docked header is hidden at rail widths (1480 px and up), so a rail click lands the heading at the top and this band is only a tolerance
+      let idx = -1;
+      for (let i = 0; i < h2s.length; i++) {
+        const y = h2s[i].getBoundingClientRect().top + window.scrollY;
+        if (y <= limit) idx = i; else break;
+      }
+      const atBottom = window.scrollY > 0 && document.documentElement.clientHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+      if (atBottom) {   // at the bottom a short last section is being read although its heading sits below the band; a rail click on an on-screen heading still wins
+        const t = h2s.findIndex(h => '#' + h.id === location.hash && h.getBoundingClientRect().top < document.documentElement.clientHeight);
+        idx = t >= 0 ? t : h2s.length - 1;
+      }
+      links.forEach((a, i) => { if (i === idx) a.setAttribute('aria-current', 'location'); else a.removeAttribute('aria-current'); });
+    };
+    const onScroll = () => { if (!ticking) { ticking = true; setTimeout(markCurrent, 16); } };   // a timer, not rAF: same cadence for readers, and it runs in headless checks
+    if (window.__lgRailSpy) { window.removeEventListener('scroll', window.__lgRailSpy); window.removeEventListener('resize', window.__lgRailSpy); }
+    window.__lgRailSpy = onScroll;
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    markCurrent();
   }
 
   const header = headerEl;
