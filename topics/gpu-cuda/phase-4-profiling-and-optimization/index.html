@@ -59,6 +59,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">一个 kernel 能跑、结果也对，但它为什么不更快？它可能在等内存带宽，可能把运算单元用满了，也可能两样都没用满、只是在空等。改错了方向就白改：给一个已经计算受限的 kernel 加分块，或者优化一个只占总时间 10% 的 kernel，都省不下多少。需要的是先量出时间花在哪，再对一个 kernel 回答两个问题：它顶着哪一条上限、离那条线还有多远，以及它的 warp 在等什么。</p>
+    <p lang="en">A kernel runs and gives the right answer, but why is it not faster? It may be waiting on memory bandwidth, it may have filled the arithmetic units, or it may be using neither and simply waiting. Changing the wrong thing is wasted work: tiling a kernel that is already compute-bound, or optimising one that is 10% of the total time, saves little. What is needed is to measure first where the time goes, and then answer two questions about one kernel: which ceiling it is up against and how far below it it sits, and what its warps are waiting for.</p>
+    <p lang="zh-CN">概念 1 的 <code>nsys</code> 回答时间花在哪，概念 3 的 roofline 回答顶着哪条线，概念 5 的停顿原因回答 warp 在等什么。</p>
+    <p lang="en"><code>nsys</code> in concept 1 answers where the time goes, the roofline of concept 3 answers which line the kernel is against, and the stall reasons of concept 5 answer what its warps wait for.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 先看全局，再看一个 kernel：Nsight Systems 与 Nsight Compute</h3><h3 lang="en">1. The whole program first, then one kernel: Nsight Systems and Nsight Compute</h3>
   <p lang="zh-CN">两个工具回答两个层次的问题。<strong>Nsight Systems</strong>（<code>nsys</code>，本页读的是在线用户指南 v2026.5，比 13.4 Update 2 自带的 2026.3.2 新）画整个程序的时间线：CPU 线程上的 CUDA API 调用、GPU 上的 kernel 和内存拷贝、它们之间的空隙。它回答「时间花在哪」：是 <code>cudaMemcpy</code> 占了大头，是很多小 kernel 每个都在付启动开销，还是一个 kernel 本身就慢。<strong>Nsight Compute</strong>（<code>ncu</code>，本页读的是 v2026.3.1 的 Profiling Guide 和 CLI 文档）一次只看一个 kernel 的一次启动，把它重放（replay）多遍，每遍收一部分硬件计数器，回答「这个 kernel 为什么慢」。顺序总是先 <code>nsys</code> 后 <code>ncu</code>：如果 kernel 只占总时间的 10%，把它优化到零也只省 10%。</p>
   <p lang="en">The two tools answer questions at two levels. <strong>Nsight Systems</strong> (<code>nsys</code>; this page read the online user guide v2026.5, newer than the 2026.3.2 bundled with 13.4 Update 2) draws the whole program on a timeline: CUDA API calls on the CPU threads, kernels and memory copies on the GPU, and the gaps between them. It answers where the time goes: whether <code>cudaMemcpy</code> takes the bulk, whether many small kernels each pay the launch cost, or whether one kernel is simply slow. <strong>Nsight Compute</strong> (<code>ncu</code>; this page read the v2026.3.1 Profiling Guide and CLI documentation) looks at one launch of one kernel at a time, replays it several times and collects part of the hardware counters on each pass, and answers why this kernel is slow. The order is always <code>nsys</code> first, then <code>ncu</code>: if the kernel is 10% of the total time, optimising it to zero saves only 10%.</p>
@@ -102,6 +109,30 @@
     <li lang="zh-CN"><strong>三个矩阵乘的「代码上的」intensity</strong>（推算，按 kernel 里写的 global 读次数算）：朴素版每次 FMA（2 次运算）读 2 个 float（8 字节），0.25 FLOP/byte；Phase 1 的 TILE = 16 分块版每步搬 2 × 16 × 16 个 float（2048 字节）做 2 × 16<sup>3</sup> = 8192 次运算，4 FLOP/byte；Lab A 的 <code>mm_reg</code> 用 64 × 64 的块、每步搬 2 × 64 × 16 个 float（8192 字节）做 2 × 64 × 64 × 16 = 131072 次运算，16 FLOP/byte。在 T4 上，对应的上限分别是 80 GFLOP/s、1.28 TFLOP/s 和 5.1 TFLOP/s。</li>
     <li lang="en"><strong>The intensity of the three matrix multiplies, as written</strong> (derived by counting the global loads in each kernel): the naive kernel reads 2 floats (8 bytes) per FMA (2 operations), 0.25 FLOP/byte; Phase 1’s TILE = 16 version moves 2 × 16 × 16 floats (2048 bytes) per step for 2 × 16<sup>3</sup> = 8192 operations, 4 FLOP/byte; Lab A’s <code>mm_reg</code> uses 64 × 64 blocks and moves 2 × 64 × 16 floats (8192 bytes) per step for 2 × 64 × 64 × 16 = 131,072 operations, 16 FLOP/byte. On a T4 the matching ceilings are 80 GFLOP/s, 1.28 TFLOP/s and 5.1 TFLOP/s.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把图解 (a) 的点换算成 Lab A 里 n = 1024 的一次矩阵乘最少要多久。下面每个数都是从 T4 产品页的峰值和上面的 intensity 算出来的下限，不是测量值；Lab A 还没有在租用机器上跑过。</p>
+    <p lang="en">Turn the points of diagram (a) into the least time one n = 1024 matrix multiply of Lab A can take. Every number below is a lower bound computed from the T4 product-page peaks and the intensities above, not a measurement; Lab A has not yet been run on a rented machine.</p>
+    <pre>work: 2 n^3 = 2 x 1024^3 = 2,147,483,648 FLOP
+ceiling = min(intensity x 320 GB/s, 8.1 TFLOP/s)
+  naive   0.25 FLOP/B -&gt;   80 GFLOP/s -&gt; 2.147e9 /   80e9 = 26.8  ms
+  tiled   4    FLOP/B -&gt; 1.28 TFLOP/s -&gt; 2.147e9 / 1.28e12 =  1.68 ms
+  mm_reg 16    FLOP/B -&gt; 5.12 TFLOP/s -&gt; 2.147e9 / 5.12e12 =  0.42 ms
+  FP32 flat line       -&gt; 8.1  TFLOP/s -&gt; 2.147e9 / 8.1e12  =  0.27 ms</pre>
+    <ol lang="zh-CN">
+      <li>工作量：C 有 1024 × 1024 个元素，每个做 1024 次 FMA，每次 FMA 算 2 次运算，一共约 21.5 亿次浮点运算。三个 kernel 的工作量一样，不同的只是每搬一个字节做几次运算。</li>
+      <li>朴素版：0.25 × 320 = 80 GFLOP/s，在 ridge（约 25）左边，上限由斜线给出，最快 26.8 ms（图解 (a) 第 3 步）。</li>
+      <li>分块版：intensity 涨 16 倍到 4，上限 1.28 TFLOP/s，最快 1.68 ms，时间下限也正好缩短 16 倍（第 4 步）。它仍在斜线上，所以再优化也还是在跟带宽较劲。</li>
+      <li><code>mm_reg</code>：16 × 320 = 5.12 TFLOP/s，仍低于 8.1 的平线，最快 0.42 ms（第 5 步）。intensity 要到约 25 FLOP/byte 才会被平线挡住，那时下限是 0.27 ms；在那之前，提高 intensity 每一步都直接换成时间。</li>
+      <li>Lab A 量出真实时间后，把实测 GFLOP/s 除以对应的上限，就得到离线还有多远。实测可能超过这里的上限，因为缓存挡掉了重复读（下一段，以及 Lab B 在 M5 上看到的情形）。</li>
+    </ol>
+    <ol lang="en">
+      <li>The work: C has 1024 × 1024 elements, each takes 1024 FMAs, and each FMA counts as 2 operations, about 2.15 billion floating-point operations in all. The three kernels do the same work; they differ only in operations per byte moved.</li>
+      <li>Naive: 0.25 × 320 = 80 GFLOP/s, left of the ridge at about 25, so the slope sets the ceiling and the fastest possible run is 26.8 ms (step 3 of diagram (a)).</li>
+      <li>Tiled: intensity rises 16 times to 4, the ceiling to 1.28 TFLOP/s, and the floor to 1.68 ms, exactly 16 times shorter (step 4). It is still on the slope, so any further work on it is still a fight with bandwidth.</li>
+      <li><code>mm_reg</code>: 16 × 320 = 5.12 TFLOP/s, still under the flat line at 8.1, for a floor of 0.42 ms (step 5). Only at about 25 FLOP/byte does the flat line take over, with a floor of 0.27 ms; until then every gain in intensity turns straight into time.</li>
+      <li>Once Lab A has measured real times, divide each measured GFLOP/s by its ceiling to see how far below the line it sits. A measurement may beat the ceiling here, because caches absorb repeated loads (the next paragraph, and what Lab B saw on the M5).</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>代码上的 intensity 不等于 DRAM 上的</strong>：上面的算法假设每次 global 读都到了 DRAM。实际上 L1 和 L2 会挡掉很多重复读，真实的 DRAM 字节更少，真实 intensity 更高。Lab B 在 M5 上正好看到这一点：朴素版按「每次读都到内存」和 Phase 1 量到的约 134 GB/s 拷贝带宽算，上限只有约 34 GFLOP/s，实测却是 372 GFLOP/s，高出约 11 倍，所以大部分读一定被缓存挡住了（推断）。这就是为什么 <code>ncu</code> 的 roofline 用的是实测的 DRAM 字节，而且有分层的 roofline（<code>SpeedOfLight_HierarchicalSingleRooflineChart</code> 等），把 L1、L2、DRAM 三条带宽线画在一起；指南说，点贴着 DRAM 线时，缓存效率往往就是限制。</p>
   <p lang="en"><strong>Intensity as written is not intensity at DRAM</strong>: the arithmetic above assumes every global load reaches DRAM. In practice L1 and L2 absorb many repeated loads, so the real DRAM bytes are fewer and the real intensity is higher. Lab B sees exactly this on the M5: counting every load as a memory access and using the copy bandwidth of about 134 GB/s measured in Phase 1, the naive kernel’s ceiling would be only about 34 GFLOP/s, yet it measured 372 GFLOP/s, about 11 times higher, so most of its loads must be caught by caches (an inference). This is why <code>ncu</code>’s roofline uses measured DRAM bytes, and why there are hierarchical rooflines (<code>SpeedOfLight_HierarchicalSingleRooflineChart</code> and others) that draw the L1, L2 and DRAM bandwidth lines together; the guide says that when a point sits at the DRAM line, cache efficiency is often what limits it.</p>
   <p lang="zh-CN">延伸阅读：Hennessy &amp; Patterson 第 6 版第 4 章讲 roofline 模型的部分；Williams 等人 2009 年在 Communications of the ACM 上的原始论文（见资料）；PMPP 第 5 版第 5 章「Memory architecture and data locality」（矩阵乘分块与计算/访存比）。</p>
@@ -176,6 +207,37 @@
   <p lang="en">On the Metal side the counterpart is <code>MPSMatrixMultiplication</code> from Metal Performance Shaders. Lab B measured it on the M5 at 5.2 times as fast as Phase 1’s tiled kernel: a gap this wide usually separates a tuned library from classroom tiling (register tiling, double buffering, vectorised loads, block sizes chosen for the architecture). Apple does not publish which kernel MPS picked.</p>
   <p lang="zh-CN">延伸阅读：参考书目里没有书讲 cuBLAS 的调用细节；依据是 cuBLAS 文档的「cublas&lt;t&gt;gemm()」「cublasGemmEx()」「Tensor Core Usage」和「cublasMath_t」几节（见资料）。PMPP 第 5 版第 6 章（线程粒度粗化、寄存器分块）讲了 <code>mm_reg</code> 这一步背后的想法。</p>
   <p lang="en">Further reading: no book in the bibliography covers the details of calling cuBLAS; this rests on the “cublas&lt;t&gt;gemm()”, “cublasGemmEx()”, “Tensor Core Usage” and “cublasMath_t” sections of the cuBLAS documentation (see Resources). PMPP, 5th ed., Chapter 6 (thread coarsening, register tiling) covers the idea behind the <code>mm_reg</code> step.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>先用 <code>nsys</code> 看整个程序的时间花在拷贝、启动还是 kernel 上，再用 <code>ncu</code> 打开占大头的那一个 kernel。</li>
+      <li>读 <code>ncu</code> 报告从 SpeedOfLight 往下走：哪一侧接近峰值，瓶颈就在哪一侧，两侧都低多半是延迟受限。</li>
+      <li>roofline 的上限是 intensity 乘带宽和峰值算力中较小的那个，T4 的 FP32 ridge 约在 25 FLOP/byte。</li>
+      <li>朴素、分块、寄存器分块三个矩阵乘的代码上的 intensity 是 0.25、4、16，都在 T4 的 FP32 ridge 左边。</li>
+      <li>停顿样本记在等待数据的那条指令上，目标是提高发射槽利用率，改一处就重新剖析一次。</li>
+      <li>T4 的 Tensor Core 只吃 FP16 这一种浮点输入，cuBLAS 的时间是自写矩阵乘的那把尺子。</li>
+    </ul>
+    <ul lang="en">
+      <li>Use <code>nsys</code> first to see whether the program’s time goes to copies, launches or kernels, then open the dominant kernel in <code>ncu</code>.</li>
+      <li>Read an <code>ncu</code> report from SpeedOfLight down: whichever side is near its peak holds the bottleneck, and both sides low usually means latency-bound.</li>
+      <li>The roofline ceiling is the smaller of intensity times bandwidth and peak compute, and the T4’s FP32 ridge is at about 25 FLOP/byte.</li>
+      <li>The naive, tiled and register-tiled matrix multiplies have intensities as written of 0.25, 4 and 16, all left of the T4’s FP32 ridge.</li>
+      <li>Stall samples are charged to the instruction waiting for the data, the goal is issue-slot utilisation, and every change is followed by a fresh profile.</li>
+      <li>The T4’s tensor cores take FP16 as their only floating-point input, and the cuBLAS time is the ruler for a hand-written matrix multiply.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：<code>ncu</code> 报的时长就是这个 kernel 在程序里的真实时间。→ 实际：<code>ncu</code> 默认锁定时钟、在重放之间清空缓存并串行化启动，它的时长适合比较同一个 kernel 的两个版本。</li>
+      <li>误解：Long Scoreboard 占主导，说明 kernel 是带宽受限。→ 实际：Profiling Guide 写明那是访存延迟受限，不一定是带宽受限；带宽没用满时先选藏延迟的改法。</li>
+      <li>误解：要把每一种停顿计数器都压到零。→ 实际：<code>selected</code> 和 <code>not_selected</code> 根本不是停顿，目标是发射槽的利用率。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: the duration <code>ncu</code> reports is the kernel’s real time inside the program. → Fact: by default <code>ncu</code> locks clocks, flushes caches between replays and serialises launches, so its duration is for comparing two versions of one kernel.</li>
+      <li>Myth: a dominant Long Scoreboard means the kernel is bandwidth-bound. → Fact: the Profiling Guide says it means memory-latency-bound, not necessarily bandwidth-bound; when bandwidth is not saturated, try latency hiding first.</li>
+      <li>Myth: every stall counter should be driven to zero. → Fact: <code>selected</code> and <code>not_selected</code> are not stalls at all, and the target is issue-slot utilisation.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：ncu 指标 ↔ 它告诉你什么</h2><h2 id="compare-en" lang="en">Comparison: ncu metric ↔ what it tells you</h2>
   <div class="table-wrap">

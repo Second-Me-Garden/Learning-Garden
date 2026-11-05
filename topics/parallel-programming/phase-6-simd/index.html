@@ -55,6 +55,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">前几个阶段靠多开线程变快，可一个核本身就有 128 位宽的向量寄存器，一条指令能做 4 次 <code>float</code> 乘加。那么一个 4096 元素的点积，单线程到底能快多少：是 4 倍，还是更多？如果编译器报告说「向量化了」却几乎没变快，问题出在哪里？数据大到放不进缓存时，再好的向量代码又会被什么挡住？</p>
+    <p lang="en">Earlier phases got faster by adding threads, yet one core already has 128-bit vector registers, and one instruction can do 4 <code>float</code> multiply-adds. So how much faster can a single thread make a 4096-element dot product: 4 times, or more? If the compiler reports “vectorized” and the loop barely speeds up, where is the problem? And once the data no longer fits in the caches, what stops even the best vector code?</p>
+    <p lang="zh-CN">概念 1 的车道和概念 2 的独立累加器回答第一问，概念 3 和 4 的自动向量化与重排许可回答第二问，概念 6 的 roofline 回答第三问。</p>
+    <p lang="en">The lanes of concept 1 and the independent accumulators of concept 2 answer the first question, auto-vectorization and the permission to reassociate in concepts 3 and 4 answer the second, and the roofline of concept 6 answers the third.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 一个核里的数据并行：寄存器、车道与元素宽度</h3><h3 lang="en">1. Data parallelism inside one core: registers, lanes and element widths</h3>
   <p lang="zh-CN">Phase 0 讲 Flynn 分类时说过，多核是 MIMD，每个核里又有 SIMD：一条指令作用在一组数据上。AArch64 的 SIMD 叫 Advanced SIMD，通称 NEON。它有 32 个向量寄存器 <code>v0</code>–<code>v31</code>，每个固定 128 位。同一个寄存器可以按不同的元素宽度切成<strong>车道（lane）</strong>：16 条 8 位、8 条 16 位、4 条 32 位或 2 条 64 位。一条 <code>fadd.4s</code> 把两个寄存器的 4 条 32 位车道两两相加，车道之间互不进位、互不干扰。<code>.4s</code> 里的 4 是车道数，<code>s</code> 是 single，即 32 位；<code>.2d</code> 是 2 条 64 位，<code>.16b</code> 是 16 条 8 位。</p>
   <p lang="en">When Phase 0 covered Flynn’s taxonomy, it said a multicore CPU is MIMD and each core contains SIMD: one instruction acting on a group of data. AArch64’s SIMD is called Advanced SIMD, commonly NEON. It has 32 vector registers, <code>v0</code>–<code>v31</code>, each a fixed 128 bits. The same register can be cut into <strong>lanes</strong> of different element widths: 16 of 8 bits, 8 of 16 bits, 4 of 32 bits or 2 of 64 bits. One <code>fadd.4s</code> adds the 4 32-bit lanes of two registers pairwise, with no carry and no interference between lanes. In <code>.4s</code> the 4 is the lane count and <code>s</code> means single, 32 bits; <code>.2d</code> is 2 lanes of 64 bits, <code>.16b</code> is 16 lanes of 8 bits.</p>
@@ -88,18 +95,41 @@ sysctl: unknown oid 'hw.optional.arm.FEAT_SVE'</pre>
   <p lang="en">Further reading: McKenney, Chapter 3, “Hardware and its Habits”, section 3.1.5 (functional units: each core has a few vector units) and section 3.3.4, “Special-Purpose Accelerators” (which uses exactly a dot product to show why vector instructions save decode and loop overhead). All four books in the bibliography say little about SIMD; this page relies mainly on Arm’s and Apple’s documentation, listed under Resources.</p>
 
   <h3 lang="zh-CN">2. 车道之外的第二个维度：延迟、吞吐和独立的累加器</h3><h3 lang="en">2. The second dimension beyond lanes: latency, throughput and independent accumulators</h3>
-  <p lang="zh-CN">车道让一条指令做 4 份工作，但这还不够。一条浮点指令从发出到结果可用要等几个周期（<strong>延迟</strong>），而核每个周期又能发出不止一条（<strong>吞吐</strong>）。如果每一步都要用上一步的结果，核只能等延迟。Phase 0 的数组求和用四个累加器把单线程提高了 3 倍，道理相同。Lab A 在本机测出的数字把这一点拆成了三级（n = 4096，放得进 L1）：</p>
-  <p lang="en">Lanes let one instruction do 4 pieces of work, but that is not the whole story. A floating-point instruction takes several cycles from issue until its result is usable (<strong>latency</strong>), and the core can issue more than one per cycle (<strong>throughput</strong>). If every step needs the previous step’s result, the core can only wait out the latency. The four accumulators in Phase 0’s array sum made one thread 3 times faster for the same reason. The numbers Lab A measured on this Mac split this into three levels (n = 4096, fits L1):</p>
+  <p lang="zh-CN">车道让一条指令做 4 份工作，但这还不够。一条浮点指令从发出到结果可用要等几个周期（<strong>延迟</strong>），而核每个周期又能发出不止一条（<strong>吞吐</strong>）。如果每一步都要用上一步的结果，核只能等延迟。Phase 0 的数组求和用四个累加器把单线程提高了 3 倍，道理相同。Lab B 的标量链和 Lab A 的两个 NEON 版本在本机测出的数字把这一点拆成了三级（n = 4096，放得进 L1）：</p>
+  <p lang="en">Lanes let one instruction do 4 pieces of work, but that is not the whole story. A floating-point instruction takes several cycles from issue until its result is usable (<strong>latency</strong>), and the core can issue more than one per cycle (<strong>throughput</strong>). If every step needs the previous step’s result, the core can only wait out the latency. The four accumulators in Phase 0’s array sum made one thread 3 times faster for the same reason. The numbers measured on this Mac, Lab B’s scalar chain and Lab A’s two NEON versions, split this into three levels (n = 4096, fits L1):</p>
   <ul>
-    <li lang="zh-CN"><strong>标量，一条 <code>fmadd</code> 链</strong>（<code>-fno-vectorize</code>）：2968 ns 做 4096 次，每次约 0.72 ns。每条 <code>fmadd</code> 都要等上一条的 <code>s0</code>，这 0.72 ns 就是一次乘加的延迟（从测量推出）。</li>
-    <li lang="en"><strong>Scalar, one <code>fmadd</code> chain</strong> (<code>-fno-vectorize</code>): 4096 of them in 2968 ns, about 0.72 ns each. Every <code>fmadd</code> waits for the previous one’s <code>s0</code>, so the 0.72 ns is the latency of one multiply-add (inferred from the measurement).</li>
+    <li lang="zh-CN"><strong>标量，一条 <code>fmadd</code> 链</strong>（<code>-fno-vectorize</code>，Lab B）：2969 ns 做 4096 次，每次约 0.72 ns。每条 <code>fmadd</code> 都要等上一条的 <code>s0</code>，这 0.72 ns 就是一次乘加的延迟（从测量推出）。</li>
+    <li lang="en"><strong>Scalar, one <code>fmadd</code> chain</strong> (<code>-fno-vectorize</code>, Lab B): 4096 of them in 2969 ns, about 0.72 ns each. Every <code>fmadd</code> waits for the previous one’s <code>s0</code>, so the 0.72 ns is the latency of one multiply-add (inferred from the measurement).</li>
     <li lang="zh-CN"><strong>NEON，一个向量累加器</strong>（<code>neon1</code>）：748 ns 做 1024 条 <code>fmla.4s</code>，每条约 0.73 ns，和标量的一次几乎一样，但每条做了 4 份。车道带来了约 4 倍。</li>
     <li lang="en"><strong>NEON, one vector accumulator</strong> (<code>neon1</code>): 1024 <code>fmla.4s</code> in 748 ns, about 0.73 ns each, nearly the same as one scalar step, but each does 4 pieces of work. Lanes bought about a factor of 4.</li>
     <li lang="zh-CN"><strong>NEON，四个向量累加器</strong>（<code>neon4</code>）：187–211 ns（三次运行的中位数）。四条互不依赖的链可以同时在流水线里，每 0.73 ns 左右完成 4 条 <code>fmla.4s</code>。独立的链又带来了约 3.5–4 倍。</li>
     <li lang="en"><strong>NEON, four vector accumulators</strong> (<code>neon4</code>): 187–211 ns (medians of three runs). Four chains that do not depend on each other can be in the pipeline together, completing about 4 <code>fmla.4s</code> every 0.73 ns. Independent chains bought another factor of about 3.5–4.</li>
   </ul>
-  <p lang="zh-CN">所以「用 SIMD」有两个旋钮：每条指令几条车道，以及同时有几条互不依赖的链。只拧第一个，你只拿到 4 倍；两个都拧，同一个核在 L1 里拿到 14–16 倍。<code>vDSP_dotpr</code> 还要再快一点（156 ns），它的实现不公开，实验机上 <code>lldb</code> 附加进程被拒绝，没能读到它的内层循环，所以本页不猜它多用了什么。</p>
-  <p lang="en">So “using SIMD” has two knobs: how many lanes per instruction, and how many independent chains at once. Turn only the first and you get 4 times; turn both and the same core gets 14–16 times in L1. <code>vDSP_dotpr</code> is a little faster still (156 ns). Its implementation is not public, and on the lab Mac <code>lldb</code> was refused permission to attach, so its inner loop could not be read and this page does not guess what more it does.</p>
+  <p lang="zh-CN">所以「用 SIMD」有两个旋钮：每条指令几条车道，以及同时有几条互不依赖的链。对照 <code>-fno-vectorize</code> 的标量链（Lab B），只拧第一个，你只拿到 4 倍；两个都拧，同一个核在 L1 里拿到 14–16 倍。<code>vDSP_dotpr</code> 还要再快一点（156 ns），它的实现不公开，实验机上 <code>lldb</code> 附加进程被拒绝，没能读到它的内层循环，所以本页不猜它多用了什么。</p>
+  <p lang="en">So “using SIMD” has two knobs: how many lanes per instruction, and how many independent chains at once. Against the <code>-fno-vectorize</code> scalar chain (Lab B), turn only the first and you get 4 times; turn both and the same core gets 14–16 times in L1. <code>vDSP_dotpr</code> is a little faster still (156 ns). Its implementation is not public, and on the lab Mac <code>lldb</code> was refused permission to attach, so its inner loop could not be read and this page does not guess what more it does.</p>
+  <div class="worked">
+    <p lang="zh-CN">用两个数推出三个时间：标量的一条链（Lab B 用 <code>-fno-vectorize</code> 测得 2969 ns），以及 Lab A 在 L1 尺寸上的 <code>neon1</code> 和 <code>neon4</code>。两个数是 n = 4096 个 <code>float</code>，一次乘加的延迟约 0.73 ns（上面从 <code>neon1</code> 测出的值）。点积共做 2 × 4096 = 8192 次浮点运算，关键路径的长度就是最长那条依赖链上的乘加条数。</p>
+    <p lang="en">Derive three times from two numbers: the scalar single chain (2969 ns, measured in Lab B with <code>-fno-vectorize</code>) and Lab A’s <code>neon1</code> and <code>neon4</code> at the L1 size. The two numbers are n = 4096 <code>float</code>s and a multiply-add latency of about 0.73 ns (the value measured above from <code>neon1</code>). The dot product does 2 × 4096 = 8192 floating-point operations, and the critical path is the number of multiply-adds on the longest dependency chain.</p>
+    <pre>scalar : 1 chain  ×  4096 fmadd                  ≈ 4096 × 0.73 ns ≈ 2990 ns            measured 2969 ns (Lab B, -fno-vectorize)   2.76 GFLOP/s
+neon1  : 1 chain  ×  4096 / 4 = 1024             calibration: 748 ns / 1024 ≈ 0.73 ns  measured  748 ns                          10.95 GFLOP/s
+neon4  : 4 chains ×  4096 / 16 = 256 steps each  ≈  256 × 0.73 ns ≈  187 ns            measured  187 ns                          43.8  GFLOP/s
+after the loop: c0 + c1, c2 + c3, then their sum → 3 vaddq_f32, then vaddvq_f32 → 2 faddp
+GFLOP/s = 8192 / time in ns          (8192 / 187 ≈ 43.8,  8192 / 2969 ≈ 2.76)</pre>
+    <ol lang="zh-CN">
+      <li>第 1 步，标量：每条 <code>fmadd</code> 都要等上一条写回 <code>s0</code>，4096 步首尾相接，耗时约等于 4096 个延迟。</li>
+      <li>第 2 步，<code>neon1</code>：一条 <code>fmla.4s</code> 在 4 条车道上各做一次乘加，链只剩 1024 步。每步的延迟几乎没变，所以时间降到四分之一，这就是车道带来的 4 倍。</li>
+      <li>第 3 步，<code>neon4</code>：主循环每次前进 16 个元素，<code>c0</code> 到 <code>c3</code> 四个累加器各接一条 <code>fmla.4s</code>，四条链互不依赖，可以同时在流水线里。每条链只有 256 步，时间又降到约四分之一，这是第二个旋钮带来的约 4 倍。</li>
+      <li>第 4 步，横向归约：循环结束后，三条 <code>vaddq_f32</code> 把四个累加器合成一个向量，<code>vaddvq_f32</code> 再用两条 <code>faddp</code> 把 4 条车道加成 Lab A 输出里的 <code>dot=3071.2</code>。这几条指令只做一次，不在关键路径的 256 步里。</li>
+      <li>第 5 步，对照实测：三次运行里 <code>neon4</code> 的中位数是 211.0、187.2、186.9 ns，推算的 187 ns 对上了后两次。第一次偏慢不是预热，<code>bench</code> 已丢掉预热并取 15 次中位数；更可能是当时负载（约 2.6）带来的运行间波动（推断）。<code>vDSP_dotpr</code> 的 156 ns 比这个推算更快，说明四条链还没把这台核的吞吐用满（推断）。</li>
+    </ol>
+    <ol lang="en">
+      <li>Step 1, scalar: every <code>fmadd</code> waits for the previous one to write <code>s0</code>, so 4096 steps run end to end and the time is about 4096 latencies.</li>
+      <li>Step 2, <code>neon1</code>: one <code>fmla.4s</code> does a multiply-add in each of 4 lanes, so the chain shrinks to 1024 steps. The latency per step barely changes, so the time falls to a quarter: that is the factor of 4 the lanes buy.</li>
+      <li>Step 3, <code>neon4</code>: the main loop advances 16 elements at a time, each of the four accumulators <code>c0</code> to <code>c3</code> takes one <code>fmla.4s</code>, and the four chains do not depend on each other, so they can be in the pipeline together. Each chain has only 256 steps, and the time falls by about a quarter again: the factor of about 4 from the second knob.</li>
+      <li>Step 4, the horizontal reduction: after the loop, three <code>vaddq_f32</code> combine the four accumulators into one vector, and <code>vaddvq_f32</code> adds its 4 lanes with two <code>faddp</code> into the <code>dot=3071.2</code> of Lab A’s output. These run once and are not among the 256 steps of the critical path.</li>
+      <li>Step 5, against the measurement: the three runs gave <code>neon4</code> medians of 211.0, 187.2 and 186.9 ns, so the predicted 187 ns matches the last two. The slower first run is not warm-up, since <code>bench</code> already discards one and takes a median of 15; more likely it is run-to-run variation under that load of about 2.6 (inference). <code>vDSP_dotpr</code> at 156 ns beats this prediction, which suggests four chains do not yet use the core’s full throughput (inference).</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：McKenney 第 3 章「Hardware and its Habits」的 3.1.1 节「Pipelined CPUs」（流水线为什么要找到互不依赖的工作）。</p>
   <p lang="en">Further reading: McKenney, Chapter 3, “Hardware and its Habits”, section 3.1.1, “Pipelined CPUs” (why a pipeline needs independent work to stay full).</p>
 
@@ -186,6 +216,37 @@ sysctl: unknown oid 'hw.optional.arm.FEAT_SVE'</pre>
   <p lang="zh-CN">延伸阅读：McKenney 第 6 章「Partitioning and Synchronization Design」的 6.3.5 节（矩阵乘法的效率图：没有任何同步，单线程效率也只有约 0.3，限制它的是内存而不是算力）；roofline 的原始论文见「资料」。</p>
   <p lang="en">Further reading: McKenney, Chapter 6, “Partitioning and Synchronization Design”, section 6.3.5 (the matrix-multiply efficiency figure: with no synchronization at all, even one thread reaches an efficiency of only about 0.3, limited by memory rather than compute); the original roofline paper is under Resources.</p>
 
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>NEON 有 32 个固定 128 位的 <code>v</code> 寄存器，按元素宽度切成 16、8、4 或 2 条车道，一条 <code>fmla.4s</code> 同时做 4 次 <code>float</code> 乘加。</li>
+      <li>SIMD 有两个旋钮：车道数和互不依赖的链数；对照 -fno-vectorize 的标量链（Lab B 2969 ns），只拧车道约 4 倍，两个都拧在 L1 里 14–16 倍。</li>
+      <li>编译器报告 <code>vectorized loop</code> 只说明有些指令变成了向量指令，没有重排许可的 float 归约仍是一条按源顺序的 <code>fadd</code> 链，要看汇编、量时间。</li>
+      <li>浮点加法不满足结合律，拆成多个部分和会改变结果，所以要由你给出许可：自己写多个累加器、<code>#pragma clang fp reassociate(on)</code>，或者范围最宽的 <code>-ffast-math</code>。</li>
+      <li>AArch64 上 <code>vld1q_f32</code> 不要求 16 字节对齐，而 AoS 布局会让一次向量读取把带宽浪费在不用的字段上。</li>
+      <li>点积的算术强度只有 0.25 FLOP/B，数据大过缓存时它被约 83 GB/s 的单核带宽限在约 20.8 GFLOP/s，再多的车道和累加器都没用。</li>
+    </ul>
+    <ul lang="en">
+      <li>NEON has 32 fixed 128-bit <code>v</code> registers, cut by element width into 16, 8, 4 or 2 lanes, and one <code>fmla.4s</code> does 4 <code>float</code> multiply-adds at once.</li>
+      <li>SIMD has two knobs, the number of lanes and the number of independent chains; against the -fno-vectorize scalar chain (2969 ns in Lab B), lanes alone gave about 4 times and both knobs 14–16 times in L1.</li>
+      <li>A <code>vectorized loop</code> report only means some instructions became vector instructions; a float reduction without permission to reassociate is still one <code>fadd</code> chain in source order, so read the assembly and measure.</li>
+      <li>Floating-point addition is not associative and splitting it into partial sums changes the result, so you must grant permission: write several accumulators yourself, use <code>#pragma clang fp reassociate(on)</code>, or the broadest option, <code>-ffast-math</code>.</li>
+      <li>On AArch64 <code>vld1q_f32</code> does not require 16-byte alignment, while an AoS layout makes one vector load spend bandwidth on fields that are not used.</li>
+      <li>A dot product has an arithmetic intensity of only 0.25 FLOP/B, so once the data exceeds the caches the single-core bandwidth of about 83 GB/s caps it near 20.8 GFLOP/s, and no number of lanes or accumulators helps.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：用了 4 条车道的 SIMD，就该快 4 倍，而且到头了。→ 实际：一条累加链被乘加延迟限住，再加上独立的累加器，Lab A 在 L1 里又多得约 3.5–4 倍。</li>
+      <li>误解：编译器说向量化了，循环就变快了。→ 实际：不加重排许可的 float 归约虽然报告 <code>vectorized loop</code>，加法仍是一条标量链，只从 2.76 升到 4.44 GFLOP/s，重排后是 43 GFLOP/s。</li>
+      <li>误解：重排后的浮点结果总是更准。→ 实际：Lab A 的大点积碰巧更准，换一组数据误差方向可能相反；需要逐位可复现的结果时，要固定一种求和顺序。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: SIMD with 4 lanes should be 4 times faster, and that is the limit. → Fact: one accumulator chain is held back by the multiply-add latency, and adding independent accumulators gave Lab A another factor of about 3.5–4 in L1.</li>
+      <li>Myth: if the compiler says it vectorized the loop, the loop got faster. → Fact: a float reduction without permission to reassociate reports <code>vectorized loop</code> yet its additions stay one scalar chain, rising only from 2.76 to 4.44 GFLOP/s, against 43 GFLOP/s once reassociated.</li>
+      <li>Myth: a reordered floating-point result is always more accurate. → Fact: Lab A’s large dot product happened to come out more accurate, but with other data the error can go the other way; when results must be reproducible bit for bit, fix one order of summation.</li>
+    </ul>
+  </div>
+
   <h2 id="compare" lang="zh-CN">对照表：标量 ↔ 自动向量化 ↔ intrinsics ↔ Accelerate</h2><h2 id="compare-en" lang="en">Comparison: scalar ↔ auto-vectorized ↔ intrinsics ↔ Accelerate</h2>
   <div class="table-wrap">
   <table class="cmp">
@@ -210,13 +271,13 @@ sysctl: unknown oid 'hw.optional.arm.FEAT_SVE'</pre>
            "1. 一个 v 寄存器 128 位，按 32 位切成 4 条车道（车道 0 到 3）。同一个寄存器也可以切成 16 条 8 位、8 条 16 位或 2 条 64 位，由指令后缀决定。",
            "2. vld1q_f32 一次从内存读 16 字节，即 a[0] 到 a[3]，放进 v1；b 同样放进 v2。在 AArch64 上地址不必 16 字节对齐，实测偏移 4、8、12 字节都一样快。",
            "3. fmla.4s v0, v1, v2：一条指令里 4 条车道各做一次乘加，车道之间互不干扰。neon1 用一个这样的累加器，4096 个元素 748 ns。",
-           "4. 对照标量：fmadd 一次只做一条车道，而且每次都要等上一次的结果，约 0.72 ns 一次，4096 个元素 2968 ns。车道让一条指令做 4 份工作。",
+           "4. 对照标量：fmadd 一次只做一条车道，而且每次都要等上一次的结果，约 0.72 ns 一次，4096 个元素 2969 ns。车道让一条指令做 4 份工作。",
            "5. 循环结束后做一次横向求和：faddp.4s 把相邻车道两两相加，faddp.2s 再加一次，得到一个 float。车道之间的操作较贵，所以只在循环外做一次。"]'
          data-captions-en='["The whole picture: on the left are three 128-bit v registers with their 4 lanes of 32 bits, the array a in memory above them, and the scalar version and the final horizontal sum below. The right column shows the instruction for each step and what was measured on this Mac. Press Play to step through.",
            "1. A v register is 128 bits, cut at 32 bits into 4 lanes (lanes 0 to 3). The same register can also be cut into 16 lanes of 8 bits, 8 of 16 bits or 2 of 64 bits; the instruction suffix decides.",
            "2. vld1q_f32 reads 16 bytes from memory at once, a[0] to a[3], into v1; b goes into v2 the same way. On AArch64 the address need not be 16-byte aligned; offsets of 4, 8 and 12 bytes measured just as fast.",
            "3. fmla.4s v0, v1, v2: in one instruction each of the 4 lanes does one multiply-add, and the lanes do not interfere. neon1 uses one such accumulator: 748 ns for 4096 elements.",
-           "4. Compare scalar code: fmadd does one lane at a time and each one waits for the previous result, about 0.72 ns each, 2968 ns for 4096 elements. Lanes let one instruction do 4 pieces of work.",
+           "4. Compare scalar code: fmadd does one lane at a time and each one waits for the previous result, about 0.72 ns each, 2969 ns for 4096 elements. Lanes let one instruction do 4 pieces of work.",
            "5. After the loop, one horizontal sum: faddp.4s adds neighbouring lanes in pairs and faddp.2s adds once more, giving one float. Operations across lanes cost more, so this happens only once, outside the loop."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -275,7 +336,7 @@ sysctl: unknown oid 'hw.optional.arm.FEAT_SVE'</pre>
         <text x="270" y="302" class="small" lang="zh-CN">标量：一次 1 条车道，下一次要等这一次</text><text x="270" y="302" class="small" lang="en">scalar: 1 lane, the next waits for this one</text>
         <text x="620" y="290" class="mono">fmadd s0, s1, s2, s0</text>
         <text x="620" y="309" class="small" lang="zh-CN">约 0.72 ns 一次（依赖链）</text><text x="620" y="309" class="small" lang="en">about 0.72 ns each (one chain)</text>
-        <text x="620" y="327" class="small" lang="zh-CN">4096 个元素 2968 ns</text><text x="620" y="327" class="small" lang="en">2968 ns for 4096 elements</text>
+        <text x="620" y="327" class="small" lang="zh-CN">4096 个元素 2969 ns</text><text x="620" y="327" class="small" lang="en">2969 ns for 4096 elements</text>
       </g>
 
       <!-- step 5: horizontal reduction -->

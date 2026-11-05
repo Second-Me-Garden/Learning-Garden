@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">这台 Mac 的 CPU 同一时刻跑 10 个线程，而一块 GPU 要几万个线程同时在跑才吃得满。几万个线程执行的是同一个函数，它们怎么知道各自该算哪个元素？元素个数不是 block 大小的整数倍时，多出来的线程怎么办？数据还放在另一块内存里，搬过去又要花多少？</p>
+    <p lang="en">The CPU of this Mac runs 10 threads at a time, while a GPU needs tens of thousands running at once to be kept busy. Those tens of thousands of threads all run the same function: how does each one know which element is its own? What happens to the spare threads when the element count is not a multiple of the block size? And the data sits in a different memory: what does moving it there cost?</p>
+    <p lang="zh-CN">概念 3 的编程模型回答前两个问题：每个线程用 <code>blockIdx</code>、<code>blockDim</code>、<code>threadIdx</code> 算出自己的下标，再用 <code>if (i &lt; n)</code> 挡住多余的线程；概念 4 回答第三个。</p>
+    <p lang="en">The programming model of concept 3 answers the first two: each thread computes its own index from <code>blockIdx</code>, <code>blockDim</code> and <code>threadIdx</code>, and <code>if (i &lt; n)</code> stops the spare ones; concept 4 answers the third.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 为什么用 GPU：吞吐而不是延迟</h3><h3 lang="en">1. Why GPUs: throughput, not latency</h3>
   <p lang="zh-CN">CPU 核把大部分晶体管花在让<em>一个</em>线程跑快上：大缓存、分支预测、乱序执行，目标是缩短每条指令的等待，这叫面向延迟（latency-oriented）的设计。GPU 把晶体管花在大量简单的运算单元上，每个运算单元分到的控制逻辑很少。单看一个 GPU 线程，它比 CPU 线程慢得多；但同一时刻有成千上万个线程在跑，总的完成量（吞吐，throughput）高得多。前提是工作能拆成大量互不依赖的小份，向量加法正是这样：每个元素一份。</p>
   <p lang="en">A CPU core spends most of its transistors on making <em>one</em> thread fast: large caches, branch prediction, out-of-order execution, all aimed at shortening the wait on each instruction. This is called latency-oriented design. A GPU spends its transistors on a great many simple arithmetic units, each with very little control logic of its own. A single GPU thread is much slower than a CPU thread, but tens of thousands of them run at the same time, so the total amount finished (throughput) is far higher. The precondition is that the work splits into many small independent pieces; a vector add is exactly that, one piece per element.</p>
@@ -90,6 +97,27 @@
     <li lang="zh-CN"><strong>启动是异步的</strong>：kernel 启动相对 host 线程是异步的（编程指南），<code>&lt;&lt;&lt; &gt;&gt;&gt;</code> 一返回，CPU 就接着往下走，GPU 可能还没开始。这决定了下面怎样检查错误、怎样计时。</li>
     <li lang="en"><strong>Launches are asynchronous</strong>: a kernel launch is asynchronous with respect to the host thread (programming guide); as soon as <code>&lt;&lt;&lt; &gt;&gt;&gt;</code> returns, the CPU moves on, and the GPU may not have started yet. This decides how errors are checked and how time is measured below.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">用图解 (a) 的启动 <code>vec_add&lt;&lt;&lt;8, 256&gt;&gt;&gt;</code>、n = 2000，跟三个线程走一遍：它们执行同一个函数体，只是内置变量不同。</p>
+    <p lang="en">Take the launch of diagram (a), <code>vec_add&lt;&lt;&lt;8, 256&gt;&gt;&gt;</code> with n = 2000, and follow three threads: they run the same function body and differ only in their built-in variables.</p>
+    <pre>grid: (2000 + 255) / 256 = 8 blocks, 8 x 256 = 2048 threads
+block 3, thread 5  : i = 3*256 + 5   =  773 &lt; 2000  -&gt; c[773] = a[773] + b[773]  (warp 0)
+block 7, thread 207: i = 7*256 + 207 = 1999 &lt; 2000  -&gt; the last element         (warp 6)
+block 7, thread 208: i = 7*256 + 208 = 2000, not &lt; n -&gt; skips the body          (warp 6)
+block 7 spare lanes: warp 6 has 16 (208..223), warp 7 has 32 (224..255) = 48 = 2048 - 2000</pre>
+    <ol lang="zh-CN">
+      <li>block 3 的线程 5：<code>i = 773</code>，落在图解 (a) 第 2 步的 768 到 1023 之内。5 / 32 = 0，它在 warp 0 里，和线程 0 到 31 同时执行每一条指令。</li>
+      <li>block 7 的线程 207：<code>i = 1999</code>，是最后一个元素。207 / 32 = 6，它在 warp 6（线程 192 到 223）里。</li>
+      <li>block 7 的线程 208：<code>i = 2000</code>，<code>if (i &lt; n)</code> 为假，什么也不写。没有这个判断，它会写 <code>c[2000]</code>，越过数组末尾。它和线程 207 同在 warp 6，所以这个 warp 在 <code>if</code> 上分成两半：16 条通道干活，16 条被屏蔽。</li>
+      <li>数一下多余的线程：warp 6 的 16 个加上 warp 7 的整整 32 个，正好 48 个，就是 2048 − 2000，与图解 (a) 第 1 步的「block 7 只有前 208 个线程有元素」一致。</li>
+    </ol>
+    <ol lang="en">
+      <li>Thread 5 of block 3: <code>i = 773</code>, inside the 768 to 1023 of step 2 of diagram (a). 5 / 32 = 0, so it is in warp 0 and executes every instruction together with threads 0 to 31.</li>
+      <li>Thread 207 of block 7: <code>i = 1999</code>, the last element. 207 / 32 = 6, so it is in warp 6 (threads 192 to 223).</li>
+      <li>Thread 208 of block 7: <code>i = 2000</code>, so <code>if (i &lt; n)</code> is false and it writes nothing. Without that test it would write <code>c[2000]</code>, past the end of the array. It shares warp 6 with thread 207, so that warp splits at the <code>if</code>: 16 lanes work and 16 are masked off.</li>
+      <li>Count the spare threads: 16 in warp 6 plus all 32 of warp 7 make exactly 48, which is 2048 − 2000 and matches step 1 of diagram (a), where only the first 208 threads of block 7 have an element.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版讲异构数据并行计算的一章（向量加法，第一个内核）和讲多维 grid 与数据的一章。</p>
   <p lang="en">Further reading: the chapter on heterogeneous data parallel computing in PMPP, 5th ed. (the vector add, the first kernel) and its chapter on multidimensional grids and data.</p>
 
@@ -122,6 +150,37 @@
   </ul>
   <p lang="zh-CN">延伸阅读：Best Practices Guide 中「Performance Metrics」一章（CPU 计时器与 CUDA GPU 计时器）；Sanders &amp; Kandrot《CUDA by Example》第 6 章「Constant Memory and Events」（§6.3「Measuring Performance with Events」）；Cheng 等《Professional CUDA C Programming》讲 CUDA 编程模型的一章（错误处理、内核计时）。</p>
   <p lang="en">Further reading: the “Performance Metrics” chapter of the Best Practices Guide (CPU timers and CUDA GPU timers); Chapter 6, “Constant Memory and Events” (§6.3, “Measuring Performance with Events”), of Sanders &amp; Kandrot, <em>CUDA by Example</em>; the chapter on the CUDA programming model in Cheng et al., <em>Professional CUDA C Programming</em> (error handling, timing a kernel).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>GPU 用单个线程的速度换总吞吐，靠在常驻 SM 的 warp 之间零代价切换来藏住内存延迟，所以要几万个线程才吃得满。</li>
+      <li>硬件把一个 block 里编号连续的 32 个线程编成一个 warp，一条指令同时为它们发射；warp 内走不同分支时两条路径依次执行。</li>
+      <li>每个线程用 <code>i = blockIdx.x * blockDim.x + threadIdx.x</code> 找到自己的元素，block 数用 <code>(n + block - 1) / block</code> 向上取整，再用 <code>if (i &lt; n)</code> 挡住多余的线程。</li>
+      <li>block 之间没有执行顺序的保证，也不能互相等待，所以同一个程序不改就能在 SM 多少不同的 GPU 上跑。</li>
+      <li>启动是异步的：启动后立刻调 <code>cudaGetLastError</code> 抓配置错误，执行中的错误要在下一次同步调用的返回值里看，计时用事件而不是 CPU 时钟。</li>
+      <li>独立显卡上向量加法的 PCIe 拷贝比内核本身长得多，所以要把数据留在 device 上连着跑多个内核。</li>
+    </ul>
+    <ul lang="en">
+      <li>A GPU trades single-thread speed for total throughput and hides memory latency by switching for free among warps resident on the SM, so it takes tens of thousands of threads to keep it busy.</li>
+      <li>The hardware groups 32 consecutively numbered threads of a block into a warp and issues each instruction for all of them at once; when they take different branches the two paths run one after the other.</li>
+      <li>Each thread finds its element with <code>i = blockIdx.x * blockDim.x + threadIdx.x</code>, the block count is rounded up with <code>(n + block - 1) / block</code>, and <code>if (i &lt; n)</code> stops the spare threads.</li>
+      <li>Blocks have no guaranteed order and may not wait on each other, which is why one program runs unchanged on GPUs with few or many SMs.</li>
+      <li>Launches are asynchronous: call <code>cudaGetLastError</code> right after a launch for configuration errors, read execution errors from the next synchronising call, and time with events rather than a CPU clock.</li>
+      <li>On a discrete card the PCIe copies of a vector add take far longer than the kernel, so keep data on the device and run several kernels on it.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：GPU 快，是因为它的每个线程都比 CPU 线程快。→ 实际：单个 GPU 线程慢得多，快的是同时在跑的几万个线程的总完成量。</li>
+      <li>误解：<code>&lt;&lt;&lt; &gt;&gt;&gt;</code> 返回后 <code>cudaGetLastError</code> 是 <code>cudaSuccess</code>，内核就跑对了。→ 实际：它只抓到配置错误，越界访问这类执行中的错误要到下一次同步调用才报告。</li>
+      <li>误解：在启动前后读 CPU 时钟就量到了内核时间。→ 实际：启动是异步的，这样只量到启动本身，要用 <code>cudaEventRecord</code> 和 <code>cudaEventElapsedTime</code>。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a GPU is fast because each of its threads is faster than a CPU thread. → Fact: a single GPU thread is much slower; what is fast is the combined output of tens of thousands running at once.</li>
+      <li>Myth: if <code>cudaGetLastError</code> returns <code>cudaSuccess</code> after <code>&lt;&lt;&lt; &gt;&gt;&gt;</code>, the kernel ran correctly. → Fact: it catches only configuration errors; errors during execution, such as an out-of-bounds access, are reported at the next synchronising call.</li>
+      <li>Myth: reading a CPU clock before and after a launch measures the kernel. → Fact: the launch is asynchronous, so that measures only the launch; use <code>cudaEventRecord</code> and <code>cudaEventElapsedTime</code>.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：CPU 线程 ↔ CUDA 线程 ↔ Metal 线程</h2><h2 id="compare-en" lang="en">Comparison: CPU thread ↔ CUDA thread ↔ Metal thread</h2>
   <div class="table-wrap">

@@ -58,6 +58,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">一个 launch 文件同时拉起相机、滤波和检测三个节点。检测节点启动时滤波节点可能还没加载完参数，于是它先收到几帧半配置状态下的数据；而 launch 能看到的只有「进程已经起来了」。另一边，相机每秒发 20 张 1 MB 的图，每一跳都要序列化、穿过内核、再反序列化。怎样让一个外部管理者确定某个节点「已经准备好、可以开始发数据」，又怎样在不改节点代码的前提下去掉这些拷贝？</p>
+    <p lang="en">One launch file brings up three nodes: camera, filter and detector. When the detector starts, the filter may not have loaded its parameters yet, so the detector first sees a few frames from a half-configured system; and all launch can see is “the process is up”. Meanwhile the camera sends twenty 1 MB images a second, and every hop serializes them, crosses the kernel and deserializes them. How can an outside manager know that a node is “ready and allowed to send data”, and how can the copies be removed without changing the node code?</p>
+    <p lang="zh-CN">概念 4 的 lifecycle 状态机回答第一问，概念 5 的组合加上概念 6 的进程内通信回答第二问。</p>
+    <p lang="en">Concept 4, the lifecycle state machine, answers the first question, and concept 5, composition, together with concept 6, intra-process communication, answers the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. launch 文件在运行时是什么</h3><h3 lang="en">1. What a launch file is at run time</h3>
   <p lang="zh-CN">Python launch 文件不是「按顺序执行的启动脚本」，而是一个返回<strong>描述</strong>的函数。<code>ros2 launch</code> 加载这个文件，调用其中的 <code>generate_launch_description()</code>，拿到一个 <code>LaunchDescription</code>：一列<strong>动作</strong>（action），例如声明参数、启动节点、包含另一个 launch 文件、注册事件处理器。然后一个 launch 服务（<code>launch.LaunchService</code>）在一个 asyncio 事件循环里逐个「访问」这些动作：</p>
   <p lang="en">A Python launch file is not “a start-up script that runs in order”; it is a function that returns a <strong>description</strong>. <code>ros2 launch</code> loads the file, calls its <code>generate_launch_description()</code>, and gets a <code>LaunchDescription</code>: a list of <strong>actions</strong> such as declaring an argument, starting a node, including another launch file, or registering an event handler. A launch service (<code>launch.LaunchService</code>) then “visits” those actions one by one in an asyncio event loop:</p>
@@ -68,8 +75,8 @@
     <li lang="en"><strong>A <code>Node</code> action starts a process.</strong> <code>launch_ros.actions.Node</code> is a specialisation of <code>ExecuteProcess</code>: it resolves the package and executable name to a path like <code>install/&lt;pkg&gt;/lib/&lt;pkg&gt;/&lt;exe&gt;</code> (approximate path), translates <code>name</code>, <code>namespace</code>, <code>remappings</code> and <code>parameters</code> into <code>--ros-args -r __node:=… -r __ns:=… -r a:=b --params-file …</code> appended to the command line, and the launch service spawns a child process to run it. The node does <em>not</em> run inside the launch process.</li>
     <li lang="zh-CN"><strong>结果是一棵进程树。</strong>运行中的系统在内核看来是：一个 <code>ros2 launch</code> 的 Python 进程，下面挂着每个节点一个子进程。launch 进程一直活着，用 asyncio 等待子进程的输出和退出，把它们变成事件（<code>ProcessStarted</code>、<code>ProcessIO</code>、<code>ProcessExited</code>），再分发给注册过的事件处理器。</li>
     <li lang="en"><strong>The result is a process tree.</strong> To the kernel, the running system is one Python process for <code>ros2 launch</code> with one child process per node under it. The launch process stays alive, waits with asyncio for the children’s output and exit, turns them into events (<code>ProcessStarted</code>, <code>ProcessIO</code>, <code>ProcessExited</code>), and dispatches them to the registered event handlers.</li>
-    <li lang="zh-CN"><strong>关闭是信号的升级。</strong>你在 launch 的终端按 Ctrl+C，launch 收到 <code>SIGINT</code>，发出一个 <code>Shutdown</code> 事件，再给仍在运行的子进程发 <code>SIGINT</code>；5 秒后还不退就发 <code>SIGTERM</code>，再过 5 秒发 <code>SIGKILL</code>。这两个 5 秒是 <code>sigterm_timeout</code> 和 <code>sigkill_timeout</code> 的默认值。这就是 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a> 里父进程管理子进程的那一套。</li>
-    <li lang="en"><strong>Shutdown is an escalation of signals.</strong> When you press Ctrl+C in the launch terminal, launch receives <code>SIGINT</code>, emits a <code>Shutdown</code> event, and sends <code>SIGINT</code> to the children still running; a child still running after 5 s gets <code>SIGTERM</code>, and after another 5 s <code>SIGKILL</code>. These are the <code>sigterm_timeout</code> and <code>sigkill_timeout</code> defaults. This is the parent-manages-children pattern of <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>.</li>
+    <li lang="zh-CN"><strong>关闭是信号的升级。</strong>你在 launch 的终端按 Ctrl+C，launch 收到 <code>SIGINT</code>，发出一个 <code>Shutdown</code> 事件；子进程已经从终端收到同一个 <code>SIGINT</code>（launch 不再补发），5 秒后还不退就发 <code>SIGTERM</code>，再过 5 秒发 <code>SIGKILL</code>。这两个 5 秒是 <code>sigterm_timeout</code> 和 <code>sigkill_timeout</code> 的默认值。这就是 <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a> 里父进程管理子进程的那一套。动画 (c) 按 Jazzy 的 <code>execute_local.py</code> 逐步画出这次升级；其中有一个细节：在终端里按 Ctrl+C 时，终端已经把 SIGINT 送到整个前台进程组，launch 只启动两个定时器而不再补发 SIGINT，由其他原因触发的 <code>Shutdown</code> 才由 launch 自己发 SIGINT。</li>
+    <li lang="en"><strong>Shutdown is an escalation of signals.</strong> When you press Ctrl+C in the launch terminal, launch receives <code>SIGINT</code> and emits a <code>Shutdown</code> event; the children have already received the same <code>SIGINT</code> from the terminal (launch does not send it again); a child still running after 5 s gets <code>SIGTERM</code>, and after another 5 s <code>SIGKILL</code>. These are the <code>sigterm_timeout</code> and <code>sigkill_timeout</code> defaults. This is the parent-manages-children pattern of <a href="../../kernel-engineering/phase-1-boot-and-processes/index.html">Kernel Phase 1</a>. Diagram (c) steps through this escalation as Jazzy’s <code>execute_local.py</code> implements it, with one detail: after a Ctrl+C in a terminal, the terminal has already delivered SIGINT to the whole foreground process group, so launch only starts the two timers and does not send SIGINT again; launch sends SIGINT itself only for a <code>Shutdown</code> with another cause.</li>
   </ul>
   <div class="note" lang="zh-CN">launch 文件还可以写成 XML 或 YAML，它们被解析成同一套动作，能力略少。本课程只用 Python 格式，因为事件处理器和组合容器在 Python 里写最直接。按 launch 的设计文章，launch 系统的职责是「启动、监视、关闭一组进程，并对它们的状态变化作出反应」，而不是一个通用构建或部署工具。</div>
   <div class="note" lang="en">Launch files can also be written in XML or YAML, which are parsed into the same actions with slightly fewer capabilities. This course uses only the Python format, because event handlers and composable containers are most direct to write in Python. Per the launch design article, the job of the launch system is “to start, monitor and shut down a set of processes, and to react to changes in their state”, not to be a general build or deployment tool.</div>
@@ -135,6 +142,30 @@
   </ol>
   <div class="note" lang="zh-CN">这些保证是<em>约定</em>，不是强制：状态机只保证回调按规则被调用、状态按规则转换。如果你在构造函数里就建定时器并发布，或者在 <code>on_activate</code> 里做耗时几秒的事，状态机不会拦你，但「Inactive 不产生数据」「激活很快」就不再成立。launch 里也可以用 <code>launch_ros.actions.LifecycleNode</code> 和状态转换事件自动驱动它（请查文档）；本页实验用 CLI 手动驱动，看得最清楚。</div>
   <div class="note" lang="en">These guarantees are a <em>convention</em>, not enforcement: the state machine guarantees only that callbacks are called and states change by the rules. If you create a timer and publish from the constructor, or do several seconds of work in <code>on_activate</code>, the machine will not stop you, but “Inactive produces no data” and “activation is quick” stop being true. Launch can also drive it automatically with <code>launch_ros.actions.LifecycleNode</code> and state-transition events (check the docs); the lab on this page drives it by hand with the CLI, which shows it most clearly.</div>
+  <div class="worked">
+    <p lang="zh-CN">用 Lab A 的 <code>managed_talker</code> 走一遍图解 (a)：构造函数只声明 <code>period_ms</code>（默认 500），<code>on_configure</code> 在它不大于 0 时返回 <code>FAILURE</code>，否则建发布者和定时器；定时器回调 <code>tick()</code> 每次先执行 <code>count_++</code> 再 publish。下面把 <code>period_ms</code> 先设成 0、再设成 200。configure 成功后隔 1.1 s 才 activate，这个间隔是为了举例假设的，其余数字都来自 Lab A 的代码。</p>
+    <p lang="en">Walk diagram (a) with the <code>managed_talker</code> of Lab A: the constructor only declares <code>period_ms</code> (default 500), <code>on_configure</code> returns <code>FAILURE</code> when it is not greater than 0 and otherwise creates the publisher and the timer, and the timer callback <code>tick()</code> always runs <code>count_++</code> before it publishes. Below, <code>period_ms</code> is set first to 0 and then to 200. The 1.1 s gap between a successful configure and activate is an assumption made for illustration; every other number comes from the Lab A code.</p>
+    <pre>period_ms = 0    configure → on_configure: 0 ≤ 0 → FAILURE        state unconfigured
+period_ms = 200  configure → on_configure: pub_, timer_ created   state inactive
+t = 0.2 … 1.0 s  tick() × 5: count_ 0, 1, 2, 3, 4 used, publish() sends nothing
+t = 1.1 s        activate → pub_-&gt;on_activate()                    state active
+t = 1.2 s        first message on /chatter: "managed hello 5"
+deactivate, cleanup → on_cleanup: timer_, pub_ reset, count_ = 0  state unconfigured</pre>
+    <ol lang="zh-CN">
+      <li><code>period_ms</code> 为 0 时，configure 让节点进入 Configuring，<code>on_configure</code> 返回 <code>FAILURE</code>，节点回到出发的主状态 Unconfigured。进程没死，参数可以改了再试。</li>
+      <li>改成 200 后 configure 成功，节点到达 Inactive。发布者已经存在，<code>ros2 topic info /chatter</code> 看得到它；定时器也已经在跑。</li>
+      <li>在 Inactive 的 1.1 s 里定时器触发了 5 次，每次 <code>count_++</code> 都照常执行，但 <code>LifecyclePublisher</code> 没被激活，<code>publish()</code> 什么都不发，只打印警告。</li>
+      <li>activate 调用 <code>pub_-&gt;on_activate()</code>，节点到达 Active。下一次 tick 在 t = 1.2 s，<code>/chatter</code> 上看到的第一条消息是 <code>managed hello 5</code>，而不是 0：计数器在 Inactive 期间一直在走。</li>
+      <li>deactivate 回到 Inactive，资源还在；cleanup 再回到 Unconfigured，<code>on_cleanup</code> 释放定时器和发布者并把 <code>count_</code> 清零，下次 configure 从头开始。</li>
+    </ol>
+    <ol lang="en">
+      <li>With <code>period_ms</code> at 0, configure puts the node into Configuring, <code>on_configure</code> returns <code>FAILURE</code>, and the node goes back to the primary state it started from, Unconfigured. The process is still alive, so the parameter can be changed and the transition retried.</li>
+      <li>After changing it to 200, configure succeeds and the node reaches Inactive. The publisher already exists, so <code>ros2 topic info /chatter</code> shows it, and the timer is already running.</li>
+      <li>During the 1.1 s in Inactive the timer fires 5 times, and each time <code>count_++</code> runs as usual, but the <code>LifecyclePublisher</code> is not activated, so <code>publish()</code> sends nothing and only logs a warning.</li>
+      <li>activate calls <code>pub_-&gt;on_activate()</code> and the node reaches Active. The next tick is at t = 1.2 s, and the first message seen on <code>/chatter</code> is <code>managed hello 5</code>, not 0: the counter kept running while the node was Inactive.</li>
+      <li>deactivate returns to Inactive with the resources kept; cleanup then returns to Unconfigured, and <code>on_cleanup</code> frees the timer and the publisher and resets <code>count_</code> to zero, so the next configure starts from scratch.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲 lifecycle 节点的章节；设计文章 <a href="https://design.ros2.org/articles/node_lifecycle.html">Managed nodes</a>；官方 demo <a href="https://github.com/ros2/demos/tree/jazzy/lifecycle">ros2/demos/lifecycle（jazzy 分支）</a>。</p>
   <p lang="en">Further reading: the chapters of Martín Rico, <em>A Concise Introduction to Robot Programming with ROS2</em>, on lifecycle nodes; the design article <a href="https://design.ros2.org/articles/node_lifecycle.html">Managed nodes</a>; the official demo <a href="https://github.com/ros2/demos/tree/jazzy/lifecycle">ros2/demos/lifecycle (jazzy branch)</a>.</p>
 
@@ -171,8 +202,61 @@
   <p lang="en"><strong>Conditions for zero copy</strong> (per Jazzy’s rclcpp docs and source; the author did not verify each case, so check the docs): publishing with <code>publish(std::unique_ptr&lt;Msg&gt;)</code> hands over ownership, and with exactly one subscriber whose callback takes a <code>std::unique_ptr</code>, ownership moves straight across with zero copies; when all subscribers take a <code>const</code> shared pointer, they share one copy; when a subscriber that wants ownership coexists with others, the manager must copy for it; and publishing with <code>publish(const Msg &amp;)</code> makes rclcpp copy once before it can hand anything over. Intra-process communication also restricts QoS (history must be keep last, for example; check the docs for durability support), and it is an rclcpp feature: rclpy has no matching bypass.</p>
   <div class="note" lang="zh-CN">为什么这能显著降低延迟：一张 1 MB 的图像走 DDS，要做一次序列化（遍历并拷贝 1 MB）、一次或多次穿过内核（UDP 回环要分片，共享内存传输也有拷贝和通知）、一次反序列化（再拷贝 1 MB 并分配内存），还要唤醒 DDS 的接收线程。进程内只传一个指针，代价与消息大小基本无关。消息越大，差别越大；对几个字节的消息，差别主要来自省掉的线程切换。Lab B 用 1 MB 消息量这个差别。</div>
   <div class="note" lang="en">Why this cuts latency so much: a 1 MB image over DDS needs one serialization (walk and copy 1 MB), one or more trips through the kernel (UDP loopback fragments it, and shared-memory transport also copies and notifies), one deserialization (copy 1 MB again and allocate), and a wake-up of the DDS receive thread. Intra-process passes one pointer, at a cost that hardly depends on message size. The larger the message, the larger the gap; for a message of a few bytes the gap comes mostly from the thread switches saved. Lab B measures this gap with 1 MB messages.</div>
+  <div class="worked">
+    <p lang="zh-CN">把 Lab B 的 <code>Stamper</code> 和 <code>Probe</code> 按三种模式各跑一遍，数一数每条消息被拷贝了多少字节。<code>Stamper</code> 每 50 ms 用 <code>unique_ptr</code> 发一张 <code>bytes = 1000000</code> 的 <code>sensor_msgs/msg/Image</code>，<code>Probe</code> 用接收 <code>unique_ptr</code> 的回调收下；两边在序号为 100 的倍数时打印数据缓冲区的地址。下面的 <code>0xA…</code> 和 <code>0xB…</code> 是代替真实地址的占位符。</p>
+    <p lang="en">Run the <code>Stamper</code> and <code>Probe</code> of Lab B once in each of the three modes and count how many bytes each message is copied. <code>Stamper</code> publishes one <code>sensor_msgs/msg/Image</code> of <code>bytes = 1000000</code> every 50 ms through a <code>unique_ptr</code>, and <code>Probe</code> receives it with a callback that takes a <code>unique_ptr</code>; both sides print the address of the data buffer when the sequence number is a multiple of 100. The <code>0xA…</code> and <code>0xB…</code> below are placeholders for real addresses.</p>
+    <pre>rate        1000 ms / 50 ms = 20 msg/s  → 20 × 1 000 000 B = 20 MB/s of image data
+mode 1, 2   serialize 1 MB + deserialize 1 MB = 2 MB copied per message → 40 MB/s
+            seq 100: Stamper data at 0xA…, Probe data at 0xB…  (different buffers)
+mode 3      unique_ptr → one unique_ptr subscriber: 0 B copied, one pointer handed over
+            seq 100: Stamper data at 0xA…, Probe data at 0xA…  (expected: same buffer)
+Probe line  every 100 msgs = every 100 × 50 ms = 5 s</pre>
+    <ol lang="zh-CN">
+      <li>定时器周期 50 ms，所以每秒 20 条；每条的数据区是 1000000 字节，<code>Stamper</code> 每秒产出 20 MB 图像数据。<code>Probe</code> 每 100 条打印一行均值和最大值，也就是每 5 s 一行。</li>
+      <li>模式 1 是两个进程。<code>publish()</code> 下面的 rmw 把 1 MB 序列化成 CDR 字节，经内核送到另一个进程，那边的 rmw 再把它反序列化进一个新分配的消息对象。仅这两步就是每条 2 MB、每秒 40 MB 的拷贝，还不算内核里的传输，所以两边打印的地址不同。</li>
+      <li>模式 2 把两个组件装进同一个容器，但没开进程内通信。消息仍然走 rmw 和 DDS，序列化和反序列化一步都不少，地址依旧不同。只合并进程，省不掉这些拷贝。</li>
+      <li>模式 3 加上 <code>use_intra_process_comms:=true</code>。<code>Stamper</code> 交出 <code>unique_ptr</code>，话题上只有一个要所有权的订阅者，intra-process manager 把这个指针原样放进 <code>Probe</code> 的缓冲区。拷贝的字节数应为 0，同一序号两边应打印相同的地址（Lab B 第 6 步的预期，本页没有记录实际输出）。</li>
+      <li>如果再加一个接收 <code>unique_ptr</code> 的订阅者，manager 就必须为其中一个拷贝一份；如果 <code>Stamper</code> 改用 <code>publish(const Msg &amp;)</code>，rclcpp 也要先拷贝一次。零拷贝只在上面那种一对一的条件下成立。</li>
+    </ol>
+    <ol lang="en">
+      <li>The timer period is 50 ms, so 20 messages a second; each data area is 1000000 bytes, so <code>Stamper</code> produces 20 MB of image data a second. <code>Probe</code> prints one mean-and-max line every 100 messages, which is once every 5 s.</li>
+      <li>Mode 1 is two processes. The rmw under <code>publish()</code> serializes the 1 MB into CDR bytes, the kernel carries it to the other process, and the rmw there deserializes it into a freshly allocated message object. Those two steps alone copy 2 MB per message, 40 MB a second, before counting the transport through the kernel, so the two sides print different addresses.</li>
+      <li>Mode 2 loads both components into one container but leaves intra-process communication off. Messages still go through rmw and DDS with every serialization and deserialization step intact, and the addresses still differ. Merging the processes alone does not remove these copies.</li>
+      <li>Mode 3 adds <code>use_intra_process_comms:=true</code>. <code>Stamper</code> hands over a <code>unique_ptr</code>, the topic has one subscriber that wants ownership, and the intra-process manager puts that pointer as it is into the buffer of <code>Probe</code>. Zero bytes should be copied, and both sides should print the same address for the same sequence number (the expectation of Lab B step 6; the page records no actual output).</li>
+      <li>Add a second subscriber that takes a <code>unique_ptr</code> and the manager has to copy for one of them; switch <code>Stamper</code> to <code>publish(const Msg &amp;)</code> and rclcpp has to copy once first. Zero copy holds only under the one-to-one condition above.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲组件与进程内通信的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Intra-Process-Communication.html">Intra-Process Communication</a> demo；设计文章 <a href="https://design.ros2.org/articles/intraprocess_communications.html">Intra-process Communications in ROS 2</a>。</p>
   <p lang="en">Further reading: the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, on components and intra-process communication; the official <a href="https://docs.ros.org/en/jazzy/Tutorials/Demos/Intra-Process-Communication.html">Intra-Process Communication</a> demo; the design article <a href="https://design.ros2.org/articles/intraprocess_communications.html">Intra-process Communications in ROS 2</a>.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>Python launch 文件返回一份动作描述，launch 服务在访问动作时才求值替换，每个 <code>Node</code> 动作派生一个子进程。</li>
+      <li>关闭时子进程先收到 <code>SIGINT</code>（终端里的 Ctrl+C 直接送达，其他原因的关闭由 launch 发），5 s 后 <code>SIGTERM</code>，再 5 s 后 <code>SIGKILL</code>。</li>
+      <li>参数 YAML 按节点全名匹配，命名空间一变，那一段就悄悄不生效。</li>
+      <li>lifecycle 节点把启动拆成 configure 和 activate 两步，回调返回 <code>FAILURE</code> 时回到出发的主状态，外部可以重试。</li>
+      <li>组合把多个组件 <code>dlopen</code> 进一个容器进程，进程内通信再让 <code>unique_ptr</code> 一对一时零拷贝。</li>
+    </ul>
+    <ul lang="en">
+      <li>A Python launch file returns a description of actions, the launch service evaluates substitutions only when it visits an action, and every <code>Node</code> action spawns a child process.</li>
+      <li>On shutdown the children get <code>SIGINT</code> first (straight from the terminal on Ctrl+C, from launch for any other cause), then <code>SIGTERM</code> after 5 s, then <code>SIGKILL</code> after 5 s more.</li>
+      <li>Parameter YAML matches by full node name, so a changed namespace silently stops a section from applying.</li>
+      <li>A lifecycle node splits start-up into configure and activate, and a callback returning <code>FAILURE</code> goes back to the primary state it started from, so the manager can retry.</li>
+      <li>Composition uses <code>dlopen</code> to load several components into one container process, and intra-process communication then makes a one-to-one <code>unique_ptr</code> hand-over zero copy.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：<code>OnProcessStart</code> 触发时节点已经可以用了。→ 实际：它只说明进程已经 exec，节点内部是否配置好要看 lifecycle 状态。</li>
+      <li>误解：把节点装进同一个容器就自动零拷贝。→ 实际：不开 <code>use_intra_process_comms</code>，消息照样序列化后走 DDS。</li>
+      <li>误解：lifecycle 节点在 Inactive 时什么都不做。→ 实际：<code>LifecyclePublisher</code> 不发数据，但定时器和其余回调照常运行，Lab A 的计数器在 Inactive 期间也在增加。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: when <code>OnProcessStart</code> fires, the node is ready to use. → Fact: it only says the process has exec’d, and whether the node is configured is told by its lifecycle state.</li>
+      <li>Myth: loading nodes into one container makes them zero copy automatically. → Fact: without <code>use_intra_process_comms</code>, messages are still serialized and go through DDS.</li>
+      <li>Myth: a lifecycle node does nothing while Inactive. → Fact: the <code>LifecyclePublisher</code> sends no data, but timers and other callbacks keep running, and the counter of Lab A keeps rising while Inactive.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：一个节点一个进程 ↔ 组合在一个进程里</h2><h2 id="compare-en" lang="en">Comparison: one process per node ↔ composed nodes</h2>
   <div class="table-wrap">
@@ -363,6 +447,78 @@
 
       <g data-step="6"><text x="20" y="386" class="small" lang="zh-CN">延迟几乎不随大小增长；一个崩溃，全部陪葬</text><text x="20" y="386" class="small" lang="en">latency barely grows with size; one crash kills all</text>
         <text x="470" y="386" class="small" lang="zh-CN">延迟随大小增长；崩溃只影响一个进程</text><text x="470" y="386" class="small" lang="en">latency grows with size; a crash stays contained</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) launch 怎样关掉子进程：SIGINT，5 s 后 SIGTERM，再 5 s 后 SIGKILL</h3><h3 lang="en">(c) How launch shuts its children down: SIGINT, SIGTERM after 5 s, SIGKILL after 5 s more</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
+         data-captions='["全图：时间从左往右，最上面的横条是 ros2 launch 进程，下面三条是它的子进程。各子进程什么时候退出是示意：A 和 B 处理了 SIGINT，5 s 内退出；C 不理会。两个超时是 Jazzy launch 的默认值（launch/actions/execute_local.py）：sigterm_timeout = 5，sigkill_timeout = 5。按播放逐步看。",
+           "1. t = 0 按下 Ctrl+C：终端把 SIGINT 发给整个前台进程组，launch 进程和每个子进程同时收到。",
+           "2. launch 的 SIGINT 处理函数发出 Shutdown 事件，due_to_sigint = True。每个 ExecuteProcess 动作随即启动两个定时器：sigterm_timeout = 5 s 后发 SIGTERM，sigterm_timeout + sigkill_timeout = 10 s 后发 SIGKILL。终端里的 Ctrl+C 之后 launch 不再补发 SIGINT；由其他原因（例如事件处理器）触发的 Shutdown，或 launch 以非交互模式运行时，launch 才自己给每个子进程发 SIGINT。",
+           "3. 子进程 A 和 B 处理 SIGINT 后退出。每退出一个，launch 就发出一个 ProcessExited 事件，OnProcessExit 这类事件处理器可以对它作出反应，同时取消这个子进程的两个定时器。",
+           "4. t = 5 s：C 还在运行，它的第一个定时器到期。launch 记一条错误日志，说 C 收到 SIGINT 5 秒后仍未退出、正在升级，然后发 SIGTERM。",
+           "5. t = 10 s：C 仍在运行，第二个定时器到期，launch 用 SIGKILL 杀掉它；SIGKILL 不能被进程捕获或忽略。C 退出，launch 为它发出 ProcessExited。",
+           "6. 所有子进程都已退出，launch 没有要等的东西了，自己退出。两个超时可以用 ExecuteProcess 或 Node 的 sigterm_timeout、sigkill_timeout 参数按进程调整，也可以用同名的 launch 参数整体调整。"]'
+         data-captions-en='["The whole picture: time runs left to right; the top bar is the ros2 launch process and the three bars below are its child processes. When each child exits is illustrative: A and B handle SIGINT and exit within 5 s, and C ignores it. The two timeouts are the Jazzy launch defaults (launch/actions/execute_local.py): sigterm_timeout = 5 and sigkill_timeout = 5. Press Play to step through.",
+           "1. Ctrl+C at t = 0: the terminal sends SIGINT to the whole foreground process group, so the launch process and every child receive it at once.",
+           "2. The SIGINT handler of launch emits a Shutdown event with due_to_sigint = True. Each ExecuteProcess action then starts two timers: SIGTERM after sigterm_timeout = 5 s, and SIGKILL after sigterm_timeout + sigkill_timeout = 10 s. After a Ctrl+C in a terminal, launch does not send SIGINT again; for a Shutdown with another cause, such as an event handler, or when launch runs non-interactively, launch sends SIGINT to each child itself.",
+           "3. Children A and B handle SIGINT and exit. For each exit launch emits a ProcessExited event, which event handlers such as OnProcessExit can react to, and cancels the two timers of that child.",
+           "4. t = 5 s: C is still running, so its first timer fires. launch logs an error saying that C failed to terminate 5 seconds after receiving SIGINT and is escalating, then sends SIGTERM.",
+           "5. t = 10 s: C is still running, so the second timer fires and launch kills it with SIGKILL, which no process can catch or ignore. C exits and launch emits ProcessExited for it.",
+           "6. Every child has exited, so launch has nothing left to wait for and exits itself. The two timeouts can be changed per process with the sigterm_timeout and sigkill_timeout arguments of ExecuteProcess or Node, or for the whole launch with launch arguments of the same names."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="132" class="mono">ros2 launch</text>
+      <text x="20" y="184" lang="zh-CN">子进程 A</text><text x="20" y="184" lang="en">child A</text>
+      <text x="20" y="234" lang="zh-CN">子进程 B</text><text x="20" y="234" lang="en">child B</text>
+      <text x="20" y="284" lang="zh-CN">子进程 C</text><text x="20" y="284" lang="en">child C</text>
+      <line x1="200" y1="56" x2="200" y2="322" class="lane"/>
+      <line x1="480" y1="56" x2="480" y2="322" class="lane"/>
+      <line x1="760" y1="56" x2="760" y2="322" class="lane"/>
+      <rect class="box ros" x="140" y="120" width="650" height="16"/>
+      <rect class="box ros" x="140" y="172" width="110" height="16"/>
+      <rect class="box ros" x="140" y="222" width="190" height="16"/>
+      <rect class="box ros" x="140" y="272" width="620" height="16"/>
+      <path class="arrow" d="M140 336 L880 336"/>
+      <text x="200" y="356" class="small" text-anchor="middle">0</text>
+      <text x="480" y="356" class="small" text-anchor="middle">5 s</text>
+      <text x="760" y="356" class="small" text-anchor="middle">10 s</text>
+      <text x="850" y="356" class="small" lang="zh-CN">时间</text><text x="850" y="356" class="small" lang="en">time</text>
+      <text x="20" y="400" class="small" lang="zh-CN">Jazzy 默认：sigterm_timeout = 5，sigkill_timeout = 5（launch/actions/execute_local.py）</text><text x="20" y="400" class="small" lang="en">Jazzy defaults: sigterm_timeout = 5, sigkill_timeout = 5 (launch/actions/execute_local.py)</text>
+
+      <!-- step 1: Ctrl+C, SIGINT to the process group -->
+      <g data-step="1">
+        <rect class="box" x="150" y="14" width="100" height="30"/><text x="200" y="34" class="mono" text-anchor="middle">Ctrl+C</text>
+        <text x="262" y="34" class="small" lang="zh-CN">SIGINT → 整个前台进程组</text><text x="262" y="34" class="small" lang="en">SIGINT to the foreground group</text>
+        <path class="arrow" d="M200 44 L200 268"/>
+        <circle cx="200" cy="128" r="5" class="box"/><circle cx="200" cy="180" r="5" class="box"/>
+        <circle cx="200" cy="230" r="5" class="box"/><circle cx="200" cy="280" r="5" class="box"/></g>
+      <!-- step 2: Shutdown event, two timers per child -->
+      <g data-step="2">
+        <rect class="box" x="212" y="62" width="258" height="48"/>
+        <text x="222" y="81" class="mono">Shutdown(due_to_sigint=True)</text>
+        <text x="222" y="100" class="small" lang="zh-CN">每个子进程两个定时器：5 s、10 s</text><text x="222" y="100" class="small" lang="en">two timers per child: 5 s and 10 s</text></g>
+      <!-- step 3: A and B exit -->
+      <g data-step="3">
+        <text x="258" y="185" class="small" lang="zh-CN">✓ A 退出 · ProcessExited</text><text x="258" y="185" class="small" lang="en">✓ A exits · ProcessExited</text>
+        <text x="338" y="235" class="small" lang="zh-CN">✓ B 退出 · ProcessExited</text><text x="338" y="235" class="small" lang="en">✓ B exits · ProcessExited</text></g>
+      <!-- step 4: SIGTERM to C at 5 s -->
+      <g data-step="4">
+        <path class="arrow" d="M480 246 L480 268"/>
+        <text x="488" y="258" class="mono">SIGTERM → C</text>
+        <text x="488" y="306" class="small" lang="zh-CN">5 s 后仍在运行</text><text x="488" y="306" class="small" lang="en">still running after 5 s</text></g>
+      <!-- step 5: SIGKILL to C at 10 s -->
+      <g data-step="5">
+        <path class="arrow" d="M760 246 L760 268"/>
+        <text x="768" y="258" class="mono">SIGKILL → C</text>
+        <text x="768" y="285" class="small">C · ProcessExited</text></g>
+      <!-- step 6: launch exits -->
+      <g data-step="6">
+        <text x="556" y="112" class="small" lang="zh-CN">子进程全部退出 → launch 退出</text><text x="556" y="112" class="small" lang="en">all children gone: launch exits</text></g>
     </svg>
   </div>
 

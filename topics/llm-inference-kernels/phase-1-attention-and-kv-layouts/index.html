@@ -56,6 +56,12 @@
   </ul>
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
+  <div class="crux">
+    <p lang="zh-CN">许多请求以同一段长系统提示开头。每个请求各存一份它的 KV 是浪费显存；给每个请求一块连续的大缓冲区，请求来来去去之后显存又会碎成小块。可一旦 KV 被共享、散落在一个池子里，注意力内核怎么知道某个请求的第 t 个 token 的 K 和 V 在哪一行？共享的前缀只存了一份，是不是也就只读一份？</p>
+    <p lang="en">Many requests begin with the same long system prompt. Storing its KV once per request wastes memory, and giving each request one large contiguous buffer fragments memory as requests come and go. But once the KV is shared and scattered across a pool, how does an attention kernel know which row holds the K and V of token t of a given request? And if a shared prefix is stored once, is it also read only once?</p>
+    <p lang="zh-CN">概念 1 和 2 的 radix 树与逐 token 槽位负责存放和共享，概念 3 的 CSR 数组 indptr/indices 告诉内核去哪里读，概念 4 的 cascade 回答第二个问题。</p>
+    <p lang="en">The radix tree and per-token slots of concepts 1 and 2 handle storage and sharing, the CSR arrays indptr/indices of concept 3 tell the kernel where to read, and cascade attention in concept 4 answers the second question.</p>
+  </div>
   <p lang="zh-CN">下文的源码路径和行号都在 SGLang 的 <code>v0.5.22</code> 标签下，FlashInfer 的在 <code>v0.7.1</code> 标签下（SGLang 的 <code>python/pyproject.toml</code> 钉的就是 <code>flashinfer_python[cu13]==0.7.1</code>），都是 2026-11-01 从 raw.githubusercontent.com 取回后读的。</p><p lang="en">Every source path and line number below is at the <code>v0.5.22</code> tag of SGLang, and FlashInfer’s at its <code>v0.7.1</code> tag (SGLang’s <code>python/pyproject.toml</code> pins exactly <code>flashinfer_python[cu13]==0.7.1</code>); all were fetched from raw.githubusercontent.com and read on 2026-11-01.</p>
 
   <h3 lang="zh-CN">1. RadixAttention：一棵以 token 为键、以槽位为值的 radix 树</h3><h3 lang="en">1. RadixAttention: a radix tree keyed by tokens, valued by slots</h3>
@@ -96,6 +102,30 @@
     <li lang="en"><strong>Paged</strong>: the documentation treats the page table as a block-sparse matrix indexed in CSR format. <code>kv_indptr</code> (length <code>num_requests + 1</code>) is the prefix sum of each request’s page count; <code>kv_indices</code> (length <code>kv_indptr[-1]</code>) is the concatenation of all requests’ page numbers; <code>kv_last_page_len</code> (length <code>num_requests</code>) is the number of entries in each request’s last page, between 1 and <code>page_size</code>. Request <em>i</em>’s KV length is <code>page_size × (pages − 1) + last_page_len[i]</code>. The APIs are <code>BatchDecodeWithPagedKVCacheWrapper</code> and <code>BatchPrefillWithPagedKVCacheWrapper</code>.</li>
   </ul>
   <p lang="zh-CN">用动画 (a) 的三个请求算一遍：A、B、C 各有 9、9、6 个 token，页大小 1，于是 <code>kv_indptr = [0, 9, 18, 24]</code>，<code>kv_indices</code> 是三行槽位号首尾相接的 24 个数，<code>kv_last_page_len = [1, 1, 1]</code>。页大小为 1 时，最后一页总是满的，<code>kv_indices</code> 退化成「每个 token 一个槽位号」。FlashInfer 论文（arXiv:2501.01005 v2）把这一点说成块稀疏行（BSR）格式的块大小 <code>(B<sub>r</sub>, B<sub>c</sub>)</code>：<code>B<sub>c</sub></code> 由 KV 缓存管理算法决定，SGLang 的 <code>B<sub>c</sub> = 1</code> 就是论文所说的 vector-sparse；内核先把这些行收集到共享内存里，再在连续的数据上用 Tensor Core。</p><p lang="en">Work it through for the three requests of diagram (a): A, B and C have 9, 9 and 6 tokens, the page size is 1, so <code>kv_indptr = [0, 9, 18, 24]</code>, <code>kv_indices</code> is the 24 numbers of the three slot rows end to end, and <code>kv_last_page_len = [1, 1, 1]</code>. With a page size of 1 the last page is always full, and <code>kv_indices</code> reduces to one slot number per token. The FlashInfer paper (arXiv:2501.01005 v2) puts this as the block size <code>(B<sub>r</sub>, B<sub>c</sub>)</code> of a block-sparse row (BSR) format: <code>B<sub>c</sub></code> is set by the KV-cache management algorithm, and SGLang’s <code>B<sub>c</sub> = 1</code> is what the paper calls vector-sparse; the kernel first gathers those rows into shared memory, then uses Tensor Cores on the now-contiguous data.</p>
+  <div class="worked">
+    <p lang="zh-CN">用动画 (a) 的槽位号，把请求 B 的第 t = 7 个 token（日本？ 的第一个 token，从 0 数）在某一层里从数组一路找到字节。形状借用 Phase 0 的 Qwen3-8B：8 个 KV 头（单卡，张量并行为 1）、head_dim 128、BF16；头 h = 3 是为演示随便选的。槽位号本身是动画里的示意值。</p>
+    <p lang="en">With the slot numbers of diagram (a), follow token t = 7 of request B (the first token of Japan?, counting from 0) from the arrays to its bytes in one layer. The shape is Phase 0’s Qwen3-8B: 8 KV heads (one GPU, tensor parallelism 1), head_dim 128, BF16; head h = 3 is an arbitrary choice for the demonstration. The slot numbers themselves are the diagram’s illustrative values.</p>
+    <pre>kv_indptr  = [0, 9, 18, 24]                B: start 9, end 18, length 1 × (9 − 1) + 1 = 9
+kv_indices = [17 3 21 8 12 5 19 22 2 | 17 3 21 8 12 5 19 9 14 | 17 3 21 8 11 6]
+token t = 7 of B → kv_indices[9 + 7] = kv_indices[16] = slot 9
+K offset   = 9 × (8 × 128 × 2) + 3 × (128 × 2) = 18432 + 768 = 19200 bytes, read 256 bytes
+stored     : 13 distinct slots × 4096 B = 53248 B per layer   (24 slots without sharing: 98304 B)
+read       : 24 entries      × 4096 B = 98304 B per layer in plain paged decode</pre>
+    <ol lang="zh-CN">
+      <li>负责请求 B 的线程块读 <code>kv_indptr[1] = 9</code> 和 <code>kv_indptr[2] = 18</code>：它的段长 9，页大小 1，所以长度就是 1 × 8 + 1 = 9，与 <code>kv_last_page_len</code> 的公式一致。</li>
+      <li>第 7 个 token 的槽位号在 <code>kv_indices</code> 的第 9 + 7 = 16 个位置，值是 9。这是唯一的一次间接访存，4 字节。</li>
+      <li>池子这一层的 K 张量是 NHD 布局（槽位、头、维度）：一个槽位 8 × 128 × 2 = 2048 字节，一个头 256 字节，所以槽位 9、头 3 从第 19200 字节开始，连续读 256 字节；V 在 V 张量的同一偏移。</li>
+      <li>B 的前 7 个位置与 A 的完全相同，指向同一批字节。三个请求实际只用了 4 + 3 + 2 + 2 + 2 = 13 个槽位，按 Phase 0 每个槽位每层 4096 字节（K 加 V），存的是 53248 字节而不是 98304。</li>
+      <li>但普通的分页解码里三个线程块各走自己的 9、9、6 项，一层仍读 24 × 4096 = 98304 字节：共享省下了存储，没有省下读取，这正是概念 4 的出发点。</li>
+    </ol>
+    <ol lang="en">
+      <li>The thread block for request B reads <code>kv_indptr[1] = 9</code> and <code>kv_indptr[2] = 18</code>: its segment is 9 long, and with a page size of 1 the length is 1 × 8 + 1 = 9, matching the <code>kv_last_page_len</code> formula.</li>
+      <li>The slot number of token 7 sits at position 9 + 7 = 16 of <code>kv_indices</code>, and its value is 9. This is the only indirect access, 4 bytes.</li>
+      <li>This layer’s K tensor in the pool is NHD (slot, head, dimension): one slot is 8 × 128 × 2 = 2048 bytes and one head 256 bytes, so slot 9, head 3 starts at byte 19200 and is read as 256 contiguous bytes; V sits at the same offset in the V tensor.</li>
+      <li>B’s first 7 positions are identical to A’s and point at the same bytes. The three requests use only 4 + 3 + 2 + 2 + 2 = 13 slots, which at Phase 0’s 4096 bytes per slot per layer (K plus V) stores 53248 bytes instead of 98304.</li>
+      <li>In plain paged decode, though, the three thread blocks each walk their own 9, 9 and 6 entries, so one layer still reads 24 × 4096 = 98304 bytes: sharing saved storage, not reads, which is where concept 4 starts.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">同一份 <code>plan()</code> 产生的辅助数据结构可以被所有 Transformer 层复用（<code>flashinfer/decode.py</code> 第 966 行起 <code>BatchDecodeWithPagedKVCacheWrapper</code> 的文档字符串）：数组每个批次建一次，而不是每层一次。另外，KV 张量本身的最后三维可以是 <code>NHD</code>（token、头、维度）或 <code>HND</code>，默认 <code>NHD</code>，和 SGLang 池子的 <code>(槽位, 头, 维度)</code> 一致。</p><p lang="en">The auxiliary data structures one <code>plan()</code> produces are reused by every Transformer layer (the docstring of <code>BatchDecodeWithPagedKVCacheWrapper</code>, from line 966 of <code>flashinfer/decode.py</code>): the arrays are built once per batch, not once per layer. Separately, the last three dimensions of the KV tensor itself can be <code>NHD</code> (token, head, dimension) or <code>HND</code>; the default is <code>NHD</code>, which matches the <code>(slot, head, dimension)</code> of SGLang’s pool.</p>
   <p lang="zh-CN">延伸阅读：Hwu、Kirk、El Hajj《Programming Massively Parallel Processors》第 5 版第 15 章 Sparse matrix computation（CSR 格式，以及 SpMV 为什么受间接访存的限制）。</p><p lang="en">Further reading: chapter 15, Sparse matrix computation, of Hwu, Kirk and El Hajj, <em>Programming Massively Parallel Processors</em>, 5th ed. (the CSR format, and why SpMV is limited by indirect memory access).</p>
 
@@ -122,6 +152,35 @@ s(I ∪ J) = log(exp(s(I)) + exp(s(J)))
   </ol>
   <p lang="zh-CN">extend 这一路多一层判断：确定性推理、分段 CUDA 图和强制分页都会关掉 ragged（第 1018–1022 行）。用 ragged 时，分页那部分的长度取前缀长度 <code>prefix_lens</code>（第 1915–1918 行），<code>qo_indptr</code> 是新 token 数的前缀和（第 2225 行），ragged 包装器的 <code>plan</code> 把它同时当作查询和 KV 的 indptr（第 2257–2264 行），因为新 token 只看新 token 和前缀。</p><p lang="en">The extend branch adds one decision: deterministic inference, piecewise CUDA graphs and forced paging all turn ragged off (lines 1018–1022). With ragged on, the paged part’s lengths are the prefix lengths <code>prefix_lens</code> (lines 1915–1918), <code>qo_indptr</code> is the prefix sum of new-token counts (line 2225), and the ragged wrapper’s <code>plan</code> takes it as both the query and the KV indptr (lines 2257–2264), because new tokens see only new tokens plus the prefix.</p>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 11 章 Prefix sum (scan)（<code>indptr</code> 就是一次前缀和）。后端的调用顺序没有对应的书章，依据是上面引用的 <code>flashinfer_backend.py</code> 和 <code>base_attn_backend.py</code>。</p><p lang="en">Further reading: chapter 11, Prefix sum (scan), of PMPP, 5th ed. (<code>indptr</code> is one prefix sum). No book chapter covers the backend’s call order; it rests on the <code>flashinfer_backend.py</code> and <code>base_attn_backend.py</code> cited above.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>RadixAttention 在请求结束后不丢 KV，而是挂在一棵以 token 为键、以槽位号为值的 radix 树上，新请求只为没命中的部分做预填充。</li>
+      <li>SGLang 的页大小是一个 token：<code>req_to_token</code> 每行是一个请求的槽位号，共享前缀就是几行写着同样的槽位号。</li>
+      <li>内核只认 CSR 数组：<code>kv_indptr</code> 是每个请求长度的前缀和，<code>kv_indices</code> 是所有请求槽位号的拼接，都是 <code>int32</code>。</li>
+      <li>这些数组每个批次由一个小 Triton 内核从槽位表压平一次，一次 <code>plan()</code> 给所有层复用。</li>
+      <li>注意力状态（输出加 log-sum-exp）可以合并，所以共享前缀可以单独算一次再合并进来，这就是 cascade；v0.5.22 在预填充里用同一个合并接起 ragged 和 paged 两部分。</li>
+    </ul>
+    <ul lang="en">
+      <li>RadixAttention keeps the KV after a request ends, hung on a radix tree keyed by tokens and valued by slot numbers, so a new request prefills only the part that missed.</li>
+      <li>SGLang’s page size is one token: each row of <code>req_to_token</code> holds one request’s slot numbers, and a shared prefix is several rows holding the same slot numbers.</li>
+      <li>The kernel knows only the CSR arrays: <code>kv_indptr</code> is the prefix sum of request lengths and <code>kv_indices</code> the concatenation of all their slot numbers, both <code>int32</code>.</li>
+      <li>A small Triton kernel flattens those arrays out of the slot table once per batch, and one <code>plan()</code> serves every layer.</li>
+      <li>Attention states (an output plus a log-sum-exp) merge, so a shared prefix can be computed once on its own and merged in, which is cascade attention; v0.5.22 uses the same merge in prefill to join the ragged and paged parts.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：radix 树的节点里存着 K 和 V。→ 实际：节点的 <code>value</code> 只是槽位号，KV 在 <code>MHATokenToKVPool</code> 里，切分节点时 KV 一个字节都不动。</li>
+      <li>误解：前缀共享了，解码时也就只读一次。→ 实际：普通分页解码每个请求各读一遍，上面的例子 13 个槽位读了 24 次；只读一次要靠 cascade。</li>
+      <li>误解：一个 token 一页、彻底打乱的布局会让注意力慢很多。→ 实际：每个槽位里一个头的 K 行仍是连续的 256 字节，索引只多 4 字节；Lab B 在 M5 上量到完全打乱只慢约 4%。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: the nodes of the radix tree hold K and V. → Fact: a node’s <code>value</code> holds only slot numbers, the KV lives in <code>MHATokenToKVPool</code>, and splitting a node moves not a single byte of KV.</li>
+      <li>Myth: once a prefix is shared, decode reads it only once. → Fact: plain paged decode reads it again for every request, 24 reads of 13 slots in the example above; reading it once takes cascade attention.</li>
+      <li>Myth: one-token pages in fully shuffled order make attention much slower. → Fact: one head’s K row in a slot is still 256 contiguous bytes, with only 4 bytes of index on top; Lab B measured fully shuffled pages on the M5 as only about 4% slower.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：布局 ↔ 索引数组 ↔ 谁来建 ↔ 内核代价</h2><h2 id="compare-en" lang="en">Comparison: layout ↔ index arrays ↔ who builds them ↔ kernel cost</h2>
   <div class="table-wrap">

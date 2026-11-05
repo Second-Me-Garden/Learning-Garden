@@ -54,7 +54,17 @@ The five Chinese headings 目标, 核心概念, 动画图解, 资料, 参考书�
 3. 前置 / Prerequisites: `ul` of paired `li`.
 4. 核心概念 / Core concepts: `h3` pairs numbered `1.` `2.` … ; paragraphs, lists, `div.note` pairs; each concept ends with a 延伸阅读 / Further reading pointer to a chapter of a book in the bibliography. When no book in the bibliography covers a concept, the pointer says so plainly and names the documentation page the concept rests on instead (so far only the cloud safety-and-budget concept of the GPU lab-setup page).
 5. 对照表 / Comparison: `div.table-wrap > table.cmp`, header cells with `span` pairs; the two compared sides get coloured `th` classes (see Colours).
-6. 动画图解 / Animated diagrams: two diagrams, `h3` pairs titled (a) and (b).
+
+### Learning devices inside 核心概念
+
+Three containers, each one `div` with paired children (like `div.goals`; the container itself carries no text and no `lang`), whose label is drawn by CSS and follows the language switch:
+
+- `div.crux` — immediately after the 核心概念 / Core concepts heading pair, before concept 1. Two to four sentences that state the problem this lesson answers as a question a reader could ask before knowing the mechanism (what goes wrong without it, what the mechanism must achieve), and one sentence naming which concept answers it. Modelled on the "crux of the problem" box that opens every OSTEP chapter.
+- `div.worked` — inside a concept, after the paragraph that states the mechanism. One example walked through with real numbers or one real call traced end to end (a virtual address through the page-table levels, one message through the executor, one warp through a coalesced load, one token through prefill and decode). Paired `p`, a paired `ol` of steps, and a shared `pre` where code or arithmetic helps. At least one per lesson; the numbers are consistent with the diagram captions. Modelled on CS:APP practice problems and the MIT 6.1810 lectures that trace one system call.
+- `div.recap` — after the last concept, before 对照表 / Comparison. A paired `ul` of four to six takeaways, each one sentence that could be recalled a week later, then a paired `p` with `<strong>常见误解</strong>` / `<strong>Common misconceptions</strong>` and a paired `ul` of two or three items written as 误解 → 实际 / myth → fact. Modelled on chapter summaries (OSTEP, PMPP) and the misconception callouts in the Arm Learn-the-architecture guides.
+
+None of these adds an `h2`, so the lesson rail is unchanged. They are prose and are paired like all prose. Their labels are the six fixed strings in `assets/style.css`: 先看问题 / The problem first, 走一遍 / Worked example, 要点回顾 / Key takeaways; the misconceptions line inside the recap is `<strong>常见误解</strong>` / `<strong>Common misconceptions</strong>`. A code figure inside `div.worked` is drawn without its header and line numbers (it is arithmetic or a short trace, not a template to copy), so keep those blocks to a few lines and put real commands in the labs.
+6. 动画图解 / Animated diagrams: two diagrams, `h3` pairs titled (a) and (b); a third, (c), only when a mechanism central to the lesson's crux is otherwise described in prose alone, and never repeating steps that (a) or (b) already animate — cut the older diagram back instead (2026-11-04).
 7. 动手实验 / Hands-on labs: `div.lab` with `h3` pairs Lab A and Lab B, `ol` steps, `pre` blocks, and a closing `div.note` pair naming the deliverables.
 8. 自测 / Self-check: the quiz.
 9. 资料 / Resources: `ul.res`, each `li` with links and a `span.lvl` pair (level and what it covers).
@@ -70,7 +80,7 @@ A lab-setup page whose labs run on the host rather than in a VM uses 为什么�
 - The checker requires at least 20 `lang="en"` attributes per lesson and |en − zh| ≤ max(6, 15 %). Pair everything and the counts match on their own.
 - A list item that holds a `<pre>` wraps its two prose halves in `span` pairs before the `<pre>`; the `<pre>` is shared.
 - Table cells pair inside the cell with `span` pairs.
-- SVG labels: paired `<text lang="zh-CN">` and `<text lang="en">` at the same x and y. Keep labels short and at least 11 units in a 900-unit-wide viewBox. On desktop the 928 px diagram column draws them at about 1:1. The SVG in a 390 px phone is only about 330 px wide, which would shrink 11 units to about 4 px, so below 760 px the stepper keeps the SVG at least 720 px wide in a horizontal scroller (11 units at about 8.8 px, 13 at about 10.4 px) and scrolls the lit step into view. A phone reader sees less than half the diagram at once, so any number the reader needs also goes in that step's caption.
+- SVG labels: paired `<text lang="zh-CN">` and `<text lang="en">` at the same x and y. Keep labels short and at least 11 units in a 900-unit-wide viewBox. On desktop the 928 px diagram column draws them at about 1:1. The SVG in a 390 px phone is only about 330 px wide, which would shrink 11 units to about 4 px, so below 760 px the stepper keeps the SVG at least 720 px wide in a horizontal scroller (11 units at about 8.8 px, 13 at about 10.4 px) and scrolls the lit step into view. A phone reader sees less than half the diagram at once, so any number the reader needs also goes in that step's caption. The scroller fades 32 px at each edge, so the clear middle is about 266 px, about 330 units of a 900-unit viewBox: keep the lit parts of any one step within about 330 units of width, or the stepper's centring leaves an edge of the step inside the fade (Designer, 2026-11-04).
 - Never use circled numbers (the glyphs U+2460 to U+2473) anywhere, including captions. Write `1.` or `Step 1`.
 - Never use a single quote or apostrophe inside caption text (captions live in single-quoted attributes). Use `’` only in prose, never in captions.
 
@@ -89,7 +99,7 @@ A lab-setup page whose labs run on the host rather than in a VM uses 为什么�
 ```
 
 - Parts carry `data-step="N"` (several steps: `data-step="1 3"`). Captions length must equal max step + 1; the checker fails otherwise, and `data-captions-en` must have the same length.
-- Available classes: `.box`, `.box.<colour>`, `.arrow`, `.arrow.flow` (animated dash), `.lane` (dashed divider), `text.mono`, `text.small`, `.pulse`. Coloured labels use `style="fill: var(--ros)"`.
+- Available classes: `.box`, `.box.<colour>`, `.arrow`, `.arrow.flow` (animated dash), `.lane` (dashed divider), `text.mono`, `text.small`, `.pulse`, and `.hl` (a highlight rect drawn over a static cell inside a `data-step` group, for the one entry of a grid that a step picks; the cell itself stays plain at every other step). Coloured labels use `style="fill: var(--ros)"`.
 - One `marker id="arr"` per SVG is fine; ids do not collide across SVGs because the stepper scopes by element.
 - Step 0 describes the whole picture; each step caption explains one highlighted part in one to three sentences.
 
@@ -123,6 +133,8 @@ Global tokens in `assets/style.css`: `--accent` (sage green), `--linux` (ochre) 
 A topic colour carries one fixed meaning, the same on every page of the topic (Designer review, 2026-10-31): in the kernel topic ochre is always Linux and indigo always XNU; in ROS 2 blue is always the ROS 2 graph side (nodes, rcl, rmw, DDS), orange always the Gazebo or hardware side, and ochre the kernel beneath; in GPU Programming with CUDA plum is always the NVIDIA/CUDA side, slate blue always the Apple/Metal side, and ochre the kernel beneath. A comparison table gets coloured `th` cells only when its two sides are those two meanings (URDF ↔ SDF, ROS node ↔ Gazebo plugin); a table of executor kinds, QoS profiles or tools uses plain `th`. A roadmap colours one lane or one destination, not every box. Failures, mismatches and errors are marked by a glyph and `--ink-2` text, never by a hue. The hub card illustration uses the brand green only. If a colour would carry no meaning, leave it out.
 
 A wrong quiz answer is marked ✗ in --ink-2; --warn equals the kernel ochre and is not used.
+
+A lit diagram step is a tint, a heavier stroke and a glow; a box with a topic colour keeps that colour when lit (`.box.linux` stays ochre, `.box.cuda` stays plum), so the step never repaints a side in the accent green (2026-11-05). Diagram box borders use `--box-line` (3:1 or better against the diagram frame in both themes); `--line` stays for tables, rules and dashed lanes.
 
 ## Accuracy
 

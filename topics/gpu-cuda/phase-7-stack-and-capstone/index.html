@@ -63,6 +63,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">一个在 T4 上好好的程序，换到 L4 或更新的卡上可能报 no kernel image，换一台驱动更旧的机器又可能报 PTX 版本不支持，而容器里明明装着最新的工具链。GPU 的机器码每一代都不同，驱动和工具链又各自升级：一份构建要怎样才能在今天的几张卡和明天的卡上都跑起来，驱动加载时到底挑了哪一段代码？同时，作品项目要把 softmax 写快，可它每个元素只做几次运算，快慢该由什么决定？</p>
+    <p lang="en">A program that works on a T4 may report no kernel image on an L4 or a newer card, and on a machine with an older driver it may report an unsupported PTX version, even though the container carries the newest toolkit. GPU machine code differs in every generation, and drivers and toolkits are upgraded separately: what does one build need to run on today’s cards and tomorrow’s, and which piece of code does the driver actually pick at load time? Meanwhile the capstone has to make softmax fast, yet it does only a few operations per element, so what decides its speed?</p>
+    <p lang="zh-CN">概念 2 到 5 的 PTX、SASS、fatbin、JIT 和兼容规则回答前一个问题，概念 8 的融合与在线 softmax 及其字节模型回答后一个。</p>
+    <p lang="en">PTX, SASS, fatbins, JIT and the compatibility rules of concepts 2 to 5 answer the first question, and fusion, online softmax and the byte model of concept 8 answer the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 运行时 API 与驱动 API</h3><h3 lang="en">1. The runtime API and the driver API</h3>
   <p lang="zh-CN">前六课用的 <code>cudaMalloc</code>、<code>cudaMemcpy</code>、<code>&lt;&lt;&lt; &gt;&gt;&gt;</code> 都属于 <strong>CUDA 运行时 API</strong>（库 <code>cudart</code>，随工具链发布）。编程指南（「CUDA Runtime API and CUDA Driver API」一节，2026-09-10 版）说，运行时建立在更底层的 <strong>驱动 API</strong> 之上；驱动 API 由驱动安装时放到系统里的动态库实现（Linux 上是 <code>libcuda.so</code>），入口都以 <code>cu</code> 开头。两者能做的事基本一样，区别在于谁替你管理什么：</p>
   <p lang="en">The <code>cudaMalloc</code>, <code>cudaMemcpy</code> and <code>&lt;&lt;&lt; &gt;&gt;&gt;</code> of the first six phases all belong to the <strong>CUDA runtime API</strong> (the <code>cudart</code> library, shipped with the toolkit). The programming guide (“CUDA Runtime API and CUDA Driver API”, edition of 2026-09-10) says the runtime is built on a lower-level <strong>driver API</strong>, implemented in a dynamic library that the driver installation puts on the system (<code>libcuda.so</code> on Linux), with every entry point prefixed <code>cu</code>. The two can do essentially the same things; what differs is who manages what for you:</p>
@@ -101,8 +108,8 @@
     <li lang="en"><strong>JIT (just-in-time compilation)</strong>: when the executable carries PTX, the driver compiles it at load time into SASS for the GPU at hand. The programming guide (“PTX Compatibility”) says PTX for <code>compute_80</code> can be JIT-compiled at run time to a newer architecture such as <code>sm_120</code>, but only to an <strong>equal or higher</strong> compute capability. The price is a slower start; the driver stores the result in the compute cache (on Linux by default <code>~/.nv/ComputeCache</code>, sized by <code>CUDA_CACHE_MAXSIZE</code>, 1 GiB by default on servers), and the cache is invalidated automatically when the driver is upgraded, so the program picks up the improved JIT compiler of the new driver.</li>
     <li lang="zh-CN"><strong>fatbin</strong>：同一份设备代码的多个译本装在一个容器里，嵌进主机可执行文件。可以有几个 cubin（每代硬件一个）加一份或几份 PTX。指南的说法：程序运行时，驱动从 fatbin 里为当前 GPU 挑最合适的那一个；有完全匹配的 cubin 就直接用，没有才拿 PTX 去 JIT。</li>
     <li lang="en"><strong>Fatbins</strong>: several translations of the same device code in one container embedded in the host executable, typically a few cubins (one per hardware generation) plus one or more PTX versions. In the guide’s words, when the program runs the driver picks the best one in the fatbin for the GPU at hand; a matching cubin is used directly, and PTX is JIT-compiled only when there is none.</li>
-    <li lang="zh-CN"><strong>同一主版本内的二进制兼容</strong>：指南写明，在同一个主计算能力内，次版本相同或更高的 GPU 能加载 cubin：为 8.6 编的 cubin 能在 8.6 和 8.9 上跑，不能在 8.0 上跑。所以 <code>sm_75</code> 的 cubin 在 T4（7.5）上直接跑，在 L4（8.9）上不能用，L4 只能靠 PTX。计算能力 10.0 起，同族内的兼容改由驱动在加载时「重新定稿」cubin（off-target finalization），比 PTX JIT 便宜；9.x 及更早的 cubin 不参与。</li>
-    <li lang="en"><strong>Binary compatibility within a major version</strong>: the guide states that within one major compute capability, a GPU whose minor version is equal or higher can load a cubin: a cubin built for 8.6 runs on 8.6 and 8.9 but not on 8.0. So an <code>sm_75</code> cubin runs directly on a T4 (7.5) but is useless on an L4 (8.9), which must rely on PTX. From compute capability 10.0, compatibility within a family is handled by the driver re-finalising the cubin at load time (off-target finalization), which is cheaper than PTX JIT; cubins for 9.x and earlier are not eligible.</li>
+    <li lang="zh-CN"><strong>同一主版本内的二进制兼容</strong>：指南写明，在同一个主计算能力内，次版本相同或更高的 GPU 能加载 cubin：为 8.6 编的 cubin 能在 8.6 和 8.9 上跑，不能在 8.0 上跑。所以 <code>sm_75</code> 的 cubin 在 T4（7.5）上直接跑；而 cubin 不能跨主版本，它在 L4（8.9）上不能用，L4 只能靠 PTX。计算能力 10.0 起，同族内的兼容改由驱动在加载时「重新定稿」cubin（off-target finalization），比 PTX JIT 便宜；9.x 及更早的 cubin 不参与。</li>
+    <li lang="en"><strong>Binary compatibility within a major version</strong>: the guide states that within one major compute capability, a GPU whose minor version is equal or higher can load a cubin: a cubin built for 8.6 runs on 8.6 and 8.9 but not on 8.0. So an <code>sm_75</code> cubin runs directly on a T4 (7.5); but a cubin never crosses a major version, so it is useless on an L4 (8.9), which must rely on PTX. From compute capability 10.0, compatibility within a family is handled by the driver re-finalising the cubin at load time (off-target finalization), which is cheaper than PTX JIT; cubins for 9.x and earlier are not eligible.</li>
     <li lang="zh-CN"><strong>两个用来验证的环境变量</strong>（编程指南「CUDA Environment Variables」）：<code>CUDA_FORCE_PTX_JIT=1</code> 让驱动忽略所有 cubin、一律 JIT 嵌入的 PTX，用来确认 PTX 真的在、JIT 真的能用；<code>CUDA_DISABLE_PTX_JIT=1</code> 反过来禁止 JIT，没有兼容 cubin 的 kernel 会加载失败，用来确认每个 kernel 都有对口的 cubin。Lab A 第 4 步两个都用。</li>
     <li lang="en"><strong>Two environment variables for checking</strong> (programming guide, “CUDA Environment Variables”): <code>CUDA_FORCE_PTX_JIT=1</code> makes the driver ignore every cubin and JIT the embedded PTX, which confirms that the PTX is there and that JIT works; <code>CUDA_DISABLE_PTX_JIT=1</code> does the opposite and forbids JIT, so a kernel without a compatible cubin fails to load, which confirms every kernel has a matching cubin. Step 4 of Lab A uses both.</li>
   </ul>
@@ -131,6 +138,29 @@ nvcc -O3 softmax_capstone.cu -o softmax_capstone \
     -gencode arch=compute_75,code=sm_75 \
     -gencode arch=compute_89,code=sm_89 \
     -gencode arch=compute_75,code=compute_75</pre>
+  <div class="worked">
+    <p lang="zh-CN">把这份发布构建和本专题默认的 <code>-arch=sm_75</code> 构建，分别交给三张卡，按概念 3 的规则看驱动加载时挑哪一段。T4 是 7.5，L4 是 8.9；第三张是一张假想的 12.0 的卡（举例用，指南的例子里 <code>compute_80</code> 的 PTX 能 JIT 到 <code>sm_120</code>）：</p>
+    <p lang="en">Hand this release build and the topic’s default <code>-arch=sm_75</code> build to three cards, and use the rules of concept 3 to see which piece the driver picks at load time. The T4 is 7.5 and the L4 is 8.9; the third is a hypothetical 12.0 card (for illustration; the guide’s example JIT-compiles <code>compute_80</code> PTX to <code>sm_120</code>):</p>
+    <pre>fatbin (release):  sm_75 cubin | sm_89 cubin | compute_75 PTX
+fatbin (-arch):    sm_75 cubin | compute_75 PTX
+
+               release build        -arch=sm_75 build
+T4   (7.5)     sm_75 cubin          sm_75 cubin
+L4   (8.9)     sm_89 cubin          JIT compute_75 PTX
+12.0 card      JIT compute_75 PTX   JIT compute_75 PTX</pre>
+    <ol lang="zh-CN">
+      <li>T4：两份构建里都有 <code>sm_75</code> cubin，完全匹配，直接加载，不 JIT。</li>
+      <li>L4：发布构建有 <code>sm_89</code> cubin，直接用。<code>-arch=sm_75</code> 构建只有 <code>sm_75</code> cubin，而 cubin 不能跨主版本，7.x 的 cubin 上不了 8.9，于是驱动拿 <code>compute_75</code> 的 PTX 现场 JIT，第一次启动变慢，结果存进 compute cache。</li>
+      <li>12.0 的卡：两个 cubin 的主版本都不同，都不能用；两份构建都靠 <code>compute_75</code> 的 PTX JIT，因为 PTX 只能往相同或更高的计算能力编，而 12.0 高于 7.5。</li>
+      <li>在 L4 上对 <code>-arch=sm_75</code> 构建设 <code>CUDA_DISABLE_PTX_JIT=1</code>：没有对口的 cubin、又不准 JIT，kernel 加载失败。Lab A 第 4 步就是用这一招逼驱动表态。</li>
+    </ol>
+    <ol lang="en">
+      <li>T4: both builds carry an <code>sm_75</code> cubin, an exact match, loaded directly with no JIT.</li>
+      <li>L4: the release build has an <code>sm_89</code> cubin and uses it. The <code>-arch=sm_75</code> build has only the <code>sm_75</code> cubin, and a cubin never crosses a major version, so a 7.x cubin cannot go onto 8.9; the driver JIT-compiles the <code>compute_75</code> PTX on the spot, the first launch is slower, and the result goes into the compute cache.</li>
+      <li>The 12.0 card: both cubins are of a different major version and unusable; both builds rely on JIT from the <code>compute_75</code> PTX, since PTX compiles only to the same or a higher compute capability and 12.0 is above 7.5.</li>
+      <li>On the L4, set <code>CUDA_DISABLE_PTX_JIT=1</code> for the <code>-arch=sm_75</code> build: there is no matching cubin and JIT is forbidden, so the kernel fails to load. Step 4 of Lab A uses exactly this to make the driver show its hand.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">带 <code>a</code> 和 <code>f</code> 后缀的目标（<code>sm_90a</code>、<code>sm_100f</code>）启用架构专属和同族专属的特性（PTX ISA 9.4 的说法）；T4 和 L4 用不到它们，本专题不展开。</p>
   <p lang="en">Targets with an <code>a</code> or <code>f</code> suffix (<code>sm_90a</code>, <code>sm_100f</code>) enable architecture-specific and family-specific features (PTX ISA 9.4’s terms); the T4 and the L4 have no use for them, and this topic does not go further.</p>
   <p lang="zh-CN">延伸阅读：《Professional CUDA C Programming》第 10 章「CUDA Code Compilation」；依据是 nvcc 文档的「Options for Steering GPU Code Generation」和「NVCC Examples」两节（见资料）。下面的对照表把四种构建放到三种 GPU 上。</p>
@@ -197,8 +227,63 @@ nvcc -O3 softmax_capstone.cu -o softmax_capstone \
   </ul>
   <p lang="zh-CN">两者都远在 roofline 的访存受限一侧（每个元素只有几次运算），所以时间由搬的字节决定，预测是融合版快 2 到 3 倍。Lab B 在 M5 上量到：4096 列时快 2.8 倍，32768 列时快 2.1 倍，正好落在这两端；动画 (b) 和 Lab B 第 4 步解释为什么。layer norm（每行求均值和方差，再归一化）是同一个形状：同样两次行内归约，同样可以融合，Welford 算法扮演在线 softmax 的角色（推断：本页没有实现 layer norm）。</p>
   <p lang="en">Both sit far on the memory-bound side of the roofline (a few operations per element), so time is set by bytes moved, and the prediction is that the fused version is 2 to 3 times as fast. Lab B measured on the M5: 2.8 times at 4096 columns and 2.1 times at 32768 columns, right at the two ends; diagram (b) and step 4 of Lab B explain why. Layer norm (mean and variance per row, then normalise) has the same shape: the same two in-row reductions, equally fusable, with Welford’s algorithm in the role of the online softmax (an inference: this page did not implement layer norm).</p>
+  <div class="worked">
+    <p lang="zh-CN">用 Lab B 在这台 M5 上的两个大形状把字节模型算一遍。Phase 1 在这台机器上量到的 64 MB 拷贝约 134 GB/s，当作内存那条线：</p>
+    <p lang="en">Work the byte model through Lab B’s two large shapes on this M5. Phase 1 measured a 64 MB copy on this machine at about 134 GB/s, which serves as the memory line:</p>
+    <pre>4096 × 4096:   MN = 2^24 floats = 64 MiB
+  unfused 6MN = 384 MiB = 402.7 MB / 3.018 ms = 133.4 GB/s
+  fused   3MN = 192 MiB = 201.3 MB / 1.072 ms = 187.8 GB/s
+  speedup 3.018 / 1.072 = 2.8   (row 16 KB: near 6MN / 2MN = 3)
+1024 × 32768:  MN = 2^25 floats = 128 MiB
+  unfused 6MN = 805.3 MB / 6.230 ms = 129.3 GB/s
+  fused   3MN = 402.7 MB / 2.967 ms = 135.7 GB/s
+  speedup 6.230 / 2.967 = 2.1   (row 128 KB: near 6MN / 3MN = 2)</pre>
+    <ol lang="zh-CN">
+      <li>未融合：<code>row_max</code> 读 x，<code>exp_sub</code> 读 x 写 e，<code>row_sum</code> 读 e，<code>divide</code> 读 e 写 y，共 6MN 个 float。两个形状上按这个字节数算出的速度都是 129 到 133 GB/s，正贴着 134 GB/s 的线：它确实在搬 6MN。</li>
+      <li>融合，1024 × 32768：一行 32768 个 float 是 128 KB，第二遍读 x 又回到内存，流量是 3MN，算出 135.7 GB/s，也在线上；快 2.1 倍，与 6MN 比 3MN 的预测相符。</li>
+      <li>融合，4096 × 4096：一行只有 16 KB，第二遍大多在缓存里命中，按 3MN 算出 187.8 GB/s，高过内存线，说明真实流量更接近 2MN；预测变成 3 倍，实测 2.8 倍（推断：Metal 不给命中率计数器）。</li>
+      <li>两种形状元素数不同，但都只有几次运算对几次访存，所以时间一路跟着字节走：融合的价值就是不让 e 进出全局内存。</li>
+    </ol>
+    <ol lang="en">
+      <li>Unfused: <code>row_max</code> reads x, <code>exp_sub</code> reads x and writes e, <code>row_sum</code> reads e, and <code>divide</code> reads e and writes y, 6MN floats in all. At both shapes the rate computed from this byte count is 129 to 133 GB/s, right on the 134 GB/s line: it really is moving 6MN.</li>
+      <li>Fused at 1024 × 32768: a row of 32768 floats is 128 KB, so the second read of x goes back to memory, the traffic is 3MN, and the rate is 135.7 GB/s, also on the line; it is 2.1 times as fast, as 6MN against 3MN predicts.</li>
+      <li>Fused at 4096 × 4096: a row is only 16 KB, so most of the second pass hits in cache, and computed as 3MN the rate is 187.8 GB/s, above the memory line, which says the real traffic is nearer 2MN; the prediction becomes 3 times, and it measures 2.8 (an inference: Metal offers no hit-rate counters).</li>
+      <li>The two shapes differ in element count, but both do only a few operations per memory access, so time follows bytes throughout: the value of fusion is keeping e out of global memory.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 10 章「Reduction」（行内归约）和第 18 章「Deep learning」（按章名对应）；《Professional CUDA C Programming》第 5 章的「The Warp Shuffle Instruction」到「Parallel Reduction Using the Warp Shuffle Instruction」几节；Milakov 和 Gimelshein 的原始论文（见资料）。</p>
   <p lang="en">Further reading: PMPP, 5th ed., Chapter 10, “Reduction” (in-row reductions), and Chapter 18, “Deep learning” (matched by chapter title); the sections of Chapter 5 of <em>Professional CUDA C Programming</em> from “The Warp Shuffle Instruction” to “Parallel Reduction Using the Warp Shuffle Instruction”; Milakov and Gimelshein’s original paper (see Resources).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>运行时 API 建在驱动 API 之上，运行时隐式建好的 primary context 让两者能混用；<code>cudaRuntimeGetVersion</code> 是工具链版本，<code>cudaDriverGetVersion</code> 是驱动支持的最高版本。</li>
+      <li><code>nvcc</code> 分两阶段：源码到虚拟架构的 PTX，再到某一代硬件的 SASS；跨主计算能力的 SASS 没有二进制兼容。</li>
+      <li>fatbin 里装着几个 cubin 和 PTX，驱动有兼容的 cubin 就直接用，没有才把 PTX JIT 到相同或更高的计算能力。</li>
+      <li>发布构建按「虚拟架构尽量低、真实架构尽量高」组合 <code>-gencode</code>：每张目标卡一个 SASS，再加一份最低的 PTX。</li>
+      <li>驱动比工具链旧时，同一主版本内只有 SASS 能跑，PTX 不行；容器钉死工具链，却管不了宿主的驱动。</li>
+      <li>softmax 每个元素只有几次运算，时间跟着字节走：融合把 6MN 减到 3MN，一行能留在缓存里时接近 2MN。</li>
+    </ul>
+    <ul lang="en">
+      <li>The runtime API sits on the driver API, and the primary context the runtime creates implicitly lets the two mix; <code>cudaRuntimeGetVersion</code> is the toolkit version and <code>cudaDriverGetVersion</code> the highest version the driver supports.</li>
+      <li><code>nvcc</code> works in two stages, source to PTX for a virtual architecture and then to SASS for one hardware generation, and SASS has no binary compatibility across major compute capabilities.</li>
+      <li>A fatbin carries several cubins and PTX; the driver uses a compatible cubin when there is one, and only otherwise JIT-compiles the PTX to the same or a higher compute capability.</li>
+      <li>A release build combines <code>-gencode</code> pairs by keeping the virtual architecture low and the real ones high: one SASS per target card plus one lowest PTX.</li>
+      <li>When the driver is older than the toolkit, within one major version only SASS runs and PTX does not; a container pins the toolkit but cannot change the host’s driver.</li>
+      <li>Softmax does only a few operations per element, so time follows bytes: fusion cuts 6MN to 3MN, and to nearly 2MN when a row stays in cache.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：为 <code>sm_75</code> 编的 cubin 能在所有更新的卡上跑。→ 实际：cubin 只在同一主版本、次版本相同或更高的卡上加载，L4（8.9）上 <code>sm_75</code> 的 cubin 不能用，只能靠 PTX JIT。</li>
+      <li>误解：容器里装了 CUDA 13.4，宿主的驱动就无所谓了。→ 实际：驱动在宿主机上，容器管不了；驱动比工具链旧时要么升级驱动，要么只用 SASS 走小版本兼容，要么在数据中心卡上用 <code>cuda-compat</code>。</li>
+      <li>误解：融合 softmax 变快，是因为 kernel 里的计算写得更好。→ 实际：两者都受内存限制，变快来自少搬字节，4096 × 4096 上快 2.8 倍，1024 × 32768 上快 2.1 倍，正好对着 2MN 和 3MN 两端。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a cubin built for <code>sm_75</code> runs on every newer card. → Fact: a cubin loads only within its major version on the same or a higher minor version, so the <code>sm_75</code> cubin is unusable on an L4 (8.9), which has to rely on PTX JIT.</li>
+      <li>Myth: with CUDA 13.4 in the container, the host’s driver does not matter. → Fact: the driver lives on the host and the container cannot change it; when it is older than the toolkit, upgrade it, stay within minor-version compatibility with SASS only, or use <code>cuda-compat</code> on a data-centre card.</li>
+      <li>Myth: the fused softmax is faster because its kernel computes more cleverly. → Fact: both versions are memory-bound and the gain comes from moving fewer bytes, 2.8 times at 4096 × 4096 and 2.1 times at 1024 × 32768, matching the 2MN and 3MN ends.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：一个构建放到不同的 GPU 和驱动上</h2><h2 id="compare-en" lang="en">Comparison: one build on different GPUs and drivers</h2>
   <p lang="zh-CN">每一格按概念 3 到 5 引用的 nvcc 文档、编程指南和兼容性文档的规则推出（推断，没有在这些 GPU 上运行）。✕ 表示加载失败。最后一列是「用 CUDA 13.4 编译、在只有 r580 驱动（CUDA 13.0）的 T4 上运行」，也就是小版本兼容。</p>

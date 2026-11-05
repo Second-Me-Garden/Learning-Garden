@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">先别往下读，猜一猜：<code>x</code>、<code>y</code> 初始为 0，线程 A 执行 <code>x = 1; r1 = y;</code>，线程 B 执行 <code>y = 1; r2 = x;</code>。最后 <code>(r1, r2)</code> 可能是哪几种：<code>(0, 1)</code>、<code>(1, 0)</code>、<code>(1, 1)</code>、<code>(0, 0)</code>？把两个线程的语句交错起来，<code>(0, 0)</code> 不可能出现，可这台 M5 上它确实会出现。那么程序员到底能依赖什么：一个线程写下的值，另一个线程什么时候、以什么顺序看见，又要写什么才能把顺序要回来？</p>
+    <p lang="en">Before reading on, make a guess: <code>x</code> and <code>y</code> start at 0, thread A runs <code>x = 1; r1 = y;</code> and thread B runs <code>y = 1; r2 = x;</code>. Which values can <code>(r1, r2)</code> end up with: <code>(0, 1)</code>, <code>(1, 0)</code>, <code>(1, 1)</code>, <code>(0, 0)</code>? Interleave the two threads’ statements and <code>(0, 0)</code> cannot happen, yet on this M5 it does. So what can a programmer actually rely on: when, and in what order, does one thread see the values another wrote, and what do you have to write to get the order back?</p>
+    <p lang="zh-CN">概念 1 说明 <code>(0, 0)</code> 从哪里来，概念 3 和 4 的 happens-before 与内存序说明 C++ 给你哪些保证、各要用哪种写法换来。</p>
+    <p lang="en">Concept 1 shows where <code>(0, 0)</code> comes from, and the happens-before relation and memory orders of concepts 3 and 4 say which guarantees C++ gives and what you must write to get each one.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 顺序一致性，以及硬件为什么不给你</h3><h3 lang="en">1. Sequential consistency, and why hardware does not give it to you</h3>
   <p lang="zh-CN"><strong>顺序一致性</strong>（sequential consistency，Lamport 1979）的意思是：所有线程的所有内存操作，可以排成一个全局的先后顺序，这个顺序里每个线程自己的操作保持程序顺序，每次读都读到这个顺序里它之前最后一次写。这是人脑默认的模型：把两个线程的语句交错起来，任何一种交错都可能，交错之外的结果都不可能。</p>
   <p lang="en"><strong>Sequential consistency</strong> (Lamport, 1979) means that all memory operations of all threads can be arranged in one global order in which each thread’s own operations keep their program order and every read returns the last write before it in that order. It is the model the human mind assumes: interleave the two threads’ statements, any interleaving is possible, and no result outside the interleavings is.</p>
@@ -72,6 +79,31 @@
     <li lang="zh-CN"><strong>ARM64 是弱序的。</strong>对不同地址的普通读写，在没有依赖、没有屏障的情况下，读读、读写、写读、写写四种重排都允许（Arm ARM 的 AArch64 内存模型一章）。Lab A 的 message passing 实验在 M5 上抓到了写写或读读重排：读者看见了旗子，却读到了旧数据，2000 万次里 10 到 58 次。ARMv8 自 2017 年前后的一次架构修订起（Pulte 等，POPL 2018）是 other-multi-copy-atomic 的：一个写一旦被另一个核看见，就被所有其他核看见。</li>
     <li lang="en"><strong>ARM64 is weakly ordered.</strong> For plain reads and writes to different addresses, with no dependency and no barrier, all four reorderings are allowed: read-read, read-write, write-read and write-write (the AArch64 memory model chapter of the Arm ARM). The message-passing experiment in Lab A catches a write-write or read-read reordering on the M5: the reader saw the flag but read stale data, 10 to 58 times in 20 million trials. Since a revision of the architecture around 2017 (Pulte et al., POPL 2018), ARMv8 is other-multi-copy atomic: once one other core sees a write, all other cores see it.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">回答开头的问题，先按顺序一致性枚举，再按 store buffer 走一遍（与下方图解 (a) 相同）。四个操作记作 a1 <code>x = 1</code>、a2 <code>r1 = y</code>、b1 <code>y = 1</code>、b2 <code>r2 = x</code>；每个线程内部保持 1 在 2 之前，交错一共有 4! / (2! × 2!) = 6 种：</p>
+    <p lang="en">To answer the opening question, first enumerate under sequential consistency, then walk the store buffer (the same scene as diagram (a) below). Call the four operations a1 <code>x = 1</code>, a2 <code>r1 = y</code>, b1 <code>y = 1</code> and b2 <code>r2 = x</code>; with 1 before 2 inside each thread there are 4! / (2! × 2!) = 6 interleavings:</p>
+    <pre>a1 a2 b1 b2   → r1 = 0, r2 = 1
+a1 b1 a2 b2   → r1 = 1, r2 = 1
+a1 b1 b2 a2   → r1 = 1, r2 = 1
+b1 a1 a2 b2   → r1 = 1, r2 = 1
+b1 a1 b2 a2   → r1 = 1, r2 = 1
+b1 b2 a1 a2   → r1 = 1, r2 = 0
+(0, 0): none of the 6
+
+M5, relaxed, Lab A: 2683 of 100 000 000 trials → about 1 in 37 000</pre>
+    <ol lang="zh-CN">
+      <li>顺序一致性下，第一个执行的操作必是某个写（a1 或 b1），排在它后面的另一线程的读就一定看见 1，所以 6 种交错里没有 <code>(0, 0)</code>：<code>(1, 1)</code> 4 种，<code>(0, 1)</code> 和 <code>(1, 0)</code> 各 1 种。</li>
+      <li>在 M5 上，a1 编成 <code>str</code>，<code>x = 1</code> 进了 A 的 store buffer，A 不等它对外可见，接着执行 a2；b1 同样停在 B 的 buffer 里。</li>
+      <li>a2 的 <code>ldr</code> 从内存读到 <code>y = 0</code>，b2 读到 <code>x = 0</code>。两个 buffer 随后排空，内存是 <code>x = y = 1</code>，但两次读已经返回了 0。</li>
+      <li>汇编里 <code>str</code> 在 <code>ldr</code> 之前，编译器没有改顺序，所以那 2683 次来自硬件。换成 seq_cst（<code>stlr</code> + <code>ldar</code>）或在中间加 <code>dmb ish</code> 后，1 亿次里是 0 次；acquire/release 仍有 354 次，原因见概念 4。</li>
+    </ol>
+    <ol lang="en">
+      <li>Under sequential consistency the first operation executed must be a write (a1 or b1), and the other thread’s read, which comes after it, then sees 1, so none of the 6 interleavings gives <code>(0, 0)</code>: 4 give <code>(1, 1)</code>, and <code>(0, 1)</code> and <code>(1, 0)</code> one each.</li>
+      <li>On the M5, a1 compiles to <code>str</code>: <code>x = 1</code> goes into A’s store buffer, and A goes on to a2 without waiting for it to become visible; b1 likewise sits in B’s buffer.</li>
+      <li>The <code>ldr</code> of a2 reads <code>y = 0</code> from memory and b2 reads <code>x = 0</code>. Both buffers then drain and memory holds <code>x = y = 1</code>, but both reads have already returned 0.</li>
+      <li>In the assembly <code>str</code> comes before <code>ldr</code>; the compiler kept the order, so the 2683 come from the hardware. With seq_cst (<code>stlr</code> + <code>ldar</code>) or a <code>dmb ish</code> in between it is 0 in 100 million; acquire/release still gives 354, for the reason in concept 4.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：McKenney《Is Parallel Programming Hard》附录 Why Memory Barriers? 的 Store Buffers、Store Forwarding、Invalidate Queues 三节；Bos《Rust Atomics and Locks》第 7 章 Understanding the Processor 的 Reordering 和 Memory Ordering 两节。</p>
   <p lang="en">Further reading: the sections Store Buffers, Store Forwarding and Invalidate Queues in McKenney’s appendix Why Memory Barriers? in <em>Is Parallel Programming Hard</em>; the sections Reordering and Memory Ordering of chapter 7 of Bos’s <em>Rust Atomics and Locks</em>, Understanding the Processor.</p>
 
@@ -106,6 +138,30 @@
     <li lang="zh-CN"><strong>数据竞争</strong>：两个线程里的两个冲突访问（同一位置，至少一个是写），至少一个不是原子的，并且谁也不 happens-before 谁。有数据竞争的程序是未定义行为。反过来，没有数据竞争时，普通变量的读一定读到 happens-before 它的最后一次写。</li>
     <li lang="en"><strong>Data race</strong>: two conflicting accesses (same location, at least one a write) in different threads, at least one not atomic, and neither happens before the other. A program with a data race has undefined behaviour. Conversely, without data races, a read of an ordinary variable always sees the last write that happens before it.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">用这些关系推一遍 message passing（与下方图解 (b) 相同的数字）：<code>data</code> 是普通 <code>int</code>，<code>ready</code> 是 <code>std::atomic&lt;int&gt;</code>，都从 0 开始。写者执行 W1、W2，读者执行 R1、R2：</p>
+    <p lang="en">Derive message passing from these relations (the same numbers as diagram (b) below): <code>data</code> is a plain <code>int</code>, <code>ready</code> is a <code>std::atomic&lt;int&gt;</code>, and both start at 0. The writer runs W1 and W2, the reader R1 and R2:</p>
+    <pre>// writer                                   // reader
+data = 42;                          // W1   while (ready.load(std::memory_order_acquire) != 1) {}  // R1
+ready.store(1, std::memory_order_release);  // W2   int r = data;                               // R2
+
+W1 sequenced-before W2      (program order, writer)
+W2 synchronizes-with R1     (R1 is acquire and reads the 1 that the release W2 wrote)
+R1 sequenced-before R2      (program order, reader)
+W1 happens-before R2        (transitive closure)  → R2 must read 42, and there is no data race on data</pre>
+    <ol lang="zh-CN">
+      <li>W1 sequenced-before W2，R1 sequenced-before R2：这两条只是各自线程的程序顺序。</li>
+      <li>R1 是 acquire 读，并且读到了 release 写 W2 写下的 1，所以 W2 synchronizes-with R1。循环里前几次读到 0 的那些 R1 什么也不同步，只有读到 1 的那一次算数。</li>
+      <li>传递得到 W1 happens-before R2。对 <code>data</code> 的两次访问有了先后，不构成数据竞争，R2 读到的是 happens-before 它的最后一次写，也就是 42。</li>
+      <li>两边都改成 relaxed，第 2 条边就消失了：R2 和 W1 之间没有 happens-before，<code>data</code> 上有数据竞争。Lab A 的 <code>mp.cpp</code> 为了能数这种结果，把 <code>data</code> 也写成 relaxed 原子变量（写入值是 1 而不是 42）：M5 上每次 2000 万轮的运行里出现 10 到 58 次 <code>ready = 1</code> 却读到 <code>data = 0</code>，release/acquire 下 0 次。</li>
+    </ol>
+    <ol lang="en">
+      <li>W1 is sequenced before W2 and R1 before R2: these two are just each thread’s program order.</li>
+      <li>R1 is an acquire load and reads the 1 that the release store W2 wrote, so W2 synchronizes with R1. The earlier passes of the loop, whose R1 read 0, synchronize with nothing; only the one that reads 1 counts.</li>
+      <li>By transitivity W1 happens before R2. The two accesses to <code>data</code> are now ordered, there is no data race, and R2 reads the last write that happens before it, which is 42.</li>
+      <li>Make both sides relaxed and the second edge disappears: nothing orders W1 before R2, and <code>data</code> has a data race. To count this outcome, Lab A’s <code>mp.cpp</code> makes <code>data</code> a relaxed atomic as well (and writes 1 instead of 42): on the M5, in each run of 20 million trials, 10 to 58 times the reader sees <code>ready = 1</code> and still reads <code>data = 0</code>, and 0 times under release and acquire.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">release sequence 的实际用处是引用计数。线程 T1 用 release 写入 <code>count = 2</code>，之后 T2、T3 各做一次 <code>fetch_sub</code>（RMW）。T3 的 acquire 读到的是 T2 写的值，但因为 T2 的 RMW 在以 T1 的写为首的 release sequence 里，T3 仍然与 T1 同步，T1 在写之前做的初始化对 T3 可见。</p>
   <p lang="en">The practical use of the release sequence is reference counting. Thread T1 writes <code>count = 2</code> with release, after which T2 and T3 each do one <code>fetch_sub</code> (an RMW). T3’s acquire reads the value T2 wrote, but since T2’s RMW lies in the release sequence headed by T1’s write, T3 still synchronizes with T1, and the initialization T1 did before its write is visible to T3.</p>
   <p lang="zh-CN">延伸阅读：Bos 第 3 章 Memory Ordering 的 The Memory Model、Happens-Before Relationship、Spawning and Joining 三节；Williams《C++ Concurrency in Action》讲 C++ 内存模型与原子类型操作（the C++ memory model and operations on atomic types）的一章。</p>
@@ -168,6 +224,37 @@
   <p lang="en"><strong>ABA</strong>: CAS compares only the value and cannot tell that it changed in between. A lock-free stack’s pop reads the top A and A’s next, B, and prepares CAS(top, A → B); meanwhile another thread pops A, pops B and pushes A back (the same address reused). top is A again, the CAS succeeds, and top is set to B, which is no longer on the stack. The fixes give the value a version: a tagged pointer (with a 128-bit CAS or the spare high bits of a pointer), or a guarantee that A is not reused while anyone might still hold it (hazard pointers, epochs, RCU). Those are Phase 4, whose Lab A makes ABA actually happen: it corrupted the stack in 100 of 100 trials.</p>
   <p lang="zh-CN">延伸阅读：Bos 第 2 章 Atomics 的 Compare-and-Exchange Operations 一节；Herlihy 等《The Art of Multiprocessor Programming》讲队列、内存管理与 ABA 问题的一章；McKenney Advanced Synchronization 一章的 Non-Blocking Synchronization 一节。</p>
   <p lang="en">Further reading: the section Compare-and-Exchange Operations of chapter 2 of Bos, Atomics; the chapter on queues, memory management and the ABA problem in Herlihy et al., <em>The Art of Multiprocessor Programming</em>; the section Non-Blocking Synchronization of McKenney’s chapter Advanced Synchronization.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>顺序一致性就是「所有操作排成一个保持各线程程序顺序的交错」，按它 SB 的 <code>(0, 0)</code> 不可能，而 M5 的 store buffer 让它在 1 亿次里出现 2683 次。</li>
+      <li>cache 一致性只管同一个地址；重排说的是不同地址之间的先后，x86 TSO 只允许较晚的读越过较早的写，ARM64 四种都允许。</li>
+      <li>编译器在「没有数据竞争」的前提下也会重排普通变量，要分清是编译器还是硬件，就看汇编。</li>
+      <li>happens-before 是 sequenced-before 与 synchronizes-with 的传递闭包，而 acquire 只有<em>读到</em> release 写的值才同步。</li>
+      <li>acquire/release 足以做 message passing，却修不好 SB 和 Dekker；只有 seq_cst 的单一全序 S，或一个 seq_cst 栅栏，才禁止 <code>(0, 0)</code>。</li>
+      <li>在 M5 上内存序是指令本身的属性（<code>stlr</code>、<code>ldar</code>、<code>ldapr</code>，栅栏是 <code>dmb ish</code>），在 x86-64 上几乎都是 <code>mov</code>，只有 seq_cst 写和 RMW 要加锁的指令。</li>
+    </ul>
+    <ul lang="en">
+      <li>Sequential consistency means all operations form one interleaving that keeps each thread’s program order; under it the SB outcome <code>(0, 0)</code> is impossible, yet the M5’s store buffers produce it 2683 times in 100 million.</li>
+      <li>Cache coherence covers one address only; reordering is about order between different addresses, and x86 TSO allows only a later read to pass an earlier write while ARM64 allows all four kinds.</li>
+      <li>The compiler also reorders ordinary variables on the assumption that there is no data race, and the assembly is how you tell the compiler from the hardware.</li>
+      <li>happens-before is the transitive closure of sequenced-before and synchronizes-with, and an acquire synchronizes only if it <em>reads</em> the value a release wrote.</li>
+      <li>Acquire and release are enough for message passing but cannot fix SB or Dekker; only seq_cst’s single total order S, or a seq_cst fence, forbids <code>(0, 0)</code>.</li>
+      <li>On the M5 memory order is a property of the instructions themselves (<code>stlr</code>, <code>ldar</code>, <code>ldapr</code>, and <code>dmb ish</code> for a fence); on x86-64 nearly everything is a <code>mov</code>, and only seq_cst stores and RMWs need locked instructions.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：更强的内存序让写「更快」被别的线程看见。→ 实际：内存序只约束先后，不约束快慢；它规定的是读到某个值之后还能推出什么（Bos 第 3 章 Common Misconceptions 的第一条）。</li>
+      <li>误解：x86 不怎么重排，在 x86 上就不用管内存序。→ 实际：TSO 仍允许 store→load 重排，SB 在 x86 上照样失败，而且编译器的重排与机器无关。</li>
+      <li>误解：两个线程互相通知时 acquire/release 总是够的。→ 实际：SB 和 Dekker 里没有哪次 acquire 读到对方 release 写的值，Lab A 中 acquire/release 的 SB 在 1 亿次里失败 354 次，要用 seq_cst 或 seq_cst 栅栏。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a stronger memory order makes a write visible to other threads “sooner”. → Fact: memory order constrains order, not speed; it says what else you may conclude once a read has seen a value (the first item of Common Misconceptions in chapter 3 of Bos).</li>
+      <li>Myth: x86 hardly reorders, so on x86 memory order does not matter. → Fact: TSO still allows store-to-load reordering, SB fails on x86 too, and compiler reordering does not depend on the machine at all.</li>
+      <li>Myth: acquire and release are always enough when two threads signal each other. → Fact: in SB and Dekker no acquire reads the value the other side’s release wrote, so in Lab A the acquire/release SB failed 354 times in 100 million; you need seq_cst or a seq_cst fence.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：内存序 ↔ 承诺 ↔ 指令</h2><h2 id="compare-en" lang="en">Comparison: memory order ↔ promise ↔ instruction</h2>
   <div class="table-wrap">

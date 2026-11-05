@@ -60,7 +60,27 @@ for (const page of pages) {
     for (const h of ['目标', '核心概念', '动画图解', '资料', '参考书目']) {
       if (!html.includes(h)) problems.push(`${rel}: section "${h}" missing`);
     }
+    // Learning devices (contract: "Learning devices inside 核心概念"): a lesson that carries any of them
+    // carries the full set — one crux before concept 1, at least one worked example, one recap before the
+    // comparison table — and the containers carry no lang (their children are paired).
+    const crux = (html.match(/<div class="crux"/g) || []).length;
+    const worked = (html.match(/<div class="worked"/g) || []).length;
+    const recap = (html.match(/<div class="recap"/g) || []).length;
+    if (crux + worked + recap) {
+      if (crux !== 1) problems.push(`${rel}: ${crux} div.crux (expected 1)`);
+      if (worked < 1) problems.push(`${rel}: no div.worked`);
+      if (recap !== 1) problems.push(`${rel}: ${recap} div.recap (expected 1)`);
+      const iCrux = html.indexOf('<div class="crux"'), iC1 = html.search(/<h3 lang="zh-CN">1\./);
+      if (crux === 1 && iC1 > 0 && iCrux > iC1) problems.push(`${rel}: div.crux must come before concept 1`);
+      const iRecap = html.indexOf('<div class="recap"'), iCmp = html.indexOf('id="compare"');
+      if (recap === 1 && iCmp > 0 && iRecap > iCmp) problems.push(`${rel}: div.recap must come before the comparison table`);
+      for (const m of html.matchAll(/<div class="(crux|worked|recap)"[^>]*>/g)) {
+        if (/\blang=/.test(m[0])) problems.push(`${rel}: div.${m[1]} must not carry lang (its children are paired)`);
+      }
+    }
   }
+  // Circled numbers are banned everywhere (contract: Bilingual pairing).
+  if (/[①-⑳]/.test(html)) problems.push(`${rel}: circled number glyph (U+2460–U+2473)`);
 
   // data-step values must be within captions length
   for (const d of html.matchAll(/<svg[^>]*data-captions='([^']*)'[\s\S]*?<\/svg>/g)) {

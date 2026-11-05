@@ -55,6 +55,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">内核里总会有 bug：一次越界写、一次释放后使用，都可能被一个低权限进程经系统调用、<code>ioctl</code> 或 IOKit 接口触发。把每个 bug 都提前修掉做不到，那么怎样让「内核里有一个 bug」不等于「整台机器归了攻击者」？防线必须让攻击者在每一步都多付代价：不知道内核在哪个地址，不能让内核执行或读取用户内存，改不了返回地址和页表，也占不住刚释放的对象。</p>
+    <p lang="en">The kernel will always have bugs: one out-of-bounds write or one use-after-free can be triggered by a low-privilege process through a system call, an <code>ioctl</code> or an IOKit interface. Fixing every bug in advance is impossible, so how do you make sure that “the kernel has a bug” does not mean “the attacker owns the machine”? The defences have to make the attacker pay more at every step: not knowing where the kernel is, being unable to make the kernel execute or read user memory, being unable to change return addresses or page tables, and being unable to reclaim a freshly freed object.</p>
+    <p lang="zh-CN">概念 1 的威胁模型画出这条利用链，概念 2–7 的缓解措施各守其中一环（概念 4 的 PAC 是最完整的一例），概念 8 教你用同一张表去读真实漏洞。</p>
+    <p lang="en">Concept 1, the threat model, lays out this exploit chain; the mitigations of concepts 2–7 each guard one link of it (concept 4, PAC, is the most complete example); and concept 8 teaches you to read real vulnerabilities with the same table.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 内核威胁模型</h3><h3 lang="en">1. The kernel threat model</h3>
   <p lang="zh-CN">威胁模型回答三个问题：<strong>攻击者从哪里开始</strong>（通常是一个低权限进程——沙箱里的 App、浏览器渲染进程——或者一段送进内核的外部数据）、<strong>能碰到哪些内核代码</strong>（攻击面）、<strong>想达到什么</strong>（提权、逃出沙箱、持久化）。<strong>Linux</strong> 的典型攻击面：几百个系统调用、设备文件上的 <code>ioctl</code>、netlink、网络协议栈、挂载不可信的文件系统镜像、io_uring、eBPF（非特权 eBPF 通常由 <code>kernel.unprivileged_bpf_disabled</code> 关闭）。<strong>XNU</strong> 多了两类：Mach trap 与发往内核对象的 Mach 消息（MIG 接口），以及 <strong>IOKit 用户客户端</strong>——用户态 <code>IOServiceOpen</code> 后通过 <code>IOConnectCallMethod</code> 进到驱动的 <code>IOUserClient::externalMethod</code>，每个驱动都是一块新攻击面。Sandbox 的意义正在于<em>缩小一个进程能够到的攻击面</em>。</p>
   <p lang="en">A threat model answers three questions: <strong>where the attacker starts</strong> (usually a low-privilege process — a sandboxed app, a browser renderer process — or a piece of external data fed into the kernel), <strong>which kernel code it can reach</strong> (the attack surface), and <strong>what it wants to achieve</strong> (privilege escalation, sandbox escape, persistence). The typical <strong>Linux</strong> attack surface: several hundred system calls, <code>ioctl</code> on device files, netlink, the network stack, mounting untrusted filesystem images, io_uring, and eBPF (unprivileged eBPF is usually disabled by <code>kernel.unprivileged_bpf_disabled</code>). <strong>XNU</strong> adds two more kinds: Mach traps and Mach messages sent to kernel objects (MIG interfaces), and <strong>IOKit user clients</strong> — after <code>IOServiceOpen</code> in user space, <code>IOConnectCallMethod</code> reaches the driver’s <code>IOUserClient::externalMethod</code>, so every driver is a new piece of attack surface. The whole point of the sandbox is to <em>shrink the attack surface a process can reach</em>.</p>
@@ -80,6 +87,29 @@
   <p lang="en">FEAT_PAuth in ARMv8.3 adds five 128-bit keys (<code>APIAKey</code>, <code>APIBKey</code>, <code>APDAKey</code>, <code>APDBKey</code>, <code>APGAKey</code>, each split across two system registers, <code>…Lo_EL1</code>/<code>…Hi_EL1</code>; EL0 cannot read them) and a set of instructions: <code>pacia Xd, Xn</code> uses the IA key, with <code>Xn</code> as the modifier, to compute a short MAC — the <strong>PAC</strong> — over the pointer in <code>Xd</code>, and writes it into the pointer’s <strong>high bits that are not used for addressing</strong>; <code>autia</code> recomputes it with the same key and modifier and compares, and on a match removes the PAC to restore the original pointer; <code>xpaci</code>/<code>xpacd</code> only strip it, without checking; <code>paciasp</code>/<code>pacibsp</code> are shorthand for “sign LR, with SP as the modifier”; <code>retaa</code>/<code>retab</code> and <code>blraa</code> combine verification and branch into one instruction. The number of PAC bits depends on the virtual-address width and on TBI: with a 48-bit VA and TBI enabled there are only 7 bits, [54:48] (bit 55 selects the TTBR); with TBI disabled the top byte can be used as well. So PAC is a <em>probabilistic</em> defence that relies on “one wrong guess means a crash”.</p>
   <p lang="zh-CN">校验失败时：有 <strong>FEAT_FPAC</strong> 的 CPU 让 <code>aut*</code> 指令<em>立即</em>产生异常（<code>ESR_ELx.EC = 0x1C</code>）——Linux 用户态收到 <code>SIGILL</code>（<code>do_el0_fpac</code>），内核态 <code>die("Oops - FPAC")</code>（<code>do_el1_fpac</code>，<code>arch/arm64/kernel/traps.c</code>）；XNU 走 <code>sleh.c</code> 里的 <code>handle_pac_fail</code>。没有 FPAC 时，<code>aut*</code> 把错误码写进高位使指针变成非规范地址（FEAT_PAuth 行为；FEAT_PAuth2 下改为把重算的 PAC 异或进高位，效果同样通常是非规范地址），等到真正用它跳转或访存时才触发 translation fault。arm64e 编译器还会在部分 <code>aut</code> 之后自己插入检查，失败时执行 <code>brk</code>（XNU 的 <code>ptrauth_handle_brk_trap</code> 负责把它报告成 PAC 失败）。</p>
   <p lang="en">When verification fails: on a CPU with <strong>FEAT_FPAC</strong>, the <code>aut*</code> instruction raises an exception <em>immediately</em> (<code>ESR_ELx.EC = 0x1C</code>) — on Linux, user space receives <code>SIGILL</code> (<code>do_el0_fpac</code>) and kernel mode hits <code>die("Oops - FPAC")</code> (<code>do_el1_fpac</code>, <code>arch/arm64/kernel/traps.c</code>); XNU goes to <code>handle_pac_fail</code> in <code>sleh.c</code>. Without FPAC, <code>aut*</code> writes an error code into the high bits so that the pointer becomes a non-canonical address (FEAT_PAuth behaviour; under FEAT_PAuth2 it instead XORs the recomputed PAC into the high bits, which likewise usually yields a non-canonical address), and a translation fault is raised only when the pointer is actually used for a branch or a memory access. The arm64e compiler also inserts its own check after some <code>aut</code> instructions and executes <code>brk</code> on failure (XNU’s <code>ptrauth_handle_brk_trap</code> reports it as a PAC failure).</p>
+  <div class="worked">
+    <p lang="zh-CN">算一笔账：图解 A 里那个用户态返回地址（48 位 VA、开 TBI）的 PAC 有几位，攻击者猜中的机会有多大。位的划分按 Arm 架构手册（Arm ARM，DDI 0487）的 pointer authentication 规则，Linux 的对应代码是 <code>arch/arm64/include/asm/pointer_auth.h</code>，密钥的生命周期写在 <code>Documentation/arch/arm64/pointer-authentication.rst</code>。</p>
+    <p lang="en">Do the arithmetic: how many PAC bits does the user-space return address in diagram A (48-bit VA, TBI enabled) have, and what are an attacker’s chances of guessing it? The bit layout follows the pointer-authentication rules of the Arm Architecture Reference Manual (Arm ARM, DDI 0487); the matching Linux code is <code>arch/arm64/include/asm/pointer_auth.h</code>, and the key lifetime is described in <code>Documentation/arch/arm64/pointer-authentication.rst</code>.</p>
+    <pre> 63        56 55 54          48 47                            0
++------------+--+--------------+------------------------------+
+|  tag (TBI) |  |  PAC, 7 bits |     48-bit virtual address   |
++------------+--+--------------+------------------------------+
+               bit 55: TTBR0 / TTBR1</pre>
+    <ol lang="zh-CN">
+      <li>48 位 VA 占 [47:0]；bit 55 用来选 TTBR0 还是 TTBR1，不能放 PAC；开 TBI 时 [63:56] 留给软件标签。剩下 [54:48]，54 − 48 + 1 = 7 位。Linux 的 <code>ptrauth_user_pac_mask()</code> 正是 <code>GENMASK_ULL(54, vabits_actual)</code>。</li>
+      <li>7 位只有 2<sup>7</sup> = 128 种取值。攻击者没有密钥，只能随便填一个 PAC，一次猜中的概率是 1/128，约 0.8%。</li>
+      <li>猜错的代价：有 FEAT_FPAC 时 <code>autiasp</code> 当场异常，用户态进程收到 <code>SIGILL</code>；没有 FPAC 时下一条 <code>ret</code> 跳到非规范地址，触发 translation fault。PAC 的强度不在 7 位本身，而在每猜错一次进程就死一次。</li>
+      <li>重试的条件：Linux 文档写明，用户态密钥在 <code>exec*()</code> 时随机生成，同一进程的线程共享，并且跨 <code>fork()</code> 保留。一个子进程崩了就 fork 一个新的服务，每个子进程的密钥都相同，攻击者把 128 个值逐个试一遍，最多 128 次必中。</li>
+      <li>内核指针不同：<code>ptrauth_kernel_pac_mask()</code> 是 <code>GENMASK_ULL(63, vabits_actual)</code>，高字节也归 PAC，即 [63:56] 加 [54:48]，共 8 + 7 = 15 位，2<sup>15</sup> = 32768 种取值。反过来，VA 越宽 PAC 越短：52 位 VA 的用户指针只剩 [54:52] 3 位，8 种取值。</li>
+    </ol>
+    <ol lang="en">
+      <li>A 48-bit VA occupies [47:0]; bit 55 selects TTBR0 or TTBR1 and cannot hold PAC bits; with TBI enabled, [63:56] is reserved for software tags. What remains is [54:48], 54 − 48 + 1 = 7 bits. Linux’s <code>ptrauth_user_pac_mask()</code> is exactly <code>GENMASK_ULL(54, vabits_actual)</code>.</li>
+      <li>Seven bits give only 2<sup>7</sup> = 128 values. Without the key, the attacker can only fill in a PAC at random, so a single guess succeeds with probability 1/128, about 0.8%.</li>
+      <li>The price of a wrong guess: with FEAT_FPAC, <code>autiasp</code> raises an exception on the spot and the user process receives <code>SIGILL</code>; without FPAC, the next <code>ret</code> jumps to a non-canonical address and raises a translation fault. PAC’s strength lies not in the 7 bits themselves but in the process dying on every wrong guess.</li>
+      <li>When retries are possible: the Linux documentation states that user-space keys are generated at random at <code>exec*()</code>, shared by the threads of a process, and preserved across <code>fork()</code>. For a service that forks a new child whenever one crashes, every child has the same keys, so the attacker can try the 128 values one by one and is certain to hit within 128 attempts.</li>
+      <li>Kernel pointers differ: <code>ptrauth_kernel_pac_mask()</code> is <code>GENMASK_ULL(63, vabits_actual)</code>, so the top byte belongs to the PAC too, giving [63:56] plus [54:48], 8 + 7 = 15 bits and 2<sup>15</sup> = 32768 values. Conversely, a wider VA means a shorter PAC: a user pointer with a 52-bit VA keeps only [54:52], 3 bits and 8 values.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>Linux</strong>：<code>CONFIG_ARM64_PTR_AUTH</code> 给用户态启用（每个进程 exec 时随机生成密钥，<code>/proc/cpuinfo</code> 里能看到 <code>paca pacg</code>），<code>CONFIG_ARM64_PTR_AUTH_KERNEL</code> 用 <code>-mbranch-protection=pac-ret</code>（与 BTI 同开时 <code>pac-ret+bti</code>）编译内核，保护返回地址，用 IA 密钥。<strong>Apple arm64e</strong> 是全面使用：返回地址用 <strong>IB</strong> 密钥（XNU 汇编宏 <code>ARM64_STACK_PROLOG</code>/<code>EPILOG</code> 就是 <code>pacibsp</code>/<code>retab</code>，<code>osfmk/arm64/asm.h</code>），C 函数指针用 IA，数据指针用 DA/DB，C++ vtable 指针、ObjC 关键指针等再混入「存放地址 + 类型常量」做修饰值（address diversity），让签名不能从一个位置挪到另一个位置复用。<code>ptrauth.h</code> 里 <code>ptrauth_key_process_independent_code</code> 就是 IA 的别名——A 类密钥跨进程共享（共享缓存里的指针才能通用），B 类按进程区分。第三方 arm64e 二进制至今仍属「预览 ABI」：能编译，但正常系统默认不让它运行（见 Lab B）。</p>
   <p lang="en"><strong>Linux</strong>: <code>CONFIG_ARM64_PTR_AUTH</code> enables it for user space (keys are generated randomly for each process at exec, and <code>paca pacg</code> shows up in <code>/proc/cpuinfo</code>); <code>CONFIG_ARM64_PTR_AUTH_KERNEL</code> builds the kernel with <code>-mbranch-protection=pac-ret</code> (<code>pac-ret+bti</code> when BTI is enabled too) to protect return addresses, using the IA key. <strong>Apple arm64e</strong> uses it throughout: return addresses use the <strong>IB</strong> key (the XNU assembly macros <code>ARM64_STACK_PROLOG</code>/<code>EPILOG</code> are exactly <code>pacibsp</code>/<code>retab</code>, <code>osfmk/arm64/asm.h</code>), C function pointers use IA, data pointers use DA/DB, and C++ vtable pointers, key ObjC pointers and so on also mix “storage address + type constant” into the modifier (address diversity), so that a signature cannot be moved from one location and reused at another. In <code>ptrauth.h</code>, <code>ptrauth_key_process_independent_code</code> is simply an alias for IA — the A keys are shared across processes (which is what lets pointers in the shared cache work everywhere), while the B keys differ per process. Third-party arm64e binaries are still a “preview ABI” today: they compile, but a normal system does not let them run by default (see Lab B).</p>
 
@@ -116,6 +146,57 @@
   <p lang="en">For any kernel vulnerability analysis you read, fill in the same table: <strong>(1) Root cause</strong> (which line of code, and which class of error: out-of-bounds, UAF, race, uninitialised, logic); <strong>(2) Reachability</strong> (from what privilege and through which interface it is triggered, and whether it can be reached from inside a sandbox); <strong>(3) Primitive</strong> (what the bug gives directly: how many bytes of read/write, and whether it can be repeated); <strong>(4) Mitigations</strong> (which measures make exploitation harder and how the author got around them — or why no bypass was needed at all); <strong>(5) Fix</strong> (what the patch changed, and whether it fixes just this one spot or eliminates a whole class of problems).</p>
   <p lang="zh-CN">两个好练习：<strong>Dirty Pipe</strong>（CVE-2022-0847，Linux）——管道缓冲区的 <code>flags</code> 字段在某条路径上未初始化，残留的「可合并」标志让写入落进只读文件的页缓存；它是逻辑错误、不涉及内存破坏，KASLR、PAN、CFI 全都帮不上，修复只是把 flags 初始化——说明缓解措施不能替代正确的代码。<strong>XNU</strong> 一侧读 Project Zero 博客上 Ian Beer 等人的 iOS 内核分析：注意它们怎样因为 PAC 而走向 data-only 利用，以及 Apple 随后在 kalloc_type、只读 zone、SPTM 上的应对。</p>
   <p lang="en">Two good exercises: <strong>Dirty Pipe</strong> (CVE-2022-0847, Linux) — the <code>flags</code> field of a pipe buffer was left uninitialised on one path, and a leftover “can merge” flag let writes land in the page cache of a read-only file; it is a logic error with no memory corruption involved, so KASLR, PAN and CFI are all of no help, and the fix was simply to initialise the flags — which shows that mitigations cannot replace correct code. On the <strong>XNU</strong> side, read the iOS kernel analyses by Ian Beer and others on the Project Zero blog: notice how PAC pushed them towards data-only exploitation, and how Apple then responded with kalloc_type, read-only zones and SPTM.</p>
+  <div class="worked">
+    <p lang="zh-CN">拿 Dirty Pipe 把上面的五栏表填一遍。事实全部出自发现者 Max Kellermann 的原文（dirtypipe.cm4all.com），版本号与提交号照原文抄录。</p>
+    <p lang="en">Fill in the five-column table above for Dirty Pipe. Every fact comes from the original write-up by its discoverer, Max Kellermann (dirtypipe.cm4all.com), and the version and commit numbers are copied from it.</p>
+    <ol lang="zh-CN">
+      <li>根因：Linux 4.9（2016）的提交 241699cd72a8 加了两个新建 <code>struct pipe_buffer</code> 的函数（利用代码注释点名的是 <code>copy_page_to_iter_pipe()</code>），两者都没有初始化 <code>flags</code>。Linux 5.8（2020）的提交 f6dd975583bd 把「能否合并」改成每个缓冲区上的 <code>PIPE_BUF_FLAG_CAN_MERGE</code> 标志之后，残留的旧标志就变得危险。类别：未初始化导致的逻辑错误。</li>
+      <li>可达性：普通用户，对目标文件只要有读权限；接口是 <code>pipe()</code>、<code>splice()</code> 和 <code>write()</code>，不需要任何设备或特权。</li>
+      <li>原语：往任意可读文件的页缓存里写任意数据。原文列出四条限制：要有读权限；偏移不能落在页边界上，因为那一页至少要先有 1 个字节被 splice 进管道；一次写不能跨页；不能改变文件长度。</li>
+      <li>利用四步：建管道并写满，让环上每个缓冲区都带上 <code>CAN_MERGE</code>；读空，标志留着；从目标文件偏移前一个字节处 splice 1 字节进管道；再往管道 <code>write</code>，数据直接合并进那一页缓存。写的是页缓存而不是磁盘，所以只读挂载、不可变文件、只读 btrfs 快照都拦不住。</li>
+      <li>缓解：KASLR、PAN、PAC、CFI 一个都没被触发，因为既没有内存破坏，也没有劫持控制流，内核只是照常把数据写进自己的页缓存。</li>
+      <li>修复：Linux 5.16.11、5.15.25、5.10.102 收进了作者的补丁，补上 <code>flags</code> 的初始化。它修的是这一处遗漏，没有新增任何缓解层。</li>
+    </ol>
+    <ol lang="en">
+      <li>Root cause: commit 241699cd72a8 in Linux 4.9 (2016) added two functions that create a new <code>struct pipe_buffer</code> (the exploit’s comments name <code>copy_page_to_iter_pipe()</code>), and neither initialised <code>flags</code>. Once commit f6dd975583bd in Linux 5.8 (2020) turned “may merge” into a per-buffer flag, <code>PIPE_BUF_FLAG_CAN_MERGE</code>, a leftover stale flag became dangerous. Class: a logic error caused by missing initialisation.</li>
+      <li>Reachability: any ordinary user who can read the target file; the interfaces are <code>pipe()</code>, <code>splice()</code> and <code>write()</code>, with no device or privilege needed.</li>
+      <li>Primitive: write arbitrary data into the page cache of any readable file. The write-up lists four limits: read permission is required; the offset cannot sit on a page boundary, because at least 1 byte of that page must first be spliced into the pipe; one write cannot cross a page; and the file length cannot change.</li>
+      <li>Four exploit steps: create a pipe and fill it, so that every buffer on the ring carries <code>CAN_MERGE</code>; drain it, leaving the flags in place; splice 1 byte from the target file, from just before the target offset, into the pipe; then <code>write</code> to the pipe, and the data merges straight into that cached page. What is written is the page cache, not the disk, so read-only mounts, immutable files and read-only btrfs snapshots do not stop it.</li>
+      <li>Mitigations: none of KASLR, PAN, PAC or CFI is triggered, because there is no memory corruption and no hijacked control flow; the kernel simply writes data into its own page cache as usual.</li>
+      <li>Fix: Linux 5.16.11, 5.15.25 and 5.10.102 took the author’s patch, which adds the missing initialisation of <code>flags</code>. It fixed this one omission and added no mitigation layer at all.</li>
+    </ol>
+  </div>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>威胁模型先问攻击者从哪开始、能碰到哪些内核代码、想要什么，Sandbox 和 LSM 缩小的是第二项。</li>
+      <li>利用链是漏洞、原语、绕过缓解、达成目标四步，每种缓解只需让其中一步更贵。</li>
+      <li>KASLR 逼攻击者先找信息泄露，PXN 和 PAN 让内核不能执行或直接读写用户内存。</li>
+      <li>PAC 把一个短 MAC 写进指针高位，48 位 VA 且开 TBI 的用户指针只有 7 位，靠的是猜错就崩溃。</li>
+      <li>Linux 内核能改写自己的页表，Apple 用 PPL 或 SPTM 把页表修改搬进比内核更受保护的代码里。</li>
+      <li>kalloc_type 按类型隔离堆，被释放的对象很难再用另一种类型的对象占位；它是 Apple 对 data-only 利用的应对之一，而把攻击者推向 data-only 的是 PAC。</li>
+    </ul>
+    <ul lang="en">
+      <li>A threat model first asks where the attacker starts, which kernel code it can reach and what it wants; the sandbox and LSMs shrink the second.</li>
+      <li>The exploit chain has four steps, bug, primitive, mitigation bypass and goal, and each mitigation only has to make one step more expensive.</li>
+      <li>KASLR forces the attacker to find an information leak first, and PXN and PAN stop the kernel from executing or directly accessing user memory.</li>
+      <li>PAC writes a short MAC into a pointer’s high bits; a user pointer with a 48-bit VA and TBI enabled has only 7 of them, and the defence relies on a wrong guess causing a crash.</li>
+      <li>The Linux kernel can rewrite its own page tables, while Apple moves page-table changes into code that is better protected than the kernel, PPL or SPTM.</li>
+      <li>kalloc_type isolates the heap by type, so a freed object is hard to reclaim with an object of another type; it is one of Apple’s answers to the data-only exploitation that PAC pushed attackers towards.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：PAC 让返回地址无法被篡改。→ 实际：它只让篡改后的地址大概率校验失败；PAC 位数少、密钥又跨 <code>fork()</code> 保留时可以反复重试，签名过的指针还可能被原样搬到另一个合法位置复用，所以 Apple 把存放地址混进修饰值。</li>
+      <li>误解：缓解措施叠得够多，内核漏洞就无法利用。→ 实际：Dirty Pipe 这样的逻辑错误不碰任何一层缓解，只能靠修代码本身。</li>
+      <li>误解：KASLR 随机化了就足够。→ 实际：整个内核镜像只滑动一个偏移，泄露镜像里任意一个地址就能算出整个镜像的位置；所以它必须配合 <code>kptr_restrict</code>、<code>VM_KERNEL_ADDRPERM</code> 这些不泄露地址的措施。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: PAC makes return addresses impossible to tamper with. → Fact: it only makes a tampered address fail verification with high probability; with few PAC bits and keys preserved across <code>fork()</code> an attacker can retry, and a signed pointer may be moved as is to another legitimate location and reused, which is why Apple mixes the storage address into the modifier.</li>
+      <li>Myth: with enough mitigations stacked up, kernel bugs cannot be exploited. → Fact: a logic error like Dirty Pipe touches no mitigation layer at all, and only fixing the code helps.</li>
+      <li>Myth: once KASLR randomises, that is enough. → Fact: the whole kernel image slides by a single offset, so leaking any one address inside the image reveals where the whole image is; it must be paired with measures that keep addresses from leaking, such as <code>kptr_restrict</code> and <code>VM_KERNEL_ADDRPERM</code>.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">

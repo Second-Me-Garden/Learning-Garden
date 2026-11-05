@@ -55,6 +55,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">两个节点之间要传三种东西：每秒几十次的速度指令、一次「现在电量多少」的查询、一次要走几十秒的「去厨房」。速度指令丢一条无所谓，但不能等对方回话；电量查询必须拿到回答；去厨房则既要中途的进度，又要能半路喊停。如果只有一种通信方式，总有一种需求会被它做坏。那么 ROS 2 需要几种通信方式，它们在底下又是怎么实现的？</p>
+    <p lang="en">Two nodes need to exchange three things: velocity commands dozens of times a second, one query for the current battery level, and one tens-of-seconds trip to the kitchen. Losing one velocity command does not matter, but the sender must not wait for a reply; the battery query must get an answer; the kitchen trip needs progress along the way and a way to stop it halfway. With only one way to communicate, one of these needs would always be served badly. So how many ways does ROS 2 need, and how are they built underneath?</p>
+    <p lang="zh-CN">概念 2、4、5 分别给出话题、服务和动作，概念 5 说明动作就是三个隐藏服务加两个隐藏话题拼成的。</p>
+    <p lang="en">Concepts 2, 4 and 5 give topics, services and actions in turn, and concept 5 shows that an action is just three hidden services plus two hidden topics put together.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 节点与 graph</h3><h3 lang="en">1. Nodes and the graph</h3>
   <p lang="zh-CN"><strong>节点</strong>是 graph 里一个有名字的参与者，负责一件边界清楚的事（读一个传感器、跑一个控制器）。在代码里它是一个对象：rclpy 里继承 <code>rclpy.node.Node</code>，rclcpp 里继承 <code>rclcpp::Node</code>。节点通过它创建的 publisher、subscription、service、client 和 action 与别人相连；这些连接和节点一起构成 <strong>ROS graph</strong>。节点不是进程：一个进程里可以有多个节点，Phase 4 的组合（composition）就是这样做的。</p>
   <p lang="en">A <strong>node</strong> is a named participant in the graph that does one well-bounded job (read a sensor, run a controller). In code it is an object: in rclpy you subclass <code>rclpy.node.Node</code>, in rclcpp <code>rclcpp::Node</code>. A node connects to others through the publishers, subscriptions, services, clients and actions it creates; those connections together with the nodes form the <strong>ROS graph</strong>. A node is not a process: one process can hold several nodes, which is exactly what composition does in Phase 4.</p>
@@ -102,8 +109,8 @@
   <h3 lang="zh-CN">4. 服务：一问一答</h3><h3 lang="en">4. Services: one request, one reply</h3>
   <p lang="zh-CN">服务是请求 / 响应：client 发一个请求，server 的回调算出响应并返回。适合短的、需要确认结果的操作：查询一个值、切换一个模式、触发一次标定。一个服务名应该只有一个 server（多个 server 同名时哪个回答是不确定的），client 可以有很多个。</p>
   <p lang="en">A service is request / response: a client sends a request, and the server’s callback computes a response and returns it. It suits short operations whose outcome you need to confirm: query a value, switch a mode, trigger a calibration. A service name should have exactly one server (with several servers of the same name, which one answers is undefined); there can be many clients.</p>
-  <p lang="zh-CN"><strong>底下是什么</strong>：在基于 DDS 的 rmw 里，一个服务大致就是两个话题，一个承载请求、一个承载响应（Fast DDS 下名字大致是 <code>rq/add_two_intsRequest</code> 和 <code>rr/add_two_intsReply</code>）。每个请求带上 client 的身份和一个序列号，server 回复时原样带回，client 端据此把响应交给等待它的那个 future，其他 client 看到的响应会被丢掉。所以服务不是一条「连接」，只是两个话题加一套配对规则。</p>
-  <p lang="en"><strong>What lies underneath</strong>: in DDS-based rmw implementations a service is roughly two topics, one carrying requests and one carrying responses (under Fast DDS the names are approximately <code>rq/add_two_intsRequest</code> and <code>rr/add_two_intsReply</code>). Each request carries the client’s identity and a sequence number, which the server copies back into its reply; the client side uses them to hand the response to the future waiting for it, and responses meant for other clients are dropped. So a service is not a “connection”, just two topics plus a pairing rule.</p>
+  <p lang="zh-CN"><strong>底下是什么</strong>：在基于 DDS 的 rmw 里，一个服务大致就是两个话题，一个承载请求、一个承载响应（Fast DDS 下名字大致是 <code>rq/add_two_intsRequest</code> 和 <code>rr/add_two_intsReply</code>）。每个请求带上 client 的身份和一个序列号，server 回复时原样带回，client 端据此把响应交给等待它的那个 future，其他 client 看到的响应会被丢掉。所以服务不是一条「连接」，只是两个话题加一套配对规则。图解 (c) 一步步画出两个 client 共用这两个话题时，各自怎样认出自己的响应。</p>
+  <p lang="en"><strong>What lies underneath</strong>: in DDS-based rmw implementations a service is roughly two topics, one carrying requests and one carrying responses (under Fast DDS the names are approximately <code>rq/add_two_intsRequest</code> and <code>rr/add_two_intsReply</code>). Each request carries the client’s identity and a sequence number, which the server copies back into its reply; the client side uses them to hand the response to the future waiting for it, and responses meant for other clients are dropped. So a service is not a “connection”, just two topics plus a pairing rule. Diagram (c) steps through how two clients that share these two topics each pick out their own reply.</p>
   <div class="note" lang="zh-CN">client 的调用是异步的：rclpy 的 <code>call_async()</code> 和 rclcpp 的 <code>async_send_request()</code> 立即返回一个 future，响应要等执行器 spin 时才会被处理并填进去。在 <code>main</code> 里用 <code>spin_until_future_complete</code> 等它没问题；但如果在<em>另一个回调里</em>同步地等这个 future，而执行器是单线程的，处理响应的那个线程正是被你堵住的线程，于是永远等不到——这就是 Phase 2 要讲的死锁。</div>
   <div class="note" lang="en">A client call is asynchronous: rclpy’s <code>call_async()</code> and rclcpp’s <code>async_send_request()</code> return a future at once, and the response is processed and filled in only when the executor spins. Waiting for it with <code>spin_until_future_complete</code> in <code>main</code> is fine; but if you wait for that future synchronously <em>inside another callback</em> on a single-threaded executor, the thread that would process the response is exactly the thread you are blocking, so the wait never ends — the deadlock Phase 2 covers.</div>
   <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲服务的章节；Quigley 等《Programming Robots with ROS》讲服务的章节（ROS 1，但请求 / 响应的设计取舍不变）；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Services.html">Services</a>。</p>
@@ -128,6 +135,34 @@
   </ol>
   <p lang="zh-CN">所以动作没有自己的传输机制，<code>ros2 action</code> 和 <code>rclcpp_action</code>、<code>rclpy.action</code> 只是把这五个实体和目标状态机包装成一个对象。两种库的分工略有不同：<code>rclpy.action.ActionServer</code> 接受目标后替你调用 <code>execute_callback</code>；<code>rclcpp_action</code> 的 server 只调用 <code>handle_goal</code>、<code>handle_cancel</code> 和 <code>handle_accepted</code>，长时间的执行要你在 <code>handle_accepted</code> 里自己开线程或交给执行器，否则会堵住 spin（官方 C++ 教程就是开一个 <code>std::thread</code>）。</p>
   <p lang="en">So an action has no transport of its own; <code>ros2 action</code>, <code>rclcpp_action</code> and <code>rclpy.action</code> merely wrap these five entities and the goal state machine into one object. The two libraries divide the work slightly differently: <code>rclpy.action.ActionServer</code> calls your <code>execute_callback</code> for you after accepting a goal; the <code>rclcpp_action</code> server calls only <code>handle_goal</code>, <code>handle_cancel</code> and <code>handle_accepted</code>, and the long-running execution is yours to start in <code>handle_accepted</code> on a thread of your own or through the executor, or it blocks spin (the official C++ tutorial starts a <code>std::thread</code>).</p>
+  <div class="worked">
+    <p lang="zh-CN">把下方图解 (b) 的那次调用交给 Lab B 写的 Python server 跑一遍：目标 <code>order = 5</code>，执行回调每算出一项就发一次反馈，然后 <code>time.sleep(1)</code>。client 在第二次反馈之后、第三项算出之前请求取消；取消请求在 t = 1.5 s 到达这个时刻是为了举例假设的，其余数字都来自 Lab B 的代码。</p>
+    <p lang="en">Run the call of diagram (b) below through the Python server written in Lab B: goal <code>order = 5</code>, and the execute callback publishes feedback each time it computes a term, then does <code>time.sleep(1)</code>. The client asks to cancel after the second feedback and before the third term is computed; the cancel arriving at t = 1.5 s is an assumption made for illustration, and every other number comes from the Lab B code.</p>
+    <pre>t = 0      send_goal {goal_id, order: 5}   → ACCEPT (order ≥ 0), state ACCEPTED → EXECUTING
+t = 0      get_result {goal_id}            → server holds the reply
+t = 0      i = 1: [0, 1] + 1 → feedback [0, 1, 1]        sleep 1 s
+t = 1      i = 2: [0, 1, 1] + 2 → feedback [0, 1, 1, 2]  sleep 1 s
+t = 1.5    cancel_goal {goal_id}           → ACCEPT, state CANCELING
+t = 2      i = 3: is_cancel_requested → canceled()       state CANCELED
+t = 2      get_result reply                → CANCELED, sequence [0, 1, 1, 2]
+no cancel: i = 3, 4 add 3 and 5           → SUCCEEDED, sequence [0, 1, 1, 2, 3, 5] at t = 4</pre>
+    <ol lang="zh-CN">
+      <li><code>send_goal</code> 是一个服务：请求带 client 生成的 UUID 和 <code>order = 5</code>，goal 回调看到 5 不是负数就接受，响应里只有「已接受」和时间戳，序列一项都还没算。</li>
+      <li>client 立即带着同一个 goal ID 发 <code>get_result</code>。这是第二个服务，server 收下请求但先不回答，这次调用要挂到 t = 2 s。</li>
+      <li>执行回调从 <code>[0, 1]</code> 开始，循环 i = 1 到 4。每算出一项就在 <code>feedback</code> 话题上发一次部分序列：t = 0 发 <code>[0, 1, 1]</code>，t = 1 s 发 <code>[0, 1, 1, 2]</code>。<code>status</code> 话题这时报告 EXECUTING。</li>
+      <li>t = 1.5 s 时 client 调用第三个服务 <code>cancel_goal</code>。cancel 回调接受，目标进入 CANCELING，但执行回调此刻正在 <code>sleep</code>，什么都没停下来。</li>
+      <li>t = 2 s 时循环进入 i = 3，先检查 <code>is_cancel_requested</code>，发现为真，于是调用 <code>canceled()</code> 并返回已算出的 <code>[0, 1, 1, 2]</code>。目标到达终态 CANCELED，server 这才回复 t = 0 时挂起的 <code>get_result</code>。</li>
+      <li>若不取消，i = 3 和 i = 4 再追加 3 和 5，一共 4 次反馈，约 4 s 后以 SUCCEEDED 和 <code>[0, 1, 1, 2, 3, 5]</code> 回复。整个过程用到的正好是三个服务和两个话题。</li>
+    </ol>
+    <ol lang="en">
+      <li><code>send_goal</code> is a service: the request carries a UUID generated by the client and <code>order = 5</code>, the goal callback accepts because 5 is not negative, and the response holds only “accepted” and a timestamp, with no term of the sequence computed yet.</li>
+      <li>The client at once sends <code>get_result</code> with the same goal ID. This is the second service; the server takes the request but does not answer yet, and this call stays pending until t = 2 s.</li>
+      <li>The execute callback starts from <code>[0, 1]</code> and loops i = 1 to 4. Each term it computes is published as a partial sequence on the <code>feedback</code> topic: <code>[0, 1, 1]</code> at t = 0 and <code>[0, 1, 1, 2]</code> at t = 1 s. The <code>status</code> topic reports EXECUTING meanwhile.</li>
+      <li>At t = 1.5 s the client calls the third service, <code>cancel_goal</code>. The cancel callback accepts and the goal enters CANCELING, but the execute callback is inside <code>sleep</code> at that moment, so nothing has stopped.</li>
+      <li>At t = 2 s the loop reaches i = 3, checks <code>is_cancel_requested</code> first, finds it true, calls <code>canceled()</code> and returns the <code>[0, 1, 1, 2]</code> computed so far. The goal reaches the terminal state CANCELED, and only now does the server answer the <code>get_result</code> pending since t = 0.</li>
+      <li>Without the cancel, i = 3 and i = 4 append 3 and 5, for four feedback messages in all, and after about 4 s the reply is SUCCEEDED with <code>[0, 1, 1, 2, 3, 5]</code>. The whole exchange used exactly three services and two topics.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲动作的章节；Quigley 等《Programming Robots with ROS》讲 actionlib 的章节（ROS 1 的前身，目标、反馈、结果、取消的概念相同）；设计文章 <a href="https://design.ros2.org/articles/actions.html">Actions</a>。</p>
   <p lang="en">Further reading: the chapter on actions in Renard, <em>ROS 2 From Scratch</em>; the chapter on actionlib in Quigley et al., <em>Programming Robots with ROS</em> (the ROS 1 predecessor, with the same goal, feedback, result and cancel concepts); the design article <a href="https://design.ros2.org/articles/actions.html">Actions</a>.</p>
 
@@ -154,6 +189,35 @@
   <p lang="en">Both libraries sit on rcl, so the concepts correspond one to one and interoperate on the wire: publishing from Python and subscribing from C++ just works (Lab A checks it). The differences are in language and runtime: rclcpp fixes the message type at compile time with templates (<code>create_publisher&lt;std_msgs::msg::String&gt;</code>), rclpy passes the type as an argument (<code>create_publisher(String, …)</code>); rclcpp timers take <code>std::chrono</code> durations, rclpy takes seconds; C++ packages use <code>ament_cmake</code> and install executables with <code>add_executable</code> and <code>install(TARGETS …)</code>, Python packages use <code>ament_python</code> and an executable is a <code>console_scripts</code> entry in <code>setup.py</code>. On performance, every rclpy message is converted between C and Python and Python callbacks are bound by the GIL, so high-rate, low-latency and real-time nodes are usually C++, while tools, orchestration and prototypes are Python.</p>
   <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》全书 Python 与 C++ 并列的写法；Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲用 C++ 和 Python 编写 ROS 2 程序的章节。</p>
   <p lang="en">Further reading: Renard, <em>ROS 2 From Scratch</em>, which writes every example in Python and C++ side by side; the chapters on writing ROS 2 programs in C++ and Python in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>节点是 graph 里的有名对象而不是进程，一个进程只有一个 DDS participant，不论里面有几个节点。</li>
+      <li>话题是单向、多对多、不等回话的通道，跨进程时订阅者拿到的是反序列化出来的新副本。</li>
+      <li>服务在 DDS 上就是一个请求话题加一个响应话题，靠 client 身份和序列号把响应配给正确的 future。</li>
+      <li>动作是三个隐藏服务（send_goal、get_result、cancel_goal）加两个隐藏话题（feedback、status），结果靠一次一直挂起的 get_result 取回。</li>
+      <li>参数属于各自的节点，先声明后设置，on-set 回调只要有一个拒绝，整次设置就不生效。</li>
+    </ul>
+    <ul lang="en">
+      <li>A node is a named object in the graph, not a process, and one process has one DDS participant however many nodes it holds.</li>
+      <li>A topic is a one-way, many-to-many channel with no reply, and across processes the subscriber receives a fresh deserialized copy.</li>
+      <li>On DDS a service is a request topic plus a response topic, and the client identity and sequence number pair each response with the right future.</li>
+      <li>An action is three hidden services (send_goal, get_result, cancel_goal) plus two hidden topics (feedback, status), and the result comes back through one get_result request that stays pending.</li>
+      <li>Parameters belong to their own node, are declared before they are set, and one rejecting on-set callback makes the whole set fail.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：cancel 回调返回 ACCEPT，目标就停了。→ 实际：目标只进入 CANCELING，要等执行代码检查 <code>is_cancel_requested</code> 并调用 <code>canceled()</code> 才真正停下。</li>
+      <li>误解：<code>publish()</code> 返回时订阅者已经收到消息。→ 实际：它只是把消息交给中间件，订阅者的回调要等它那边的执行器 spin 时才运行。</li>
+      <li>误解：一个进程里的节点越多，DDS 端口就越多。→ 实际：从 Foxy 起一个 rcl context 只建一个 participant，端口数跟进程数有关，跟节点数无关。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: once the cancel callback returns ACCEPT, the goal has stopped. → Fact: the goal only enters CANCELING, and it stops when the executing code checks <code>is_cancel_requested</code> and calls <code>canceled()</code>.</li>
+      <li>Myth: when <code>publish()</code> returns, the subscriber has the message. → Fact: it has only handed the message to the middleware, and the subscriber’s callback runs when the executor on that side spins.</li>
+      <li>Myth: more nodes in one process means more DDS ports. → Fact: since Foxy one rcl context creates one participant, so the port count depends on processes, not nodes.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：rclcpp ↔ rclpy（同一个节点）</h2><h2 id="compare-en" lang="en">Comparison: rclcpp ↔ rclpy (the same node)</h2>
   <div class="table-wrap">
@@ -319,6 +383,80 @@
         <rect class="box" x="685" y="350" width="190" height="52"/>
         <text x="697" y="372" class="mono">CANCELED</text>
         <text x="697" y="392" class="small" lang="zh-CN">或 SUCCEEDED / ABORTED</text><text x="697" y="392" class="small" lang="en">or SUCCEEDED / ABORTED</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) 两个 client、一个 server：每个 client 怎样拿到自己的响应</h3><h3 lang="en">(c) Two clients, one server: how each client gets its own reply</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：上面是两个调用 /add_two_ints 的 client A 和 B，下面是唯一的 server，中间两条虚线是服务底下的两个话题：请求话题和响应话题（Fast DDS 下名字大致是 rq/add_two_intsRequest 和 rr/add_two_intsReply）。每个请求带着 client 的身份和一个序列号。按播放逐步看。",
+           "第 1 步，A 发出请求：请求带上 A 的身份（一个 GUID，全局唯一的实体标识）和序列号 1，发布到请求话题上，server 订阅了这个话题。",
+           "第 2 步，B 也发出请求。序列号由每个 client 自己计数，所以 B 的第一个请求同样是 1。光看序列号分不清这两个请求，要靠身份。",
+           "第 3 步，server 的回调处理 A 的请求，把响应发布到响应话题上，并原样带回请求里的身份和序列号：(A, 1)。响应话题只有一个，两个 client 都订阅它。",
+           "第 4 步，A 和 B 都收到这条响应。A 看到身份是自己、序列号 1 对得上它正在等的 future，于是收下并填进那个 future；B 看到身份不是自己，丢掉。",
+           "第 5 步，server 处理 B 的请求，发布 (B, 1)。这一次 B 收下，A 丢掉。",
+           "第 6 步，整个过程只用了两个话题：所有请求都走 rq/add_two_intsRequest，所有响应都走 rr/add_two_intsReply，配对全靠身份加序列号。ros2 service list -t 把这一对话题显示成一个服务 /add_two_ints。"]'
+         data-captions-en='["The whole picture: at the top, clients A and B both call /add_two_ints; at the bottom, the one server; the two dashed lines between them are the two topics under the service, the request topic and the response topic (under Fast DDS named approximately rq/add_two_intsRequest and rr/add_two_intsReply). Each request carries the identity of its client and a sequence number. Press Play to step through.",
+           "Step 1, A sends a request: it carries the identity of A (a GUID, a globally unique entity id) and sequence number 1, and is published on the request topic, which the server subscribes to.",
+           "Step 2, B sends a request too. Each client counts its own sequence numbers, so the first request of B is also number 1. The sequence number alone cannot tell the two requests apart; the identity can.",
+           "Step 3, the server callback handles the request of A and publishes the reply on the response topic, copying back the identity and sequence number of the request: (A, 1). There is one response topic, and both clients subscribe to it.",
+           "Step 4, both A and B receive this reply. A sees its own identity and sequence number 1, which match the future it is waiting on, so it keeps the reply and completes that future; B sees an identity that is not its own and drops it.",
+           "Step 5, the server handles the request of B and publishes (B, 1). This time B keeps it and A drops it.",
+           "Step 6, the whole exchange used just two topics: every request on rq/add_two_intsRequest, every reply on rr/add_two_intsReply, paired only by identity plus sequence number. ros2 service list -t shows the pair as one service, /add_two_ints."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box ros" x="40" y="20" width="160" height="80"/><text x="52" y="42" class="mono">client A</text>
+      <rect class="box ros" x="250" y="20" width="160" height="80"/><text x="262" y="42" class="mono">client B</text>
+      <text x="490" y="40" class="small" lang="zh-CN">每个请求带着：</text><text x="490" y="40" class="small" lang="en">each request carries:</text>
+      <text x="490" y="60" class="small" lang="zh-CN">client 的身份（GUID）+ 序列号</text><text x="490" y="60" class="small" lang="en">client identity (GUID) + sequence number</text>
+      <text x="490" y="80" class="small" lang="zh-CN">响应原样带回这两项</text><text x="490" y="80" class="small" lang="en">the reply copies both back</text>
+      <line x1="30" y1="160" x2="470" y2="160" class="lane"/>
+      <text x="490" y="164" class="mono" style="fill: var(--ros)">rq/add_two_intsRequest</text>
+      <text x="490" y="182" class="small" lang="zh-CN">请求话题</text><text x="490" y="182" class="small" lang="en">request topic</text>
+      <line x1="30" y1="255" x2="470" y2="255" class="lane"/>
+      <text x="490" y="259" class="mono" style="fill: var(--ros)">rr/add_two_intsReply</text>
+      <text x="490" y="277" class="small" lang="zh-CN">响应话题</text><text x="490" y="277" class="small" lang="en">response topic</text>
+      <rect class="box ros" x="40" y="330" width="420" height="56"/><text x="55" y="353" class="mono">server /add_two_ints</text>
+      <text x="55" y="374" class="small" lang="zh-CN">这个服务名唯一的 server</text><text x="55" y="374" class="small" lang="en">the only server of this name</text>
+
+      <!-- step 1: A sends (A, 1) -->
+      <g data-step="1">
+        <path class="arrow" d="M95 100 L95 146"/>
+        <rect class="box" x="42" y="148" width="106" height="24"/><text x="48" y="165" class="mono">rq · A, seq 1</text>
+        <path class="arrow" d="M95 172 L95 328"/></g>
+      <!-- step 2: B sends (B, 1) -->
+      <g data-step="2">
+        <path class="arrow" d="M400 100 L400 146"/>
+        <rect class="box" x="347" y="148" width="106" height="24"/><text x="353" y="165" class="mono">rq · B, seq 1</text>
+        <path class="arrow" d="M400 172 L400 328"/></g>
+      <!-- step 3: server publishes reply (A, 1) -->
+      <path data-step="3" class="arrow" d="M205 330 L205 269"/>
+      <g data-step="3 4"><rect class="box" x="120" y="243" width="112" height="24"/><text x="126" y="260" class="mono">rr · A, seq 1</text></g>
+      <!-- step 4: both receive (A, 1); A keeps, B drops -->
+      <g data-step="4">
+        <path class="arrow" d="M170 243 L165 102"/>
+        <path class="arrow" d="M215 243 L285 102" style="stroke-dasharray: 5 4"/>
+        <text x="52" y="66" lang="zh-CN">✓ 收下 (A, 1)</text><text x="52" y="66" lang="en">✓ keeps (A, 1)</text>
+        <text x="262" y="66" style="fill: var(--ink-2)" lang="zh-CN">✕ 丢掉 (A, 1)</text><text x="262" y="66" style="fill: var(--ink-2)" lang="en">✕ drops (A, 1)</text></g>
+      <!-- step 5: reply (B, 1); B keeps, A drops -->
+      <g data-step="5">
+        <path class="arrow" d="M322 330 L322 269"/>
+        <rect class="box" x="266" y="243" width="112" height="24"/><text x="272" y="260" class="mono">rr · B, seq 1</text>
+        <path class="arrow" d="M340 243 L305 102"/>
+        <path class="arrow" d="M290 243 L185 102" style="stroke-dasharray: 5 4"/>
+        <text x="52" y="88" style="fill: var(--ink-2)" lang="zh-CN">✕ 丢掉 (B, 1)</text><text x="52" y="88" style="fill: var(--ink-2)" lang="en">✕ drops (B, 1)</text>
+        <text x="262" y="88" lang="zh-CN">✓ 收下 (B, 1)</text><text x="262" y="88" lang="en">✓ keeps (B, 1)</text></g>
+      <!-- step 6: the pair of topics as one service -->
+      <g data-step="6">
+        <rect class="hl" x="482" y="146" width="186" height="44"/>
+        <rect class="hl" x="482" y="241" width="186" height="44"/>
+        <text x="490" y="322" class="mono">$ ros2 service list -t</text>
+        <text x="490" y="342" class="mono">/add_two_ints</text>
+        <text x="490" y="360" class="mono">[example_interfaces/srv/AddTwoInts]</text>
+        <text x="490" y="384" class="small" lang="zh-CN">一个服务，底下是这两个话题</text><text x="490" y="384" class="small" lang="en">one service, these two topics underneath</text></g>
     </svg>
   </div>
 

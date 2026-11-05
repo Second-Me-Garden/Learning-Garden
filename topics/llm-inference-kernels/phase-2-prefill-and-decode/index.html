@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">同一个注意力算子，预填充一次喂进几千个 token，解码一次只喂一个，坏的地方却不一样。预填充照教科书先算出整张分数矩阵 S，Qwen3-8B 在 T = 4096 时一层就是约 1.07 GB，写一次读一次就把本该受算力限制的内核拖回带宽一侧；可 softmax 偏偏要整行的最大值和整行的和。解码没有大矩阵，但查询长度是 1，线程块只有「批 × 头」那么多，批小时大部分 SM 闲着，带宽读不满。</p>
+    <p lang="en">One attention operator, fed thousands of tokens at once in prefill and a single token in decode, goes wrong in two different ways. Prefill done the textbook way first materializes the whole score matrix S, about 1.07 GB per layer for Qwen3-8B at T = 4096, and writing and re-reading it drags a kernel that should be compute-bound back to the bandwidth side; yet softmax needs the maximum and the sum of a whole row. Decode has no large matrix, but its query length is 1, so there are only batch × heads thread blocks, and at small batch most SMs sit idle and the bandwidth goes unused.</p>
+    <p lang="zh-CN">概念 2 的分块与在线 softmax 让 S 只活在片上而结果仍然精确，概念 4 的 split-KV 把一个查询的 KV 读取摊到所有 SM 上，概念 6 让两个阶段各用各的内核。</p>
+    <p lang="en">Concept 2, tiling with the online softmax, keeps S on chip while the result stays exact; concept 4, split-KV, spreads one query’s KV read over every SM; and concept 6 lets each phase use its own kernel.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 同一个注意力，两种界</h3><h3 lang="en">1. One attention, two bounds</h3>
   <p lang="zh-CN">设一层有 H<sub>q</sub> 个查询头、H<sub>kv</sub> 个 KV 头，head_dim 为 d，BF16 每元素 2 字节。每一对（查询，键）在 QK<sup>T</sup> 里做 d 次乘加、在 PV 里再做 d 次，共 4d FLOP。</p>
   <p lang="en">Let a layer have H<sub>q</sub> query heads and H<sub>kv</sub> KV heads with head_dim d, at 2 bytes per BF16 element. Each (query, key) pair does d multiply-adds in QK<sup>T</sup> and d more in PV, 4d FLOP in all.</p>
@@ -84,6 +91,34 @@
     <li lang="zh-CN">所有块走完，O<sub>i</sub> = O ÷ l，写回显存一次。因果掩码下，越过对角线的整块直接跳过，对角线上的块按位置掩掉一半。</li>
     <li lang="en">After the last tile, O<sub>i</sub> = O ÷ l is written back to memory once. Under the causal mask, tiles entirely past the diagonal are skipped, and the tile on the diagonal masks out half its entries by position.</li>
   </ol>
+  <div class="worked">
+    <p lang="zh-CN">用图解 (a) 第 6 步的那一行走一遍：一行分数（已乘 scale）是 <code>[1, 3 | 5, 2]</code>，B<sub>c</sub> = 2，分两块。为了把 O 也算出来，设 head_dim d = 1，四个 token 的 V 是 <code>[10, 20 | 30, 40]</code>（这四个值是为演示设的，不来自任何模型）。</p>
+    <p lang="en">Walk the row of step 6 of diagram (a): one row of scores (already scaled) is <code>[1, 3 | 5, 2]</code> with B<sub>c</sub> = 2, so two tiles. To follow O as well, let head_dim d = 1 and let the four tokens’ V be <code>[10, 20 | 30, 40]</code> (values chosen for the demonstration, not taken from any model).</p>
+    <pre>start   : m = -inf, l = 0, O = 0
+tile 1  : S = [1, 3]   m = 3
+          P = [exp(-2), exp(0)] = [0.1353, 1]
+          l = 0.1353 + 1 = 1.1353
+          O = 0.1353*10 + 1*20 = 21.353
+tile 2  : S = [5, 2]   m' = max(3, 5) = 5   rescale = exp(3 - 5) = 0.1353
+          P = [exp(0), exp(-3)] = [1, 0.0498]
+          l = 1.1353*0.1353 + 1 + 0.0498 = 0.1537 + 1.0498 = 1.2034
+          O = 21.353*0.1353 + 1*30 + 0.0498*40 = 2.890 + 30 + 1.991 = 34.881
+end     : O / l = 34.881 / 1.2034 = 28.985
+check   : softmax([1, 3, 5, 2]) = [0.0152, 0.1125, 0.8310, 0.0414]
+          0.0152*10 + 0.1125*20 + 0.8310*30 + 0.0414*40 = 28.985 (to rounding)</pre>
+    <ol lang="zh-CN">
+      <li>块 1：这一块的最大值 3 就是 m，P 相对 m 算，所以最大的那一项是 exp(0) = 1，不会溢出。l = 1.135，正是图解 (a) 第 6 步的第一行数。</li>
+      <li>块 2：新块里有 5，比旧的 m = 3 大。旧的 l 和 O 都是按 3 算的，先乘 exp(3 − 5) = 0.1353 换到以 5 为基准，再加上新块的 P 和 P·V。l 变成 1.203，与图解相同。</li>
+      <li>最后只除一次：O ÷ l = 28.985。FlashAttention-2 把 1/l 留到这里才乘，块 1 结束时并不归一化，这就是摘要里「减少非矩阵乘运算」的一个例子。</li>
+      <li>核对：把整行一次做 softmax，权重是 0.0152、0.1125、0.8310、0.0414，对 V 加权得 28.985，与分块结果一致。片上从头到尾只存了 m、l、O 三个数和当前这一块，没有存过整行的 S。</li>
+    </ol>
+    <ol lang="en">
+      <li>Tile 1: this tile’s maximum, 3, becomes m, and P is taken relative to m, so its largest entry is exp(0) = 1 and cannot overflow. l = 1.135, the first figure of step 6 of diagram (a).</li>
+      <li>Tile 2: the new tile holds a 5, larger than the old m = 3. The old l and O were computed against 3, so they are first multiplied by exp(3 − 5) = 0.1353 to move them to the baseline 5, and then the new tile’s P and P·V are added. l becomes 1.203, as in the diagram.</li>
+      <li>Divide once, at the end: O ÷ l = 28.985. FlashAttention-2 waits until here to apply 1/l and does not normalize after tile 1, one instance of the “fewer non-matmul FLOPs” of its abstract.</li>
+      <li>Check: a softmax over the whole row at once gives weights 0.0152, 0.1125, 0.8310 and 0.0414, and weighting V by them gives 28.985, the same as the tiled result. From start to finish the chip held only the three numbers m, l and O plus the current tile, never the whole row of S.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">结果是精确的，不是近似：每一步的缩放都只是把同一个和换一个基准。动画 (a) 用一行四个分数手算一遍。FlashAttention-2（arXiv:2307.08691，v1）不改这个算法，改的是分工，摘要列了三条：减少非矩阵乘的运算（例如 1/l 只在最后乘一次，而不是每块都乘），即使只有一个头也把工作分给不同线程块以提高占用率（正文说是沿序列长度分），以及在线程块内部按 Q 的行而不是按 K/V 给 warp 分工，减少经过 shared memory 的通信。摘要说这样比 FlashAttention 快约 2 倍，在 A100 上达到理论峰值的 50–73%。</p>
   <p lang="en">The result is exact, not an approximation: each rescaling merely moves the same sum to a new baseline. Diagram (a) works one row of four scores by hand. FlashAttention-2 (arXiv:2307.08691, v1) keeps the algorithm and changes the division of work, listing three changes in its abstract: fewer non-matmul FLOPs (for example, 1/l applied once at the end instead of after every tile), parallelizing across thread blocks even for a single head to raise occupancy (along the sequence length, per the paper body), and, inside a thread block, dividing work among warps by rows of Q instead of by K/V to cut communication through shared memory. The abstract reports about 2 times the speed of FlashAttention, reaching 50–73% of the theoretical peak on an A100.</p>
   <p lang="zh-CN">在 SGLang v0.5.22 里，FlashInfer 后端的分页预填充和解码 wrapper 都用 FlashInfer 的 <code>"fa2"</code> 内核（<code>srt/layers/attention/flashinfer_backend.py</code> 第 310–311 行），新 token 的 ragged 预填充 wrapper 用 <code>"auto"</code>（第 476 行，SM100 上改成 <code>"fa2"</code> 或 <code>"cutlass"</code>）。Lab B 的 Metal 内核就是这五步的直译。</p>
@@ -120,6 +155,27 @@
     <li lang="zh-CN">再起一个小内核合并：M = max<sub>s</sub> m<sub>s</sub>，w<sub>s</sub> = exp(m<sub>s</sub> − M)，o = Σ w<sub>s</sub>·o<sub>s</sub> ÷ Σ w<sub>s</sub>·l<sub>s</sub>。这和块内的缩放是同一个公式，所以结果同样精确。</li>
     <li lang="en">Merge in one more small kernel: M = max<sub>s</sub> m<sub>s</sub>, w<sub>s</sub> = exp(m<sub>s</sub> − M), o = Σ w<sub>s</sub>·o<sub>s</sub> ÷ Σ w<sub>s</sub>·l<sub>s</sub>. This is the same formula as the in-tile rescaling, so the result is just as exact.</li>
   </ol>
+  <div class="worked">
+    <p lang="zh-CN">把上面概念 2 的那一行当成解码：一个查询、4 个缓存 token，分数 <code>[1, 3 | 5, 2]</code>，V 是 <code>[10, 20 | 30, 40]</code>。这次不是一个线程块依次走两块，而是切成 S = 2 段，两个线程块同时各算一段（图解 (b) 用 S = 4，算法相同）。</p>
+    <p lang="en">Treat the row of concept 2 as a decode: one query, 4 cached tokens, scores <code>[1, 3 | 5, 2]</code> and V <code>[10, 20 | 30, 40]</code>. This time one thread block does not walk two tiles in turn; the KV is cut into S = 2 splits and two thread blocks compute one split each at the same time (diagram (b) uses S = 4; the algorithm is the same).</p>
+    <pre>split 1 : m_1 = 3   l_1 = 0.1353 + 1      = 1.1353   o_1 = 0.1353*10 + 20      = 21.353
+split 2 : m_2 = 5   l_2 = 1 + 0.0498      = 1.0498   o_2 = 30 + 0.0498*40      = 31.991
+merge   : M = max(3, 5) = 5    w_1 = exp(3 - 5) = 0.1353    w_2 = exp(5 - 5) = 1
+          o = (0.1353*21.353 + 1*31.991) / (0.1353*1.1353 + 1*1.0498)
+            = 34.881 / 1.2034 = 28.985</pre>
+    <ol lang="zh-CN">
+      <li>stage 1：两个线程块互不等待，各自在段内做在线 softmax，写出 (m<sub>s</sub>, l<sub>s</sub>, o<sub>s</sub>)。这里 d = 1，每段多写 d + 2 = 3 个数。</li>
+      <li>stage 2：合并内核取 M = 5，第 1 段的结果按旧基准 3 算，乘权重 exp(3 − 5) = 0.1353；第 2 段已经以 5 为基准，权重是 1。</li>
+      <li>分子 34.881、分母 1.2034，与概念 2 里一个线程块依次走两块时块 2 结束的 O 和 l 一模一样，最终仍是 28.985。合并就是块内缩放那一步，只是挪到了另一个内核里。</li>
+      <li>收益在线程块数：Lab B 在 M5 上把每头 1 段换成每头 256 段，64K 个 token 的解码从 17.01 ms 降到 2.15 ms（图解 (b) 第 7 步）。</li>
+    </ol>
+    <ol lang="en">
+      <li>Stage 1: the two thread blocks never wait for each other; each runs the online softmax within its split and writes (m<sub>s</sub>, l<sub>s</sub>, o<sub>s</sub>). With d = 1, each split writes d + 2 = 3 extra numbers.</li>
+      <li>Stage 2: the merge kernel takes M = 5; split 1 was computed against the old baseline 3 and gets the weight exp(3 − 5) = 0.1353, while split 2 is already against 5 and gets the weight 1.</li>
+      <li>The numerator, 34.881, and the denominator, 1.2034, are exactly the O and l at the end of tile 2 when one thread block walked both tiles in concept 2, and the answer is again 28.985. The merge is the in-tile rescaling step moved into another kernel.</li>
+      <li>The gain is in the number of thread blocks: Lab B on the M5 went from 1 split per head to 256, and a decode over 64K tokens fell from 17.01 ms to 2.15 ms (step 7 of diagram (b)).</li>
+    </ol>
+  </div>
   <p lang="zh-CN">代价是每段多写 d + 2 个数、多一次启动，和整段 KV 比微不足道；收益是线程块数从「批 × 头」变成「批 × 头 × S」，带宽能用满。切多少段要权衡：太少填不满 GPU，太多则每段太短、合并变贵。v0.5.22 里三种做法：FlashInfer 的解码 wrapper 在 <code>plan()</code> 里决定切分（SGLang 文档 <code>attention_backend.mdx</code> 讲如何实现后端的部分，第 745 行说 <code>init_forward_metadata</code> 里调用 plan 函数做 split_kv 这类优化；Phase 3 细讲 plan/run）；Triton 后端用固定上限 <code>--triton-attention-num-kv-splits</code>，默认 8，帮助文字写的正是「flash decoding Triton kernel」（<code>arg_groups/fields/exec_.py</code> 第 359–362 行），内核在 <code>python/sglang/kernels/ops/attention/decode_attention.py</code>：分段的 <code>_fwd_kernel_stage1</code>（GQA 用 <code>_fwd_grouped_kernel_stage1</code>）和合并的 <code>_fwd_kernel_stage2</code>；FA3 后端把 <code>num_splits</code> 设成 0，源码注释说这是把 SplitKV 的大小交给 FA 运行时决定（<code>flashattention_backend.py</code> 第 338–341 行）。</p>
   <p lang="en">The cost is d + 2 extra numbers written per split and one more launch, negligible against the whole KV; the gain is that thread blocks go from batch × heads to batch × heads × S, so the bandwidth can be used in full. The number of splits is a trade-off: too few leaves the GPU unfilled, too many makes each split short and the merge expensive. v0.5.22 does it three ways: FlashInfer’s decode wrapper decides the split in <code>plan()</code> (the part of SGLang’s <code>attention_backend.mdx</code> on implementing a backend says, on line 745, that <code>init_forward_metadata</code> calls the plan function for optimizations such as split_kv; Phase 3 covers plan/run); the Triton backend uses a fixed cap, <code>--triton-attention-num-kv-splits</code>, default 8, whose help text says exactly “flash decoding Triton kernel” (<code>arg_groups/fields/exec_.py</code>, lines 359–362), with the kernels in <code>python/sglang/kernels/ops/attention/decode_attention.py</code>: <code>_fwd_kernel_stage1</code> for the splits (<code>_fwd_grouped_kernel_stage1</code> under GQA) and <code>_fwd_kernel_stage2</code> for the merge; the FA3 backend sets <code>num_splits</code> to 0, which the source comment says delegates SplitKV sizing to the FA runtime (<code>flashattention_backend.py</code>, lines 338–341).</p>
   <p lang="zh-CN">同一个合并公式在 SGLang 里还出现在另一处：FlashInfer 后端做预填充时，新 token 之间的注意力用 ragged wrapper（因果）、对已缓存前缀的注意力用 paged wrapper（不因果），两边各返回输出和 LSE，再用 <code>merge_state</code> 合并（<code>flashinfer_backend.py</code> 第 1442–1463 行）。这就是概念 6 里分块预填充和 Phase 1 前缀共享背后的那一步。</p>
@@ -154,6 +210,37 @@
   <p lang="en">All three take their values from the same list on lines 69–99 of <code>arg_groups/choices.py</code>: on NVIDIA there are <code>fa3</code>, <code>fa4</code>, <code>flashinfer</code>, <code>flashmla</code>, <code>trtllm_mla</code>, <code>cutedsl_mla</code>, <code>trtllm_mha</code> and others, and generic ones such as <code>triton</code>, <code>torch_native</code> and <code>flex_attention</code>. The documentation, <code>attention_backend.mdx</code> (lines 507–542), calls using different backends for prefill and decode hybrid attention and marks it experimental: set only one of the two and the other phase inherits <code>--attention-backend</code>; set both and differently, and <code>HybridAttnBackend</code> from <code>hybrid_attn_backend.py</code> is wrapped around them automatically, sending EXTEND to the prefill backend and DECODE to the decode backend. Automatic selection when nothing is given (the same document, lines 545–559): for MHA models, <code>fa3</code> on Hopper, <code>trtllm_mha</code> on Blackwell, and <code>flashinfer</code> on other architectures such as Ampere and Ada, falling back to <code>triton</code>; for MLA models, <code>fa3</code> on Hopper, <code>flashinfer</code> on Blackwell (with <code>trtllm_mla</code> picked automatically for DeepSeek V3), and <code>triton</code> elsewhere. Why choose separately: prefill wants a tiled kernel that keeps the tensor cores fed, decode wants a streaming kernel that gathers pages, splits and fits in a CUDA graph, and the library best at one is often not the one best at the other; in the documentation’s words, “one backend excels at prefill and another excels at decode”.</p>
   <p lang="zh-CN">延伸阅读：Huyen《AI Engineering》推理优化一章里预填充与解码分开处理的讨论（服务层面的视角）；参数本身依据 v0.5.22 的 <code>exec_.py</code>、<code>schedule.py</code>、<code>memory_hook.py</code> 和 <code>attention_backend.mdx</code>。</p>
   <p lang="en">Further reading: the discussion of handling prefill and decode separately in the inference-optimization chapter of Huyen’s <em>AI Engineering</em> (from the serving side); the flags themselves rest on <code>exec_.py</code>, <code>schedule.py</code>, <code>memory_hook.py</code> and <code>attention_backend.mdx</code> at v0.5.22.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>预填充的运算强度随 T 线性增长（Qwen3-8B 在 T = 4096 时约 1640 FLOP/字节），解码的强度等于 GQA 组大小 H<sub>q</sub> ÷ H<sub>kv</sub>（Qwen3-8B 是 4），与上下文长度无关。</li>
+      <li>预填充能受算力限制的前提是 S 和 P 不写回显存，FlashAttention 让它们只活在片上。</li>
+      <li>在线 softmax 每行只带运行最大值 m、运行和 l 和未归一化的 O，新块的最大值更大时先乘 exp(m − m′) 再累加，结果精确。</li>
+      <li>FlashAttention-2 不改算法、改分工：1/l 只在最后乘一次，沿序列长度给线程块分工，块内 warp 按 Q 的行分。</li>
+      <li>split-KV 把 KV 切成 S 段并行算，每段写出 m<sub>s</sub>、l<sub>s</sub>、o<sub>s</sub>，再用同一个缩放公式合并，线程块数从「批 × 头」变成「批 × 头 × S」。</li>
+      <li>SGLang 用 <code>--prefill-attention-backend</code> 和 <code>--decode-attention-backend</code> 让两个阶段各用最合适的内核。</li>
+    </ul>
+    <ul lang="en">
+      <li>Prefill’s arithmetic intensity grows linearly with T (about 1640 FLOP per byte for Qwen3-8B at T = 4096), while decode’s equals the GQA group size H<sub>q</sub> ÷ H<sub>kv</sub> (4 for Qwen3-8B), whatever the context length.</li>
+      <li>Prefill can be compute-bound only if S and P are never written back to memory, and FlashAttention keeps them on chip.</li>
+      <li>The online softmax carries only a running maximum m, a running sum l and an unnormalized O per row, and when a new tile has a larger maximum it multiplies by exp(m − m′) before adding, so the result is exact.</li>
+      <li>FlashAttention-2 keeps the algorithm and changes the division of work: 1/l is applied once at the end, thread blocks are spread along the sequence length, and warps inside a block split the rows of Q.</li>
+      <li>Split-KV computes S chunks of the KV in parallel, each writing m<sub>s</sub>, l<sub>s</sub> and o<sub>s</sub>, and merges them with the same rescaling formula, so thread blocks go from batch × heads to batch × heads × S.</li>
+      <li>SGLang’s <code>--prefill-attention-backend</code> and <code>--decode-attention-backend</code> let each phase use the kernel best suited to it.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：FlashAttention 是对 softmax 的近似，换速度丢精度。→ 实际：它是精确的；分数 <code>[1, 3 | 5, 2]</code> 分块算出的和 1.2034 与整行一次算出的相同，误差只来自浮点舍入。</li>
+      <li>误解：FlashAttention 快是因为少做了乘加。→ 实际：前向的 QK<sup>T</sup> 和 PV 乘加一个不少；论文摘要说它省的是 HBM 访问，S 不落显存。</li>
+      <li>误解：解码的上下文越长，就越接近受算力限制。→ 实际：运算和字节都随 L 线性增长，强度固定在 H<sub>q</sub> ÷ H<sub>kv</sub>；能改变它的是模型结构，比如 MLA 按吸收形式推算约 242 FLOP/字节。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: FlashAttention approximates softmax, trading accuracy for speed. → Fact: it is exact; the tiled sum over scores <code>[1, 3 | 5, 2]</code>, 1.2034, equals the sum over the whole row at once, and the only error is floating-point rounding.</li>
+      <li>Myth: FlashAttention is fast because it does fewer multiply-adds. → Fact: the forward pass does every multiply-add of QK<sup>T</sup> and PV; what it saves, per the paper’s abstract, is HBM accesses, because S never reaches memory.</li>
+      <li>Myth: the longer the decode context, the closer it gets to compute-bound. → Fact: FLOPs and bytes both grow linearly in L, so the intensity stays at H<sub>q</sub> ÷ H<sub>kv</sub>; what changes it is the model architecture, for example about 242 FLOP per byte for MLA in the absorbed form (derived).</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：阶段 ↔ 受什么限制 ↔ 内核家族 ↔ 后端参数</h2><h2 id="compare-en" lang="en">Comparison: phase ↔ bound ↔ kernel family ↔ backend flag</h2>
   <div class="table-wrap">

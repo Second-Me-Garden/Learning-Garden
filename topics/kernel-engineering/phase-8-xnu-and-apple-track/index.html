@@ -53,6 +53,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">读完前七个阶段，你对两个内核各有一堆零散的知识，但真实工作和面试要的是另一种能力：拿到一个陌生的 XNU 版本，能自己构建，能找出一次调用经过的每一站，能说清它和上一个版本差在哪，还能把自己做过的东西讲得经得起追问。XNU 只按发布放出快照、没有提交历史，公开的机型列表也不一定有你的 Mac，靠记忆填空很容易出错。什么样的路线能把零散的知识变成能被别人验证的能力？</p>
+    <p lang="en">After seven phases you have a pile of scattered knowledge about each kernel, but real work and interviews ask for a different ability: given an unfamiliar XNU version, build it yourself, find every stop a call passes through, explain how it differs from the previous version, and talk about your own work in a way that survives follow-up questions. XNU is released only as per-release snapshots with no commit history, and the public machine list may not include your Mac, so filling gaps from memory goes wrong easily. What kind of route turns scattered knowledge into an ability that others can verify?</p>
+    <p lang="zh-CN">概念 1–2 的构建与阅读计划给出自己读通 XNU 的路，概念 4 教你跟踪版本变化，概念 3、5、6 把这些变成作品和面试里的故事。</p>
+    <p lang="en">Concepts 1–2, building XNU and the reading plan, give you the route to reading XNU through on your own; concept 4 teaches you to track version changes; and concepts 3, 5 and 6 turn all of this into projects and interview stories.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 从源码构建 XNU</h3><h3 lang="en">1. Building XNU from source</h3>
   <p lang="zh-CN">仓库 README 给出的构建语法是 <code>make SDKROOT=&lt;sdkroot&gt; ARCH_CONFIGS=&lt;arch&gt; KERNEL_CONFIGS=&lt;variant&gt;</code>，variant 可以是 <code>release</code>、<code>development</code>、<code>debug</code>、<code>profile</code>（<code>makedefs/MakeInc.def</code> 的 <code>SUPPORTED_KERNEL_CONFIGS</code> 里还有 <code>KASAN</code> 和 <code>SPTM</code>）。ARM64 还要选机型 <code>MACHINE_CONFIGS</code>，公开源码支持的列表就写在同一文件的 <code>SUPPORTED_ARM64_MACHINE_CONFIGS</code> 里（当前为 <code>T6000 T6020 T6030 T6031 T6041 T8101 T8103 T8112 T8122 T8132 VMAPPLE</code>）。产物是可引导的 <code>kernel.[config]</code> 和带符号的 <code>kernel.[config].unstripped</code>，<code>make install_kernels DSTROOT=…</code> 安装，安装阶段生成 DWARF 的 <code>.dSYM</code>。README 里的例子写的是 <code>SDKROOT=macosx.internal</code>——那是 Apple 内部 SDK；外部只能用 Xcode 自带的 <code>macosx</code> SDK，缺的部分靠 <strong>KDK</strong> 补：makefile 在设置了 <code>KDKROOT</code> 时会从 KDK 里找平台头文件和 <code>libfirehose_kernel</code> 库（<code>makedefs/MakeInc.def</code>）。</p>
   <p lang="en">The build syntax given in the repository README is <code>make SDKROOT=&lt;sdkroot&gt; ARCH_CONFIGS=&lt;arch&gt; KERNEL_CONFIGS=&lt;variant&gt;</code>, where the variant can be <code>release</code>, <code>development</code>, <code>debug</code> or <code>profile</code> (<code>SUPPORTED_KERNEL_CONFIGS</code> in <code>makedefs/MakeInc.def</code> also lists <code>KASAN</code> and <code>SPTM</code>). ARM64 also needs a machine, <code>MACHINE_CONFIGS</code>; the list the public source supports is in <code>SUPPORTED_ARM64_MACHINE_CONFIGS</code> in the same file (currently <code>T6000 T6020 T6030 T6031 T6041 T8101 T8103 T8112 T8122 T8132 VMAPPLE</code>). The outputs are a bootable <code>kernel.[config]</code> and a <code>kernel.[config].unstripped</code> with symbols; <code>make install_kernels DSTROOT=…</code> installs them, and the install step generates the DWARF <code>.dSYM</code>. The README example uses <code>SDKROOT=macosx.internal</code> — that is Apple’s internal SDK; outside Apple you can only use the <code>macosx</code> SDK that ships with Xcode, and the missing pieces come from the <strong>KDK</strong>: when <code>KDKROOT</code> is set, the makefile looks in the KDK for platform headers and the <code>libfirehose_kernel</code> library (<code>makedefs/MakeInc.def</code>).</p>
@@ -94,6 +101,24 @@
     <li lang="zh-CN"><code>osfmk/kern/debug.c</code> + <code>tools/lldbmacros/</code>：panic log 怎样生成、宏怎样读内核数据结构（对照 Phase 6）。</li>
     <li lang="en"><code>osfmk/kern/debug.c</code> + <code>tools/lldbmacros/</code>: how the panic log is generated and how the macros read kernel data structures (compare with Phase 6).</li>
   </ol>
+  <div class="worked">
+    <p lang="zh-CN">用阅读计划第 4、5 项的文件追两次 <code>svc</code>。Phase 0 已经追过一次成功的 <code>write</code>，这里看另外两条路：一次失败的 BSD 调用，一次 Mach trap。来源都在 XNU 源码里：<code>osfmk/arm64/sleh.c</code> 的 <code>handle_svc</code>，<code>bsd/dev/arm/systemcalls.c</code>，<code>bsd/kern/syscalls.master</code>，<code>osfmk/kern/syscall_sw.c</code>，<code>osfmk/mach/arm/traps.h</code>，<code>osfmk/arm64/proc_reg.h</code>。</p>
+    <p lang="en">Use the files from items 4 and 5 of the reading plan to trace two <code>svc</code> calls. Phase 0 already traced one successful <code>write</code>; here are the other two paths: a BSD call that fails, and a Mach trap. All sources are in the XNU tree: <code>handle_svc</code> in <code>osfmk/arm64/sleh.c</code>, <code>bsd/dev/arm/systemcalls.c</code>, <code>bsd/kern/syscalls.master</code>, <code>osfmk/kern/syscall_sw.c</code>, <code>osfmk/mach/arm/traps.h</code> and <code>osfmk/arm64/proc_reg.h</code>.</p>
+    <ol lang="zh-CN">
+      <li><code>read(-1, buf, 16)</code>：用户态桩放 <code>x16 = 3</code>（<code>syscalls.master</code> 第 3 项是 <code>read</code>），<code>x0 = -1</code>，执行 <code>svc #0x80</code>（<code>SWI_SYSCALL</code> 定义为 0x80，见 <code>osfmk/mach/arm/vm_param.h</code>）。</li>
+      <li>硬件在 <code>ESR_EL1</code> 里记下 EC = 0x15（<code>ESR_EC_SVC_64</code>），<code>sleh_synchronous</code> 交给 <code>handle_svc</code>。它先排除平台调用号，再看符号：3 不小于 0，走 <code>unix_syscall</code>。</li>
+      <li><code>unix_syscall</code> 用 <code>arm_get_syscall_number</code> 取 <code>x16</code>，<code>x16</code> 为 0 时改取 <code>x0</code>，那是经 <code>syscall(2)</code> 间接调用的写法。3 小于 <code>nsysent</code>，于是取 <code>sysent[3]</code>，调到 <code>read</code>。fd −1 无效，返回 <code>EBADF</code>，即 9。</li>
+      <li>返回约定：<code>arm_prepare_u64_syscall_return</code> 把错误码 9 放进保存的 <code>x0</code>，并在保存的 <code>cpsr</code> 里置进位标志 <code>PSR64_CF</code>。用户态桩看到进位就转到 <code>cerror</code>，把 9 写进 <code>errno</code>，让 <code>read</code> 返回 −1。Linux arm64 的约定不同：<code>x0</code> 直接是 −9。</li>
+      <li>Mach trap：<code>mach_msg2_trap</code> 的桩放 <code>x16 = -47</code>（<code>osfmk/mach/syscall_sw.h</code> 里写作 <code>kernel_trap(mach_msg2_trap, -47, 8)</code>），<code>syscall_sw.c</code> 里 <code>mach_trap_table</code> 第 47 项就是 <code>mach_msg2_trap</code>。<code>handle_svc</code> 看到负数，先查两个快速路径：−3 是 <code>MACH_ARM_TRAP_ABSTIME</code>，−4 是 <code>MACH_ARM_TRAP_CONTTIME</code>，两者都就地算出时间立即返回。其余负数把 <code>thread-&gt;syscalls_mach</code> 加一，交给 <code>mach_syscall</code>，按 47 查表。</li>
+    </ol>
+    <ol lang="en">
+      <li><code>read(-1, buf, 16)</code>: the user-space stub sets <code>x16 = 3</code> (entry 3 of <code>syscalls.master</code> is <code>read</code>) and <code>x0 = -1</code>, then executes <code>svc #0x80</code> (<code>SWI_SYSCALL</code> is defined as 0x80 in <code>osfmk/mach/arm/vm_param.h</code>).</li>
+      <li>The hardware records EC = 0x15 (<code>ESR_EC_SVC_64</code>) in <code>ESR_EL1</code>, and <code>sleh_synchronous</code> hands over to <code>handle_svc</code>. It first rules out the platform call number, then looks at the sign: 3 is not less than 0, so it goes to <code>unix_syscall</code>.</li>
+      <li><code>unix_syscall</code> takes <code>x16</code> through <code>arm_get_syscall_number</code>, and falls back to <code>x0</code> when <code>x16</code> is 0, which is how an indirect call through <code>syscall(2)</code> is encoded. 3 is less than <code>nsysent</code>, so it takes <code>sysent[3]</code> and calls <code>read</code>. fd −1 is invalid, and the call returns <code>EBADF</code>, which is 9.</li>
+      <li>The return convention: <code>arm_prepare_u64_syscall_return</code> puts the error code 9 in the saved <code>x0</code> and sets the carry flag <code>PSR64_CF</code> in the saved <code>cpsr</code>. The user-space stub sees the carry and goes to <code>cerror</code>, which writes 9 to <code>errno</code> and makes <code>read</code> return −1. Linux arm64 uses a different convention: <code>x0</code> is simply −9.</li>
+      <li>A Mach trap: the stub for <code>mach_msg2_trap</code> sets <code>x16 = -47</code> (written <code>kernel_trap(mach_msg2_trap, -47, 8)</code> in <code>osfmk/mach/syscall_sw.h</code>), and entry 47 of <code>mach_trap_table</code> in <code>syscall_sw.c</code> is exactly <code>mach_msg2_trap</code>. <code>handle_svc</code> sees a negative number and first checks two fast paths: −3 is <code>MACH_ARM_TRAP_ABSTIME</code> and −4 is <code>MACH_ARM_TRAP_CONTTIME</code>, both of which compute the time in place and return at once. Any other negative number increments <code>thread-&gt;syscalls_mach</code> and goes to <code>mach_syscall</code>, which looks up entry 47.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">节奏建议：每天 1–2 个文件；每个文件留下「入口函数、关键数据结构、加了什么锁、和 Linux 哪里对应」四行笔记。读完 14 项，你就拥有面试里讲 XNU 的全部素材。延伸阅读：《*OS Internals》Vol. II 可作阅读计划的总地图；《Mac OS X Internals》讲 XNU 内核的相关章节交代了 Mach / BSD / IOKit 分层的来历。</p>
   <p lang="en">Suggested pace: 1–2 files a day; for each file, leave a four-line note — “entry function, key data structures, which locks are taken, where it corresponds to Linux”. Once you have read all 14 items, you have all the material you need to talk about XNU in an interview. Further reading: <em>*OS Internals</em> Vol. II works as the overall map for the reading plan; the XNU kernel chapters of <em>Mac OS X Internals</em> explain where the Mach / BSD / IOKit layering came from.</p>
 
@@ -148,6 +173,37 @@
   <p lang="en">For each piece of work, prepare a “<strong>problem → approach → trade-offs → result</strong>” story in two versions, two minutes and ten minutes. The <strong>problem</strong> should be specific (“I wanted to know how much slower a <code>mach_msg</code> round trip is than a pipe, and where the time goes” is much better than “I studied Mach IPC”); the <strong>approach</strong> covers which kernel interfaces and tools you used; the <strong>trade-offs</strong> are the part the interviewer most wants to hear (why a mutex rather than a spinlock, why B2 rather than B1); the <strong>result</strong> gives numbers and what you learned that carries over to work at Apple.</p>
   <p lang="zh-CN">两条纪律：对 XNU 内部的每个说法，都能指出源码文件（「这在 <code>osfmk/ipc/ipc_kmsg.c</code> 里」），说不准的就直说「我读到的版本是这样，新版本可能变了」；不要声称理解你没读过的东西——面试官多半就是写那段代码的人。延伸阅读：《Cracking the Coding Interview》行为面试相关章节。</p>
   <p lang="en">Two disciplines: for every claim about XNU internals, be able to point to the source file (“this is in <code>osfmk/ipc/ipc_kmsg.c</code>”), and when you are not sure, say so plainly: “this is how it was in the version I read; newer versions may have changed”; do not claim to understand things you have not read — the interviewer is quite likely the person who wrote that code. Further reading: the behavioural-interview chapters of <em>Cracking the Coding Interview</em>.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>公开 XNU 用 <code>SDKROOT</code>、<code>ARCH_CONFIGS</code>、<code>KERNEL_CONFIGS</code>、<code>MACHINE_CONFIGS</code> 构建，外部缺的头文件和库从 build 号完全一致的 KDK 里补。</li>
+      <li>公开源码比运行中的 macOS 滞后，你的机型也可能不在列表里，最稳的练习环境是 <code>VMAPPLE</code> 配置加对应版本的虚拟机。</li>
+      <li>阅读计划按一个请求进出的顺序排列，每个文件只追一条主线，并记下入口、数据结构、锁和 Linux 对应四行。</li>
+      <li>XNU 的 <code>svc</code> 用 <code>x16</code> 的符号区分 BSD 调用和 Mach trap，BSD 调用出错时靠进位标志而不是负返回值。</li>
+      <li>XNU 只有按发布的 tag，理解一项变化要对相邻 tag 做定向 diff，再对照 Apple 的安全文档。</li>
+      <li>作品和面试故事都按「问题、做法、取舍、结果」组织，每个关于内部的说法都要能指出源码文件。</li>
+    </ul>
+    <ul lang="en">
+      <li>Public XNU is built with <code>SDKROOT</code>, <code>ARCH_CONFIGS</code>, <code>KERNEL_CONFIGS</code> and <code>MACHINE_CONFIGS</code>, and the headers and libraries missing outside Apple come from a KDK whose build number matches exactly.</li>
+      <li>The public source lags behind the running macOS and your machine may not be on the list, so the safest practice setup is the <code>VMAPPLE</code> configuration in a virtual machine of the matching version.</li>
+      <li>The reading plan follows one request in and out, traces a single thread through each file, and leaves a four-line note: entry, data structures, locks and the Linux counterpart.</li>
+      <li>XNU’s <code>svc</code> tells BSD calls from Mach traps by the sign of <code>x16</code>, and a failing BSD call signals the error with the carry flag rather than a negative return value.</li>
+      <li>XNU has only per-release tags, so understanding a change means a targeted diff of adjacent tags read alongside Apple’s security documentation.</li>
+      <li>Projects and interview stories are both organised as “problem, approach, trade-offs, result”, and every claim about internals must be backed by a source file.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：GitHub 上最新的 xnu tag 就是你的 Mac 正在跑的内核。→ 实际：2026-10-30 的实测里，机器跑的是 <code>xnu-13432.41.4</code>，公开仓库最新的 tag 却是 <code>xnu-12377.121.6</code>（概念 1）。</li>
+      <li>误解：XNU 系统调用失败时像 Linux 一样在 <code>x0</code> 里返回负的 errno。→ 实际：XNU 在 <code>x0</code> 放正的 errno 并置进位标志，由用户态的 <code>cerror</code> 转成 −1 加 <code>errno</code>。</li>
+      <li>误解：面试时把拿不准的内部细节说得肯定一点更好。→ 实际：面试官多半写过那段代码；说清你读的是哪个版本、哪个文件，拿不准就直说（概念 6）。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: the newest xnu tag on GitHub is the kernel your Mac is running. → Fact: in the 2026-10-30 measurement the machine ran <code>xnu-13432.41.4</code> while the newest public tag was <code>xnu-12377.121.6</code> (concept 1).</li>
+      <li>Myth: a failing XNU system call returns a negative errno in <code>x0</code>, as on Linux. → Fact: XNU puts the positive errno in <code>x0</code> and sets the carry flag, and the user-space <code>cerror</code> turns that into −1 plus <code>errno</code>.</li>
+      <li>Myth: in an interview it is better to state uncertain internal details with confidence. → Fact: the interviewer quite likely wrote that code; say which version and which file you read, and say so plainly when you are not sure (concept 6).</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表</h2><h2 id="compare-en" lang="en">Comparison table</h2>
   <div class="table-wrap">
@@ -403,7 +459,7 @@ rmmod kstat</pre></li>
 sw_vers                        # 记下 ProductVersion 和 BuildVersion（找 KDK 用）
 git ls-remote --tags https://github.com/apple-oss-distributions/xnu.git \
   | grep -o 'xnu-[0-9.]*$' | sort -V | tail -3</pre>
-        <span lang="zh-CN">若本机版本比最新公开 tag 新、或者 <code>TXXXX</code> 不在下一步的列表里，就走 <code>VMAPPLE</code> + 虚拟机路线。</span><span lang="en">If your machine’s version is newer than the latest public tag, or <code>TXXXX</code> is not in the list in the next step, take the <code>VMAPPLE</code> + virtual machine route.</span></li>
+        <span lang="zh-CN">若本机版本比最新公开 tag 新、或者 <code>TXXXX</code> 不在下一步的列表里，就走 <code>VMAPPLE</code> + 虚拟机路线。2026-11-05 核对时最新的公开 tag 是 <code>xnu-12377.121.6</code>，本课程以它为准；实验 Mac 上 macOS 27.2 对应的 XNU 源码尚未公开。</span><span lang="en">If your machine’s version is newer than the latest public tag, or <code>TXXXX</code> is not in the list in the next step, take the <code>VMAPPLE</code> + virtual machine route. When checked on 2026-11-05 the newest public tag was <code>xnu-12377.121.6</code>, which this topic is pinned to; the XNU source for macOS 27.2 on the lab Mac is not yet published.</span></li>
       <li><span lang="zh-CN">获取源码与依赖：</span><span lang="en">Get the source and the dependencies:</span><pre>git clone https://github.com/apple-oss-distributions/xnu.git &amp;&amp; cd xnu
 git checkout xnu-12377.121.6            # 换成你选定的 tag
 grep -n "SUPPORTED_ARM64_MACHINE_CONFIGS\|SUPPORTED_KERNEL_CONFIGS" makedefs/MakeInc.def

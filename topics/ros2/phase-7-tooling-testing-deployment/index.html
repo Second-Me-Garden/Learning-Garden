@@ -57,6 +57,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">前六个阶段的机器人今天能导航，可下周你改了一行代码，怎么知道它还对？手动开 Gazebo 再试一遍不可重复，也没法放进每次提交都跑的 CI；把昨天的一次运行录下来再放给节点听，节点的时钟却还停在今天，三天前打的时间戳看起来全都过期了。所以要回答两件事：一次运行怎样被录下、按原来的时间线重放，让测试可以重复？这些测试又怎样在一台干净的机器上自动跑、给出一个能决定成败的结果，再被打包成能放到机器人上的镜像？</p>
+    <p lang="en">The robot of the first six phases navigates today, but next week you change one line: how do you know it is still right? Starting Gazebo and trying again by hand is not repeatable and cannot go into CI on every commit; record yesterday’s run and play it to a node, and the node’s clock still says today, so every timestamp from three days ago looks stale. So two things need answers: how is a run recorded and replayed on its original timeline so that a test can repeat it? And how do those tests run automatically on a clean machine, give a result that decides pass or fail, and then get packaged into an image that goes onto the robot?</p>
+    <p lang="zh-CN">概念 2 的 <code>--clock</code> 加 <code>use_sim_time</code> 回答前一问，概念 3 到 6 的测试金字塔、<code>colcon test</code>、CI 和多阶段镜像回答后一问。</p>
+    <p lang="en">Concept 2, <code>--clock</code> plus <code>use_sim_time</code>, answers the first question, and concepts 3 to 6, the test pyramid, <code>colcon test</code>, CI and multi-stage images, answer the second.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 看清系统：rqt、ros2 doctor 与日志</h3><h3 lang="en">1. Seeing the system: rqt, ros2 doctor and logging</h3>
   <p lang="zh-CN"><strong>rqt</strong> 是一个 Qt 框架，各种图形工具是它的插件，单独启动时各自有命令名：<code>rqt_graph</code> 把节点和话题画成图，数据来自 DDS 发现信息，跟 <code>ros2 node info</code> 是同一个来源；<code>rqt_console</code> 订阅 <code>/rosout</code>，按级别和节点过滤日志；<code>rqt_plot</code> 订阅一个话题里的数值字段（例如 <code>/odom/pose/pose/position/x</code>）画曲线。它们都只是普通的 ROS 节点，所以在容器里要从 noVNC 桌面启动，而且会出现在 <code>ros2 node list</code> 里。</p>
   <p lang="en"><strong>rqt</strong> is a Qt framework whose graphical tools are plugins, each with its own command name when started alone: <code>rqt_graph</code> draws nodes and topics as a graph, from DDS discovery information, the same source as <code>ros2 node info</code>; <code>rqt_console</code> subscribes to <code>/rosout</code> and filters log messages by level and node; <code>rqt_plot</code> subscribes to a numeric field inside a topic (for example <code>/odom/pose/pose/position/x</code>) and draws it as a curve. They are all ordinary ROS nodes, so in the container you start them from the noVNC desktop, and they show up in <code>ros2 node list</code>.</p>
@@ -74,6 +81,31 @@
   <p lang="en"><code>ros2 bag play</code> is a publisher: it sends the messages again at their recorded spacing (<code>-r</code> changes the rate). The problem is <strong>time</strong>. During replay, the <code>header.stamp</code> inside each message is still from the recording day, while a node’s <code>now()</code> reads the system clock by default, which is today. So tf2 asked for a transform at a timestamp “days ago” reports an extrapolation error; code that drops data by message age judges every message stale; and timers run on the wall clock, out of step with the data, which is worse at a changed rate.</p>
   <p lang="zh-CN">修法是两半，缺一不可。<strong><code>--clock</code></strong> 让播放器充当时间源：按固定频率在 <code>/clock</code> 上发布「当前回放到的录制时间」（不给数值时默认 40 Hz，以 <code>ros2 bag play -h</code> 为准；同时会排除 bag 里自带的 <code>/clock</code>，免得两个时间源打架）。<strong><code>use_sim_time:=true</code></strong> 是每个节点上的参数，按设计文章 Clock and Time，它让这个节点的 ROS time 改读 <code>/clock</code> 的最新值。只开 <code>--clock</code>，没人听；只开 <code>use_sim_time</code>，节点等不到 <code>/clock</code>，时间停在 0，按设计文章 0 表示「时间未初始化」，基于 ROS time 的定时器一次都不会触发。两半都开，<code>now()</code>、定时器、tf 查询就都在录制的时间线上，暂停播放，整个系统的时间也跟着停。</p>
   <p lang="en">The fix has two halves, and both are needed. <strong><code>--clock</code></strong> makes the player a time source: it publishes “the recorded time playback has reached” on <code>/clock</code> at a fixed rate (40 Hz when no value is given; go by <code>ros2 bag play -h</code>; it also excludes any <code>/clock</code> stored in the bag so that two time sources do not fight). <strong><code>use_sim_time:=true</code></strong> is a parameter on each node; per the design article Clock and Time, it makes that node’s ROS time read the latest value from <code>/clock</code>. With only <code>--clock</code>, nobody listens; with only <code>use_sim_time</code>, the node never gets a <code>/clock</code>, so its time stays at 0, which the design article defines as “time not initialized”, and a timer on ROS time never fires. With both, <code>now()</code>, timers and tf lookups all live on the recorded timeline, and pausing playback pauses time for the whole system.</p>
+  <div class="worked">
+    <p lang="zh-CN">把 Lab A 的 <code>hello_bag</code> 回放给 Lab A 的时间探针走一遍。bag 是 talker 的 <code>/topic</code>，talker 的定时器是 0.5 s，录了约 10 s，所以大约 20 条消息；探针每 1 s 打印一次节点时钟；<code>--clock</code> 不给数值，按 40 Hz 发布。录制开始时刻 R 和今天的时刻都是为了演示自选的值：R = 1761900000.000 s（Unix 时间），回放发生在整整 3 天后，墙钟约为 R + 259200 s。</p>
+    <p lang="en">Replay Lab A’s <code>hello_bag</code> into Lab A’s time probe. The bag holds the talker’s <code>/topic</code>; the talker’s timer is 0.5 s and the recording ran for about 10 s, so there are about 20 messages; the probe prints the node clock every 1 s; <code>--clock</code> is given no value, so it publishes at 40 Hz. The recording start R and today’s time are values chosen for illustration: R = 1761900000.000 s (Unix time), and the replay happens exactly 3 days later, at a wall clock of about R + 259200 s.</p>
+    <pre>/clock period     = 1 / 40 Hz = 25 ms   → about 400 /clock messages in 10 s
+/topic messages   = 10 s / 0.5 s = 20
+3 days            = 3 × 86400 = 259200 s
+probe, wall clock : node clock: 1762159200.000 s, 1762159201.000 s, …   (R + 259200)
+probe, sim time   : node clock: 1761900001.000 s, 1761900002.000 s, …   (R + 1, R + 2, …)
+age of a message recorded at R + 3.0, read with the wall clock: 259200 s
+age of the same stamp, read with sim time:                 under 25 ms</pre>
+    <ol lang="zh-CN">
+      <li>第 1 步，播放器启动：<code>ros2 bag play hello_bag --clock</code> 按录制时的间隔重发这 20 条 <code>/topic</code>，同时每 25 ms 在 <code>/clock</code> 上发布一次回放到的录制时间，从 R 开始。</li>
+      <li>第 2 步，探针不开仿真时间：它的 <code>now()</code> 读系统时钟，打印的是 R + 259200 起的今天的时间。用同一个时钟去看一条在 R + 3.0 录下的消息（它的录制时间戳；String 没有 header，换成 <code>/scan</code> 或 <code>/odom</code> 就是 <code>header.stamp</code>），它的年龄是 259200 s，也就是 3 天，任何按年龄过滤的代码都会把它丢掉，tf2 也查不到那个时刻的变换。</li>
+      <li>第 3 步，探针开 <code>use_sim_time:=true</code>：收到第一条 <code>/clock</code> 之前它的时间是 0，定时器不触发；之后 <code>now()</code> 跟着 <code>/clock</code> 走，每过 1 s 录制时间打印一行，打印的是 R + 1、R + 2 这样录制那天的时间。同一个时间戳的年龄落到一个 <code>/clock</code> 周期以内，即 25 ms 以内。</li>
+      <li>第 4 步，暂停：在播放器终端按空格，<code>/clock</code> 不再前进，开了仿真时间的探针随即不再打印；没开仿真时间的那一个照样每秒一行，因为墙钟没有停。</li>
+      <li>第 5 步，播完：约 10 s 后 bag 放完，<code>/clock</code> 停止，开了仿真时间的探针一共打印了大约 10 行，然后停住。这就是系统测试能重复的原因：节点看到的时间线每次都一样，与回放在哪一天发生无关。</li>
+    </ol>
+    <ol lang="en">
+      <li>Step 1, the player starts: <code>ros2 bag play hello_bag --clock</code> re-sends the 20 <code>/topic</code> messages at their recorded spacing and, every 25 ms, publishes the recorded time playback has reached on <code>/clock</code>, starting from R.</li>
+      <li>Step 2, the probe without simulation time: its <code>now()</code> reads the system clock and prints today’s time, from R + 259200 onwards. Read with that clock, a message recorded at R + 3.0 (its record timestamp; String has no header, but for <code>/scan</code> or <code>/odom</code> it would be <code>header.stamp</code>) is 259200 s old, which is 3 days, so any code that filters by age drops it, and tf2 has no transform for that instant either.</li>
+      <li>Step 3, the probe with <code>use_sim_time:=true</code>: until the first <code>/clock</code> arrives its time is 0 and the timer does not fire; after that <code>now()</code> follows <code>/clock</code> and the probe prints one line per second of recorded time, showing times of the recording day such as R + 1 and R + 2. The age of the same stamp falls within one <code>/clock</code> period, under 25 ms.</li>
+      <li>Step 4, pause: press space in the player’s terminal and <code>/clock</code> stops advancing, so the probe with simulation time stops printing at once; the one without it still prints a line a second, because the wall clock has not stopped.</li>
+      <li>Step 5, the end: after about 10 s the bag is finished and <code>/clock</code> stops; the probe with simulation time has printed about 10 lines in all, and then it halts. This is why a system test can repeat: the timeline a node sees is the same every time, whatever day the replay happens on.</li>
+    </ol>
+  </div>
   <div class="note" lang="zh-CN">录制时也有对应的一面：如果被录的系统本身在仿真时间上（Gazebo 发布 <code>/clock</code>），给 <code>ros2 bag record</code> 加 <code>--use-sim-time</code>，消息就按仿真时间打戳。rosbag2 README 提醒：开了这个选项后，在收到第一条 <code>/clock</code> 之前录制器不写任何消息，否则时间会从 0 跳到 N，bag 基本没法回放。</div>
   <div class="note" lang="en">Recording has a matching side: if the recorded system itself runs on simulation time (Gazebo publishes <code>/clock</code>), add <code>--use-sim-time</code> to <code>ros2 bag record</code> so messages are stamped with simulation time. The rosbag2 README warns that with this option the recorder writes nothing until the first <code>/clock</code> arrives; otherwise time would jump from 0 to N and the bag would be essentially unplayable.</div>
   <p lang="zh-CN">延伸阅读：Quigley 等《Programming Robots with ROS》讲 rosbag 的章节（ROS 1 的 bag 格式不同，录制与回放的思路相同）；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-CLI-Tools/Recording-And-Playing-Back-Data/Recording-And-Playing-Back-Data.html">Recording and playing back data</a> 与设计文章 <a href="https://design.ros2.org/articles/clock_and_time.html">Clock and Time</a>。</p>
@@ -178,6 +210,37 @@ jobs:
   <p lang="en"><strong>DDS tuning</strong>: as Phase 3 explained, a large message sent over UDP is split into many IP fragments, and losing one voids the whole message. The kernel parameters listed on the official DDS tuning page are <code>net.ipv4.ipfrag_time</code> (default 30 s, how long incomplete fragments stay in memory; lowering it frees them sooner), <code>net.ipv4.ipfrag_high_thresh</code> (the memory limit for fragment reassembly) and <code>net.core.rmem_max</code> (the ceiling on socket receive buffers; when Cyclone DDS asks for a large buffer, this ceiling truncates it). These are kernel parameters belonging to the kernel of Docker Desktop’s VM, so in the lab container you can read them but not change them (inference; go by the actual error); on a real robot set them with <code>sysctl -w</code> or in <code>/etc/sysctl.d/</code>.</p>
   <p lang="zh-CN">延伸阅读：官方 <a href="https://docs.ros.org/en/jazzy/How-To-Guides/DDS-tuning.html">DDS tuning information</a>；<a href="https://micro.vulcanexus.org/">micro-ROS 项目网站</a>与 <a href="https://github.com/micro-ROS/micro-ROS-Agent">micro-ROS-Agent</a>；Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》中涉及嵌入式与硬件接入的章节（以目录为准）。</p>
   <p lang="en">Further reading: the official <a href="https://docs.ros.org/en/jazzy/How-To-Guides/DDS-tuning.html">DDS tuning information</a>; the <a href="https://micro.vulcanexus.org/">micro-ROS project site</a> and <a href="https://github.com/micro-ROS/micro-ROS-Agent">micro-ROS-Agent</a>; the chapters of Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em>, that touch on embedded boards and hardware (check the table of contents).</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>一条日志默认同时写到 stderr、<code>~/.ros/log</code> 下的文件和 <code>/rosout</code> 话题，launch_testing 断言日志时默认去 stderr 里找。</li>
+      <li><code>ros2 bag record</code> 存的是序列化字节加录制时间戳，回放时要 <code>--clock</code> 和 <code>use_sim_time:=true</code> 两半都在，节点的时间才回到录制那条时间线上。</li>
+      <li>单元测试检查函数，launch_testing 起真正的进程，在运行期间断言输出和消息，在关闭后断言退出码，bag 回归则在最顶层检查整条链路。</li>
+      <li><code>colcon test</code> 在测试失败时仍以 0 退出，真正决定成败的是之后 <code>colcon test-result --verbose</code> 的退出码。</li>
+      <li>CI 的价值在于干净的环境，依赖要全部写进 <code>package.xml</code>，由 rosdep 装上，漏写的依赖才会在 CI 里暴露。</li>
+      <li>多阶段镜像只从构建阶段拷 <code>install/</code>，前提是不用 <code>--symlink-install</code>、两个阶段同一发行版和同一 Ubuntu。</li>
+    </ul>
+    <ul lang="en">
+      <li>One log line by default goes to stderr, to a file under <code>~/.ros/log</code> and to the <code>/rosout</code> topic at once, and launch_testing looks in stderr when it asserts on log text.</li>
+      <li><code>ros2 bag record</code> stores serialized bytes with recording timestamps, and on replay both halves, <code>--clock</code> and <code>use_sim_time:=true</code>, are needed to put a node’s time back on the recorded timeline.</li>
+      <li>Unit tests check functions, launch_testing starts real processes and asserts on output and messages while they run and on exit codes after shutdown, and a bag regression checks the whole chain at the top.</li>
+      <li><code>colcon test</code> still exits with 0 when tests fail, and what decides pass or fail is the exit code of <code>colcon test-result --verbose</code> afterwards.</li>
+      <li>CI is worth having because the environment is clean, so every dependency must be in <code>package.xml</code> for rosdep to install, and only then does a missing one show up in CI.</li>
+      <li>A multi-stage image copies only <code>install/</code> from the build stage, provided the build did not use <code>--symlink-install</code> and both stages use the same distribution and the same Ubuntu.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：节点设了 <code>use_sim_time:=true</code>，回放时就会自动用 bag 的时间。→ 实际：还要播放器加 <code>--clock</code> 发布 <code>/clock</code>，否则节点的时间停在 0，基于 ROS time 的定时器一次都不触发。</li>
+      <li>误解：<code>colcon test</code> 退出码是 0，说明测试都过了。→ 实际：测试失败不算它的错误，除非加 <code>--return-code-on-test-failure</code>，否则要看 <code>colcon test-result</code> 的退出码。</li>
+      <li>误解：开着 ros2_tracing 会明显拖慢节点。→ 实际：没有会话时 tracepoint 只是一次判断；有会话时写的是按 CPU 划分的用户态环形缓冲区，快路径上没有系统调用，代价要在你的机器上量，每秒事件很多时才会显出来。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: once a node has <code>use_sim_time:=true</code>, replay automatically uses the bag’s time. → Fact: the player also needs <code>--clock</code> to publish <code>/clock</code>; otherwise the node’s time stays at 0 and a timer on ROS time never fires.</li>
+      <li>Myth: <code>colcon test</code> exited with 0, so the tests passed. → Fact: failing tests are not errors for it unless you pass <code>--return-code-on-test-failure</code>; otherwise read the exit code of <code>colcon test-result</code>.</li>
+      <li>Myth: running ros2_tracing noticeably slows a node down. → Fact: with no session a tracepoint is a single check; with a session it writes into a per-CPU user-space ring buffer with no system calls in the fast path, and the cost has to be measured on your machine and only shows when there are many events a second.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：每个问题用什么工具</h2><h2 id="compare-en" lang="en">Comparison: the tool for each question</h2>
   <div class="table-wrap">

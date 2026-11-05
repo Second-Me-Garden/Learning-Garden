@@ -59,6 +59,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">解码每一步都要把全部权重从显存读一遍，时间几乎就是权重的字节数除以带宽，所以把每个权重从 2 字节压到 1 字节或半字节，看上去能直接快 2 到 4 倍。可是 4 位或 8 位的数单独表示不了权重的范围；而且如果内核先把压缩的权重解回 FP16 写进显存再去算，读写的字节反而比不压缩还多。量化要做到两件事：用缩放因子补回范围，并且让 GEMM 内核实际读到的字节真的变少。</p>
+    <p lang="en">Every decode step reads all the weights from memory once, and its time is almost the weight bytes divided by bandwidth, so shrinking each weight from 2 bytes to 1 or half a byte looks like a direct 2 to 4 times speedup. But a 4-bit or 8-bit number alone cannot cover the range of the weights, and if the kernel first expands the compressed weights back to FP16 in memory before computing, it moves more bytes than with no compression at all. Quantization has to achieve two things: recover the range with scales, and make the GEMM kernel actually read fewer bytes.</p>
+    <p lang="zh-CN">概念 1 的缩放粒度回答前一件；概念 2 的配套内核回答后一件，概念 3 的 Marlin 和概念 4 的块缩放 FP8 GEMM 是它的两种做法。</p>
+    <p lang="en">The scale granularity of concept 1 answers the first; the matching kernel of concept 2 answers the second, and Marlin in concept 3 and the block-scaled FP8 GEMM in concept 4 are its two forms.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 数字格式与缩放的粒度</h3><h3 lang="en">1. Number formats and the granularity of scales</h3>
   <p lang="zh-CN">低精度格式只有很少的位，单独一个数表示不了权重的整个范围，所以每种方案都是「低精度的数 × 一个缩放因子」，区别在于每个缩放因子管多少个数。下面的最大值是从编码推出来的；FP8 的两个与 FP8 论文的表 1 一致：</p>
   <p lang="en">Low-precision formats have so few bits that one number alone cannot cover the range of the weights, so every scheme is “a low-precision number times a scale”, and they differ in how many numbers each scale covers. The largest values below are derived from the encodings; the two FP8 ones match Table 1 of the FP8 paper:</p>
@@ -90,6 +97,26 @@
   </ol>
   <p lang="zh-CN">所以同一个检查点在不同的 GPU 上省不省时间，取决于那张卡上有没有匹配的内核。SGLang v0.5.22 里三个例子：AWQ 检查点在 sm_80 以上默认被改走 <code>awq_marlin</code>（<code>awq.py</code> 第 333–354 行的 <code>override_quantization_method</code>），只有用户显式写 <code>--quantization awq</code> 才强制走先解后算，日志会提示改用 <code>awq_marlin</code>；FP8 检查点在 sm_80 到 sm_88 上（A100 这一类没有 FP8 tensor core 的卡）自动改走 Marlin 的 FP8 仅权重内核（<code>fp8.py</code> 第 506–512 行，判断在 <code>fp8_utils.py</code> 第 2540–2546 行，<code>80 &lt;= sm &lt; 89</code>）；NVFP4 检查点在 SM80 到 SM90 上走 Marlin 的 W4A16 后备，原生的 FP4 GEMM 要 SM100 以上，否则报错「ModelOpt NVFP4 native dense GEMM backends require SM100+」（<code>modelopt_quant.py</code> 第 1907–1911 行）。</p>
   <p lang="en">So whether one checkpoint saves time on a given GPU depends on whether that card has a matching kernel. Three examples in SGLang v0.5.22: an AWQ checkpoint on sm_80 and above is moved onto <code>awq_marlin</code> by default (<code>override_quantization_method</code> in <code>awq.py</code>, lines 333–354), and only an explicit <code>--quantization awq</code> forces the dequantize-first path, with a log message suggesting <code>awq_marlin</code>; an FP8 checkpoint on sm_80 to sm_88 (A100-class cards without FP8 tensor cores) is moved onto Marlin’s FP8 weight-only kernel (<code>fp8.py</code>, lines 506–512, with the test in <code>fp8_utils.py</code>, lines 2540–2546, <code>80 &lt;= sm &lt; 89</code>); and an NVFP4 checkpoint on SM80 to SM90 takes Marlin’s W4A16 fallback, since the native FP4 GEMM needs SM100 or later and otherwise raises “ModelOpt NVFP4 native dense GEMM backends require SM100+” (<code>modelopt_quant.py</code>, lines 1907–1911).</p>
+  <div class="worked">
+    <p lang="zh-CN">用 Lab B 最大的那个 GEMV 把三种做法的字节数一个一个数出来，再用 FP16 那一行实测的 127.7 GB/s 当作三个内核共同的带宽去除，看它是不是就是实测时间。W 是 16384 × 16384，共 268,435,456 个权重；int4 每 128 个一组，共 2,097,152 组，每组 2 字节缩放加 1 字节零点。</p>
+    <p lang="en">Take the largest GEMV of Lab B, count the bytes of each of the three ways, use the 127.7 GB/s measured on the FP16 line as the one bandwidth for all three, and check that this is the measured time. W is 16384 × 16384, 268,435,456 weights; int4 comes in groups of 128, 2,097,152 groups, each with a 2-byte scale and a 1-byte zero point.</p>
+    <pre>fp16          268435456 x 2 B                       = 536.9 MB  / 127.7 GB/s = about 4.20 ms  (measured 4205 us)
+int4 fused    268435456 x 0.5 B + 2097152 x 3 B     = 140.5 MB  / 127.7 GB/s = about 1.10 ms  (measured 1095 us)
+int4 unfused  268435456 x (0.5 + 2 + 2) B + 6.3 MB  = 1214.3 MB / 127.7 GB/s = about 9.51 ms  (measured 9589 us, 0.8% off)
+speedup: 536.9 / 140.5 = 3.82 (measured 3.84);  536.9 / 1214.3 = 0.44 (measured 0.44)</pre>
+    <ol lang="zh-CN">
+      <li>FP16：每个权重 2 字节，536.9 MB，与 Lab B 输出里的 <code>fp16 weights 536.9 MB</code> 相同。</li>
+      <li>边读边解的 int4：权重本身 134.2 MB，加上 6.3 MB 的缩放和零点，正是输出里的 140.5 MB；那 6.3 MB 就是 3.82 倍而不是 4 倍的原因。</li>
+      <li>先解后算：读 0.5 字节、写 2 字节、再读 2 字节，加上缩放和零点共 1214.3 MB，是 FP16 的 2.26 倍。</li>
+      <li>三个内核的带宽都在约 127–128 GB/s，所以时间之比就是字节之比：这台 M5 上量化快不快，只看内核最后读写了多少字节。</li>
+    </ol>
+    <ol lang="en">
+      <li>FP16: 2 bytes per weight, 536.9 MB, the same as <code>fp16 weights 536.9 MB</code> in the Lab B output.</li>
+      <li>Fused int4: 134.2 MB of weights plus 6.3 MB of scales and zero points, exactly the 140.5 MB of the output; those 6.3 MB are why the speedup is 3.82 and not 4.</li>
+      <li>Dequantize first: 0.5 bytes read, 2 written and 2 read again, plus the scales and zero points, 1214.3 MB in all, 2.26 times FP16.</li>
+      <li>All three kernels run at about 127–128 GB/s, so the time ratios are the byte ratios: on this M5, whether quantization is faster depends only on how many bytes the kernel finally moves.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：Hennessy &amp; Patterson 第 4 章讲 Roofline 的一节（强度约 1 FLOP/字节时，时间只由字节决定）；Marlin 论文的摘要和引言说明了仅权重内核在批大小增大时为什么还能保持受带宽限制。</p>
   <p lang="en">Further reading: the Roofline section of Hennessy &amp; Patterson, Chapter 4 (at an intensity of about 1 FLOP per byte, bytes alone decide the time); the abstract and introduction of the Marlin paper explain how a weight-only kernel can stay bandwidth-bound as the batch grows.</p>
 
@@ -116,6 +143,26 @@
   <p lang="en">The fine-grained quantization in section 3.3.2 of the DeepSeek-V3 technical report (arXiv:2412.19437, v2) is the most common format of today’s FP8 checkpoints: activations are scaled in 1 × 128 tiles (one scale per token per 128 channels) and weights in 128 × 128 blocks, with the largest absolute value of each tile and block computed online and the scale derived from it. <code>Qwen/Qwen3-8B-FP8</code>’s <code>config.json</code> uses exactly this format: <code>quant_method</code> <code>fp8</code>, <code>fmt</code> <code>e4m3</code>, <code>weight_block_size</code> [128, 128] and <code>activation_scheme</code> <code>dynamic</code> (read 2026-11-01); its files total 9,436,628,784 bytes.</p>
   <p lang="zh-CN">缩放沿 K 每 128 个就变一次，所以不能等整个点积算完再乘：每走一个 K 块，把 tensor core 算出的部分和乘上这一块的两个缩放，再加进 FP32 累加器。SGLang 的 Triton 实现 <code>_w8a8_block_fp8_matmul</code>（<code>python/sglang/kernels/ops/gemm/fp8_kernel.py</code> 第 55 行）里就是一行：<code>accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]</code>（第 126 行），其中 <code>a_s</code> 是这一块里每行一个，<code>b_s</code> 是每 128 列一个。动画 (b) 一步一步画这个循环。</p>
   <p lang="en">The scales change every 128 elements along K, so they cannot wait until the whole dot product is done: at every K block, the partial sum from the tensor cores is multiplied by that block’s two scales and added into the FP32 accumulator. In SGLang’s Triton implementation, <code>_w8a8_block_fp8_matmul</code> (<code>python/sglang/kernels/ops/gemm/fp8_kernel.py</code>, line 55), this is a single line: <code>accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]</code> (line 126), where <code>a_s</code> holds one value per row of the block and <code>b_s</code> one per 128 columns. Diagram (b) steps through this loop.</p>
+  <div class="worked">
+    <p lang="zh-CN">把一个激活值走一遍量化，再看一个 K = 4096 的点积要换几次缩放。激活的数值是示意值，不来自任何模型；448 是 E4M3 的最大值（概念 1），128 是 <code>weight_block_size</code> 和激活小片的宽度。</p>
+    <p lang="en">Walk one activation value through quantization, then count how many times a K = 4096 dot product changes scales. The activation values are illustrative and come from no model; 448 is the largest E4M3 value (concept 1), and 128 is the <code>weight_block_size</code> and the width of an activation tile.</p>
+    <pre>tile max |x| = 3.5 (illustrative)  -&gt; a_s = 3.5 / 448 = 0.0078125
+x = 1.2 -&gt; 1.2 / a_s = 153.6 -&gt; nearest E4M3 is 160 (step 16 in [128, 256))
+dequantized: 160 x 0.0078125 = 1.25, error 0.05
+K = 4096 -&gt; 4096 / 128 = 32 K blocks: 32 new a_s, 32 new b_s, 32 promotions</pre>
+    <ol lang="zh-CN">
+      <li>在线量化：这个 token 在这 128 个通道上的最大绝对值是 3.5，缩放取 3.5 / 448，让最大的那个数正好映到 E4M3 的 448（图解 (b) 第 1 步）。</li>
+      <li>1.2 除以缩放是 153.6。E4M3 只有 3 位尾数，128 到 256 之间每隔 16 一个值，最近的是 160，存进 1 字节。</li>
+      <li>用回来时 160 乘缩放得 1.25，误差 0.05，约 4%。E4M3 是浮点格式，只要一个数落在正常范围里，相对误差就由 3 位尾数决定，最多约 6%，和缩放取多大关系不大；按 1 × 128 小片缩放的意义在于，别处的一个离群值不会决定这 128 个数的缩放，它们当中小的数就不会被压到 E4M3 最小的正常值 2<sup>-6</sup> 以下，在那里精度变差，甚至舍成 0。</li>
+      <li>K = 4096 的点积分成 32 个 K 块，每块的部分和都要乘上这一块的 <code>a_s</code> 和 <code>b_s</code> 再加进 FP32 累加器（图解 (b) 第 4、5 步）；按 DeepSeek-V3 的做法，每 128 个元素提升一次，正好也是 32 次。</li>
+    </ol>
+    <ol lang="en">
+      <li>Online quantization: this token’s largest absolute value over these 128 channels is 3.5, so the scale is 3.5 / 448, which maps that largest value exactly onto E4M3’s 448 (step 1 of diagram (b)).</li>
+      <li>1.2 divided by the scale is 153.6. E4M3 has only 3 mantissa bits, so between 128 and 256 there is one value every 16; the nearest is 160, stored in one byte.</li>
+      <li>Used again, 160 times the scale is 1.25, an error of 0.05, about 4%. E4M3 is a floating-point format, so as long as a value lands in its normal range, the relative error is set by the 3 mantissa bits, at most about 6%, whatever the scale; what 1 × 128 tiles buy is that an outlier elsewhere does not set the scale for these 128 values, so their small entries are not pushed below E4M3’s smallest normal value, 2<sup>-6</sup>, where precision falls away and values can round to 0.</li>
+      <li>The K = 4096 dot product splits into 32 K blocks, and each block’s partial sum is multiplied by that block’s <code>a_s</code> and <code>b_s</code> before it is added into the FP32 accumulator (steps 4 and 5 of diagram (b)); with DeepSeek-V3’s scheme the sum is promoted every 128 elements, also exactly 32 times.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">累加的精度。报告同一节说，他们观察到 H800 上 FP8 GEMM 的累加只保留约 14 位，K = 4096 的两个随机矩阵相乘最大相对误差接近 2%；办法是把部分和每隔 N<sub>C</sub> = 128 个元素（相当于 4 次 WGMMA）拷到 CUDA core 上的 FP32 寄存器里累加，按 K 分组的缩放也在这时一并乘上；一个 warpgroup 做提升时另一个可以继续做 MMA，两者重叠。块缩放和提升恰好对齐：每 128 个元素既换一次缩放，也提升一次。</p>
   <p lang="en">Accumulation precision. The same section of the report says they observed that FP8 GEMM accumulation on H800s keeps only about 14 bits, giving a maximum relative error of nearly 2% for two random matrices with K = 4096; the fix is to copy the partial sums every N<sub>C</sub> = 128 elements (equivalent to 4 WGMMAs) into FP32 registers on the CUDA cores and accumulate there, applying the per-group scales along K at the same time; while one warpgroup promotes, another keeps issuing MMAs, so the two overlap. The block scales and the promotion line up exactly: every 128 elements, the scale changes and the sum is promoted once.</p>
   <p lang="zh-CN">SGLang v0.5.22 怎样选 FP8 的 GEMM。块缩放（<code>weight_block_size</code> 存在）走 <code>dispatch_w8a8_block_fp8_linear</code>（<code>fp8_utils.py</code> 第 614 行）；<code>--fp8-gemm-backend</code> 是默认的 <code>auto</code> 时，按 <code>_dispatch_auto_backend</code>（第 1025–1053 行）的顺序：DeepGEMM 可用就用它，否则 Blackwell 加 FlashInfer，否则 SM120 用 CUTLASS，否则 AMD 的 AITER、昇腾、XPU，最后是 Triton。DeepGEMM 只在 sm_90 以上才会打开（<code>srt/layers/deep_gemm_wrapper/configurer.py</code> 第 32–52 行，第 39 行 <code>sm_version &lt; 90</code> 时返回 False），所以 L4 上块缩放 FP8 走的是上面那个 Triton 内核（推断：按这段选择逻辑，没有在 L4 上确认）。按通道或按张量缩放的 FP8 走 <code>apply_fp8_linear</code>（第 2257 行），在 <code>cutlass_fp8_supported()</code> 为真时用 <code>sglang-kernel</code> 里的 CUTLASS <code>fp8_scaled_mm</code>；这个判断对 sm_89 要求 CUDA 12.4 以上，对 sm_90 以上要求 12.0 以上（第 307–316 行）。<code>w8a8_fp8</code> 方法的最低计算能力是 89（<code>w8a8_fp8.py</code> 第 66–67 行）。</p>
@@ -146,6 +193,35 @@
   <p lang="en">SGLang depends on its own release, <code>sgl-deep-gemm==0.2.2</code> (<code>python/pyproject.toml</code>, line 80), not on an upstream tag; this page cites the upstream README at v2.1.1.post3, and whether the two match item by item was not checked. Its place in SGLang: the first choice for block-scaled FP8 under <code>auto</code> (concept 4), enabled only on sm_90 and above, when the environment variable <code>SGLANG_ENABLE_JIT_DEEPGEMM</code> is on and <code>import deep_gemm</code> succeeds (<code>configurer.py</code>, lines 32–52); on SM100 its scales are UE8M0 (lines 58–60, <code>DEEPGEMM_SCALE_UE8M0</code>), as the README says.</p>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 23 章 Advanced Optimizations for Matrix Multiplication（CUTLASS 的 tile、warp 和 MMA 三层分块就是矩阵乘法分块在 tensor core 上的推广）。CUTLASS 和 DeepGEMM 本身参考书目里没有书讲，依据它们的 README、CuTe DSL 文档和示例代码。</p>
   <p lang="en">Further reading: chapter 23, Advanced Optimizations for Matrix Multiplication, of PMPP, 5th ed. (CUTLASS’s three levels of tiling, threadblock tile, warp and MMA, are matrix-multiplication tiling carried over to tensor cores). No book in the bibliography covers CUTLASS or DeepGEMM themselves; they rest on their READMEs, the CuTe DSL documentation and the example code.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>每种量化方案都是低精度的数乘一个缩放因子，区别在一个缩放管多少个数：每张量、每通道、每 token、每 128 个一组或每 128 × 128 一块。</li>
+      <li>解码的 GEMV 受带宽限制，量化只有在内核实际读到的字节变少时才省时间；先把权重解回 FP16 写进显存的做法每个权重要 4.5 字节，比 FP16 还慢。</li>
+      <li>边读边解的 int4 每 128 个权重读 67 字节，对 FP16 的 256 字节少约 3.8 倍，Lab B 实测快 3.84 倍；Marlin 在 SGLang 里需要 sm_80 以上，并在加载时重排权重。</li>
+      <li>块缩放 FP8 的缩放沿 K 每 128 个变一次，所以每个 K 块的部分和都要乘上两侧缩放再加进 FP32 累加器；FP8 的 <code>mma</code> 要 sm_89 以上。</li>
+      <li>NVFP4（每 16 个一个 E4M3 缩放）和 MXFP4（每 32 个一个 UE8M0 缩放）的原生 MMA 只在 Blackwell 上有，L4 和 H100 上加载 NVFP4 走的是 Marlin W4A16。</li>
+    </ul>
+    <ul lang="en">
+      <li>Every quantization scheme is a low-precision number times a scale, and they differ in how many numbers one scale covers: per tensor, per channel, per token, per group of 128 or per 128 × 128 block.</li>
+      <li>Decode GEMVs are bandwidth-bound, so quantization saves time only when the kernel actually reads fewer bytes; expanding the weights back to FP16 in memory first costs 4.5 bytes per weight and is slower than FP16.</li>
+      <li>Fused int4 reads 67 bytes per 128 weights against 256 for FP16, about 3.8 times fewer, and Lab B measured 3.84 times as fast; Marlin needs sm_80 or later in SGLang and repacks the weights at load time.</li>
+      <li>Block-scaled FP8 changes scales every 128 elements along K, so every K block’s partial sum is multiplied by both scales before it enters the FP32 accumulator; FP8 <code>mma</code> needs sm_89 or later.</li>
+      <li>The native MMAs for NVFP4 (one E4M3 scale per 16) and MXFP4 (one UE8M0 scale per 32) exist only on Blackwell, and an NVFP4 checkpoint loaded on an L4 or an H100 runs through Marlin W4A16.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：检查点小了 4 倍，解码就快 4 倍。→ 实际：只有配套的内核边读边解时才快；SGLang 强制 <code>--quantization awq</code> 时走先解后算，Lab B 同样的做法只有 FP16 的 0.44 倍。</li>
+      <li>误解：FP8 检查点在任何 GPU 上都用 FP8 tensor core。→ 实际：FP8 的 <code>mma</code> 要 sm_89；A100 这类 sm_80 的卡上 SGLang 把它改走 Marlin 的 FP8 仅权重内核，只省带宽。</li>
+      <li>误解：缩放可以等整个点积算完再乘一次。→ 实际：块缩放沿 K 每 128 个就变，必须在每个 K 块内乘上；只有每张量或每通道的缩放才能放到最后。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a checkpoint 4 times smaller decodes 4 times faster. → Fact: only with a matching kernel that dequantizes as it reads; a forced <code>--quantization awq</code> in SGLang takes the dequantize-first path, and the same approach in Lab B ran at only 0.44 times FP16.</li>
+      <li>Myth: an FP8 checkpoint uses FP8 tensor cores on any GPU. → Fact: FP8 <code>mma</code> needs sm_89; on sm_80 cards such as the A100, SGLang moves it onto Marlin’s FP8 weight-only kernel, which saves only bandwidth.</li>
+      <li>Myth: the scales can be applied once after the whole dot product. → Fact: block scales change every 128 elements along K and must be applied inside each K block; only per-tensor or per-channel scales can wait until the end.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：格式 ↔ 量化了什么 ↔ 内核 ↔ 最低硬件</h2><h2 id="compare-en" lang="en">Comparison: format ↔ what is quantized ↔ kernel ↔ minimum hardware</h2>
   <div class="table-wrap">

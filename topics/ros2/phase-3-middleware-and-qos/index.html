@@ -59,6 +59,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">激光雷达节点在 <code>/scan</code> 上发布，你的订阅者名字和类型都对，日志里却一条数据也没有，进程也没报错。两个进程之间没有任何配置文件，它们是怎么知道彼此存在的？知道之后，又由谁、按什么规则决定「这一对能不能连」？如果规则说不能，为什么不干脆报错？</p>
+    <p lang="en">A lidar node publishes on <code>/scan</code>, your subscriber has the right name and type, yet not one message shows up and no process reports an error. With no configuration file between the two processes, how do they learn that the other exists? Once they know, who decides whether this pair may connect, and by what rule? And if the rule says no, why is that not simply an error?</p>
+    <p lang="zh-CN">概念 3 的两步发现回答前一问，概念 5 的「提供 ≥ 请求」兼容规则回答后两问。</p>
+    <p lang="en">Concept 3, two-step discovery, answers the first question, and concept 5, the offered ≥ requested compatibility rule, answers the other two.</p>
+  </div>
+
   <h3 lang="zh-CN">1. DDS 与 RTPS：participant、topic、DataWriter、DataReader</h3><h3 lang="en">1. DDS and RTPS: participant, topic, DataWriter, DataReader</h3>
   <p lang="zh-CN"><strong>DDS</strong>（Data Distribution Service）是 OMG 的标准，规定了一套「以数据为中心的发布订阅」API 和语义；<strong>RTPS</strong>（Real-Time Publish-Subscribe，也叫 DDSI-RTPS）是另一份 OMG 标准，规定线上的报文格式。所以 Fast DDS 和 Cyclone DDS 是两家不同的 DDS 实现，但线上说的都是 RTPS。DDS 里有四个要认识的对象：</p>
   <p lang="en"><strong>DDS</strong> (Data Distribution Service) is an OMG standard that defines an API and semantics for “data-centric publish-subscribe”; <strong>RTPS</strong> (Real-Time Publish-Subscribe, also called DDSI-RTPS) is a separate OMG standard that defines the packet format on the wire. So Fast DDS and Cyclone DDS are two different DDS implementations, but both speak RTPS on the wire. DDS has four objects to know:</p>
@@ -160,6 +167,34 @@
     <li lang="zh-CN">History、depth、lifespan <strong>不影响</strong>匹配，它们只是各端自己的缓冲行为。</li>
     <li lang="en">History, depth and lifespan <strong>do not</strong> affect matching; they only govern each endpoint’s own buffering.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把下方图解 (a) 的两对端点按 SEDP 收到对方信息时的判定走一遍。四个端点都在 <code>/scan</code>（DDS 里是 <code>rt/scan</code>）上、类型相同，QoS 取自上面对照表里的两个 profile：默认 profile <code>rclcpp::QoS(10)</code> 是 reliable、volatile、keep last 10；传感器 profile <code>rclcpp::SensorDataQoS()</code> 是 best effort、volatile、keep last 5。</p>
+    <p lang="en">Walk the two pairs of diagram (a) below through the decision made when SEDP delivers the other side’s information. All four endpoints are on <code>/scan</code> (<code>rt/scan</code> in DDS) with the same type, and their QoS comes from the two profiles in the comparison table: the default profile <code>rclcpp::QoS(10)</code> is reliable, volatile, keep last 10; the sensor profile <code>rclcpp::SensorDataQoS()</code> is best effort, volatile, keep last 5.</p>
+    <pre>pair 1: publisher QoS(10)          subscription SensorDataQoS()
+  Reliability  offered RELIABLE    requested BEST_EFFORT   RELIABLE ≥ BEST_EFFORT   ok
+  Durability   offered VOLATILE    requested VOLATILE      equal                    ok
+  Deadline / Liveliness            defaults on both sides                          ok
+  History, depth 10 vs 5           not part of matching
+  → match; delivered best effort, no ACKNACK
+
+pair 2: publisher SensorDataQoS()  subscription QoS(10)
+  Reliability  offered BEST_EFFORT requested RELIABLE      BEST_EFFORT &lt; RELIABLE   fails
+  → no match; incompatible QoS event on both sides, last incompatible policy RELIABILITY</pre>
+    <ol lang="zh-CN">
+      <li>SPDP 之后，每个 participant 知道其他三个 participant 的地址；SEDP 再把每个 writer 和 reader 的话题名、类型名和完整 QoS 可靠地送到对方。</li>
+      <li>第 1 对：双方各自在本地逐项比较。Reliability 上发布者提供的更强，Durability 一样，Deadline 和 Liveliness 两边都是默认值，所以匹配。depth 10 和 5 不同也没关系，它们只是各端自己的缓冲大小。</li>
+      <li>匹配后数据按较弱的一方交付，也就是 best effort：订阅者不回 ACKNACK，丢了的帧不补。订阅者处理不过来时，它自己最多留最新的 5 帧，10 Hz 下就是最近 0.5 s 的扫描。</li>
+      <li>第 2 对：比较到 Reliability 就失败了，发布者给不了订阅者要的确认与重传。这一对永远不连，两端各收到一个 incompatible QoS 事件，rclcpp 打出一条警告，进程照常运行。这里把每一对当成独占一个话题；若四个端点真在同一个 /scan 上，第 2 对的 reliable 订阅者仍会和第 1 对的 reliable 发布者匹配。</li>
+      <li>排查时 <code>ros2 topic info -v /scan</code> 仍列出全部四个端点和各自的 QoS，因为 SEDP 已经交换过了。修法是让订阅者也用传感器 profile：best effort 的请求对两种发布者都能匹配。</li>
+    </ol>
+    <ol lang="en">
+      <li>After SPDP each participant knows the addresses of the other three; SEDP then reliably delivers every writer and reader, with topic name, type name and full QoS, to the other side.</li>
+      <li>Pair 1: each side compares policy by policy, locally. On Reliability the publisher offers more, Durability is equal, and Deadline and Liveliness are defaults on both sides, so they match. Depth 10 versus 5 does not matter; it is only each side’s own buffer size.</li>
+      <li>Once matched, data is delivered at the weaker level, best effort: the subscriber sends no ACKNACK and lost scans are not resent. When the subscriber falls behind it keeps at most the newest 5 scans, which at 10 Hz is the last 0.5 s.</li>
+      <li>Pair 2: the comparison fails at Reliability, because the publisher cannot give the acknowledgement and resend the subscription asks for. This pair never connects, each side receives an incompatible-QoS event, rclcpp logs a warning, and the processes run on as usual. Here each pair is treated as alone on its topic; with all four on one /scan, the reliable subscription of pair 2 would still match the reliable publisher of pair 1.</li>
+      <li>When troubleshooting, <code>ros2 topic info -v /scan</code> still lists all four endpoints with their QoS, because SEDP has already exchanged them. The fix is to give the subscription the sensor profile too: a best-effort request matches both kinds of publisher.</li>
+    </ol>
+  </div>
   <p lang="zh-CN"><strong>不匹配时会发生什么</strong>：不报错、不断开，只是这对端点永远不连，数据一条也不过去。两端各自收到一个 incompatible QoS 事件，rclcpp 和 rclpy 默认把它打成一条警告日志，大意是「发现了一个 QoS 不兼容的发布者 / 订阅者，最后一个不兼容的策略是 RELIABILITY」（措辞以实际输出为准）。排查顺序：<code>ros2 topic list</code> 确认名字，<code>ros2 topic info -v</code> 列出每个端点的节点名、GID 和完整 QoS——不兼容的端点照样会列出来，因为 SEDP 已经交换过了，只是没匹配上。</p>
   <p lang="en"><strong>What happens on a mismatch</strong>: no error and no disconnection; the pair simply never connects and not one message gets through. Each side receives an incompatible-QoS event, which rclcpp and rclpy log as a warning by default, roughly “a publisher / subscription with incompatible QoS was discovered; the last incompatible policy was RELIABILITY” (go by the actual wording). The order to investigate: confirm the name with <code>ros2 topic list</code>, then <code>ros2 topic info -v</code>, which lists every endpoint with its node name, GID and full QoS — incompatible endpoints are still listed, because SEDP has already exchanged them; they just did not match.</p>
   <div class="note" lang="zh-CN"><code>ros2 topic echo</code> 从 <code>sensor_data</code> 配置出发（best effort、volatile），只有话题上每个发布者都提供 reliable 或 transient_local 时才切过去。要匹配一组混合的发布者，就显式传 <code>--qos-reliability</code> 和 <code>--qos-durability</code>。所以 Lab A 里每次都显式给出 <code>--qos-reliability</code> 和 <code>--qos-durability</code>，不靠默认值。</div>
@@ -210,6 +245,37 @@
   <div class="note" lang="en">Which parts the default governance encrypts and which it only signs is decided by the template that <code>sros2</code> generates, and this page has not checked it item by item; Lab B looks at the result directly with a packet capture, and what you see is what counts.</div>
   <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 ROS 2 基础与 DDS 的章节中关于安全的部分（如有）；官方 <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Security.html">About security</a>、教程 <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Security/Introducing-ros2-security.html">Setting up security</a> 与设计文章 <a href="https://design.ros2.org/articles/ros2_dds_security.html">ROS 2 DDS-Security integration</a>。</p>
   <p lang="en">Further reading: the material on security within the chapters on ROS 2 fundamentals and DDS in Joseph and Cacace, <em>Mastering ROS 2 for Robotics Programming</em> (where present); the official <a href="https://docs.ros.org/en/jazzy/Concepts/Intermediate/About-Security.html">About security</a>, the tutorial <a href="https://docs.ros.org/en/jazzy/Tutorials/Advanced/Security/Introducing-ros2-security.html">Setting up security</a> and the design article <a href="https://design.ros2.org/articles/ros2_dds_security.html">ROS 2 DDS-Security integration</a>.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>ROS 的 publisher 和 subscription 在底下是 DDS 的 DataWriter 和 DataReader，从 Foxy 起每个进程只有一个 participant。</li>
+      <li>rmw 用 rosidl 生成的 typesupport 把消息编码成 CDR，序列化发生在 rmw 与中间件的交界处；不同厂商的 DDS 混用不保证能通，Zenoh 与 DDS 完全不通。</li>
+      <li>发现分两步：SPDP 用多播宣告 participant，SEDP 用可靠单播交换每个端点的话题、类型和完整 QoS，匹配在本地判定。</li>
+      <li>Reliability、Durability、Deadline、Liveliness 要求提供 ≥ 请求才匹配；History、depth、Lifespan 只管各端自己的缓冲，不影响匹配。</li>
+      <li>同一台机器上，共享内存传输绕开网络栈但仍要序列化和拷贝，loaned messages 只对定长类型再省一次拷贝。</li>
+      <li>SROS2 认证 participant、加密或签名数据与端点信息，但 SPDP 仍是明文，私钥只是磁盘上的文件。</li>
+    </ul>
+    <ul lang="en">
+      <li>A ROS publisher and subscription are a DDS DataWriter and DataReader underneath, and since Foxy each process has only one participant.</li>
+      <li>rmw encodes messages into CDR with the typesupport rosidl generates, so serialization happens at the boundary between rmw and the middleware; mixing DDS vendors is not guaranteed to work, and Zenoh and DDS do not talk at all.</li>
+      <li>Discovery has two steps: SPDP announces participants over multicast, SEDP exchanges each endpoint’s topic, type and full QoS over reliable unicast, and matching is decided locally.</li>
+      <li>Reliability, Durability, Deadline and Liveliness match only when offered ≥ requested; History, depth and Lifespan only govern each side’s own buffering and do not affect matching.</li>
+      <li>On one host the shared-memory transport skips the network stack but still serializes and copies, and loaned messages save one more copy for fixed-size types only.</li>
+      <li>SROS2 authenticates participants and encrypts or signs data and endpoint information, but SPDP stays in the clear and the private keys are just files on disk.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：QoS 不兼容会报错或断开连接。→ 实际：这一对只是永远不匹配，两端各得到一个 incompatible QoS 事件和一条警告日志，进程照常运行。</li>
+      <li>误解：reliable 总比 best effort 稳妥，传感器也该用 reliable。→ 实际：对 10 Hz 的激光雷达，重传到的是已过时的一帧，还挤占新帧的带宽，所以传感器 profile 是 best effort、depth 5。</li>
+      <li>误解：开了 SROS2，旁观者就什么都看不到了。→ 实际：SPDP 的宣告仍是明文，旁观者能看到有几个 participant、它们的 IP 和端口，以及大致的流量模式。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: a QoS incompatibility raises an error or drops the connection. → Fact: the pair simply never matches, each side gets an incompatible-QoS event and a warning in the log, and the processes run on.</li>
+      <li>Myth: reliable is always safer than best effort, so sensors should use it too. → Fact: for a 10 Hz lidar a resend delivers an outdated scan and takes bandwidth from fresh ones, which is why the sensor profile is best effort with depth 5.</li>
+      <li>Myth: with SROS2 on, an onlooker sees nothing. → Fact: SPDP announcements stay in the clear, so an onlooker still sees how many participants there are, their IPs and ports, and a rough traffic pattern.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：QoS 策略 ↔ 默认 profile ↔ 传感器数据 profile</h2><h2 id="compare-en" lang="en">Comparison: QoS policy ↔ default profile ↔ sensor-data profile</h2>
   <div class="table-wrap">

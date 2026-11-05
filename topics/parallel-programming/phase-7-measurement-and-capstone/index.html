@@ -59,6 +59,13 @@
 
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
+  <div class="crux">
+    <p lang="zh-CN">你改了一处代码，计时从 22.6 ms 变成 20.9 ms（举例用的数字）。这是变快了，还是这台同时跑着别的任务的机器恰好安静了一会儿？就算真快了，时间到底花在哪一行，离这台机器能给的上限还有多远，是该继续改计算、少搬字节，还是该停手？没有方法，这几个问题只能靠猜，而猜错的代价是在不是瓶颈的地方花上几天。</p>
+    <p lang="en">You change one line and the timing goes from 22.6 ms to 20.9 ms (numbers for illustration). Did it get faster, or did this machine, which runs other jobs at the same time, just happen to be quiet for a moment? And if it really is faster, which line does the time go to, how far is it from what this machine can give, and should you keep changing the computation, move fewer bytes, or stop? Without a method these questions are guesswork, and a wrong guess costs days spent on something that is not the bottleneck.</p>
+    <p lang="zh-CN">概念 1 和 2 的测量循环与基准方法回答「数字可不可信」，概念 3 到 5 的剖析工具回答「时间在哪」，概念 7 和 8 的 roofline 回答「离上限多远、还该不该改」。</p>
+    <p lang="en">The measurement loop and benchmark method of concepts 1 and 2 answer whether a number can be trusted, the profilers of concepts 3 to 5 answer where the time goes, and the roofline of concepts 7 and 8 answers how far from the limit you are and whether to keep going.</p>
+  </div>
+
   <h3 lang="zh-CN">1. 测量循环：每次只回答一个问题</h3><h3 lang="en">1. The measurement loop: one question per round</h3>
   <p lang="zh-CN">性能工作最常见的失败不是不会优化，而是改了五处、快了 30 %，却不知道是哪一处起的作用，甚至不知道这 30 % 是不是噪声。办法是把它做成一个循环，每一圈只回答一个问题（图解 (a)）：</p>
   <p lang="en">The most common failure in performance work is not a lack of optimisation skill but changing five things, getting 30 % faster, and not knowing which change did it, or even whether the 30 % is noise. The cure is to make it a loop in which each round answers exactly one question (diagram (a)):</p>
@@ -110,6 +117,26 @@ auto   warm-up 3  runs 20  first   33.3  median   40.9  mean   41.1  sd   5.6  m
     <li lang="zh-CN"><strong>检查结果，而不只是时间。</strong>每个程序都打印一个校验和。Phase 5 的串行基线量出 0 ms，就是因为编译器发现结果没被用到、把调用提出了循环；打印或比较结果能防住这一类「快得离谱」。</li>
     <li lang="en"><strong>Check the result, not only the time.</strong> Every program prints a checksum. Phase 5’s serial baseline measured 0 ms precisely because the compiler saw the call could be hoisted out of the loop; printing or comparing the result guards against this kind of absurdly fast number.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">用上面第 2 组的 20 个冷进程样本，算一遍中位数和平均数为什么差 1.3 ms。先排序：</p>
+    <p lang="en">Take the 20 cold-process samples of set 2 above and work out why the median and the mean differ by 1.3 ms. Sort them first:</p>
+    <pre>22.5 22.9 22.9 22.9 23.0 23.1 23.2 23.3 23.4 23.6
+24.1 24.7 24.9 26.4 26.8 27.1 27.2 27.8 28.8 34.6
+median = (23.6 + 24.1) / 2 = 23.85 ms
+mean   = 503.2 / 20        = 25.16 ms</pre>
+    <ol lang="zh-CN">
+      <li>20 个样本是偶数个，中位数取第 10 和第 11 个的平均：(23.6 + 24.1) / 2 = 23.85 ms。</li>
+      <li>平均数是总和 503.2 除以 20，得 25.16 ms，比中位数高 1.31 ms。</li>
+      <li>最慢的 34.6 ms 比中位数多 10.75 ms，与一次中位数的运行相比，单它一个就把平均数抬高 10.75 / 20 ≈ 0.54 ms；把它换成 26 ms，中位数一点不变。</li>
+      <li>所以报 23.85 ms 加范围 22.5–34.6 ms：中位数说典型情况，范围把那次 34.6 ms 留在报告里，而不是悄悄摊进平均数。</li>
+    </ol>
+    <ol lang="en">
+      <li>With an even count of 20, the median is the mean of the 10th and 11th values: (23.6 + 24.1) / 2 = 23.85 ms.</li>
+      <li>The mean is the total, 503.2, divided by 20: 25.16 ms, 1.31 ms above the median.</li>
+      <li>The slowest run, 34.6 ms, is 10.75 ms above the median, and compared with a run at the median, on its own it lifts the mean by 10.75 / 20 ≈ 0.54 ms; replace it with 26 ms and the median does not move at all.</li>
+      <li>So report 23.85 ms with the range 22.5–34.6 ms: the median says what is typical, and the range keeps that 34.6 ms run in the report instead of quietly averaging it in.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">延伸阅读：McKenney 11.7 节里的 11.7.4 Microbenchmarking、11.7.5 Isolation、11.7.6 Detecting Interference。</p>
   <p lang="en">Further reading: 11.7.4 Microbenchmarking, 11.7.5 Isolation and 11.7.6 Detecting Interference in McKenney’s section 11.7.</p>
 
@@ -239,6 +266,29 @@ sudo dtrace -n 'sched:::on-cpu /pid == $target/ { self-&gt;t = timestamp; } sche
     <li lang="zh-CN"><strong>作品项目的模糊内核（FP32，预测）。</strong>可分离的 5 点高斯模糊，每个像素每一遍 5 次乘加（10 flop），每一遍读 4 字节、写 4 字节。分两遍做：I = 20 / 16 = 1.25 flop/byte，上限约 165 GFLOP/s；把两遍融合成一遍、中间结果留在 cache 里：I = 20 / 8 = 2.5，上限约 330 GFLOP/s。两者都在 FP32 脊点 4.9 的左边，所以模糊是受内存限制的，融合比任何 NEON 技巧都重要。这两个数是按模型算的预测（没算写分配带来的额外读），作品项目要你实测。</li>
     <li lang="en"><strong>The capstone’s blur kernel (FP32, predicted).</strong> A separable 5-tap Gaussian blur does 5 multiply-adds (10 flops) per pixel per pass and reads 4 bytes and writes 4 bytes per pass. Done as two passes: I = 20 / 16 = 1.25 flops per byte, a ceiling of about 165 GFLOP/s; fused into one pass with the intermediate kept in cache: I = 20 / 8 = 2.5, a ceiling of about 330 GFLOP/s. Both sit left of the FP32 ridge at 4.9, so the blur is memory-bound and fusing matters more than any NEON trick. These two are predictions from the model (ignoring the extra reads that write-allocate causes); the capstone asks you to measure them.</li>
   </ul>
+  <div class="worked">
+    <p lang="zh-CN">把 Lab A 的矩阵乘法（FP64，N = 1024）从计时一路放到图解 (b) 上，看「问题不在 DRAM」这句话是怎么算出来的：</p>
+    <p lang="en">Take Lab A’s matrix multiply (FP64, N = 1024) from its timing all the way onto diagram (b), and see how the claim that the problem is not DRAM is worked out:</p>
+    <pre>flops = 2 × 1024³                  = 2 147 483 648
+bytes = 3 × 1024² × 8  (A, B, C)    = 25 165 824   (24 MiB)
+I     = 2 147 483 648 / 25 165 824  ≈ 85 flop/byte
+roof  = min(317, 85 × 132)          = 317 GFLOP/s
+auto  22.0–22.8 ms → 2.147 / 0.0220–0.0228 ≈ 98–94 GFLOP/s (diagram plots 95)
+NEON  14.0–15.5 ms                  ≈ 153–139 GFLOP/s
+DRAM needed at 14.0 ms: 25.2 MB / 0.014 s ≈ 1.8 GB/s</pre>
+    <ol lang="zh-CN">
+      <li>数运算：每个 <code>C[i][j]</code> 做 1024 次乘加，每次 2 flop，共 2 × 1024<sup>3</sup> ≈ 21.5 亿 flop。</li>
+      <li>数必需的字节：A、B 各读一遍、C 写一遍，每个 1024 × 1024 × 8 字节 = 8 MiB，共 24 MiB。强度 I ≈ 85，远在 FP64 脊点 2.4 的右边，斜线给的 85 × 132 远高于 317，所以屋顶是水平线 317 GFLOP/s。</li>
+      <li>换算实测：auto 版本 22.0–22.8 ms，2.147 GFLOP / 0.0220–0.0228 s ≈ 98–94 GFLOP/s，图上画在 95；NEON 分块 14.0–15.5 ms，对应 153–139 GFLOP/s，图上画的是最快的 153。</li>
+      <li>反算带宽：即使在最快的 14.0 ms，搬那 24 MiB 也只要约 1.8 GB/s，不到实测 132 GB/s 的 2 %。DRAM 几乎闲着，所以差距一定在 cache 和寄存器那一层，这正是概念 8 去找的地方。</li>
+    </ol>
+    <ol lang="en">
+      <li>Count the operations: each <code>C[i][j]</code> takes 1024 multiply-adds of 2 flops each, 2 × 1024<sup>3</sup> ≈ 2.15 billion flops in all.</li>
+      <li>Count the compulsory bytes: A and B read once and C written once, each 1024 × 1024 × 8 bytes = 8 MiB, 24 MiB in all. The intensity I ≈ 85 is far right of the FP64 ridge at 2.4, and the slope’s 85 × 132 is far above 317, so the roof is the flat line at 317 GFLOP/s.</li>
+      <li>Convert the measurements: the auto version at 22.0–22.8 ms is 2.147 GFLOP / 0.0220–0.0228 s ≈ 98–94 GFLOP/s, plotted at 95 on the diagrams; NEON blocking at 14.0–15.5 ms is 153–139 GFLOP/s, plotted at its fastest, 153.</li>
+      <li>Work the bandwidth backwards: even at the fastest 14.0 ms, moving those 24 MiB needs only about 1.8 GB/s, under 2 % of the measured 132 GB/s. DRAM is nearly idle, so the gap must lie in the cache and register level, which is where concept 8 looks.</li>
+    </ol>
+  </div>
   <p lang="zh-CN">只有一条 DRAM 带宽线的 roofline 解释不了矩阵乘法为什么离屋顶那么远，因为它的数据大部分时间在 cache 里。要换成「对 L1 的强度」去看，这就是概念 8。</p>
   <p lang="en">A roofline with only the DRAM bandwidth line cannot explain why the matrix multiply sits so far below the roof, because most of its data lives in cache. It has to be looked at as intensity against L1, and that is concept 8.</p>
   <p lang="zh-CN">延伸阅读：roofline 的原始论文（资料里）；McKenney 第 3 章 Hardware and its Habits 的 3.1.2 Memory References 和 3.1.7 Cache Misses。</p>
@@ -253,6 +303,37 @@ sudo dtrace -n 'sched:::on-cpu /pid == $target/ { self-&gt;t = timestamp; } sche
   <p lang="en">The result: the median falls from 22.0–22.8 ms to 14.0–15.5 ms (ranges across several runs that do not overlap), bit-for-bit identical to the original. It did not get 8 times faster, so memory traffic is not the only limit; the remaining gap of about 2 times to the 317 GFLOP/s roof may come from reading B by column blocks across rows, from the slower E cores, and from the E cluster’s 6 MB L2 being unable to hold the 8 MB of B (inference; this page did not separate them). That is exactly what Lab B wants to look at with counters.</p>
   <p lang="zh-CN">延伸阅读：McKenney 第 3 章的 3.4 Software Design Implications；Herlihy 等《The Art of Multiprocessor Programming》讲自旋锁与争用（spin locks and contention）的一章（用实测说明 cache 行为怎样决定性能）和讲硬件基础（hardware basics）的附录。</p>
   <p lang="en">Further reading: 3.4 Software Design Implications in McKenney’s chapter 3; in Herlihy et al., <em>The Art of Multiprocessor Programming</em>, the chapter on spin locks and contention (which shows with measurements how cache behaviour decides performance) and the appendix on hardware basics.</p>
+
+  <div class="recap">
+    <ul lang="zh-CN">
+      <li>性能工作是一个循环：假设、基准、剖析、只改一处、复测，每一圈只回答一个问题。</li>
+      <li>可信的数字要预热、计时至少 20 次、报中位数加最小到最大的范围，并记下当时的 <code>uptime</code>。</li>
+      <li>干扰只会让程序变慢，所以平均数被慢样本往上拉，中位数不动；两组范围不重叠才算变快。</li>
+      <li><code>sample</code> 不要 sudo，先看 Sort by top of stack 和 <code>文件:行</code>，停在 <code>__workq_kernreturn</code> 的是空闲池线程。</li>
+      <li>roofline 的两条线要在本机量：132 GB/s 和 FP64 317 GFLOP/s，脊点 2.4 flop/byte，强度在它左边就受内存限制。</li>
+      <li>离 DRAM 屋顶很远却没卡在 DRAM 上的内核，要按对 L1 的强度看，寄存器分块就是提高这个强度。</li>
+    </ul>
+    <ul lang="en">
+      <li>Performance work is a loop of hypothesis, benchmark, profile, change one thing and re-measure, with one question answered per round.</li>
+      <li>A number you can trust comes from warming up, timing at least 20 runs, reporting the median with the min-to-max range, and recording <code>uptime</code> at the time.</li>
+      <li>Interference only ever slows a program, so slow samples pull the mean up while the median stays put; call it faster only when the two ranges do not overlap.</li>
+      <li><code>sample</code> needs no sudo; read Sort by top of stack and <code>file:line</code> first, and threads parked in <code>__workq_kernreturn</code> are idle pool threads.</li>
+      <li>Both roofline lines are measured on this machine, 132 GB/s and an FP64 peak of 317 GFLOP/s, putting the ridge at 2.4 flops per byte; a kernel left of it is memory-bound.</li>
+      <li>A kernel far below the roof yet not limited by DRAM has to be read by its intensity against L1, and register blocking is how you raise that intensity.</li>
+    </ul>
+    <p lang="zh-CN"><strong>常见误解</strong></p>
+    <p lang="en"><strong>Common misconceptions</strong></p>
+    <ul lang="zh-CN">
+      <li>误解：剖析说热点在一个循环里，就该用 NEON 手写它。→ 实际：Lab A 的热循环已经被自动向量化成 4 条 <code>fmla.2d</code>，手写同样的循环只会得到同样的指令；要改的是访存模式。</li>
+      <li>误解：多跑几次取平均就够了。→ 实际：误差是单边的，平均数会被几次慢样本拉高；报中位数和范围，并记下负载（4 个忙进程就让中位数从 22.0 ms 涨到 32.7 ms）。</li>
+      <li>误解：受内存限制的内核，换更快的计算代码总能快一点。→ 实际：点积已经以 32.4 GFLOP/s 贴着 33 GFLOP/s 的屋顶，只有少搬字节（融合、分块、更小的类型）才有用。</li>
+    </ul>
+    <ul lang="en">
+      <li>Myth: if the profile puts the hot spot in a loop, rewrite it by hand in NEON. → Fact: Lab A’s hot loop was already auto-vectorized into four <code>fmla.2d</code> instructions, so hand-writing the same loop yields the same instructions; what has to change is the memory access pattern.</li>
+      <li>Myth: running it a few times and taking the mean is enough. → Fact: the error is one-sided and a few slow samples pull the mean up; report the median with the range and record the load (four busy processes raised the median from 22.0 ms to 32.7 ms).</li>
+      <li>Myth: a memory-bound kernel always gains a little from faster computation code. → Fact: the dot product already sits at 32.4 GFLOP/s against a 33 GFLOP/s roof, and only moving fewer bytes (fusion, blocking, smaller types) helps.</li>
+    </ul>
+  </div>
 
   <h2 id="compare" lang="zh-CN">对照表：问题 ↔ 工具</h2><h2 id="compare-en" lang="en">Comparison: the question ↔ the tool</h2>
   <div class="table-wrap">
