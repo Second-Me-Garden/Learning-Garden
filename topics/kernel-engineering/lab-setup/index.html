@@ -152,7 +152,7 @@ docker run --platform linux/arm64 --rm -it \
 # inside the container (package list is approximate; add what make asks for):
 apk add build-base clang lld llvm make bc bison flex perl \
         linux-headers elfutils-dev openssl-dev ncurses-dev git
-cd /src &amp;&amp; git clone --depth 1 https://github.com/torvalds/linux.git &amp;&amp; cd linux
+cd /src &amp;&amp; git clone --depth 1 --branch v7.3.1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git &amp;&amp; cd linux
 make LLVM=1 defconfig &amp;&amp; make LLVM=1 -j"$(nproc)" Image modules
 cp arch/arm64/boot/Image vmlinux /lab/
 # out-of-tree module, same compiler and tree:

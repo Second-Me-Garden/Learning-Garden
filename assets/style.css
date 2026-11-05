@@ -12,6 +12,7 @@
   --ink-2: #44524a;
   --ink-3: #5f6c64;
   --line: #c9d2c6;
+  --box-line: #7d8a79;   /* diagram box borders: 3.4:1 against the diagram frame (Designer, 2026-11-04); tables and rules keep --line */
   --accent: #1f6f4a;
   --accent-ink: #ffffff;
   --linux: #9a6200;
@@ -51,6 +52,7 @@
     --ink-2: #aeb9b0;
     --ink-3: #85928a;
     --line: #33403a;
+    --box-line: #697468;   /* 3.3:1 against the dark diagram frame */
     --accent: #5fbf8e;
     --accent-ink: #0d1a12;
     --linux: #e0a63a;
@@ -74,6 +76,7 @@
   --ink-2: #aeb9b0;
   --ink-3: #85928a;
   --line: #33403a;
+  --box-line: #697468;
   --accent: #5fbf8e;
   --accent-ink: #0d1a12;
   --linux: #e0a63a;
@@ -365,14 +368,17 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .diagram text { font-family: var(--sans); font-size: 13px; fill: var(--ink); }
 .diagram text.mono { font-family: var(--mono); font-size: 12px; }
 .diagram text.small { font-size: 11px; fill: var(--ink-3); }
-.diagram .box { fill: var(--surface-2); stroke: var(--line); stroke-width: 1.2; rx: 6; }
+.diagram .box { fill: var(--surface-2); stroke: var(--box-line); stroke-width: 1.2; rx: 6; }
 .diagram .box.linux { stroke: var(--linux); } .diagram .box.xnu { stroke: var(--xnu); } .diagram .box.ros { stroke: var(--ros); } .diagram .box.gz { stroke: var(--gz); } .diagram .box.par { stroke: var(--par); }
 .diagram .box.cuda { stroke: var(--cuda); } .diagram .box.metal { stroke: var(--metal); } /* GPU topic: CUDA side plum, Metal side slate blue */
 .diagram .arrow { stroke: var(--ink-3); stroke-width: 1.6; fill: none; marker-end: url(#arr); }
 .diagram .lane { fill: none; stroke: var(--line); stroke-dasharray: 3 4; }
 .diagram [data-step] { transition: opacity .35s ease, fill .35s ease, stroke .35s ease, transform .35s ease; }
 .diagram [data-step].off { opacity: 0.18; }
-.diagram [data-step].on .box { fill: color-mix(in srgb, var(--accent) 18%, var(--surface-2)); stroke: var(--accent); stroke-width: 2; }
+.diagram [data-step].on .box { fill: color-mix(in srgb, var(--accent) 18%, var(--surface-2)); stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 55%, transparent)); }
+/* A lit box keeps its topic colour (Linux ochre, XNU indigo, ROS blue, Gazebo orange, user-space purple, CUDA plum, Metal slate):
+   the lit state is the tint, the heavier stroke and the glow, not a change of hue (Designer, 2026-11-04). */
+.diagram [data-step].on .box.linux { stroke: var(--linux); } .diagram [data-step].on .box.xnu { stroke: var(--xnu); } .diagram [data-step].on .box.ros { stroke: var(--ros); } .diagram [data-step].on .box.gz { stroke: var(--gz); } .diagram [data-step].on .box.par { stroke: var(--par); } .diagram [data-step].on .box.cuda { stroke: var(--cuda); } .diagram [data-step].on .box.metal { stroke: var(--metal); }
 .diagram [data-step].on .arrow { stroke: var(--accent); stroke-width: 2.4; }
 .diagram [data-step].on text { font-weight: 600; }
 /* A highlight layer drawn over a static cell (a grid entry that is picked at one step): the cell itself keeps its plain look at every other step. */

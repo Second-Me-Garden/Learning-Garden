@@ -459,7 +459,7 @@ rmmod kstat</pre></li>
 sw_vers                        # 记下 ProductVersion 和 BuildVersion（找 KDK 用）
 git ls-remote --tags https://github.com/apple-oss-distributions/xnu.git \
   | grep -o 'xnu-[0-9.]*$' | sort -V | tail -3</pre>
-        <span lang="zh-CN">若本机版本比最新公开 tag 新、或者 <code>TXXXX</code> 不在下一步的列表里，就走 <code>VMAPPLE</code> + 虚拟机路线。</span><span lang="en">If your machine’s version is newer than the latest public tag, or <code>TXXXX</code> is not in the list in the next step, take the <code>VMAPPLE</code> + virtual machine route.</span></li>
+        <span lang="zh-CN">若本机版本比最新公开 tag 新、或者 <code>TXXXX</code> 不在下一步的列表里，就走 <code>VMAPPLE</code> + 虚拟机路线。2026-11-05 核对时最新的公开 tag 是 <code>xnu-12377.121.6</code>，本课程以它为准；实验 Mac 上 macOS 27.2 对应的 XNU 源码尚未公开。</span><span lang="en">If your machine’s version is newer than the latest public tag, or <code>TXXXX</code> is not in the list in the next step, take the <code>VMAPPLE</code> + virtual machine route. When checked on 2026-11-05 the newest public tag was <code>xnu-12377.121.6</code>, which this topic is pinned to; the XNU source for macOS 27.2 on the lab Mac is not yet published.</span></li>
       <li><span lang="zh-CN">获取源码与依赖：</span><span lang="en">Get the source and the dependencies:</span><pre>git clone https://github.com/apple-oss-distributions/xnu.git &amp;&amp; cd xnu
 git checkout xnu-12377.121.6            # 换成你选定的 tag
 grep -n "SUPPORTED_ARM64_MACHINE_CONFIGS\|SUPPORTED_KERNEL_CONFIGS" makedefs/MakeInc.def

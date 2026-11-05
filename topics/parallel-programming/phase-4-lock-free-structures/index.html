@@ -153,8 +153,8 @@ tagged   T1: {A, 8} ≠ {A, 5} → CAS fails, old = {A, 8}, next = C, retry succ
   <p lang="zh-CN">Lab A 用一个固定的节点池，从不释放节点，所以才能放心读 <code>old-&gt;next</code>。真实的栈会在 pop 之后 <code>delete</code> 节点，而另一个线程可能刚读到 <code>top == old</code>、正要读 <code>old-&gt;next</code>：那就是释放后使用（use-after-free）。锁天然没有这个问题，持锁期间没有别人在看；无锁结构必须回答「什么时候<em>没有任何线程</em>还可能拿着这个指针」。三种回答：</p>
   <p lang="en">Lab A uses a fixed pool and never frees a node, which is the only reason reading <code>old-&gt;next</code> is safe. A real stack would <code>delete</code> the node after pop, while another thread may have just read <code>top == old</code> and be about to read <code>old-&gt;next</code>: a use-after-free. Locks avoid this by nature, because nobody else is looking while the lock is held; a lock-free structure must answer “when can <em>no thread</em> still be holding this pointer?”. Three answers:</p>
   <ul>
-    <li lang="zh-CN"><strong>Hazard pointer</strong>（Maged Michael，2004）：每个线程有几个公开的槽。读 <code>top</code> 之后，先把这个指针写进自己的槽，然后用 seq_cst 顺序重读 <code>top</code>，确认它没变，才可以解引用。要释放的节点先放进本线程的「待退休」列表；列表够长时扫描所有线程的槽，不在任何槽里的节点才真正释放。读者每次访问都要付一次写和一次全序栅栏；好处是垃圾有上界：一个停住的线程最多钉住它槽里的那几个节点。</li>
-    <li lang="en"><strong>Hazard pointers</strong> (Maged Michael, 2004): each thread owns a few public slots. After reading <code>top</code> it writes that pointer into its slot, rereads <code>top</code> with seq_cst ordering to confirm it is unchanged, and only then dereferences it. A node to be freed goes onto the thread’s own retire list; when the list is long enough, the thread scans every thread’s slots and frees only the nodes that appear in none. Readers pay one store and one full fence per access; in return garbage is bounded: a stalled thread pins at most the few nodes in its slots.</li>
+    <li lang="zh-CN"><strong>Hazard pointer</strong>（Maged Michael，2004）：每个线程有几个公开的槽。读 <code>top</code> 之后，先把这个指针写进自己的槽，然后用 seq_cst 顺序重读 <code>top</code>，确认它没变，才可以解引用。要释放的节点先放进本线程的「待退休」列表；列表够长时扫描所有线程的槽，不在任何槽里的节点才真正释放。读者每次访问都要付一次写和一次全序栅栏；好处是垃圾有上界：一个停住的线程最多钉住它槽里的那几个节点。动画 (c) 把登记、重读、退休、扫描和释放逐步画出来。</li>
+    <li lang="en"><strong>Hazard pointers</strong> (Maged Michael, 2004): each thread owns a few public slots. After reading <code>top</code> it writes that pointer into its slot, rereads <code>top</code> with seq_cst ordering to confirm it is unchanged, and only then dereferences it. A node to be freed goes onto the thread’s own retire list; when the list is long enough, the thread scans every thread’s slots and frees only the nodes that appear in none. Readers pay one store and one full fence per access; in return garbage is bounded: a stalled thread pins at most the few nodes in its slots. Diagram (c) steps through publishing, rereading, retiring, scanning and freeing.</li>
     <li lang="zh-CN"><strong>Epoch 回收</strong>（Keir Fraser，2004 年剑桥技术报告「Practical lock-freedom」）：有一个全局 epoch 计数。线程进入操作时记下当前 epoch，离开时清掉；退休的节点按它退休时的 epoch 分组。当所有正在操作中的线程都已经看到更新的 epoch，更早那组节点就不可能再被任何人拿着，可以整批释放。读者只在进出时各写一次自己的那一格，比 hazard pointer 便宜；代价是一个停在操作中间的线程会让 epoch 无法前进，垃圾无限堆积。</li>
     <li lang="en"><strong>Epoch-based reclamation</strong> (Keir Fraser, the 2004 Cambridge technical report “Practical lock-freedom”): there is a global epoch counter. A thread records the current epoch when it enters an operation and clears it on leaving; retired nodes are grouped by the epoch in which they were retired. Once every thread still inside an operation has seen a newer epoch, no one can hold a node from the older group, and the whole group is freed at once. Readers write only their own slot, once on entry and once on exit, which is cheaper than hazard pointers; the price is that one thread stalled in the middle of an operation stops the epoch from advancing, and garbage piles up without bound.</li>
     <li lang="zh-CN"><strong>RCU，内核的答案</strong>：把 epoch 的思路推到读者「什么也不写」。Linux 内核里 <code>rcu_read_lock()</code> 在非抢占内核中只是关抢占，读区里不会发生上下文切换，所以每个 CPU 只要经历过一次上下文切换、进入 idle 或回到用户态（quiescent state），就证明它在宽限期开始前进入的读区都结束了。写者用 <code>rcu_assign_pointer</code>（本质是 store-release）发布新版本，<code>synchronize_rcu()</code> 等宽限期结束再释放旧版本。动画 (b) 演示这个时间线；内核里的 API、<code>kernel/rcu/tree.c</code> 和 XNU 基于序号的 SMR 见 Kernel Engineering <a href="../../kernel-engineering/phase-3-concurrency-and-ipc/index.html">Phase 3</a> 概念 3。</li>
@@ -434,6 +434,107 @@ writer non-stop,      R = 1:  retry/read 4039.9, 0.3 M reads/s (mutex reader 14.
       <rect class="box" x="130" y="302" width="110" height="26"/><text x="185" y="320" class="mono" text-anchor="middle" lang="zh-CN">版本 A</text><text x="185" y="320" class="mono" text-anchor="middle" lang="en">version A</text>
       <rect class="box" x="130" y="345" width="110" height="26"/><text x="185" y="363" class="mono" text-anchor="middle" lang="zh-CN">版本 B</text><text x="185" y="363" class="mono" text-anchor="middle" lang="en">version B</text>
       <text x="30" y="404" class="small" lang="zh-CN">读者不加锁、不写共享内存；代价由写者承担</text><text x="30" y="404" class="small" lang="en">Readers take no lock and write no shared memory; the writer pays</text>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) Hazard pointer：先登记再解引用，退休后按槽扫描再释放</h3><h3 lang="en">(c) Hazard pointers: publish before dereferencing, retire, then scan the slots before freeing</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 430" data-interval="2800"
+         data-captions='["全图：左边是一个节点会被真正释放的 Treiber 栈；中间上方是 hazard 槽，这里每个线程画一个公开的槽（perfbook 的实现每线程 K = 2 个），下方是 T2 的待退休列表；右边是读者协议和回收者的简写。按播放逐步看。",
+           "1. 读者 T1 读到 top = A。这时还不能解引用 A：从这次读到下一步之间，别的线程可能 pop 掉 A 并把它释放。",
+           "2. T1 把 A 写进自己的 hazard 槽 hp[T1]，再执行一次全序栅栏（seq_cst），让这次写入排在第 3 步重读 top 之前；回收者扫描前也有一次全序栅栏，两者配合，要么扫描看到这个槽，要么 T1 重读时发现 top 变了。",
+           "3. T1 重读 top，仍是 A：说明槽公开之后 A 还在栈上，从此任何扫描都不会释放它，T1 这时才读 A.next。如果 top 变了，T1 就回到第 1 步重来（perfbook 里 hp_record 循环调用 hp_try_record）。",
+           "4. T2 pop 掉 A：它的 CAS(top: A → B) 成功。A 已不在栈上，但 T1 可能还在读它，所以 T2 不能释放 A。",
+           "5. T2 调用 retire(A)：A 进入 T2 私有的待退休列表，而不是被释放。列表里现在是 A、D、E（D 和 E 是更早退休的，示意）。列表长度到达阈值 R 时才扫描：图中示意为 3，perfbook 的 hazptr.h 取 R = 100 + 2H，H 是所有槽的总数。",
+           "6. 扫描：T2 读所有线程的每一个 hazard 槽，收集非空的值。hp[T1] 写着 A，hp[T2] 和 hp[T3] 为空，所以受保护的集合是 {A}。",
+           "7. T2 逐个检查待退休列表：D 和 E 不在任何槽里，释放；A 在 hp[T1] 里，放回列表，留给以后的扫描。",
+           "8. T1 用完 A，把自己的槽清为 null。T2 下一次扫描时 A 不在任何槽里，于是被释放。即使 T1 停住不动，它也只钉住槽里的 A 这一个节点：垃圾有上界。"]'
+         data-captions-en='["The whole picture: on the left a Treiber stack whose nodes really are freed; top middle the hazard slots, drawn here as one public slot per thread (the perfbook implementation gives each thread K = 2), and below them the retire list of T2; on the right the reader protocol and the reclaimer in short. Press Play to step through.",
+           "1. Reader T1 reads top = A. It may not dereference A yet: between this read and its next step another thread may pop A and free it.",
+           "2. T1 writes A into its own hazard slot hp[T1] and issues a full fence (seq_cst), ordering that store before the reread of top in step 3; the reclaimer also fences before it scans, so either the scan sees the slot or the reread by T1 finds that top has changed.",
+           "3. T1 rereads top and it is still A: A was on the stack after the slot became public, so no scan from now on will free it, and only now does T1 read A.next. Had top changed, T1 would start over at step 1 (in perfbook, hp_record calls hp_try_record in a loop).",
+           "4. T2 pops A: its CAS(top: A → B) succeeds. A is off the stack, but T1 may still be reading it, so T2 must not free A.",
+           "5. T2 calls retire(A): A goes onto the private retire list of T2 instead of being freed. The list now holds A, D and E (D and E were retired earlier; illustrative). A scan runs only when the list reaches a threshold R: 3 in this picture, and R = 100 + 2H in perfbook hazptr.h, where H is the total number of slots.",
+           "6. The scan: T2 reads every hazard slot of every thread and collects the non-null values. hp[T1] holds A, hp[T2] and hp[T3] are null, so the protected set is {A}.",
+           "7. T2 walks its retire list: D and E appear in no slot, so they are freed; A is in hp[T1], so it goes back on the list for a later scan.",
+           "8. T1 is done with A and clears its slot to null. On the next scan by T2, A is in no slot and is freed. Even if T1 had stalled, it would pin only A, the one node in its slot: the garbage is bounded."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="30" class="small" lang="zh-CN">栈与 top</text><text x="30" y="30" class="small" lang="en">the stack and top</text>
+      <rect class="box" x="30" y="50" width="56" height="30"/><text x="58" y="70" class="mono" text-anchor="middle">top</text>
+      <rect class="box" x="30" y="110" width="56" height="30"/><text x="58" y="130" class="mono" text-anchor="middle">A</text>
+      <rect class="box" x="30" y="170" width="56" height="30"/><text x="58" y="190" class="mono" text-anchor="middle">B</text>
+      <rect class="box" x="30" y="230" width="56" height="30"/><text x="58" y="250" class="mono" text-anchor="middle">C</text>
+      <path class="arrow" d="M58 140 L58 166"/><path class="arrow" d="M58 200 L58 226"/>
+
+      <text x="350" y="30" class="small" lang="zh-CN">hazard 槽（公开，此处每线程一个）</text><text x="350" y="30" class="small" lang="en">hazard slots (public, one per thread here)</text>
+      <text x="350" y="70" class="mono">hp[T1]</text><rect class="box" x="420" y="50" width="110" height="30"/>
+      <text x="350" y="110" class="mono">hp[T2]</text><rect class="box" x="420" y="90" width="110" height="30"/><text x="475" y="110" class="mono" text-anchor="middle">null</text>
+      <text x="350" y="150" class="mono">hp[T3]</text><rect class="box" x="420" y="130" width="110" height="30"/><text x="475" y="150" class="mono" text-anchor="middle">null</text>
+
+      <text x="350" y="242" class="small" lang="zh-CN">T2 的待退休列表</text><text x="350" y="242" class="small" lang="en">retire list of T2</text>
+      <rect class="box" x="350" y="252" width="50" height="30"/><text x="375" y="272" class="mono" text-anchor="middle">A</text>
+      <rect class="box" x="410" y="252" width="50" height="30"/><text x="435" y="272" class="mono" text-anchor="middle">D</text>
+      <rect class="box" x="470" y="252" width="50" height="30"/><text x="495" y="272" class="mono" text-anchor="middle">E</text>
+
+      <line x1="640" y1="40" x2="640" y2="400" class="lane"/>
+      <text x="660" y="50" class="small" lang="zh-CN">读者 T1</text><text x="660" y="50" class="small" lang="en">reader T1</text>
+      <text x="660" y="72" class="mono">1. p = top</text>
+      <text x="660" y="90" class="mono">2. hp[me] = p; fence</text>
+      <text x="660" y="108" class="mono">3. if (top != p) goto 1</text>
+      <text x="660" y="126" class="mono">4. read p-&gt;next</text>
+      <text x="660" y="144" class="mono">5. hp[me] = null</text>
+      <text x="660" y="190" class="small" lang="zh-CN">回收者 T2</text><text x="660" y="190" class="small" lang="en">reclaimer T2</text>
+      <text x="660" y="212" class="mono">retire(p): push on list</text>
+      <text x="660" y="230" class="mono">if (len ≥ R) scan()</text>
+      <text x="660" y="248" class="mono">scan: free p ∉ slots</text>
+
+      <!-- step 1: T1 reads top = A -->
+      <g data-step="1 3"><path class="arrow" d="M58 80 L58 106"/></g>
+      <g data-step="1">
+        <text x="100" y="121" lang="zh-CN">T1 读到 top = A</text><text x="100" y="121" lang="en">T1 reads top = A</text>
+        <text x="100" y="139" class="small" lang="zh-CN">还不能解引用</text><text x="100" y="139" class="small" lang="en">may not dereference it yet</text></g>
+      <!-- step 2: publish A in hp[T1] -->
+      <text x="475" y="70" class="mono" text-anchor="middle" data-step="2 3 4 5 6 7">A</text>
+      <g data-step="2">
+        <path class="arrow" d="M225 116 L416 70"/>
+        <rect class="hl" x="420" y="50" width="110" height="30"/></g>
+      <!-- step 3: reread top -->
+      <g data-step="3">
+        <text x="100" y="186" lang="zh-CN">T1 重读 top：仍是 A ✓</text><text x="100" y="186" lang="en">T1 rereads top: still A ✓</text>
+        <text x="100" y="204" class="small" lang="zh-CN">这才读 A.next；变了就从头重试</text><text x="100" y="204" class="small" lang="en">only now read A.next; if changed, retry</text></g>
+      <!-- step 4: T2 pops A -->
+      <g data-step="4">
+        <path class="arrow" d="M30 65 C 4 65 4 185 26 185"/>
+        <text x="100" y="250" class="mono">T2: CAS(top: A → B)</text>
+        <text x="100" y="268" class="small" lang="zh-CN">A 已摘下，但还不能释放</text><text x="100" y="268" class="small" lang="en">A is unlinked but may not be freed</text></g>
+      <!-- step 5: retire(A) -->
+      <g data-step="5">
+        <rect class="hl" x="350" y="252" width="50" height="30"/>
+        <text x="350" y="304" lang="zh-CN">retire(A)：进列表，不释放</text><text x="350" y="304" lang="en">retire(A): onto the list, not freed</text>
+        <text x="350" y="322" class="small" lang="zh-CN">长度到阈值 R（此处示意为 3）→ 扫描</text><text x="350" y="322" class="small" lang="en">length reaches R (3 here, illustrative) → scan</text></g>
+      <!-- step 6: scan all slots -->
+      <g data-step="6">
+        <rect class="hl" x="420" y="50" width="110" height="30"/>
+        <rect class="hl" x="420" y="90" width="110" height="30"/>
+        <rect class="hl" x="420" y="130" width="110" height="30"/>
+        <text x="420" y="184" lang="zh-CN">扫描：受保护集合 = {A}</text><text x="420" y="184" lang="en">scan: protected set = {A}</text></g>
+      <!-- step 7: free D and E, keep A -->
+      <g data-step="7">
+        <rect class="hl" x="410" y="252" width="50" height="30"/>
+        <rect class="hl" x="470" y="252" width="50" height="30"/>
+        <text x="350" y="350" class="mono">free(D) · free(E)</text>
+        <text x="350" y="368" class="small" lang="zh-CN">A 在 hp[T1] 里，放回列表</text><text x="350" y="368" class="small" lang="en">A is in hp[T1]: back on the list</text></g>
+      <!-- step 8: T1 clears its slot, next scan frees A -->
+      <g data-step="8">
+        <rect class="hl" x="420" y="50" width="110" height="30"/>
+        <text x="540" y="70" class="mono">→ null</text>
+        <rect class="hl" x="350" y="252" width="50" height="30"/>
+        <text x="350" y="394" lang="zh-CN">下一次扫描：free(A)</text><text x="350" y="394" lang="en">next scan: free(A)</text></g>
+      <text x="30" y="418" class="small" lang="zh-CN">垃圾有上界：一个停住的线程最多钉住它槽里的节点</text><text x="30" y="418" class="small" lang="en">Bounded garbage: a stalled thread pins only the nodes in its slots</text>
     </svg>
   </div>
 

@@ -411,7 +411,7 @@ grep openat available_filter_functions       # arm64 的系统调用入口通常
 echo __arm64_sys_openat &gt; set_graph_function
 echo function_graph &gt; current_tracer
 echo 1 &gt; tracing_on; cat /proc/version &gt; /dev/null; echo 0 &gt; tracing_on
-head -80 trace                               # 带缩进和耗时的调用树：getname → do_filp_open → path_openat …
+head -80 trace                               # 带缩进和耗时的调用树：getname_flags → do_file_open → path_openat …
 echo nop &gt; current_tracer; echo &gt; set_graph_function</pre>
         <span lang="zh-CN">如果 <code>grep</code> 给出的名字不同，就用它给的那个；不要照抄。把调用树和 Phase 4 的 VFS 路径对照着读。</span><span lang="en">If <code>grep</code> gives a different name, use the one it gives; do not copy blindly. Read the call tree side by side with the VFS path from Phase 4.</span></li>
       <li><span lang="zh-CN">dynamic debug 与 oops：</span><span lang="en">dynamic debug and an oops:</span><pre>mount -t debugfs none /sys/kernel/debug
@@ -438,7 +438,7 @@ echo c &gt; /proc/sysrq-trigger                          # 故意让内核崩溃
 sudo perf record -g -a -- sleep 5
 sudo perf report --stdio | head -60
 sudo bpftrace -e 'kprobe:do_filp_open { @[comm] = count(); }'   # Ctrl-C 后打印每个进程的 open 次数</pre>
-        <span lang="zh-CN">虚拟机若没有暴露 PMU，<code>perf stat</code> 会把 <code>cycles</code> 等硬件事件标成 <code>&lt;not supported&gt;</code>，这时改用软件事件 <code>-e cpu-clock</code>。</span><span lang="en">If the virtual machine does not expose a PMU, <code>perf stat</code> marks hardware events such as <code>cycles</code> as <code>&lt;not supported&gt;</code>; switch to the software event <code>-e cpu-clock</code> instead.</span></li>
+        <span lang="zh-CN">虚拟机若没有暴露 PMU，<code>perf stat</code> 会把 <code>cycles</code> 等硬件事件标成 <code>&lt;not supported&gt;</code>，这时改用软件事件 <code>-e cpu-clock</code>。<code>bpftrace</code> 那一行的探测点随内核版本变：6.x 的发行版内核叫 <code>do_filp_open</code>，7.0 起（含本课程固定的 v7.3.1）改名为 <code>do_file_open</code>（2026-11-05 核对）；报找不到探测点时换另一个名字。</span><span lang="en">If the virtual machine does not expose a PMU, <code>perf stat</code> marks hardware events such as <code>cycles</code> as <code>&lt;not supported&gt;</code>; switch to the software event <code>-e cpu-clock</code> instead. The probe in the <code>bpftrace</code> line depends on the kernel version: 6.x distribution kernels call it <code>do_filp_open</code>, and from 7.0 (including the v7.3.1 this topic is pinned to) it is renamed <code>do_file_open</code> (checked 2026-11-05); if bpftrace reports the probe is not found, use the other name.</span></li>
     </ol>
 
     <h3 lang="zh-CN">Lab B · macOS：统一日志、ktrace/kperf、dtrace 与 panic 报告</h3><h3 lang="en">Lab B · macOS: unified logging, ktrace/kperf, dtrace and panic reports</h3>
