@@ -143,8 +143,8 @@ t = 0       latest common time = min(12.38, 12.40) = 12.38 s</pre>
   <p lang="en">Simulator time is not wall-clock time. Each Gazebo physics step advances a fixed amount of simulated time, but how much real time a step takes depends on the CPU; with the lidar rendered by llvmpipe in the lab container, the simulation will likely run slower than real time (the real time factor shown in the Gazebo GUI is below 1), and you can pause it at any moment. Sensor message timestamps and the tf from the differential drive are all stamped in <strong>simulation time</strong>: tens or hundreds of seconds since the simulation started.</p>
   <p lang="zh-CN"><strong>机制</strong>：仿真器把自己的时钟发布在 <code>/clock</code> 话题上（类型 <code>rosgraph_msgs/msg/Clock</code>，本页由桥从 Gazebo 转过来）。每个 ROS 节点都有一个内置参数 <code>use_sim_time</code>，默认 false；设为 true 后，这个节点的 ROS 时钟不再读系统时间，而是订阅 <code>/clock</code>，<code>now()</code> 返回收到的最新仿真时刻。按节点时钟走的定时器（<code>create_timer</code>）也跟着仿真时间走，仿真暂停它就停；<code>create_wall_timer</code> 则仍按真实时间。</p>
   <p lang="en"><strong>Mechanism</strong>: the simulator publishes its clock on the <code>/clock</code> topic (type <code>rosgraph_msgs/msg/Clock</code>; on this page the bridge forwards it from Gazebo). Every ROS node has a built-in parameter <code>use_sim_time</code>, false by default; set to true, the node’s ROS clock stops reading system time, subscribes to <code>/clock</code> instead, and <code>now()</code> returns the latest simulated instant received. Timers that run on the node clock (<code>create_timer</code>) follow simulation time too and stop when the simulation pauses; <code>create_wall_timer</code> still runs on real time.</p>
-  <p lang="zh-CN"><strong>缺了它会坏在哪里</strong>：假设 RViz2 忘了设 <code>use_sim_time</code>。它的「现在」是 Unix 时间，约 17 亿秒；而缓冲区里 odom → base_link 的样本都打着「第 120 秒」这样的仿真时间戳。RViz2 按自己的「现在」去查变换，请求时刻比最新样本晚了十几亿秒，就是概念 2 里的 extrapolation into the future；激光扫描的显示会因为找不到对应时刻的变换而丢弃消息，机器人模型显示报错。反过来也一样：你的节点用墙上时间给自己发的消息打戳，别的节点在仿真时间里查不到它。所以规则很简单：<strong>仿真时，系统里每一个节点都设 <code>use_sim_time:=true</code></strong>，包括 <code>robot_state_publisher</code>、RViz2 和你自己写的节点。</p>
-  <p lang="en"><strong>What breaks without it</strong>: suppose RViz2 forgot to set <code>use_sim_time</code>. Its “now” is Unix time, about 1.7 billion seconds, while the odom → base_link samples in the buffer carry simulated stamps such as “second 120”. RViz2 looks up transforms at its own “now”, a requested time over a billion seconds after the newest sample: that is the extrapolation into the future of concept 2; the laser scan display drops messages because it cannot find a transform for their time, and the robot model display shows errors. It works the other way too: a node that stamps its own messages with wall time cannot be looked up by other nodes running in simulation time. So the rule is simple: <strong>in simulation, set <code>use_sim_time:=true</code> on every node in the system</strong>, including <code>robot_state_publisher</code>, RViz2 and your own nodes.</p>
+  <p lang="zh-CN"><strong>缺了它会坏在哪里</strong>：假设 RViz2 忘了设 <code>use_sim_time</code>。它的「现在」是 Unix 时间，约 18 亿秒（2026 年）；而缓冲区里 odom → base_link 的样本都打着「第 120 秒」这样的仿真时间戳。RViz2 按自己的「现在」去查变换，请求时刻比最新样本晚了十几亿秒，就是概念 2 里的 extrapolation into the future；按「现在」取变换的机器人模型显示报错，激光扫描的显示是否也丢弃消息取决于它按哪个时刻查变换，本页没有对照 rviz2 源码核对（推断）。反过来也一样：你的节点用墙上时间给自己发的消息打戳，别的节点在仿真时间里查不到它。所以规则很简单：<strong>仿真时，系统里每一个节点都设 <code>use_sim_time:=true</code></strong>，包括 <code>robot_state_publisher</code>、RViz2 和你自己写的节点。动画 (c) 把设了和没设 <code>use_sim_time</code> 的两个节点并排，逐步画出这次查询为什么失败。</p>
+  <p lang="en"><strong>What breaks without it</strong>: suppose RViz2 forgot to set <code>use_sim_time</code>. Its “now” is Unix time, about 1.8 billion seconds (in 2026), while the odom → base_link samples in the buffer carry simulated stamps such as “second 120”. RViz2 looks up transforms at its own “now”, a requested time over a billion seconds after the newest sample: that is the extrapolation into the future of concept 2; the robot model display, which takes transforms at now, shows errors, and whether the laser scan display also drops messages depends on which time it looks up, which this page has not checked against the rviz2 source (inference). It works the other way too: a node that stamps its own messages with wall time cannot be looked up by other nodes running in simulation time. So the rule is simple: <strong>in simulation, set <code>use_sim_time:=true</code> on every node in the system</strong>, including <code>robot_state_publisher</code>, RViz2 and your own nodes. Diagram (c) puts a node with <code>use_sim_time</code> beside one without it and steps through why this lookup fails.</p>
   <div class="note" lang="zh-CN">设了 <code>use_sim_time</code> 但还没收到第一条 <code>/clock</code> 时，<code>now()</code> 大致返回 0（推断，具体行为查 rclcpp 和 rclpy 的文档）。所以启动顺序是：先起仿真器和 <code>/clock</code> 的桥，再起其他节点；否则早启动的节点会先用 0 时刻打几条戳。</div>
   <div class="note" lang="en">With <code>use_sim_time</code> set but before the first <code>/clock</code> message arrives, <code>now()</code> returns roughly 0 (inference; check the rclcpp and rclpy docs for the exact behaviour). So the start-up order is: simulator and the <code>/clock</code> bridge first, then the other nodes; otherwise a node started early stamps a few messages at time 0.</div>
   <p lang="zh-CN">延伸阅读：Joseph 与 Cacace《Mastering ROS 2 for Robotics Programming》讲 Gazebo 仿真的章节；设计文章 <a href="https://design.ros2.org/articles/clock_and_time.html">Clock and Time</a>（ROS 时间、系统时间、稳定时间的区别和 <code>/clock</code> 的设计）。</p>
@@ -383,21 +383,21 @@ output    one period 1 / 50 Hz = 0.02 s
   <div class="diagram">
     <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
          data-captions='["全图：左边是 Gazebo 服务器里的几个系统，中间是 ros_gz_bridge，右边是 ROS 2 的话题和节点。按「播放」沿闭环走一圈：物理推进，传感器出数据，过桥，控制器发指令，再过桥回到轮子。",
-           "第 1 步，Physics 每一步推进固定的仿真时长，仿真时钟随之前进，发在 Gazebo 的 /clock 上。桥把它转成 rosgraph_msgs/Clock，设了 use_sim_time 的节点都按它计时。",
+           "第 1 步，Physics 每一步推进固定的仿真时长，仿真时钟随之前进，发在 Gazebo 的 /clock 上。它怎样过桥、被节点使用，见图解 (c)。",
            "第 2 步，Sensors 系统按 update_rate 用渲染引擎从雷达位置朝每个角度看一次场景，得到距离，发成 gz.msgs.LaserScan。容器里这一步用 llvmpipe 在 CPU 上做，最耗时。",
            "第 3 步，桥把 gz.msgs.LaserScan 逐字段转成 sensor_msgs/msg/LaserScan，发到 ROS 的 /scan。时间戳是仿真时间，frame_id 原样保留，所以要在 SDF 里用 gz_frame_id 设成 URDF 里的 lidar。",
            "第 4 步，DiffDrive 从轮子实际转角积分出里程计，发 Odometry 和一条 odom → base_link 变换；JointStatePublisher 发轮子关节角。桥把它们转成 /odom、/tf 和 /joint_states，robot_state_publisher 再算出轮子的 tf。",
            "第 5 步，控制器在 ROS 一侧发布 /cmd_vel。本页是 teleop_twist_keyboard，默认发 geometry_msgs/msg/Twist，与桥声明的类型一致。Phase 6 换成 Jazzy 的 diff_drive_controller 后只收 TwistStamped：teleop 要加 stamped:=true，Nav2 要打开 enable_stamped_cmd_vel。",
            "第 6 步，桥按 ] 方向把 Twist 转成 gz.msgs.Twist 送进 Gazebo。DiffDrive 换算出左右轮速度交给物理引擎，下一步物理推进时机器人动起来，环路闭合。",
-           "第 7 步，消费者：RViz2 和你的 tf2 listener 都要设 use_sim_time:=true，按 /clock 计时，按消息时间戳查 tf。桥只转换声明过的类型对，任何一侧类型对不上，结果都是不报错、没数据。"]'
+           "第 7 步，桥只转换声明过的类型对，任何一侧类型对不上，结果都是没有报错也没有数据。消费方如何按 /clock 计时见图解 (c)。"]'
          data-captions-en='["The whole picture: on the left the systems inside the Gazebo server, in the middle ros_gz_bridge, on the right the ROS 2 topics and nodes. Press Play to go once round the loop: physics steps, a sensor produces data, it crosses the bridge, a controller sends a command, and that crosses back to the wheels.",
-           "Step 1, Physics advances a fixed amount of simulated time each step, and the simulation clock moves with it, published on the Gazebo /clock. The bridge turns it into rosgraph_msgs/Clock, and every node with use_sim_time keeps time by it.",
+           "Step 1, Physics advances a fixed amount of simulated time each step, and the simulation clock moves with it, published on the Gazebo /clock. How it crosses the bridge and how nodes use it is diagram (c).",
            "Step 2, at its update_rate the Sensors system uses the rendering engine to look at the scene from the lidar at each angle, gets the distances and publishes a gz.msgs.LaserScan. In the container this runs on the CPU through llvmpipe and is the most expensive step.",
            "Step 3, the bridge copies gz.msgs.LaserScan field by field into sensor_msgs/msg/LaserScan and publishes it on ROS /scan. The stamp is simulation time and the frame_id is kept as is, so set it in SDF with gz_frame_id to the URDF link lidar.",
            "Step 4, DiffDrive integrates odometry from the actual wheel angles and publishes Odometry plus an odom → base_link transform; JointStatePublisher publishes the wheel joint angles. The bridge turns them into /odom, /tf and /joint_states, and robot_state_publisher computes the wheel tf.",
            "Step 5, a controller on the ROS side publishes /cmd_vel. On this page it is teleop_twist_keyboard, which publishes geometry_msgs/msg/Twist by default, matching the bridge. In Phase 6 the Jazzy diff_drive_controller accepts only TwistStamped, so teleop needs stamped:=true and Nav2 needs enable_stamped_cmd_vel.",
            "Step 6, the bridge, in the ] direction, turns Twist into gz.msgs.Twist and sends it into Gazebo. DiffDrive converts it into left and right wheel speeds for the physics engine; on the next physics step the robot moves, and the loop is closed.",
-           "Step 7, the consumers: RViz2 and your tf2 listener both need use_sim_time:=true, keep time by /clock and look up tf by message stamp. The bridge converts only the declared type pairs; a type mismatch on either side means no error and no data."]'>
+           "Step 7, the bridge converts only the declared type pairs; a type mismatch on either side means no error and no data. How consumers keep time by /clock is diagram (c)."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -421,14 +421,13 @@ output    one period 1 / 50 Hz = 0.02 s
         <rect class="box" x="34" y="330" width="252" height="70"/>
         <text x="46" y="352" class="mono">/clock</text>
         <text x="46" y="370" class="small" lang="zh-CN">仿真时钟 · gz.msgs.Clock</text><text x="46" y="370" class="small" lang="en">simulation clock · gz.msgs.Clock</text>
-        <text x="46" y="388" class="small" lang="zh-CN">比真实时间慢也没关系</text><text x="46" y="388" class="small" lang="en">may run slower than real time</text>
-        <path class="arrow" d="M288 360 L318 360"/>
+        <text x="46" y="388" class="small" lang="zh-CN">比真实时间慢也没关系</text><text x="46" y="388" class="small" lang="en">may run slower than real time</text></g>
+      <g><path class="arrow" d="M288 360 L318 360"/>
         <text x="332" y="364" class="small">[ gz.msgs.Clock → Clock</text>
         <path class="arrow" d="M532 360 L573 360"/>
-        <rect class="box ros" x="575" y="330" width="305" height="70"/>
+        <rect class="box ros" x="575" y="330" width="305" height="52"/>
         <text x="587" y="352" class="mono">/clock · rosgraph_msgs/Clock</text>
-        <text x="587" y="370" class="small" lang="zh-CN">设了 use_sim_time 的节点的 now()</text><text x="587" y="370" class="small" lang="en">now() of every use_sim_time node</text>
-        <text x="587" y="388" class="small" lang="zh-CN">先起仿真和这座桥</text><text x="587" y="388" class="small" lang="en">start the sim and this bridge first</text></g>
+        <text x="587" y="372" class="small" lang="zh-CN">先起仿真和这座桥</text><text x="587" y="372" class="small" lang="en">start the sim and this bridge first</text></g>
 
       <g data-step="2"><rect class="box" x="34" y="210" width="252" height="50"/>
         <text x="46" y="230" class="mono">Sensors · gpu_lidar</text>
@@ -467,10 +466,89 @@ output    one period 1 / 50 Hz = 0.02 s
         <path class="arrow" d="M318 72 L288 72"/></g>
 
       <g data-step="7"><text x="332" y="176" class="small" lang="zh-CN">只转换声明过的类型对</text><text x="332" y="176" class="small" lang="en">converts declared pairs only</text>
-        <text x="332" y="192" class="small" lang="zh-CN">两侧类型都要对上</text><text x="332" y="192" class="small" lang="en">types must match on both sides</text>
-        <rect class="box ros" x="575" y="150" width="305" height="50"/>
-        <text x="587" y="170" class="mono">RViz2 · tf2 listener</text>
-        <text x="587" y="188" class="small" lang="zh-CN">use_sim_time:=true · 按时间戳查 tf</text><text x="587" y="188" class="small" lang="en">use_sim_time:=true · tf looked up by stamp</text></g>
+        <text x="332" y="192" class="small" lang="zh-CN">两侧类型都要对上</text><text x="332" y="192" class="small" lang="en">types must match on both sides</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) 两种时钟：设了 use_sim_time 的节点 ↔ 忘了设的 RViz2</h3><h3 lang="en">(c) Two clocks: a node with use_sim_time ↔ an RViz2 without it</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 430" data-interval="2800"
+         data-captions='["全图：左边是仿真一侧，Gazebo、它的 /clock 和一个设了 use_sim_time:=true 的节点；右边是没设 use_sim_time 就启动的 RViz2，它的系统时钟和它的 tf2 缓冲区。120 s 代表正文里「第 120 秒」这样的仿真时刻，是举例；约 18 亿秒是 Unix 时间。按播放逐步看。",
+           "1. Gazebo 发布自己的仿真时钟，桥把它转成类型为 rosgraph_msgs/msg/Clock 的 /clock。它从仿真开始算起，这里约 120 s，可以比真实时间慢，暂停时就停住。",
+           "2. 设了 use_sim_time:=true 的节点，这里是 robot_state_publisher，订阅 /clock：now() 返回收到的最新仿真时刻 120 s，用 create_timer 建的定时器也跟着它走。",
+           "3. Gazebo 里的 DiffDrive 经桥发布 odom → base_link，打的是仿真时间戳；RViz2 里的 tf2 缓冲区存下这些样本，最新的约在 120 s。",
+           "4. RViz2 启动时没设 use_sim_time，它默认是 false，所以它的时钟读系统时间：now() 是 Unix 时间，约 18 亿秒。",
+           "5. RViz2 按自己的「现在」查变换。请求时刻比最新样本晚了十几亿秒，tf2 报 Lookup would require extrapolation into the future，并给出请求时刻和最新数据的时刻。",
+           "6. 屏幕上的结果：按「现在」取变换的显示（例如 RobotModel）报错；LaserScan 是否也丢弃扫描取决于它按哪个时刻查变换，本页没有对照 rviz2 源码核对（推断）。线上的消息并没有丢，只是两个时钟对不上。",
+           "7. 规则：仿真时每个节点都设 use_sim_time:=true，包括 robot_state_publisher、RViz2 和你自己写的节点。反过来也会坏：用墙上时间给消息打戳的节点，在仿真时间里的其他节点查不到它。"]'
+         data-captions-en='["The whole picture: on the left the simulated side, Gazebo, its /clock and a node with use_sim_time:=true; on the right an RViz2 started without use_sim_time, with its system clock and its tf2 buffer. 120 s stands for a simulated time such as second 120 in the text, an example; about 1.8 billion seconds is Unix time. Press Play to step through.",
+           "1. Gazebo publishes its simulation clock, and the bridge forwards it as /clock of type rosgraph_msgs/msg/Clock. It counts from the start of the simulation, about 120 s here, may run slower than real time, and stops when paused.",
+           "2. A node with use_sim_time:=true, here robot_state_publisher, subscribes to /clock: now() returns the latest simulated instant received, 120 s, and timers made with create_timer follow it too.",
+           "3. DiffDrive in Gazebo publishes odom → base_link through the bridge with simulation stamps; the tf2 buffer inside RViz2 stores the samples, the newest at about 120 s.",
+           "4. RViz2 was started without use_sim_time, which is false by default, so its clock reads system time: now() is Unix time, about 1.8 billion seconds.",
+           "5. RViz2 looks up the transform at its own now. The requested time is over a billion seconds after the newest sample, so tf2 raises Lookup would require extrapolation into the future, giving the requested time and the time of the latest data.",
+           "6. The result on screen: displays that take transforms at now, such as RobotModel, show errors; whether LaserScan also drops scans depends on which time it looks up, which this page has not checked against the rviz2 source (inference). No message was lost on the wire; only the two clocks disagree.",
+           "7. The rule: in simulation set use_sim_time:=true on every node, including robot_state_publisher, RViz2 and your own nodes. The reverse fails too: a node that stamps its messages with wall time cannot be looked up by the other nodes on simulation time."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="22" class="small" lang="zh-CN">仿真时间一侧</text><text x="20" y="22" class="small" lang="en">simulation time side</text>
+      <text x="540" y="22" class="small" lang="zh-CN">没设 use_sim_time 的 RViz2</text><text x="540" y="22" class="small" lang="en">RViz2 without use_sim_time</text>
+      <line x1="470" y1="30" x2="470" y2="410" class="lane"/>
+      <rect class="box gz" x="20" y="32" width="150" height="62"/>
+      <text x="32" y="54" class="mono">Gazebo</text>
+      <text x="32" y="74" class="small" lang="zh-CN">仿真时钟</text><text x="32" y="74" class="small" lang="en">simulation clock</text>
+      <rect class="box gz" x="200" y="252" width="210" height="62"/>
+      <text x="212" y="274" class="mono">DiffDrive</text>
+      <text x="212" y="294" class="small" lang="zh-CN">经桥发 /tf · 仿真时间戳</text><text x="212" y="294" class="small" lang="en">sends /tf via the bridge · sim stamps</text>
+      <rect class="box" x="540" y="32" width="220" height="62"/>
+      <text x="552" y="54" lang="zh-CN">系统时钟</text><text x="552" y="54" lang="en">system clock</text>
+      <text x="552" y="74" class="small" lang="zh-CN">Unix 时间</text><text x="552" y="74" class="small" lang="en">Unix time</text>
+      <rect class="box ros" x="540" y="252" width="200" height="62"/>
+      <text x="552" y="274" lang="zh-CN">RViz2 的 tf2 缓冲区</text><text x="552" y="274" lang="en">tf2 buffer in RViz2</text>
+      <text x="552" y="294" class="small">odom → base_link ≈ 120 s</text>
+
+      <!-- step 1: /clock -->
+      <g data-step="1">
+        <path class="arrow" d="M172 63 L196 63"/>
+        <rect class="box ros" x="200" y="32" width="210" height="72"/>
+        <text x="212" y="54" class="mono">/clock</text>
+        <text x="212" y="74" class="small">rosgraph_msgs/msg/Clock</text>
+        <text x="212" y="92" class="small" lang="zh-CN">例：120 s（经桥）</text><text x="212" y="92" class="small" lang="en">e.g. 120 s (via the bridge)</text></g>
+      <!-- step 2: node with use_sim_time -->
+      <g data-step="2">
+        <path class="arrow" d="M300 106 L300 136"/>
+        <rect class="box ros" x="200" y="140" width="210" height="70"/>
+        <text x="212" y="160" class="mono">robot_state_publisher</text>
+        <text x="212" y="178" class="small">use_sim_time:=true</text>
+        <text x="212" y="196" class="small" lang="zh-CN">now() = 120 s</text><text x="212" y="196" class="small" lang="en">now() = 120 s</text></g>
+      <!-- step 3: tf samples into the buffer -->
+      <g data-step="3">
+        <path class="arrow" d="M428 283 L536 283"/>
+        <text x="434" y="276" class="small">/tf</text>
+        <rect class="hl" x="540" y="252" width="200" height="62"/></g>
+      <!-- step 4: RViz2 on system time -->
+      <g data-step="4">
+        <path class="arrow" d="M650 96 L650 136"/>
+        <rect class="box ros" x="540" y="140" width="320" height="70"/>
+        <text x="552" y="160" class="mono">RViz2</text>
+        <text x="552" y="178" class="small" lang="zh-CN">use_sim_time = false（默认）</text><text x="552" y="178" class="small" lang="en">use_sim_time = false (default)</text>
+        <text x="552" y="196" class="small" lang="zh-CN">now() ≈ 18 亿 s</text><text x="552" y="196" class="small" lang="en">now() ≈ 1.8 billion s</text></g>
+      <!-- step 5: lookup at now fails -->
+      <g data-step="5">
+        <path class="arrow" d="M700 212 L700 248"/>
+        <text x="540" y="344" style="fill: var(--ink-2)">✕ extrapolation into the future</text>
+        <text x="540" y="362" class="small" lang="zh-CN">请求 ≈ 18 亿 s，最新数据 ≈ 120 s</text><text x="540" y="362" class="small" lang="en">requested ≈ 1.8 billion s, latest ≈ 120 s</text></g>
+      <!-- step 6: displays fail -->
+      <g data-step="6">
+        <text x="540" y="392" style="fill: var(--ink-2)" lang="zh-CN">✕ RobotModel 报错</text><text x="540" y="392" style="fill: var(--ink-2)" lang="en">✕ RobotModel shows errors</text>
+        <text x="540" y="410" style="fill: var(--ink-2)" lang="zh-CN">LaserScan 是否丢弃扫描：未核对</text><text x="540" y="410" style="fill: var(--ink-2)" lang="en">Whether LaserScan drops scans: unchecked</text></g>
+      <!-- step 7: the rule -->
+      <g data-step="7">
+        <text x="20" y="372" lang="zh-CN">规则：每个节点都设 use_sim_time:=true</text><text x="20" y="372" lang="en">Rule: use_sim_time:=true on every node</text>
+        <text x="20" y="392" class="small" lang="zh-CN">包括 robot_state_publisher、RViz2 和你的节点</text><text x="20" y="392" class="small" lang="en">including robot_state_publisher, RViz2 and your nodes</text></g>
     </svg>
   </div>
 
@@ -759,7 +837,7 @@ ros2 topic info -v /cmd_vel</pre></li>
       <p lang="en">2. Gazebo and all other nodes run with <code>use_sim_time:=true</code>; only RViz2 forgot it. What are you most likely to see?</p>
       <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">一切正常，只是显示稍有延迟，因为 RViz2 只是一个看的工具</span><span lang="en">Everything works, just with slightly delayed display, because RViz2 only views</span></label>
       <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">RViz2 收不到 <code>/scan</code>，因为它和桥的 QoS 不兼容</span><span lang="en">RViz2 receives no <code>/scan</code>, because its QoS is incompatible with the bridge</span></label>
-      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">RViz2 按墙上时间（约 17 亿秒）去查只有仿真时间戳的变换，报 extrapolation，激光扫描被丢弃</span><span lang="en">RViz2 looks up, at wall time (about 1.7 billion seconds), transforms that carry only simulation stamps, gets extrapolation errors, and drops the scans</span></label>
+      <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">RViz2 按墙上时间（约 18 亿秒）去查只有仿真时间戳的变换，报 extrapolation</span><span lang="en">RViz2 looks up, at wall time (about 1.8 billion seconds), transforms that carry only simulation stamps, and gets extrapolation errors</span></label>
       <div class="why" hidden><span lang="zh-CN">RViz2 本身是 tf2 监听者，用自己的时钟查变换；它的「现在」比缓冲区里最新的仿真样本晚了十几亿秒。a 错在 RViz2 不只是看，它要按时刻查 tf。b 混淆了两件事：<code>use_sim_time</code> 不影响 QoS 匹配，消息照样能收到，只是变换查不到。</span><span lang="en">RViz2 is itself a tf2 listener and looks up transforms with its own clock; its “now” is over a billion seconds past the newest simulated sample in the buffer. a is wrong because RViz2 does more than view: it looks up tf at given times. b confuses two things: <code>use_sim_time</code> does not affect QoS matching; messages still arrive, only the transforms cannot be found.</span></div>
     </div>
     <div class="q" data-answer="a">

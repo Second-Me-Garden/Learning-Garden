@@ -270,7 +270,7 @@
 
   <h3 lang="zh-CN">B · CPU 怎么在向量表的 16 个入口里选一个</h3><h3 lang="en">B · How the CPU picks one of the 16 vector-table entries</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 440" data-interval="2200"
+    <svg data-diagram viewBox="0 0 900 500" data-interval="2200"
          data-captions='["全图：右边是 VBAR_EL1 指向的向量表，4 行 × 4 列 = 16 个入口，每个 0x80 字节（32 条指令），共 0x800 字节。行是异常从哪来（组基址），列是什么类型（类型偏移）。第 1–3 步是 CPU 的选择过程（左列两步加上方的相加框），第 4–5 步是跳转和入口桩，例子是用户态的一条 svc。按「播放」逐步走。",
            "1. 定来源：svc 在 EL0 执行，EL0 是 AArch64，异常进 EL1，属于来自更低 EL、AArch64 这一组，组基址 0x400。另外三组：当前 EL 用 SP_EL0 是 0x000，当前 EL 用 SP_ELx 是 0x200，更低 EL 全是 AArch32 是 0x600。",
            "2. 分类：svc 是同步异常（Synchronous），类型偏移 +0x000。另外三列：IRQ +0x080、FIQ +0x100、SError +0x180。",
@@ -350,16 +350,16 @@
         <text x="520" y="325" class="small" lang="zh-CN">VBAR_EL1 低 11 位为 0（2 KB 对齐）</text><text x="520" y="325" class="small" lang="en">VBAR_EL1 low 11 bits are 0 (2 KB aligned)</text></g>
 
       <!-- step 5: the stubs -->
-      <g data-step="5"><path class="arrow" d="M350 340 L350 360"/>
-        <rect class="box linux" x="20" y="360" width="420" height="66"/>
-        <text x="32" y="383" class="mono">entry.S: kernel_ventry 0, t, 64, sync</text>
-        <text x="32" y="408" class="small" lang="zh-CN">预留 pt_regs → b el0t_64_sync</text><text x="32" y="408" class="small" lang="en">reserve pt_regs → b el0t_64_sync</text>
-        <text x="428" y="383" text-anchor="end" class="small" style="fill: var(--linux)">Linux</text></g>
-      <g data-step="5"><path class="arrow" d="M670 340 L670 360"/>
-        <rect class="box xnu" x="460" y="360" width="420" height="66"/>
-        <text x="472" y="383" class="mono">locore.s: Lel0_synchronous_vector_64</text>
-        <text x="472" y="408" class="small">MAP_KERNEL → el0_synchronous_vector_64_long → fleh_synchronous</text>
-        <text x="868" y="383" text-anchor="end" class="small" style="fill: var(--xnu)">XNU</text></g>
+      <g data-step="5"><path class="arrow" d="M352 340 V387 H340"/>
+        <rect class="box linux" x="20" y="355" width="320" height="60"/>
+        <text x="32" y="377" class="mono">entry.S: kernel_ventry 0, t, 64, sync</text>
+        <text x="32" y="402" class="small" lang="zh-CN">预留 pt_regs → b el0t_64_sync</text><text x="32" y="402" class="small" lang="en">reserve pt_regs → b el0t_64_sync</text>
+        <text x="330" y="402" text-anchor="end" class="small" style="fill: var(--linux)">Linux</text></g>
+      <g data-step="5"><path class="arrow" d="M352 340 V457 H340"/>
+        <rect class="box xnu" x="20" y="425" width="320" height="60"/>
+        <text x="32" y="447" class="mono">locore.s: Lel0_synchronous_vector_64</text>
+        <text x="32" y="472" class="small">MAP_KERNEL → … → fleh_synchronous</text>
+        <text x="330" y="472" text-anchor="end" class="small" style="fill: var(--xnu)">XNU</text></g>
     </svg>
   </div>
 
@@ -370,7 +370,7 @@
       <li><span lang="zh-CN">工具链：</span><span lang="en">Toolchain:</span><pre>brew install qemu llvm lld make
 export PATH="$(brew --prefix llvm)/bin:$(brew --prefix make)/libexec/gnubin:$PATH"</pre>
         <span lang="zh-CN">Linux 内核支持纯 LLVM 构建（<code>LLVM=1</code>），不需要 GNU 交叉 gcc。macOS 自带的 <code>make</code> 太旧，用 Homebrew 的 gmake。</span><span lang="en">The Linux kernel supports a pure LLVM build (<code>LLVM=1</code>), so no GNU cross gcc is needed. The <code>make</code> that ships with macOS is too old; use Homebrew's gmake.</span></li>
-      <li><span lang="zh-CN">源码：</span><span lang="en">Source:</span><pre>git clone --depth 1 https://github.com/torvalds/linux.git
+      <li><span lang="zh-CN">源码：</span><span lang="en">Source:</span><pre>git clone --depth 1 --branch v7.3.1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 cd linux
 make LLVM=1 ARCH=arm64 defconfig
 make LLVM=1 ARCH=arm64 -j"$(sysctl -n hw.ncpu)" Image</pre>
@@ -401,7 +401,7 @@ sysctl kern.version kern.osproductversion hw.ncpu machdep.cpu.brand_string</pre>
       <li><span lang="zh-CN">已加载的内核扩展（现在大多数是 Apple 自己的，第三方驱动已迁到 DriverKit）：</span><span lang="en">Loaded kernel extensions (most are now Apple's own; third-party drivers have moved to DriverKit):</span><pre>kmutil showloaded --list-only | head -30</pre></li>
       <li><span lang="zh-CN">内核日志（相当于 dmesg）：</span><span lang="en">The kernel log (the equivalent of dmesg):</span><pre>log show --last 5m --predicate 'process == "kernel"' | tail -50</pre></li>
       <li><span lang="zh-CN">看一个进程的系统调用（<code>dtruss</code> 需要关 SIP，先用文件系统视角的 <code>fs_usage</code>）：</span><span lang="en">Watch a process's system calls (<code>dtruss</code> needs SIP off, so start with the filesystem view from <code>fs_usage</code>):</span><pre>sudo fs_usage -w -f filesys -t 5 2>/dev/null | head -50</pre></li>
-      <li><span lang="zh-CN">下载 XNU 源码，找到动画里的函数：</span><span lang="en">Download the XNU source and find the functions from the diagram:</span><pre>git clone --depth 1 https://github.com/apple-oss-distributions/xnu.git
+      <li><span lang="zh-CN">下载 XNU 源码，找到动画里的函数：</span><span lang="en">Download the XNU source and find the functions from the diagram:</span><pre>git clone --depth 1 --branch xnu-12377.121.6 https://github.com/apple-oss-distributions/xnu.git
 cd xnu
 grep -n "fleh_synchronous\|sleh_synchronous" osfmk/arm64/locore.s osfmk/arm64/sleh.c | head
 grep -n "^[0-9]" bsd/kern/syscalls.master | head -20   # BSD syscall 表

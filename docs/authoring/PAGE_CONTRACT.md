@@ -134,6 +134,8 @@ A topic colour carries one fixed meaning, the same on every page of the topic (D
 
 A wrong quiz answer is marked ✗ in --ink-2; --warn equals the kernel ochre and is not used.
 
+A lit diagram step is a tint, a heavier stroke and a glow; a box with a topic colour keeps that colour when lit (`.box.linux` stays ochre, `.box.cuda` stays plum), so the step never repaints a side in the accent green (2026-11-05). Diagram box borders use `--box-line` (3:1 or better against the diagram frame in both themes); `--line` stays for tables, rules and dashed lanes.
+
 ## Accuracy
 
 - No invented APIs, commands, package names, file paths or numbers. If a path is only approximately known, write 大致路径 / approximate path next to it.

@@ -66,8 +66,8 @@
   <ol>
     <li lang="zh-CN">固件 / bootloader（QEMU 里是 QEMU 自己；真机上是 U-Boot、UEFI 等）把内核 <code>Image</code> 放进内存，<code>x0</code> = 设备树（DTB）物理地址，MMU 关闭，CPU 处于 EL2 或 EL1。</li>
     <li lang="en">The firmware / bootloader (QEMU itself under QEMU; U-Boot, UEFI and so on on real hardware) places the kernel <code>Image</code> in memory, with <code>x0</code> = the physical address of the device tree (DTB), the MMU off, and the CPU at EL2 or EL1.</li>
-    <li lang="zh-CN"><code>Image</code> 开头是 64 字节的 header：第一条指令是跳转到真正入口的分支，后面有 <code>text_offset</code>、<code>image_size</code>、flags，偏移 0x38 处是魔数 <code>"ARM\x64"</code>。</li>
-    <li lang="en"><code>Image</code> starts with a 64-byte header: the first instruction is a branch to the real entry point, followed by <code>text_offset</code>, <code>image_size</code> and flags; at offset 0x38 is the magic number <code>"ARM\x64"</code>.</li>
+    <li lang="zh-CN"><code>Image</code> 开头是 64 字节的 header：第一条指令是一条无实际作用、只为凑出 UEFI 要的 "MZ" 签名的 <code>ccmp</code>（<code>efi_signature_nop</code>），第二条才是跳转到真正入口的分支，后面有 <code>text_offset</code>、<code>image_size</code>、flags，偏移 0x38 处是魔数 <code>"ARM\x64"</code>。</li>
+    <li lang="en"><code>Image</code> starts with a 64-byte header: the first instruction is a no-effect <code>ccmp</code> whose encoding forms the "MZ" signature UEFI needs (<code>efi_signature_nop</code>), the second is the branch to the real entry point, followed by <code>text_offset</code>, <code>image_size</code> and flags; at offset 0x38 is the magic number <code>"ARM\x64"</code>.</li>
     <li lang="zh-CN"><code>primary_entry</code>（<code>arch/arm64/kernel/head.S</code>）：保存启动参数、处理 EL2（初始化或降到 EL1）、建立最初的页表。</li>
     <li lang="en"><code>primary_entry</code> (<code>arch/arm64/kernel/head.S</code>): saves the boot arguments, handles EL2 (initialises it or drops to EL1), and builds the initial page tables.</li>
     <li lang="zh-CN"><code>__primary_switch</code>：调用 <code>__enable_mmu</code> 写 <code>TTBR0/1_EL1</code> 和 <code>SCTLR_EL1</code> 打开 MMU，之后跳到运行在内核虚拟地址上的 <code>__primary_switched</code>：设好 <code>VBAR_EL1</code>（Phase 0 的向量表）、init 任务的栈，再 <code>bl start_kernel</code>。</li>
