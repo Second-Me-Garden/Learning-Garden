@@ -167,8 +167,8 @@ ceiling = min(intensity x 320 GB/s, 8.1 TFLOP/s)
     <li lang="zh-CN"><strong>其他</strong>：LG Throttle（global 和 local 访存指令太密，常见于寄存器溢出）、Wait（固定延迟的依赖，比如相互依赖的 FFMA 之间 4 个周期，通常只在已经很优化的 kernel 里排第一）、No Instructions（指令缓存缺失，或 grid 不足一波的很短的 kernel）。</li>
     <li lang="en"><strong>Others</strong>: LG Throttle (global and local memory instructions too dense, common with register spills), Wait (a fixed-latency dependency, such as the 4 cycles between dependent FFMAs, usually on top only in already well-optimised kernels), No Instructions (instruction-cache misses, or very short kernels with less than one full wave).</li>
   </ul>
-  <p lang="zh-CN">停顿原因指的是方向，不是答案：改一处，再剖析一次，看主导原因有没有换。Lab A 就按这个循环走两轮：朴素版 → 分块版 → 寄存器分块版。</p>
-  <p lang="en">A stall reason points a direction; it is not an answer. Change one thing, profile again, and see whether the dominant reason has changed. Lab A walks this loop twice: naive, then tiled, then register-tiled.</p>
+  <p lang="zh-CN">停顿原因指的是方向，不是答案：改一处，再剖析一次，看主导原因有没有换。Lab A 就按这个循环走：朴素版 → 分块版 → 寄存器分块版，两次修复。图解 (c) 把三次剖析逐步画出来。</p>
+  <p lang="en">A stall reason points a direction; it is not an answer. Change one thing, profile again, and see whether the dominant reason has changed. Lab A walks this loop: naive, then tiled, then register-tiled, with two fixes. Diagram (c) steps through the three profiles.</p>
   <p lang="zh-CN">延伸阅读：参考书目里没有书逐条讲这些停顿原因；依据是 Profiling Guide 的「Warp Stall Reasons」一节（v2026.3.1）。背后的硬件道理在 PMPP 第 5 版第 4 章（warp 调度与延迟容忍）和 Phase 2 的概念 2。</p>
   <p lang="en">Further reading: no book in the bibliography goes through these stall reasons one by one; this rests on the “Warp Stall Reasons” part of the Profiling Guide (v2026.3.1). The hardware behind them is in PMPP, 5th ed., Chapter 4 (warp scheduling and latency tolerance) and Phase 2’s concept 2.</p>
 
@@ -319,6 +319,86 @@ ceiling = min(intensity x 320 GB/s, 8.1 TFLOP/s)
       <g data-step="5"><rect class="box" x="590" y="40" width="290" height="140"/><text x="604" y="64" lang="zh-CN">Turing · sm_75（T4）</text><text x="604" y="64" lang="en">Turing · sm_75 (T4)</text><text x="604" y="90" class="mono">FP16 × FP16 → FP16 / FP32</text><text x="604" y="114" class="mono">INT8, INT4 → INT32; INT1 experimental</text><text x="604" y="138" class="small" lang="zh-CN">FP16 形状：16×16×16、32×8×16、8×32×16</text><text x="604" y="138" class="small" lang="en">FP16 shapes: 16×16×16, 32×8×16, 8×32×16</text><text x="604" y="160" class="small" lang="zh-CN">每个 SM 8 个 Tensor Core</text><text x="604" y="160" class="small" lang="en">8 tensor cores per SM</text></g>
       <g data-step="6"><rect class="box" x="590" y="196" width="290" height="112"/><text x="604" y="220" lang="zh-CN">Ampere 起 · sm_80+</text><text x="604" y="220" lang="en">From Ampere · sm_80+</text><text x="604" y="246" class="mono">BF16 → FP32</text><text x="604" y="268" class="mono">TF32 16×16×8 → FP32</text><text x="604" y="292" class="small" lang="zh-CN">Ada · sm_89（L4）：再加 FP8</text><text x="604" y="292" class="small" lang="en">Ada · sm_89 (L4): adds FP8</text><text x="604" y="328" class="small" lang="zh-CN">FP64：只有 sm_80、sm_90、sm_100</text><text x="604" y="328" class="small" lang="en">FP64: sm_80, sm_90, sm_100 only</text></g>
       <g data-step="7"><text x="30" y="404" class="small" lang="zh-CN">cuBLAS：GemmEx 的 FP16 输入走 Tensor Core；T4 上 FP32 的 Sgemm 走 FP32 核，因为没有 TF32（推断）</text><text x="30" y="404" class="small" lang="en">cuBLAS: GemmEx with FP16 inputs uses the tensor cores; on a T4, FP32 Sgemm uses the FP32 cores, since there is no TF32 (inference)</text><text x="30" y="424" class="small" lang="zh-CN">默认数学模式 CUBLAS_DEFAULT_MATH 只在精度不降低时才换用 Tensor Core</text><text x="30" y="424" class="small" lang="en">The default math mode, CUBLAS_DEFAULT_MATH, switches to tensor cores only when precision does not drop</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) 剖析、修复、再剖析：主导停顿怎样换</h3><h3 lang="en">(c) Profile, fix, profile again: how the dominant stall changes</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 290" data-interval="2800"
+         data-captions='["全图：概念 5 的循环在 Lab A 的矩阵乘上走三轮：用 ncu 剖析，读主导的停顿原因，改一处，再剖析。每一列是一轮：命令、停顿原因，以及图解 (a) 里这个 kernel 的上限。Lab A 没有运行过，所以停顿一个也没测：标出的第一名是本页的预期，点是按代码里的读次数算的上限，和图解 (a) 一样。按播放逐步看。",
+           "第 1 步，第一轮：只剖析朴素版的一次启动，只收回答「瓶颈在哪」的几个 section：ncu -k regex:mm_naive -c 1，加 SpeedOfLight、Occupancy、LaunchStats、SchedulerStats、WarpStateStats 和 SourceCounters。",
+           "第 2 步，预期排第一的是 Long Scoreboard，SourceCounters 把它记在内层循环用到 A[...] 和 B[...] 的那一行：warp 在等 global 读。在图解 (a) 里它位于 0.25 FLOP/byte，上限 80 GFLOP/s，深在带宽斜线上。",
+           "第 3 步，修复是 Phase 1 的分块（TILE = 16）：每个值在 shared memory 里复用 16 次。用同一组 section 剖析 mm_tiled。在图解 (a) 里点爬到 4 FLOP/byte，上限 1.28 TFLOP/s，高了 16 倍，仍在约 25 的 ridge 左边。",
+           "第 4 步，Long Scoreboard 应当明显下降，第一名换成 MIO Throttle 或 Short Scoreboard，或者 Barrier：每次乘加要从 shared memory 读两个数，每个块的两头还要等 __syncthreads()。这是推断，由 Lab A 检验；再加 MemoryWorkloadAnalysis_Tables 确认 shared memory 没有 bank 冲突（Phase 1 算过它没有）。",
+           "第 5 步，修复是寄存器分块 mm_reg：每个线程在寄存器里算 4 × 4 个结果，每次 shared 读喂给好几次乘加；64 × 64 的块让 intensity 到 16 FLOP/byte，上限 5.1 TFLOP/s，接近 ridge。Lab A 第 6 步只为它收 roofline；要看它的停顿，用同一组 section 再剖析一次。",
+           "第 6 步，本页没有给出 mm_reg 预期的第一名停顿；再剖析一次时排第一的那个决定下一处改什么。停顿原因指的是方向，不是答案，这个循环的终点在 cuBLAS 附近，也就是概念 7 讲的上限。"]'
+         data-captions-en='["The whole picture: the loop of concept 5, run three times on the matrix multiplies of Lab A: profile with ncu, read the dominant stall reason, change one thing, profile again. Each column is one round: the command, the stall reasons, and the ceiling of the kernel from diagram (a). Lab A has not been run, so no stall here is measured: the top reasons marked are what this page expects, and the points are ceilings counted from the code, as in diagram (a). Press Play to step through.",
+           "Step 1, round one: profile a single launch of the naive kernel, collecting only the sections that answer where the bottleneck is: ncu -k regex:mm_naive -c 1 with SpeedOfLight, Occupancy, LaunchStats, SchedulerStats, WarpStateStats and SourceCounters.",
+           "Step 2, the expected top stall is Long Scoreboard, which SourceCounters charges to the inner-loop line that uses A[...] and B[...]: the warps are waiting on global loads. In diagram (a) it sits at 0.25 FLOP/byte, a ceiling of 80 GFLOP/s, deep on the bandwidth slope.",
+           "Step 3, the fix is the tiling of Phase 1 (TILE = 16): each value is reused 16 times from shared memory. Profile mm_tiled with the same sections. In diagram (a) the point climbs to 4 FLOP/byte and a ceiling of 1.28 TFLOP/s, 16 times higher, still left of the ridge at about 25.",
+           "Step 4, Long Scoreboard should drop clearly, and the top reason should become MIO Throttle or Short Scoreboard, or Barrier: each FMA now reads two values from shared memory, and every tile waits at __syncthreads() at both ends. This is an inference that Lab A checks; adding MemoryWorkloadAnalysis_Tables confirms that shared memory has no bank conflicts (Phase 1 worked out that there are none).",
+           "Step 5, the fix is register tiling, mm_reg: each thread computes 4 × 4 results in registers, so each shared load feeds several FMAs, and 64 × 64 blocks bring the intensity to 16 FLOP/byte, a ceiling of 5.1 TFLOP/s, close to the ridge. Lab A only collects its roofline; to see its stalls, profile it again with the same sections.",
+           "Step 6, the page names no expected top stall for mm_reg; whichever reason comes out on top when you profile it again sets the next change. A stall reason points a direction and is not an answer, and the loop ends near cuBLAS, the ceiling of concept 7."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <line x1="310" y1="12" x2="310" y2="280" class="lane"/><line x1="600" y1="12" x2="600" y2="280" class="lane"/>
+      <text x="30" y="22" class="mono" lang="zh-CN">第 1 轮 · mm_naive</text><text x="30" y="22" class="mono" lang="en">round 1 · mm_naive</text>
+      <rect class="box" x="30" y="112" width="196" height="20"/><text x="36" y="126" class="small">Long Scoreboard</text>
+      <rect class="box" x="30" y="136" width="196" height="20"/><text x="36" y="150" class="small">MIO Throttle / Short Scoreboard</text>
+      <rect class="box" x="30" y="160" width="196" height="20"/><text x="36" y="174" class="small">Barrier</text>
+      <text x="320" y="22" class="mono" lang="zh-CN">第 2 轮 · mm_tiled</text><text x="320" y="22" class="mono" lang="en">round 2 · mm_tiled</text>
+      <rect class="box" x="320" y="112" width="196" height="20"/><text x="326" y="126" class="small">Long Scoreboard</text>
+      <rect class="box" x="320" y="136" width="196" height="20"/><text x="326" y="150" class="small">MIO Throttle / Short Scoreboard</text>
+      <rect class="box" x="320" y="160" width="196" height="20"/><text x="326" y="174" class="small">Barrier</text>
+      <text x="610" y="22" class="mono" lang="zh-CN">第 3 轮 · mm_reg</text><text x="610" y="22" class="mono" lang="en">round 3 · mm_reg</text>
+      <!-- step 1: profile mm_naive -->
+      <g data-step="1">
+        <rect class="box" x="30" y="32" width="266" height="68"/>
+        <text x="38" y="52" class="mono">ncu -k regex:mm_naive -c 1</text>
+        <text x="38" y="70" class="small">--section WarpStateStats</text>
+        <text x="38" y="88" class="small">--section SourceCounters  …</text></g>
+      <!-- step 2: Long Scoreboard on top; naive point -->
+      <g data-step="2">
+        <rect class="hl" x="30" y="112" width="196" height="20"/>
+        <text x="234" y="126" class="small" lang="zh-CN">预期第一</text><text x="234" y="126" class="small" lang="en">expected top</text>
+        <text x="30" y="202" lang="zh-CN">warp 在等 global 读</text><text x="30" y="202" lang="en">warps wait on global loads</text>
+        <text x="30" y="222" class="small" lang="zh-CN">修复：分块进 shared memory</text><text x="30" y="222" class="small" lang="en">fix: tiles in shared memory</text>
+        <text x="30" y="250" class="mono">0.25 FLOP/B, ≤ 80 GFLOP/s</text>
+        <text x="30" y="270" class="small" lang="zh-CN">上限，未测量 · 见图解 (a) 第 3 步</text><text x="30" y="270" class="small" lang="en">ceiling, not measured · (a) step 3</text></g>
+      <!-- step 3: tile, re-profile; point moves -->
+      <g data-step="3">
+        <rect class="box" x="320" y="32" width="266" height="68"/>
+        <text x="328" y="52" class="small" lang="zh-CN">修复 1：TILE = 16 的分块</text><text x="328" y="52" class="small" lang="en">fix 1: tiles, TILE = 16</text>
+        <text x="328" y="72" class="mono">ncu -k regex:mm_tiled -c 1</text>
+        <text x="328" y="90" class="small" lang="zh-CN">同一组 section</text><text x="328" y="90" class="small" lang="en">the same sections</text>
+        <text x="320" y="250" class="mono">4 FLOP/B, ≤ 1.28 TFLOP/s</text>
+        <text x="320" y="270" class="small" lang="zh-CN">上限，未测量 · 见图解 (a) 第 4 步</text><text x="320" y="270" class="small" lang="en">ceiling, not measured · (a) step 4</text></g>
+      <!-- step 4: MIO / Short Scoreboard (or Barrier) on top -->
+      <g data-step="4">
+        <text x="524" y="126" class="small" style="fill: var(--ink-2)" lang="zh-CN">↓ 下降</text><text x="524" y="126" class="small" style="fill: var(--ink-2)" lang="en">↓ drops</text>
+        <rect class="hl" x="320" y="136" width="196" height="20"/>
+        <text x="524" y="150" class="small" lang="zh-CN">预期第一</text><text x="524" y="150" class="small" lang="en">expected top</text>
+        <text x="524" y="174" class="small" lang="zh-CN">或者它</text><text x="524" y="174" class="small" lang="en">or this</text>
+        <text x="320" y="202" lang="zh-CN">每次乘加读两次 shared</text><text x="320" y="202" lang="en">two shared reads per FMA</text>
+        <text x="320" y="222" class="small" lang="zh-CN">修复：在寄存器里复用</text><text x="320" y="222" class="small" lang="en">fix: reuse in registers</text></g>
+      <!-- step 5: register tiling, re-profile; point near the ridge -->
+      <g data-step="5">
+        <rect class="box" x="610" y="32" width="266" height="68"/>
+        <text x="618" y="52" class="small" lang="zh-CN">修复 2：寄存器分块 4 × 4</text><text x="618" y="52" class="small" lang="en">fix 2: register tiles, 4 × 4</text>
+        <text x="618" y="72" class="mono">ncu -k regex:mm_reg -c 1</text>
+        <text x="618" y="90" class="small" lang="zh-CN">64 × 64 的块，再剖析一次</text><text x="618" y="90" class="small" lang="en">64 × 64 blocks, profile again</text>
+        <text x="610" y="250" class="mono">16 FLOP/B, ≤ 5.1 TFLOP/s</text>
+        <text x="610" y="270" class="small" lang="zh-CN">上限，未测量 · 见图解 (a) 第 5 步</text><text x="610" y="270" class="small" lang="en">ceiling, not measured · (a) step 5</text></g>
+      <!-- step 6: next top stall not stated -->
+      <g data-step="6">
+        <rect class="box" x="610" y="110" width="266" height="76"/>
+        <text x="620" y="134" lang="zh-CN">? 本页没有给出预期的第一名</text><text x="620" y="134" lang="en">? no expected top stated here</text>
+        <text x="620" y="156" class="small" lang="zh-CN">再剖析时排第一的决定下一处</text><text x="620" y="156" class="small" lang="en">the top when profiled again sets the next fix</text>
+        <text x="620" y="176" class="small" lang="zh-CN">终点：cuBLAS，概念 7 的上限</text><text x="620" y="176" class="small" lang="en">end: cuBLAS, the ceiling of concept 7</text>
+        <text x="610" y="222" class="small" lang="zh-CN">方向，不是答案</text><text x="610" y="222" class="small" lang="en">a direction, not an answer</text></g>
     </svg>
   </div>
 

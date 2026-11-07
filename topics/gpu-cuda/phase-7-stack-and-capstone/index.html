@@ -167,8 +167,8 @@ L4   (8.9)     sm_89 cubin          JIT compute_75 PTX
   <p lang="en">Further reading: “CUDA Code Compilation” in Chapter 10 of <em>Professional CUDA C Programming</em>; this rests on the “Options for Steering GPU Code Generation” and “NVCC Examples” sections of the nvcc documentation (see Resources). The comparison table below puts four builds on three GPUs.</p>
 
   <h3 lang="zh-CN">5. 兼容性与 NGC 容器</h3><h3 lang="en">5. Compatibility and the NGC container</h3>
-  <p lang="zh-CN">概念 3 讲的是代码和 <strong>GPU</strong> 的兼容；这里讲工具链和 <strong>驱动</strong> 的兼容。CUDA Compatibility 文档（2026-09-09 版）把它分成三种，判断标准是驱动（<code>libcuda.so</code>）比编程序时的运行时新还是旧：</p>
-  <p lang="en">Concept 3 was about compatibility between code and the <strong>GPU</strong>; this one is about the toolkit and the <strong>driver</strong>. The CUDA Compatibility guide (edition of 2026-09-09) splits it three ways, by whether the driver (<code>libcuda.so</code>) is newer or older than the runtime the program was built with:</p>
+  <p lang="zh-CN">概念 3 讲的是代码和 <strong>GPU</strong> 的兼容；这里讲工具链和 <strong>驱动</strong> 的兼容。CUDA Compatibility 文档（2026-09-09 版）把它分成三种，判断标准是驱动（<code>libcuda.so</code>）比编程序时的运行时新还是旧。图解 (c) 把同一个构建放到这三种驱动上逐步画出：</p>
+  <p lang="en">Concept 3 was about compatibility between code and the <strong>GPU</strong>; this one is about the toolkit and the <strong>driver</strong>. The CUDA Compatibility guide (edition of 2026-09-09) splits it three ways, by whether the driver (<code>libcuda.so</code>) is newer or older than the runtime the program was built with. Diagram (c) steps one build through the three kinds of driver:</p>
   <ul>
     <li lang="zh-CN"><strong>向后兼容（驱动更新）</strong>：新驱动跑旧工具链编的程序，没有附加条件。这是最常见、最省事的升级方式。</li>
     <li lang="en"><strong>Backward compatibility (newer driver)</strong>: a newer driver runs programs built with an older toolkit, with no conditions. This is the commonest and simplest way to upgrade.</li>
@@ -302,9 +302,9 @@ L4   (8.9)     sm_89 cubin          JIT compute_75 PTX
   <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagrams</h2>
   <h3 lang="zh-CN">(a) nvcc → PTX → SASS → 加载时的 JIT</h3><h3 lang="en">(a) nvcc → PTX → SASS → JIT at load time</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 440" data-interval="2600"
-         data-captions='["全图：左边三列是构建时 nvcc 做的事，右边一列是加载时 CUDA 驱动做的事。例子是概念 4 推荐的发布构建：T4 和 L4 各一个 SASS，再加一份 compute_75 的 PTX。按播放逐步看。", "1. 源文件里既有主机代码也有设备代码。nvcc 把两者分开：主机代码交给主机编译器（例如 g++），设备代码走下面的两个阶段。", "2. 阶段 1：设备代码编成 PTX，一种虚拟 GPU 的汇编，总是文本。每个 -gencode 的 arch 跑一次阶段 1，所以这里有 compute_75 和 compute_89 两份。PTX ISA 9.4 随 CUDA 13.4 发布。", "3. 阶段 2：ptxas 把 PTX 编成某一代真实硬件的 SASS，装在 cubin 里。sm_75 的 SASS 只在 cc 7.x 里次版本不低于 5 的 GPU 上能用，sm_89 的只在 8.9 上能用。", "4. 链接：主机代码和 fatbin 合成一个可执行文件。这个 fatbin 里有两个 cubin 和一份 compute_75 的 PTX；compute_89 的 PTX 没有放进来，因为对应的 code 只写了 sm_89。cuobjdump -lelf -lptx 能列出它们。", "5. 在 T4（cc 7.5）上加载：驱动在 fatbin 里找到完全匹配的 sm_75 cubin，直接用，不需要编译。", "6. 在 L4（cc 8.9）上加载：sm_75 的 SASS 主版本不同，不能用；fatbin 里正好有 sm_89 的 cubin，直接用。", "7. 在更新的 GPU（例如 cc 12.0）上加载：两个 cubin 都不匹配，驱动拿 compute_75 的 PTX 现场 JIT 成这张卡的 SASS，并存进 compute cache（Linux 上默认 ~/.nv/ComputeCache），下次启动就不用再编。", "8. 两种失败。fatbin 里没有 PTX 时，更新的 GPU 上没有可用的 kernel 映像。用 CUDA 13.4 编出的 PTX 交给只有 r580 驱动的机器时，旧驱动的 JIT 不认识这么新的 PTX；小版本兼容只保证 SASS 能用。"]'
-         data-captions-en='["The whole picture: the three columns on the left are what nvcc does at build time, the column on the right is what the CUDA driver does at load time. The example is the release build recommended in concept 4: one SASS each for the T4 and the L4, plus compute_75 PTX. Press Play to step through.", "1. The source file holds both host code and device code. nvcc separates them: host code goes to the host compiler (such as g++), and device code goes through the two stages below.", "2. Stage 1: device code becomes PTX, the assembly language of a virtual GPU, always text. Stage 1 runs once per -gencode arch, so there are two copies here, compute_75 and compute_89. PTX ISA 9.4 ships with CUDA 13.4.", "3. Stage 2: ptxas compiles PTX into SASS for one real hardware generation, stored in a cubin. The sm_75 SASS works only on cc 7.x GPUs with a minor version of 5 or more, the sm_89 SASS only on 8.9.", "4. Linking: host code and the fatbin become one executable. This fatbin holds two cubins and the compute_75 PTX; the compute_89 PTX is left out, because its code value names only sm_89. cuobjdump -lelf -lptx lists them.", "5. Loading on a T4 (cc 7.5): the driver finds an exactly matching sm_75 cubin in the fatbin and uses it directly, with no compilation.", "6. Loading on an L4 (cc 8.9): the sm_75 SASS has a different major version and cannot be used; the fatbin happens to hold an sm_89 cubin, used directly.", "7. Loading on a newer GPU (such as cc 12.0): neither cubin matches, so the driver JIT-compiles the compute_75 PTX into SASS for this card on the spot and stores it in the compute cache (by default ~/.nv/ComputeCache on Linux), so the next launch skips the compilation.", "8. Two failures. With no PTX in the fatbin, a newer GPU finds no usable kernel image. PTX built with CUDA 13.4 and given to a machine with only the r580 driver is too new for the JIT of the old driver; minor-version compatibility guarantees only that SASS works."]'>
+    <svg data-diagram viewBox="0 0 900 370" data-interval="2600"
+         data-captions='["全图：左边三列是构建时 nvcc 做的事，右边一列是加载时 CUDA 驱动做的事。例子是概念 4 推荐的发布构建：T4 和 L4 各一个 SASS，再加一份 compute_75 的 PTX。按播放逐步看。", "1. 源文件里既有主机代码也有设备代码。nvcc 把两者分开：主机代码交给主机编译器（例如 g++），设备代码走下面的两个阶段。", "2. 阶段 1：设备代码编成 PTX，一种虚拟 GPU 的汇编，总是文本。每个 -gencode 的 arch 跑一次阶段 1，所以这里有 compute_75 和 compute_89 两份。PTX ISA 9.4 随 CUDA 13.4 发布。", "3. 阶段 2：ptxas 把 PTX 编成某一代真实硬件的 SASS，装在 cubin 里。sm_75 的 SASS 只在 cc 7.x 里次版本不低于 5 的 GPU 上能用，sm_89 的只在 8.9 上能用。", "4. 链接：主机代码和 fatbin 合成一个可执行文件。这个 fatbin 里有两个 cubin 和一份 compute_75 的 PTX；compute_89 的 PTX 没有放进来，因为对应的 code 只写了 sm_89。cuobjdump -lelf -lptx 能列出它们。", "5. 在 T4（cc 7.5）上加载：驱动在 fatbin 里找到完全匹配的 sm_75 cubin，直接用，不需要编译。", "6. 在 L4（cc 8.9）上加载：sm_75 的 SASS 主版本不同，不能用；fatbin 里正好有 sm_89 的 cubin，直接用。", "7. 在更新的 GPU（例如 cc 12.0）上加载：两个 cubin 都不匹配，驱动拿 compute_75 的 PTX 现场 JIT 成这张卡的 SASS，并存进 compute cache（Linux 上默认 ~/.nv/ComputeCache），下次启动就不用再编。", "8. 一种失败：fatbin 里没有 PTX 时，更新的 GPU 上没有可用的 kernel 映像。驱动比工具链旧时会怎样，见图解 (c)。"]'
+         data-captions-en='["The whole picture: the three columns on the left are what nvcc does at build time, the column on the right is what the CUDA driver does at load time. The example is the release build recommended in concept 4: one SASS each for the T4 and the L4, plus compute_75 PTX. Press Play to step through.", "1. The source file holds both host code and device code. nvcc separates them: host code goes to the host compiler (such as g++), and device code goes through the two stages below.", "2. Stage 1: device code becomes PTX, the assembly language of a virtual GPU, always text. Stage 1 runs once per -gencode arch, so there are two copies here, compute_75 and compute_89. PTX ISA 9.4 ships with CUDA 13.4.", "3. Stage 2: ptxas compiles PTX into SASS for one real hardware generation, stored in a cubin. The sm_75 SASS works only on cc 7.x GPUs with a minor version of 5 or more, the sm_89 SASS only on 8.9.", "4. Linking: host code and the fatbin become one executable. This fatbin holds two cubins and the compute_75 PTX; the compute_89 PTX is left out, because its code value names only sm_89. cuobjdump -lelf -lptx lists them.", "5. Loading on a T4 (cc 7.5): the driver finds an exactly matching sm_75 cubin in the fatbin and uses it directly, with no compilation.", "6. Loading on an L4 (cc 8.9): the sm_75 SASS has a different major version and cannot be used; the fatbin happens to hold an sm_89 cubin, used directly.", "7. Loading on a newer GPU (such as cc 12.0): neither cubin matches, so the driver JIT-compiles the compute_75 PTX into SASS for this card on the spot and stores it in the compute cache (by default ~/.nv/ComputeCache on Linux), so the next launch skips the compilation.", "8. A failure: with no PTX in the fatbin, a newer GPU finds no usable kernel image. What happens when the driver is older than the toolkit is diagram (c)."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -320,7 +320,7 @@ L4   (8.9)     sm_89 cubin          JIT compute_75 PTX
       <g data-step="5"><path class="arrow" d="M656 236 L686 62"/><rect class="box" x="690" y="30" width="190" height="56"/><text x="702" y="54" lang="zh-CN">T4 · cc 7.5</text><text x="702" y="54" lang="en">T4 · cc 7.5</text><text x="702" y="76" class="small" lang="zh-CN">直接用 sm_75 cubin</text><text x="702" y="76" class="small" lang="en">uses the sm_75 cubin</text></g>
       <g data-step="6"><path class="arrow" d="M656 248 L686 132"/><rect class="box" x="690" y="104" width="190" height="56"/><text x="702" y="128" lang="zh-CN">L4 · cc 8.9</text><text x="702" y="128" lang="en">L4 · cc 8.9</text><text x="702" y="150" class="small" lang="zh-CN">直接用 sm_89 cubin</text><text x="702" y="150" class="small" lang="en">uses the sm_89 cubin</text></g>
       <g data-step="7"><path class="arrow" d="M656 262 L686 206"/><rect class="box" x="690" y="178" width="190" height="56"/><text x="702" y="202" lang="zh-CN">更新的 GPU · cc 12.0</text><text x="702" y="202" lang="en">Newer GPU · cc 12.0</text><text x="702" y="224" class="small" lang="zh-CN">JIT：PTX → SASS</text><text x="702" y="224" class="small" lang="en">JIT: PTX → SASS</text><path class="arrow" d="M785 234 L785 250"/><rect class="box" x="690" y="254" width="190" height="44"/><text x="702" y="274" class="small">compute cache</text><text x="702" y="290" class="small">~/.nv/ComputeCache</text></g>
-      <g data-step="8"><text x="30" y="352" style="fill: var(--ink-2)" lang="zh-CN">✕ fatbin 里没有 PTX：更新的 GPU 上没有可用的 kernel 映像（cudaErrorNoKernelImageForDevice）</text><text x="30" y="352" style="fill: var(--ink-2)" lang="en">✕ No PTX in the fatbin: no usable kernel image on a newer GPU (cudaErrorNoKernelImageForDevice)</text><text x="30" y="380" style="fill: var(--ink-2)" lang="zh-CN">✕ CUDA 13.4 的 PTX（ISA 9.4）交给 r580 驱动：旧 JIT 不认识（cudaErrorUnsupportedPtxVersion）</text><text x="30" y="380" style="fill: var(--ink-2)" lang="en">✕ CUDA 13.4 PTX (ISA 9.4) on the r580 driver: the old JIT does not know it (cudaErrorUnsupportedPtxVersion)</text><text x="30" y="408" class="small" lang="zh-CN">小版本兼容只保证 SASS 能用，所以 nvcc 必须带 -arch=sm_xx</text><text x="30" y="408" class="small" lang="en">Minor-version compatibility guarantees only SASS, which is why nvcc needs -arch=sm_xx</text></g>
+      <g data-step="8"><text x="30" y="352" style="fill: var(--ink-2)" lang="zh-CN">✕ fatbin 里没有 PTX：更新的 GPU 上没有可用的 kernel 映像（cudaErrorNoKernelImageForDevice）</text><text x="30" y="352" style="fill: var(--ink-2)" lang="en">✕ No PTX in the fatbin: no usable kernel image on a newer GPU (cudaErrorNoKernelImageForDevice)</text></g>
     </svg>
   </div>
 
@@ -348,6 +348,78 @@ L4   (8.9)     sm_89 cubin          JIT compute_75 PTX
       <g data-step="6"><path class="arrow" d="M324 284 L338 284"/><rect class="box" x="342" y="240" width="210" height="88"/><text x="354" y="264" lang="zh-CN">归约整行</text><text x="354" y="264" lang="en">Reduce the row</text><text x="354" y="288" class="small" lang="zh-CN">warp shuffle → shared</text><text x="354" y="288" class="small" lang="en">warp shuffle → shared</text><text x="354" y="308" class="small" lang="zh-CN">→ 整行的 m 和 d</text><text x="354" y="308" class="small" lang="en">→ the row m and d</text></g>
       <g data-step="7"><path class="arrow" d="M552 284 L566 284"/><rect class="box" x="570" y="240" width="210" height="88"/><text x="582" y="264" lang="zh-CN">第 2 遍：再读 x</text><text x="582" y="264" lang="en">Pass 2: read x again</text><text x="582" y="288" class="small" lang="zh-CN">写 exp(x − m) / d</text><text x="582" y="288" class="small" lang="en">write exp(x − m) / d</text><path class="arrow" d="M794 274 L812 274"/><rect class="box" x="816" y="250" width="60" height="48"/><text x="838" y="280" class="mono">y</text><rect x="98" y="352" width="300" height="14" style="fill: var(--ink-3); opacity: .55"/><text x="410" y="364" class="mono">3MN</text><text x="460" y="364" class="small" lang="zh-CN">一行留在缓存里时 2MN</text><text x="460" y="364" class="small" lang="en">2MN when a row stays in cache</text></g>
       <g data-step="8"><text x="20" y="400" class="small" lang="zh-CN">这台 M5 上实测（Lab B，2026-10-31，中位数）：4096 × 4096：未融合 3.018 ms · 融合 1.072 ms · MPS 1.076 ms</text><text x="20" y="400" class="small" lang="en">Measured on this M5 (Lab B, 2026-10-31, medians): 4096 × 4096: unfused 3.018 ms · fused 1.072 ms · MPS 1.076 ms</text><text x="20" y="422" class="small" lang="zh-CN">1024 × 32768：未融合 6.230 ms · 融合 2.967 ms · MPS 2.612 ms</text><text x="20" y="422" class="small" lang="en">1024 × 32768: unfused 6.230 ms · fused 2.967 ms · MPS 2.612 ms</text><text x="20" y="444" class="small" style="fill: var(--ink-2)" lang="zh-CN">T4 上的 CUDA 版：未运行，见 Lab A</text><text x="20" y="444" class="small" style="fill: var(--ink-2)" lang="en">The CUDA version on a T4: not run; see Lab A</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) 同一个构建放到三种驱动上：加载的是什么</h3><h3 lang="en">(c) One build on three kinds of driver: what gets loaded</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="2800"
+         data-captions='["全图：左上是概念 4 推荐的发布构建，用 CUDA 13.4 编译，fatbin 里有 sm_75 和 sm_89 的 SASS，加一份 compute_75 的 PTX。下面三列是 CUDA Compatibility 文档的三种情况，按驱动 libcuda.so 比编程序时的运行时新还是旧来分。每一列看两件事：SASS 能不能直接加载，PTX 能不能 JIT。这些都是按文档规则推出的，没有在这些驱动上运行。按播放逐步看。",
+           "1. 程序是 CUDA 13.4 编的，所以运行时是 13.4。决定能不能跑的是机器上的驱动：比 13.4 新、比 13.4 旧但主版本相同、还是主版本也更旧。",
+           "2. 情况 1，驱动更新（13.4 配的 r615 或更新）：向后兼容，没有附加条件。SASS 直接加载，新驱动的 JIT 也认识 PTX ISA 9.4，所以 PTX 也能用。",
+           "3. 情况 2，驱动更旧但主版本相同，比如 CUDA 13.0 配的 r580：小版本兼容，CUDA 13.x 要求驱动不低于 580。fatbin 里的 sm_75 或 sm_89 SASS 直接加载，程序能跑。",
+           "4. 同一台 r580 机器上的 PTX：文档说把设备代码编成 PTX 的程序在旧驱动上不能工作，r580 的 JIT 不认识 9.4 的 PTX（本页推断，对应 cudaErrorUnsupportedPtxVersion）。所以 nvcc 必须带 -arch=sm_xx；同时依赖新驱动的功能会返回 cudaErrorCallRequiresNewerDriver。",
+           "5. 情况 3，驱动的主版本也更旧，低于 580：小版本兼容不覆盖它，只靠这个驱动，CUDA 13.x 的程序不受支持。",
+           "6. 装 cuda-compat-13-4：它带的是 615 驱动的用户态库，包括 libcuda.so 和 PTX JIT 编译器，装在 /usr/local/cuda-13.4/compat/，用 LD_LIBRARY_PATH 指过去。向前兼容定义在内核驱动和 CUDA 驱动之间，所以 SASS 和 PTX 都能用。只适用于数据中心 GPU、部分 NGC Server Ready 的 RTX 卡和 Jetson。"]'
+         data-captions-en='["The whole picture: top left is the release build recommended in concept 4, compiled with CUDA 13.4, whose fatbin holds sm_75 and sm_89 SASS plus compute_75 PTX. The three columns below are the three cases of the CUDA Compatibility guide, split by whether the driver libcuda.so is newer or older than the runtime the program was built with. Each column asks two things: does the SASS load directly, and can the PTX be JIT-compiled. All of this is derived from the rules in the guide, not run on these drivers. Press Play to step through.",
+           "1. The program was compiled with CUDA 13.4, so its runtime is 13.4. What decides whether it runs is the driver on the machine: newer than 13.4, older than 13.4 within the same major, or older in the major too.",
+           "2. Case 1, a newer driver (the r615 that came with 13.4, or later): backward compatibility, with no conditions. The SASS loads directly, and the JIT of the new driver knows PTX ISA 9.4, so the PTX works too.",
+           "3. Case 2, an older driver of the same major, such as the r580 that came with CUDA 13.0: minor-version compatibility, for which CUDA 13.x needs a driver of 580 or later. The sm_75 or sm_89 SASS in the fatbin loads directly, and the program runs.",
+           "4. The PTX on the same r580 machine: the guide says applications that compile device code to PTX will not work on older drivers; the JIT of r580 does not know PTX 9.4 (an inference on this page; the matching error is cudaErrorUnsupportedPtxVersion). Hence nvcc needs -arch=sm_xx, and features that also need a newer driver return cudaErrorCallRequiresNewerDriver.",
+           "5. Case 3, a driver older in the major too, below 580: minor-version compatibility does not cover it, and with this driver alone a CUDA 13.x program is not supported.",
+           "6. Install cuda-compat-13-4: it carries the user-mode libraries of the 615 driver, including libcuda.so and the PTX JIT compiler, under /usr/local/cuda-13.4/compat/, and LD_LIBRARY_PATH points at them. Forward compatibility is defined between the kernel driver and the CUDA driver, so both the SASS and the PTX work. It applies only to data-center GPUs, selected NGC Server Ready RTX cards and Jetson boards."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="360" y="52" class="small" lang="zh-CN">按驱动 libcuda.so 比运行时 13.4 新还是旧，分三种</text><text x="360" y="52" class="small" lang="en">three cases, by whether the driver libcuda.so is newer or older than runtime 13.4</text>
+      <text x="360" y="72" class="small" lang="zh-CN">每列两问：SASS 直接加载？PTX 能 JIT？</text><text x="360" y="72" class="small" lang="en">two questions per column: does the SASS load? can the PTX be JIT-compiled?</text>
+      <text x="360" y="92" class="small" lang="zh-CN">依据：CUDA Compatibility 文档（按规则推出，未运行）</text><text x="360" y="92" class="small" lang="en">source: the CUDA Compatibility guide (derived from its rules, not run)</text>
+      <path class="lane" d="M20 128 L880 128"/>
+      <text x="20" y="152" class="small" lang="zh-CN">情况 1 · 驱动更新</text><text x="20" y="152" class="small" lang="en">case 1 · newer driver</text>
+      <text x="310" y="152" class="small" lang="zh-CN">情况 2 · 更旧，主版本相同</text><text x="310" y="152" class="small" lang="en">case 2 · older, same major</text>
+      <text x="600" y="152" class="small" lang="zh-CN">情况 3 · 更旧，主版本也旧</text><text x="600" y="152" class="small" lang="en">case 3 · older major too</text>
+      <path class="lane" d="M300 140 L300 392 M590 140 L590 392"/>
+
+      <!-- step 1: the build -->
+      <g data-step="1">
+        <rect class="box" x="20" y="24" width="300" height="96"/>
+        <text x="32" y="48" class="mono">softmax_capstone</text>
+        <text x="32" y="70" class="small" lang="zh-CN">用 CUDA 13.4 编译：运行时 13.4</text><text x="32" y="70" class="small" lang="en">built with CUDA 13.4: runtime 13.4</text>
+        <text x="32" y="92" class="mono">sm_75 + sm_89 SASS</text>
+        <text x="32" y="110" class="mono">compute_75 PTX</text></g>
+      <!-- step 2: case 1, newer driver -->
+      <g data-step="2">
+        <rect class="box" x="20" y="166" width="270" height="44"/><text x="32" y="186" class="mono">libcuda.so · r615+</text>
+        <text x="32" y="203" class="small" lang="zh-CN">13.4 配的驱动或更新</text><text x="32" y="203" class="small" lang="en">the 13.4 driver or later</text>
+        <text x="20" y="236" class="small" lang="zh-CN">向后兼容 · 没有附加条件</text><text x="20" y="236" class="small" lang="en">backward compatibility · no conditions</text>
+        <text x="20" y="318" lang="zh-CN">✓ SASS 直接加载</text><text x="20" y="318" lang="en">✓ SASS loads directly</text>
+        <text x="20" y="342" lang="zh-CN">✓ PTX 9.4 可以 JIT</text><text x="20" y="342" lang="en">✓ PTX 9.4 can be JIT-compiled</text></g>
+      <!-- step 3: case 2, SASS works -->
+      <g data-step="3">
+        <rect class="box" x="310" y="166" width="270" height="44"/><text x="322" y="186" class="mono">libcuda.so · r580</text>
+        <text x="322" y="203" class="small" lang="zh-CN">CUDA 13.0 配的驱动</text><text x="322" y="203" class="small" lang="en">the driver of CUDA 13.0</text>
+        <text x="310" y="236" class="small" lang="zh-CN">小版本兼容 · 13.x 要求驱动 ≥ 580</text><text x="310" y="236" class="small" lang="en">minor-version compat · 13.x needs ≥ 580</text>
+        <text x="310" y="318" lang="zh-CN">✓ SASS 直接加载</text><text x="310" y="318" lang="en">✓ SASS loads directly</text></g>
+      <!-- step 4: case 2, PTX fails -->
+      <g data-step="4">
+        <text x="310" y="342" style="fill: var(--ink-2)" lang="zh-CN">✕ PTX 9.4：旧 JIT 不认识</text><text x="310" y="342" style="fill: var(--ink-2)" lang="en">✕ PTX 9.4: the old JIT does not know it</text>
+        <text x="310" y="364" class="small" lang="zh-CN">所以 nvcc 必须带 -arch=sm_xx</text><text x="310" y="364" class="small" lang="en">hence nvcc needs -arch=sm_xx</text>
+        <text x="310" y="382" class="small">cudaErrorUnsupportedPtxVersion</text></g>
+      <!-- step 5: case 3 without the package -->
+      <g data-step="5">
+        <rect class="box" x="600" y="166" width="270" height="44"/><text x="612" y="186" class="mono">libcuda.so · &lt; 580</text>
+        <text x="612" y="203" class="small" lang="zh-CN">更旧的主版本</text><text x="612" y="203" class="small" lang="en">an older major</text>
+        <text x="600" y="232" style="fill: var(--ink-2)" lang="zh-CN">✕ 只靠它：13.x 程序不受支持</text><text x="600" y="232" style="fill: var(--ink-2)" lang="en">✕ alone: a 13.x program is unsupported</text></g>
+      <!-- step 6: case 3 with cuda-compat -->
+      <g data-step="6">
+        <rect class="box" x="600" y="244" width="270" height="52"/><text x="612" y="266" class="mono">cuda-compat-13-4</text>
+        <text x="612" y="286" class="small">/usr/local/cuda-13.4/compat/</text>
+        <text x="600" y="318" lang="zh-CN">✓ SASS 直接加载</text><text x="600" y="318" lang="en">✓ SASS loads directly</text>
+        <text x="600" y="342" lang="zh-CN">✓ PTX 由 615 的 JIT 编译</text><text x="600" y="342" lang="en">✓ PTX via the JIT of 615</text>
+        <text x="600" y="364" class="small" lang="zh-CN">LD_LIBRARY_PATH 指向 compat/</text><text x="600" y="364" class="small" lang="en">LD_LIBRARY_PATH points at compat/</text>
+        <text x="600" y="382" class="small" lang="zh-CN">只限数据中心卡、部分 RTX、Jetson</text><text x="600" y="382" class="small" lang="en">data-center GPUs, some RTX, Jetson only</text></g>
     </svg>
   </div>
 

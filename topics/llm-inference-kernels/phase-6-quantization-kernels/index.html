@@ -133,8 +133,8 @@ speedup: 536.9 / 140.5 = 3.82 (measured 3.84);  536.9 / 1214.3 = 0.44 (measured 
   <p lang="en">The checkpoint Lab A uses, <code>Qwen/Qwen3-8B-AWQ</code> (its <code>config.json</code> on Hugging Face, read 2026-11-01): <code>quant_method</code> <code>awq</code>, <code>bits</code> 4, <code>group_size</code> 128, <code>zero_point</code> true and <code>version</code> <code>gemm</code>; its safetensors files total 6,098,581,864 bytes, against 16,381,516,776 bytes for the BF16 <code>Qwen/Qwen3-8B</code>.</p>
   <p lang="zh-CN">SGLang 怎样跑它。<code>AWQMarlinConfig.is_awq_marlin_compatible</code>（<code>awq.py</code> 第 402–424 行）检查 <code>quant_method</code>、位数、组大小和零点，再交给 Marlin 的支持检查；通过就改名为 <code>awq_marlin</code>，最低计算能力 80（第 307–308 行）。普通 <code>awq</code> 的最低计算能力是 75（第 109–116 行，注释说 AWQ 内核只支持 Turing 及更新的卡），所以 T4 上只有先解后算这一条路。加载时 <code>AWQMarlinLinearKernel</code> 把权重重排成 Marlin 的布局（<code>awq_marlin_repack</code>、<code>marlin_permute_scales</code>、<code>awq_to_marlin_zero_points</code>，<code>awq_kernels.py</code> 第 109–142 行），之后每次前向调 <code>gptq_marlin_gemm</code>（<code>marlin_utils.py</code> 第 533–560 行），CUDA 源码在 <code>python/sglang/kernels/jit/csrc/gemm/marlin/gptq_marlin.cuh</code>。Marlin 的形状约束写在 <code>marlin_utils.py</code> 第 40–44 行：输出维是 64 的倍数、输入维是 128 的倍数，组大小只能是 −1（整行一组）、32、64 或 128。GPTQ 检查点同样被改走 <code>gptq_marlin</code>（<code>gptq.py</code> 第 414 行起），最低计算能力 80（第 386–387 行）。</p>
   <p lang="en">How SGLang runs it. <code>AWQMarlinConfig.is_awq_marlin_compatible</code> (<code>awq.py</code>, lines 402–424) checks <code>quant_method</code>, the bit width, the group size and the zero point, then hands over to Marlin’s support check; if it passes, the method becomes <code>awq_marlin</code>, with a minimum compute capability of 80 (lines 307–308). Plain <code>awq</code> has a minimum of 75 (lines 109–116, whose comment says the AWQ kernel supports only Turing or newer), so on a T4 the dequantize-first path is the only one. At load time <code>AWQMarlinLinearKernel</code> repacks the weights into Marlin’s layout (<code>awq_marlin_repack</code>, <code>marlin_permute_scales</code> and <code>awq_to_marlin_zero_points</code>, <code>awq_kernels.py</code>, lines 109–142), and every forward pass then calls <code>gptq_marlin_gemm</code> (<code>marlin_utils.py</code>, lines 533–560), whose CUDA source is <code>python/sglang/kernels/jit/csrc/gemm/marlin/gptq_marlin.cuh</code>. Marlin’s shape constraints are on lines 40–44 of <code>marlin_utils.py</code>: the output dimension a multiple of 64, the input dimension a multiple of 128, and a group size of −1 (one group per row), 32, 64 or 128 only. GPTQ checkpoints are likewise moved onto <code>gptq_marlin</code> (<code>gptq.py</code>, from line 414), with a minimum of 80 (lines 386–387).</p>
-  <p lang="zh-CN">为什么要重排：边读边解的内核希望一个线程一次读 16 字节就拿到它马上要用的 32 个权重，并且解出来的 FP16 正好排成 tensor core 指令要的寄存器布局，不必再在线程之间搬数据。检查点里的打包顺序是为写检查点的工具定的，不是为某一条 MMA 指令定的，所以加载时一次性重排，换来每一步都省事。Marlin 论文第 3 节描述的正是这种重排：权重交错存放，一次 16 字节的读取正好装下 4 个不同的 16×16 tensor core 块各自的 8 个权重。动画 (a) 画的就是这个内核的骨架，Lab B 用 Metal 写了一个。</p>
-  <p lang="en">Why repack: a dequantize-as-you-read kernel wants each thread to get the 32 weights it is about to use from one 16-byte load, and wants the dequantized FP16 values to land in exactly the register layout the tensor-core instruction expects, with no shuffling between threads. The packing order in a checkpoint is set for the tool that wrote it, not for any particular MMA instruction, so the weights are repacked once at load time to make every step cheap. Section 3 of the Marlin paper describes exactly this repacking: the weights are interleaved so that one 16-byte read holds the 8 weights of each of 4 separate 16×16 tensor-core blocks. Diagram (a) draws the skeleton of such a kernel, and Lab B writes one in Metal.</p>
+  <p lang="zh-CN">为什么要重排：边读边解的内核希望一个线程一次读 16 字节就拿到它马上要用的 32 个权重，并且解出来的 FP16 正好排成 tensor core 指令要的寄存器布局，不必再在线程之间搬数据。检查点里的打包顺序是为写检查点的工具定的，不是为某一条 MMA 指令定的，所以加载时一次性重排，换来每一步都省事。Marlin 论文第 3 节描述的正是这种重排：权重交错存放，一次 16 字节的读取正好装下 4 个不同的 16×16 tensor core 块各自的 8 个权重。图解 (c) 按 SGLang 的源码把这次重排逐步画出来。动画 (a) 画的就是这个内核的骨架，Lab B 用 Metal 写了一个。</p>
+  <p lang="en">Why repack: a dequantize-as-you-read kernel wants each thread to get the 32 weights it is about to use from one 16-byte load, and wants the dequantized FP16 values to land in exactly the register layout the tensor-core instruction expects, with no shuffling between threads. The packing order in a checkpoint is set for the tool that wrote it, not for any particular MMA instruction, so the weights are repacked once at load time to make every step cheap. Section 3 of the Marlin paper describes exactly this repacking: the weights are interleaved so that one 16-byte read holds the 8 weights of each of 4 separate 16×16 tensor-core blocks. Diagram (c) steps through this repack as the SGLang source does it. Diagram (a) draws the skeleton of such a kernel, and Lab B writes one in Metal.</p>
   <p lang="zh-CN">延伸阅读：PMPP 第 5 版第 23 章 Advanced Optimizations for Matrix Multiplication（GEMV 是 M = 1 的情形，每个权重只被用一次，所以没有复用可谈，只剩带宽）。量化算法本身参考书目里没有书讲，依据 GPTQ、AWQ 和 Marlin 三篇论文。</p>
   <p lang="en">Further reading: chapter 23, Advanced Optimizations for Matrix Multiplication, of PMPP, 5th ed. (a GEMV is the M = 1 case, where each weight is used once, so there is no reuse to speak of and only bandwidth is left). No book in the bibliography covers the quantization algorithms themselves; they rest on the GPTQ, AWQ and Marlin papers.</p>
 
@@ -391,6 +391,110 @@ K = 4096 -&gt; 4096 / 128 = 32 K blocks: 32 new a_s, 32 new b_s, 32 promotions</
       <g data-step="7">
         <text x="30" y="446" class="mono" lang="zh-CN">L4：Triton · H100 / B200：DeepGEMM · SM120：CUTLASS</text><text x="30" y="446" class="mono" lang="en">L4: Triton · H100 / B200: DeepGEMM · SM120: CUTLASS</text>
       </g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) Marlin 的加载时重排：检查点的打包顺序 → tensor core 要的寄存器布局</h3><h3 lang="en">(c) The Marlin repack at load time: the packing order of the checkpoint → the register layout the tensor cores want</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 470" data-interval="3000"
+         data-captions='["全图：左上是检查点里的 int4 权重，中间是一个 16 × 16 块，右上是重排后一条 lane 写出的字；下面是 GEMM 内核每次前向怎样用它。源码是 SGLang v0.5.22 的 awq_marlin_repack.cuh、marlin_template.h 和 dequant.h。图里以 lane 0 为例，它是 32 条 lane 之一，换一条 lane 只是行列偏移不同。按播放逐步看。",
+           "1. 检查点：AWQ 的 qweight 形状是 [K, N/8] 的 int32，一个 32 位字装同一行 k 的 8 个输出列，每列 4 位。字里的顺序是 AWQ 定的：从低位到高位是 n0 n2 n4 n6 n1 n3 n5 n7。repack 内核先用 undo_pack 把它还原（awq_marlin_repack.cuh 第 109–116 行），一次处理 16 行 k × 64 列 n 的一块（marlin.cuh 第 31–32 行）。",
+           "2. 重排：4 个 warp 各管 16 列，也就是一个 16 × 16 块。lane t 取第 t / 4 列和往右数第 8 列（t / 4 + 8），行取 (t % 4) × 2 加上 0、1、8、9，一共 8 个权重（第 93–128 行）。lane 0 取的是 n = 0 和 8，k = 0、1、8、9。",
+           "3. 打包：这 8 个权重按 pack_idx 0 2 4 6 1 3 5 7 的顺序装进一个新的 32 位字（第 136–142 行），写到 out[th_id × 4 + warp_id]（第 144 行）。同一条 lane 在 4 个 warp 里的 4 个字因此挨着存放。",
+           "4. 每次前向：GEMM 内核里每个线程一次读 16 字节，即一个 int4（marlin_template.h 第 823 行），拿到 4 个字，分别属于 4 个不同的 16 × 16 块，每块 8 个权重，共 32 个。这就是 Marlin 论文第 3 节说的交错存放。",
+           "5. 解量化一个字：掩码 0x000f000f 取出 nibble 0 和 4，0x00f000f0 取出 1 和 5，各拼成一个 half2；字右移 8 位再做一次，得到 2、6 和 3、7（dequant.h 第 143–160 行，marlin_template.h 第 1098–1109 行）。对 lane 0 来说，四个 half2 正好是 k 0、1 和 k 8、9 在 n 0 与 n 8 上的值，即 MMA 的 B 操作数在这条 lane 上的寄存器布局（按 PTX ISA 的片段布局推断），线程之间不用再搬数据。",
+           "6. 缩放和零点也在加载时重排：marlin_permute_scales 和 awq_to_marlin_zero_points（awq_kernels.py 第 125–139 行）。重排只在加载时做一次，换来每一步前向都能直接用。"]'
+         data-captions-en='["The whole picture: top left, the int4 weights in the checkpoint; in the middle, one 16 × 16 block; top right, the word one lane writes after the repack; below, how the GEMM kernel uses it on every forward pass. The source is awq_marlin_repack.cuh, marlin_template.h and dequant.h at SGLang v0.5.22. The diagram follows lane 0 as its example, one of 32 lanes; any other lane differs only by a row and column offset. Press Play to step through.",
+           "1. The checkpoint: the AWQ qweight is int32 of shape [K, N/8], and one 32-bit word holds 8 output columns of one row k, 4 bits each. The order inside the word is the AWQ one: from low bits to high, n0 n2 n4 n6 n1 n3 n5 n7. The repack kernel first undoes it with undo_pack (awq_marlin_repack.cuh, lines 109–116), working on a tile of 16 rows of k by 64 columns of n (marlin.cuh, lines 31–32).",
+           "2. The repack: 4 warps take 16 columns each, one 16 × 16 block. Lane t takes column t / 4 and the column 8 to its right, and rows (t % 4) × 2 plus 0, 1, 8 and 9, 8 weights in all (lines 93–128). Lane 0 takes n = 0 and 8, and k = 0, 1, 8 and 9.",
+           "3. The packing: these 8 weights go into a new 32-bit word in the order pack_idx 0 2 4 6 1 3 5 7 (lines 136–142), stored at out[th_id × 4 + warp_id] (line 144). The 4 words one lane writes for the 4 warps therefore sit side by side.",
+           "4. Every forward pass: in the GEMM kernel each thread makes one 16-byte load, one int4 (marlin_template.h, line 823), and gets 4 words, one for each of 4 separate 16 × 16 blocks, 8 weights each, 32 in all. This is the interleaving section 3 of the Marlin paper describes.",
+           "5. Dequantizing one word: the mask 0x000f000f pulls out nibbles 0 and 4 and 0x00f000f0 pulls out 1 and 5, each pair becoming one half2; the word shifted right by 8 gives 2 and 6, and 3 and 7 (dequant.h, lines 143–160; marlin_template.h, lines 1098–1109). For lane 0 the four half2 values are exactly k 0, 1 and k 8, 9 at n 0 and n 8, the register layout of the B operand of the MMA on this lane (inferred from the fragment layout in the PTX ISA), with no data moved between threads.",
+           "6. The scales and zero points are repacked at load time too: marlin_permute_scales and awq_to_marlin_zero_points (awq_kernels.py, lines 125–139). The repack runs once at load time, and every forward pass after it uses the result directly."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="20" class="small" lang="zh-CN">加载时：重排一次（awq_marlin_repack）</text><text x="20" y="20" class="small" lang="en">At load time: one repack (awq_marlin_repack)</text>
+      <text x="330" y="36" class="small" lang="zh-CN">一个 16 × 16 块 · 一个 warp（k 向下，n 向右）</text><text x="330" y="36" class="small" lang="en">one 16 × 16 block · one warp (k down, n right)</text>
+      <rect class="box" x="330" y="44" width="192" height="192" style="rx: 0"/>
+      <path class="lane" d="M342 44 L342 236 M354 44 L354 236 M366 44 L366 236 M378 44 L378 236 M390 44 L390 236 M402 44 L402 236 M414 44 L414 236 M426 44 L426 236 M438 44 L438 236 M450 44 L450 236 M462 44 L462 236 M474 44 L474 236 M486 44 L486 236 M498 44 L498 236 M510 44 L510 236 M330 56 L522 56 M330 68 L522 68 M330 80 L522 80 M330 92 L522 92 M330 104 L522 104 M330 116 L522 116 M330 128 L522 128 M330 140 L522 140 M330 152 L522 152 M330 164 L522 164 M330 176 L522 176 M330 188 L522 188 M330 200 L522 200 M330 212 L522 212 M330 224 L522 224"/>
+      <path class="lane" d="M20 252 L880 252"/>
+      <text x="20" y="274" class="small" lang="zh-CN">每次前向：gptq_marlin_gemm 内核</text><text x="20" y="274" class="small" lang="en">Every forward pass: the gptq_marlin_gemm kernel</text>
+      <!-- step 1: the checkpoint word in AWQ order -->
+      <g data-step="1">
+        <text x="20" y="52" class="mono">qweight [K, N/8] int32</text>
+        <text x="20" y="72" class="small" lang="zh-CN">检查点：一个 32 位字</text><text x="20" y="72" class="small" lang="en">checkpoint: one 32-bit word</text>
+        <text x="20" y="88" class="small" lang="zh-CN">装同一行 k 的 8 个输出列</text><text x="20" y="88" class="small" lang="en">holds 8 output columns of one row k</text>
+        <rect class="box" x="20" y="100" width="34" height="30" style="rx: 2"/><text x="28" y="120" class="mono">n0</text>
+        <rect class="box" x="54" y="100" width="34" height="30" style="rx: 2"/><text x="62" y="120" class="mono">n2</text>
+        <rect class="box" x="88" y="100" width="34" height="30" style="rx: 2"/><text x="96" y="120" class="mono">n4</text>
+        <rect class="box" x="122" y="100" width="34" height="30" style="rx: 2"/><text x="130" y="120" class="mono">n6</text>
+        <rect class="box" x="156" y="100" width="34" height="30" style="rx: 2"/><text x="164" y="120" class="mono">n1</text>
+        <rect class="box" x="190" y="100" width="34" height="30" style="rx: 2"/><text x="198" y="120" class="mono">n3</text>
+        <rect class="box" x="224" y="100" width="34" height="30" style="rx: 2"/><text x="232" y="120" class="mono">n5</text>
+        <rect class="box" x="258" y="100" width="34" height="30" style="rx: 2"/><text x="266" y="120" class="mono">n7</text>
+        <text x="20" y="150" class="small" lang="zh-CN">nibble 0 → 7，低位到高位</text><text x="20" y="150" class="small" lang="en">nibble 0 → 7, low bits to high</text>
+        <text x="20" y="170" class="small" lang="zh-CN">repack 先用 undo_pack 还原 AWQ 顺序</text><text x="20" y="170" class="small" lang="en">repack undoes the AWQ order with undo_pack</text>
+        <text x="20" y="190" class="small" lang="zh-CN">tile：16 行 k × 64 列 n</text><text x="20" y="190" class="small" lang="en">tile: 16 rows of k × 64 columns of n</text></g>
+      <!-- step 2: the 8 cells lane 0 picks in the block -->
+      <g data-step="2">
+        <rect class="hl" x="330" y="44" width="12" height="12" style="rx: 2"/>
+        <rect class="hl" x="426" y="44" width="12" height="12" style="rx: 2"/>
+        <rect class="hl" x="330" y="56" width="12" height="12" style="rx: 2"/>
+        <rect class="hl" x="426" y="56" width="12" height="12" style="rx: 2"/>
+        <rect class="hl" x="330" y="140" width="12" height="12" style="rx: 2"/>
+        <rect class="hl" x="426" y="140" width="12" height="12" style="rx: 2"/>
+        <rect class="hl" x="330" y="152" width="12" height="12" style="rx: 2"/>
+        <rect class="hl" x="426" y="152" width="12" height="12" style="rx: 2"/>
+        <text x="534" y="70" class="mono">lane 0</text>
+        <text x="534" y="92" class="mono">n = 0, 8</text>
+        <text x="534" y="114" class="mono">k = 0, 1, 8, 9</text>
+        <text x="534" y="138" class="small" lang="zh-CN">共 8 个权重</text><text x="534" y="138" class="small" lang="en">8 weights in all</text>
+        <text x="534" y="156" class="small" lang="zh-CN">第 93–128 行</text><text x="534" y="156" class="small" lang="en">lines 93–128</text></g>
+      <!-- step 3: the new word, in pack_idx order -->
+      <g data-step="3">
+        <text x="650" y="72" class="small" lang="zh-CN">lane 0 写出的字（k,n）</text><text x="650" y="72" class="small" lang="en">the word lane 0 writes (k,n)</text>
+        <rect class="box" x="646" y="84" width="29" height="30" style="rx: 2"/><text x="651" y="104" class="mono" style="font-size: 11px">0,0</text>
+        <rect class="box" x="675" y="84" width="29" height="30" style="rx: 2"/><text x="680" y="104" class="mono" style="font-size: 11px">8,0</text>
+        <rect class="box" x="704" y="84" width="29" height="30" style="rx: 2"/><text x="709" y="104" class="mono" style="font-size: 11px">0,8</text>
+        <rect class="box" x="733" y="84" width="29" height="30" style="rx: 2"/><text x="738" y="104" class="mono" style="font-size: 11px">8,8</text>
+        <rect class="box" x="762" y="84" width="29" height="30" style="rx: 2"/><text x="767" y="104" class="mono" style="font-size: 11px">1,0</text>
+        <rect class="box" x="791" y="84" width="29" height="30" style="rx: 2"/><text x="796" y="104" class="mono" style="font-size: 11px">9,0</text>
+        <rect class="box" x="820" y="84" width="29" height="30" style="rx: 2"/><text x="825" y="104" class="mono" style="font-size: 11px">1,8</text>
+        <rect class="box" x="849" y="84" width="29" height="30" style="rx: 2"/><text x="854" y="104" class="mono" style="font-size: 11px">9,8</text>
+        <text x="650" y="138" class="mono">pack_idx 0 2 4 6 1 3 5 7</text>
+        <text x="650" y="160" class="mono">out[th_id*4 + warp_id]</text>
+        <text x="650" y="182" class="small" lang="zh-CN">第 136–144 行</text><text x="650" y="182" class="small" lang="en">lines 136–144</text>
+        <text x="650" y="200" class="small" lang="zh-CN">4 个 warp 的字挨着存</text><text x="650" y="200" class="small" lang="en">words of the 4 warps side by side</text></g>
+      <!-- step 4: one 16-byte load in the GEMM -->
+      <g data-step="4">
+        <text x="20" y="298" class="small" lang="zh-CN">一次 16 字节读取（一个 int4）</text><text x="20" y="298" class="small" lang="en">one 16-byte load (one int4)</text>
+        <rect class="box" x="20" y="308" width="70" height="30"/><text x="32" y="328" class="mono" lang="zh-CN">块 0</text><text x="32" y="328" class="mono" lang="en">block 0</text>
+        <rect class="box" x="94" y="308" width="70" height="30"/><text x="106" y="328" class="mono" lang="zh-CN">块 1</text><text x="106" y="328" class="mono" lang="en">block 1</text>
+        <rect class="box" x="168" y="308" width="70" height="30"/><text x="180" y="328" class="mono" lang="zh-CN">块 2</text><text x="180" y="328" class="mono" lang="en">block 2</text>
+        <rect class="box" x="242" y="308" width="70" height="30"/><text x="254" y="328" class="mono" lang="zh-CN">块 3</text><text x="254" y="328" class="mono" lang="en">block 3</text>
+        <text x="20" y="360" class="small" lang="zh-CN">4 个字 × 8 个权重 = 32 个</text><text x="20" y="360" class="small" lang="en">4 words × 8 weights = 32 weights</text>
+        <text x="20" y="378" class="small" lang="zh-CN">4 个不同的 16 × 16 块，各 8 个</text><text x="20" y="378" class="small" lang="en">8 for each of 4 separate 16 × 16 blocks</text>
+        <text x="20" y="396" class="small" lang="zh-CN">marlin_template.h 第 823 行</text><text x="20" y="396" class="small" lang="en">marlin_template.h, line 823</text></g>
+      <!-- step 5: dequant into the register layout -->
+      <g data-step="5">
+        <text x="350" y="298" class="small" lang="zh-CN">解一个字：掩码取 2 个 nibble 拼成 half2</text><text x="350" y="298" class="small" lang="en">one word: masks pull 2 nibbles into a half2</text>
+        <rect class="box" x="350" y="308" width="154" height="28"/><text x="362" y="327" class="mono">k 0,1 · n 0 ← 0,4</text>
+        <rect class="box" x="350" y="342" width="154" height="28"/><text x="362" y="361" class="mono">k 8,9 · n 0 ← 1,5</text>
+        <rect class="box" x="512" y="308" width="154" height="28"/><text x="524" y="327" class="mono">k 0,1 · n 8 ← 2,6</text>
+        <rect class="box" x="512" y="342" width="154" height="28"/><text x="524" y="361" class="mono">k 8,9 · n 8 ← 3,7</text>
+        <text x="350" y="390" class="mono">frag_b0</text><text x="512" y="390" class="mono">frag_b1</text>
+        <text x="350" y="410" class="small" lang="zh-CN">nibble 0,4 和 1,5；右移 8 位后 2,6 和 3,7</text><text x="350" y="410" class="small" lang="en">nibbles 0,4 and 1,5; after &gt;&gt; 8, 2,6 and 3,7</text>
+        <text x="350" y="428" class="small" lang="zh-CN">MMA 的寄存器布局，线程之间不搬数据</text><text x="350" y="428" class="small" lang="en">the MMA register layout, no shuffles</text>
+        <text x="350" y="446" class="small" lang="zh-CN">dequant.h 第 143–160 行</text><text x="350" y="446" class="small" lang="en">dequant.h, lines 143–160</text></g>
+      <!-- step 6: scales and zero points -->
+      <g data-step="6">
+        <text x="700" y="320" class="mono">marlin_permute_scales</text>
+        <text x="700" y="342" class="mono">awq_to_marlin_zero_points</text>
+        <text x="700" y="364" class="small" lang="zh-CN">缩放和零点也重排</text><text x="700" y="364" class="small" lang="en">scales, zero points too</text>
+        <text x="700" y="382" class="small" lang="zh-CN">awq_kernels.py 第 125–139 行</text><text x="700" y="382" class="small" lang="en">awq_kernels.py, lines 125–139</text></g>
     </svg>
   </div>
 

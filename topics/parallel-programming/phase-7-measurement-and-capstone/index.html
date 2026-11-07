@@ -141,8 +141,8 @@ mean   = 503.2 / 20        = 25.16 ms</pre>
   <p lang="en">Further reading: 11.7.4 Microbenchmarking, 11.7.5 Isolation and 11.7.6 Detecting Interference in McKenney’s section 11.7.</p>
 
   <h3 lang="zh-CN">3. 读 sample 和 spindump</h3><h3 lang="en">3. Reading sample and spindump</h3>
-  <p lang="zh-CN"><code>sample</code> 每隔 1 ms 停一下目标进程，记下每个线程的调用栈，最后把相同的栈合起来计数。它不需要 sudo，也不需要 Xcode。下面是 Lab A 第 1 步对矩阵乘法采样 3 秒的输出节选：</p>
-  <p lang="en"><code>sample</code> stops the target process every 1 ms, records every thread’s call stack, and at the end merges identical stacks and counts them. It needs neither sudo nor Xcode. Below is an excerpt of step 1 of Lab A, sampling the matrix multiply for 3 seconds:</p>
+  <p lang="zh-CN"><code>sample</code> 每隔 1 ms 停一下目标进程，记下每个线程的调用栈，最后把相同的栈合起来计数（图解 (c) 一步步画出这个合并）。它不需要 sudo，也不需要 Xcode。下面是 Lab A 第 1 步对矩阵乘法采样 3 秒的输出节选：</p>
+  <p lang="en"><code>sample</code> stops the target process every 1 ms, records every thread’s call stack, and at the end merges identical stacks and counts them (diagram (c) steps through this merge). It needs neither sudo nor Xcode. Below is an excerpt of step 1 of Lab A, sampling the matrix multiply for 3 seconds:</p>
 <pre data-lang="sh">Call graph:
     1918 Thread_6973201   DispatchQueue_19: com.apple.root.user-interactive-qos  (concurrent)
     + 1918 start  (in dyld) + 6652  [0x1835bcd7c]
@@ -487,6 +487,96 @@ DRAM needed at 14.0 ms: 25.2 MB / 0.014 s ≈ 1.8 GB/s</pre>
         <text x="560" y="330" class="small" lang="zh-CN">点到屋顶的竖直距离</text><text x="560" y="330" class="small" lang="en">vertical distance to the roof</text>
         <text x="560" y="348" class="small" lang="zh-CN">= 还能拿到的上限</text><text x="560" y="348" class="small" lang="en">= what is left to gain</text></g>
       <text x="560" y="376" class="small" lang="zh-CN">实心 = 实测 · 空心 = 预测</text><text x="560" y="376" class="small" lang="en">filled = measured · hollow = predicted</text>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) sample 怎样合并栈：每 1 ms 停一次，同样的栈合起来计数，再按栈顶排序</h3><h3 lang="en">(c) How sample merges stacks: a stop every 1 ms, identical stacks counted together, then sorted by top of stack</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2800"
+         data-captions='["全图：对 Lab A 的矩阵乘法运行 sample 3 秒。左边是它每次停下时做的事，中间是它为每个线程合出的调用树，右边是最后的 Sort by top of stack 汇总。所有计数都来自上面的输出节选。按播放逐步看。",
+           "第 1 步，sample 每 1 ms 把整个进程挂起一次，记下每个线程此刻的调用栈（这次运行有 21 个线程），然后让进程继续跑。",
+           "第 2 步，主线程 Thread_6973201 在其中三次停下时的栈：start、matmul_prof.c:37 的 main、dispatch_apply，一直往下到叶子帧。前两次都停在 matmul_prof.c:21 的 rows，两个栈完全相同；第三次停在 __ulock_wait。哪一次是哪个栈只是示意。",
+           "第 3 步，采样结束后，sample 把相同的栈合成一棵调用树并计数。Thread_6973201 共 1918 个样本，其中 1791 个停在第 21 行的 rows，也就是最内层的 C[i][j] += a * B[k][j]；59 个在第 19 行的 rows；64 个在 __ulock_wait，主线程在等别的线程做完最后几块。",
+           "第 4 步，每个线程都这样合并。Thread_6973210 是一个池线程，1867 个样本里 1829 个在第 21 行的 rows；Thread_6973206 有 997 个，其中 992 个在 __workq_kernreturn，是一个没活干、在内核里等活的空闲池线程。",
+           "第 5 步，Sort by top of stack 按栈顶函数把所有线程加总：rows 18450，约占全部栈顶样本的 92 %；其次是 __workq_kernreturn 1563、__ulock_wait 64；不到 5 的条目不列出。先读这一段：几乎所有时间都在你自己的代码里。"]'
+         data-captions-en='["The whole picture: sample run on the matrix multiply of Lab A for 3 seconds. On the left what it does at each stop, in the middle the call tree it builds for each thread, on the right the Sort by top of stack total at the end. Every count comes from the output excerpt above. Press Play to step through.",
+           "Step 1, every 1 ms sample suspends the whole process, records the call stack of every thread at that moment (21 threads in this run), and lets the process run on.",
+           "Step 2, the stacks of the main thread, Thread_6973201, at three of those stops: start, main at matmul_prof.c:37, dispatch_apply, and on down to the leaf frame. The first two stops both ended in rows at matmul_prof.c:21, so the two stacks are identical; the third ended in __ulock_wait. Which stop showed which stack is illustrative.",
+           "Step 3, when sampling ends, sample merges identical stacks into a call tree and counts them. Thread_6973201 has 1918 samples: 1791 of them in rows at line 21, the innermost C[i][j] += a * B[k][j]; 59 in rows at line 19; and 64 in __ulock_wait, the main thread waiting for the others to finish the last chunks.",
+           "Step 4, every thread is merged the same way. Thread_6973210, a pool thread, has 1867 samples, 1829 of them in rows at line 21; Thread_6973206 has 997, of which 992 are in __workq_kernreturn: an idle pool thread with no work, waiting in the kernel for some.",
+           "Step 5, Sort by top of stack totals all threads by the function on top of the stack: rows 18450, about 92 % of all top-of-stack samples, then __workq_kernreturn 1563 and __ulock_wait 64; entries under 5 are left out. Read this part first: nearly all the time is in your own code."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="34" y="22" class="small" lang="zh-CN">每次停下</text><text x="34" y="22" class="small" lang="en">at each stop</text>
+      <text x="330" y="22" class="small" lang="zh-CN">每个线程的调用树</text><text x="330" y="22" class="small" lang="en">call tree per thread</text>
+      <text x="630" y="22" class="small">Sort by top of stack</text>
+      <line x1="318" y1="12" x2="318" y2="410" class="lane"/><line x1="618" y1="12" x2="618" y2="410" class="lane"/>
+      <!-- step 1: suspend every 1 ms, record all threads -->
+      <g data-step="1">
+        <path class="arrow" d="M34 50 L306 50"/>
+        <line x1="50" y1="40" x2="50" y2="60" style="stroke: var(--ink-2); stroke-width: 2"/>
+        <line x1="90" y1="40" x2="90" y2="60" style="stroke: var(--ink-2); stroke-width: 2"/>
+        <line x1="130" y1="40" x2="130" y2="60" style="stroke: var(--ink-2); stroke-width: 2"/>
+        <line x1="170" y1="40" x2="170" y2="60" style="stroke: var(--ink-2); stroke-width: 2"/>
+        <line x1="210" y1="40" x2="210" y2="60" style="stroke: var(--ink-2); stroke-width: 2"/>
+        <line x1="250" y1="40" x2="250" y2="60" style="stroke: var(--ink-2); stroke-width: 2"/>
+        <line x1="290" y1="40" x2="290" y2="60" style="stroke: var(--ink-2); stroke-width: 2"/>
+        <text x="54" y="76" class="small">1 ms</text><path class="lane" d="M50 66 L90 66"/>
+        <text x="110" y="76" class="small" lang="zh-CN">挂起 → 记下 21 个线程的栈 → 继续</text><text x="110" y="76" class="small" lang="en">suspend → record 21 stacks → resume</text></g>
+      <!-- step 2: three stacks of Thread_6973201 -->
+      <g data-step="2">
+        <text x="34" y="100" class="small">Thread_6973201</text>
+        <rect class="box" x="34" y="110" width="88" height="22"/><text x="40" y="125" class="small">start</text>
+        <rect class="box" x="34" y="134" width="88" height="22"/><text x="40" y="149" class="small">main :37</text>
+        <rect class="box" x="34" y="158" width="88" height="22"/><text x="40" y="173" class="small">dispatch_apply</text>
+        <rect class="box" x="34" y="182" width="88" height="22"/><text x="40" y="197" class="small">…</text>
+        <rect class="box" x="34" y="206" width="88" height="22"/><text x="40" y="221" class="small">rows :21</text>
+        <rect class="box" x="126" y="110" width="88" height="22"/><text x="132" y="125" class="small">start</text>
+        <rect class="box" x="126" y="134" width="88" height="22"/><text x="132" y="149" class="small">main :37</text>
+        <rect class="box" x="126" y="158" width="88" height="22"/><text x="132" y="173" class="small">dispatch_apply</text>
+        <rect class="box" x="126" y="182" width="88" height="22"/><text x="132" y="197" class="small">…</text>
+        <rect class="box" x="126" y="206" width="88" height="22"/><text x="132" y="221" class="small">rows :21</text>
+        <rect class="box" x="218" y="110" width="88" height="22"/><text x="224" y="125" class="small">start</text>
+        <rect class="box" x="218" y="134" width="88" height="22"/><text x="224" y="149" class="small">main :37</text>
+        <rect class="box" x="218" y="158" width="88" height="22"/><text x="224" y="173" class="small">dispatch_apply</text>
+        <rect class="box" x="218" y="182" width="88" height="22"/><text x="224" y="197" class="small">…</text>
+        <rect class="box" x="218" y="206" width="88" height="22"/><text x="224" y="221" class="small">__ulock_wait</text>
+        <rect class="hl" x="32" y="108" width="184" height="128"/>
+        <text x="34" y="256" class="small" lang="zh-CN">前两个栈完全相同</text><text x="34" y="256" class="small" lang="en">the first two stacks are identical</text>
+        <text x="34" y="274" class="small" lang="zh-CN">哪次停下是哪个栈：示意</text><text x="34" y="274" class="small" lang="en">which stop shows which: illustrative</text></g>
+      <!-- step 3: merged call tree, main thread -->
+      <g data-step="3">
+        <text x="330" y="104" class="mono">1918 Thread_6973201</text>
+        <text x="340" y="124" class="mono">+ 1918 start › main :37</text>
+        <text x="350" y="144" class="mono">  1918 dispatch_apply › …</text>
+        <text x="360" y="166" class="mono">1791 rows  matmul_prof.c:21</text>
+        <text x="360" y="186" class="mono">59 rows  matmul_prof.c:19</text>
+        <text x="360" y="206" class="mono">64 __ulock_wait</text>
+        <rect class="hl" x="354" y="152" width="250" height="20"/>
+        <text x="330" y="228" class="small" lang="zh-CN">同样的栈合在一起，数出次数</text><text x="330" y="228" class="small" lang="en">identical stacks merged and counted</text></g>
+      <!-- step 4: the other threads -->
+      <g data-step="4">
+        <text x="330" y="264" class="mono">1867 Thread_6973210</text>
+        <text x="360" y="284" class="mono">1829 rows  matmul_prof.c:21</text>
+        <text x="330" y="316" class="mono">997 Thread_6973206</text>
+        <text x="360" y="336" class="mono">992 __workq_kernreturn</text>
+        <text x="330" y="362" class="small" lang="zh-CN">空闲池线程：在内核里等活</text><text x="330" y="362" class="small" lang="en">an idle pool thread waiting for work</text>
+        <text x="330" y="384" class="small" lang="zh-CN">共 21 个线程，约 10 个大多在 rows</text><text x="330" y="384" class="small" lang="en">21 threads; about 10 mostly in rows</text></g>
+      <!-- step 5: sort by top of stack, all threads -->
+      <g data-step="5">
+        <text x="630" y="104" class="mono">rows</text><text x="878" y="104" class="mono" text-anchor="end">18450</text>
+        <text x="630" y="128" class="mono">__workq_kernreturn</text><text x="878" y="128" class="mono" text-anchor="end">1563</text>
+        <text x="630" y="152" class="mono">__ulock_wait</text><text x="878" y="152" class="mono" text-anchor="end">64</text>
+        <text x="630" y="176" class="mono">start_wqthread</text><text x="878" y="176" class="mono" text-anchor="end">51</text>
+        <text x="630" y="200" class="mono">_platform_memset</text><text x="878" y="200" class="mono" text-anchor="end">14</text>
+        <text x="630" y="224" class="mono">_dispatch_client_callout2</text><text x="878" y="224" class="mono" text-anchor="end">8</text>
+        <rect class="hl" x="626" y="88" width="256" height="22"/>
+        <text x="630" y="260" class="small" lang="zh-CN">rows 约占全部栈顶样本的 92 %</text><text x="630" y="260" class="small" lang="en">rows: about 92 % of top-of-stack samples</text>
+        <text x="630" y="280" class="small" lang="zh-CN">不到 5 的条目不列出</text><text x="630" y="280" class="small" lang="en">entries under 5 are left out</text>
+        <text x="630" y="300" class="small" lang="zh-CN">先读这一段</text><text x="630" y="300" class="small" lang="en">read this part first</text></g>
     </svg>
   </div>
 
