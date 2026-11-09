@@ -86,6 +86,8 @@ for (const page of pages) {
   for (const d of html.matchAll(/<svg[^>]*data-captions='([^']*)'[\s\S]*?<\/svg>/g)) {
     let captions;
     try { captions = JSON.parse(d[1]); } catch { problems.push(`${rel}: data-captions is not valid JSON`); continue; }
+    // Contract (Diagrams): no quote or apostrophe inside caption text, curly ones included.
+    if (/[’‘]/.test(d[1]) || /data-captions-en='[^']*[’‘]/.test(d[0])) problems.push(`${rel}: apostrophe inside a captions attribute`);
     const steps = [...d[0].matchAll(/data-step="([^"]+)"/g)].flatMap(s => s[1].split(/\s+/).map(Number));
     const max = Math.max(0, ...steps);
     if (captions.length !== max + 1) problems.push(`${rel}: captions ${captions.length} != steps+1 (${max + 1})`);

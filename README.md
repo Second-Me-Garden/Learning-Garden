@@ -39,8 +39,14 @@ Follow `docs/authoring/PAGE_CONTRACT.md` (page skeleton, bilingual pairing, diag
 
 An animated diagram is an inline `<svg data-diagram data-captions='[...]'>` whose parts carry `data-step="N"`; `assets/diagram.js` adds the controls. Step 0 is the full picture; steps 1..N highlight that step's parts and dim the rest. Use `class="pulse"` or `class="flow"` on a part for continuous motion.
 
-Check before committing:
+Check before committing (details and what to look for in `docs/authoring/VERIFICATION.md`):
 
 ```
-node scripts/check-site.mjs
+node scripts/check-site.mjs                                   # structure, captions, devices, glyphs (CI runs this)
+sh scripts/leak-scan.sh --against main <changed pages>        # no Chinese leaking into English mode
+sh scripts/render-diagram.sh <page> <0|1|2> all               # a diagram step by step, desktop and 390 px phone
+sh scripts/render-page.sh <page>                              # a whole page, light / dark / phone
+sh scripts/probe-rail.sh                                      # the lesson rail, after a rail or CSS change
 ```
+
+The browser scripts need a headless Chromium (Google Chrome on macOS is found on its own; on Linux install `chromium` or set `LG_BROWSER`) and write only under `.renders/`, which is gitignored.
