@@ -157,8 +157,8 @@
   </ol>
   <p lang="zh-CN"><strong>overlay 与 underlay 全靠环境变量</strong>。<code>source /opt/ros/jazzy/setup.bash</code> 把这个前缀加进 <code>AMENT_PREFIX_PATH</code>、<code>PATH</code>、<code>PYTHONPATH</code> 等（大致还有 <code>LD_LIBRARY_PATH</code>）；这就是 underlay。<code>source ~/ws/install/setup.bash</code> 先重新 source 构建时所在的 underlay，再把工作空间里每个包的前缀加到<em>前面</em>；这就是 overlay。<code>local_setup.bash</code> 只加工作空间自己，不碰 underlay。</p>
   <p lang="en"><strong>Overlays and underlays are entirely environment variables</strong>. <code>source /opt/ros/jazzy/setup.bash</code> adds that prefix to <code>AMENT_PREFIX_PATH</code>, <code>PATH</code>, <code>PYTHONPATH</code> and so on (approximately also <code>LD_LIBRARY_PATH</code>); that is the underlay. <code>source ~/ws/install/setup.bash</code> first re-sources the underlay that was active at build time, then adds every package prefix of the workspace in <em>front</em> of it; that is the overlay. <code>local_setup.bash</code> adds only the workspace itself and leaves the underlay alone.</p>
-  <p lang="zh-CN"><code>ros2 pkg list</code> 和 <code>ros2 run</code> 怎么找到包？靠 <strong>ament 资源索引</strong>：每个装好的包在 <code>share/ament_index/resource_index/packages/</code> 下放一个以包名命名的空文件。工具按 <code>AMENT_PREFIX_PATH</code> 的顺序逐个前缀去看这个目录，先找到的算数——所以 overlay 里的同名包会遮住 underlay 里的。没有数据库，只有文件和路径顺序。</p>
-  <p lang="en">How do <code>ros2 pkg list</code> and <code>ros2 run</code> find packages? Through the <strong>ament resource index</strong>: each installed package places an empty file named after itself in <code>share/ament_index/resource_index/packages/</code>. The tools look in that directory under each prefix in <code>AMENT_PREFIX_PATH</code> order, and the first hit wins — so a package of the same name in the overlay shadows the one in the underlay. There is no database, only files and path order.</p>
+  <p lang="zh-CN"><code>ros2 pkg list</code> 和 <code>ros2 run</code> 怎么找到包？靠 <strong>ament 资源索引</strong>：每个装好的包在 <code>share/ament_index/resource_index/packages/</code> 下放一个以包名命名的空文件。工具按 <code>AMENT_PREFIX_PATH</code> 的顺序逐个前缀去看这个目录，先找到的算数——所以 overlay 里的同名包会遮住 underlay 里的。没有数据库，只有文件和路径顺序。图解 (c) 一个前缀一个前缀地走一遍这次查找。</p>
+  <p lang="en">How do <code>ros2 pkg list</code> and <code>ros2 run</code> find packages? Through the <strong>ament resource index</strong>: each installed package places an empty file named after itself in <code>share/ament_index/resource_index/packages/</code>. The tools look in that directory under each prefix in <code>AMENT_PREFIX_PATH</code> order, and the first hit wins — so a package of the same name in the overlay shadows the one in the underlay. There is no database, only files and path order. Diagram (c) walks this search one prefix at a time.</p>
   <div class="note" lang="zh-CN">官方教程的规则：在一个<strong>没有</strong> source 过这个 overlay 的终端里构建，在<strong>另开的新终端</strong>里 source overlay。在同一个终端里一边 source overlay 一边构建，可能把 overlay 自己当成 underlay，造成难查的问题。</div>
   <div class="note" lang="en">The rule from the official tutorial: build in a terminal that has <strong>not</strong> sourced this overlay, and source the overlay in a <strong>new, separate terminal</strong>. Building in a terminal where the overlay is sourced can make the overlay act as its own underlay and cause hard-to-trace problems.</div>
   <p lang="zh-CN">延伸阅读：Renard《ROS 2 From Scratch》讲包与工作空间的章节；Martín Rico《A Concise Introduction to Robot Programming with ROS2》讲 ROS 2 入门与工作空间的章节；官方 <a href="https://docs.ros.org/en/jazzy/Tutorials/Beginner-Client-Libraries/Creating-A-Workspace/Creating-A-Workspace.html">Creating a workspace</a>。</p>
@@ -333,14 +333,14 @@ domain 0, last slot:  p = 119 → 7400 + 10 + 238 = 7648, 7649
            "第 3 步，colcon build --symlink-install：读所有 package.xml，排出拓扑顺序，先 pkg_a 后 pkg_b（互不依赖的会并行），对每个包调用它自己的 CMake 或 setuptools，中间产物在 build/，日志在 log/。",
            "第 4 步，安装：每个包装进自己的前缀 install/pkg_a 和 install/pkg_b，并生成 setup.bash 与 local_setup.bash。symlink 安装意味着改 Python 文件不必重新构建。",
            "第 5 步，在新终端里 source ~/ws/install/setup.bash：它先重新 source 构建时的 underlay，再把工作空间的前缀加到最前面。AMENT_PREFIX_PATH 现在是 overlay 在前、underlay 在后。",
-           "第 6 步，ros2 run pkg_b node：按 AMENT_PREFIX_PATH 的顺序在各前缀的 ament 资源索引里找包，先找到的算数。所以 overlay 里与 underlay 同名的包会遮住 underlay 的版本。"]'
+           "第 6 步，ros2 run pkg_b node：按 AMENT_PREFIX_PATH 的顺序在各前缀的 ament 资源索引里找包，先找到的算数。所以 overlay 里与 underlay 同名的包会遮住 underlay 的版本。图解 (c) 一个前缀一个前缀地走一遍这次查找。"]'
          data-captions-en='["The whole picture: top left is the underlay installed with apt; the middle column is the workspace ~/ws from source to install; on the right are the environment variables and lookup in a new terminal. Press Play to walk from the underlay to ros2 run.",
            "Step 1, the underlay: /opt/ros/jazzy is ROS 2 installed by apt. source /opt/ros/jazzy/setup.bash writes this prefix into AMENT_PREFIX_PATH, PATH, PYTHONPATH and so on. Only then does the ros2 command work.",
            "Step 2, the source: ~/ws/src holds two packages. Each package is a directory with a package.xml; the package.xml of pkg_b declares a dependency on pkg_a.",
            "Step 3, colcon build --symlink-install: it reads every package.xml, sorts them topologically, builds pkg_a before pkg_b (independent packages in parallel), and runs each package through its own CMake or setuptools, with intermediate output in build/ and logs in log/.",
            "Step 4, install: each package is installed into its own prefix, install/pkg_a and install/pkg_b, and setup.bash and local_setup.bash are generated. A symlink install means editing Python files needs no rebuild.",
            "Step 5, in a new terminal, source ~/ws/install/setup.bash: it first re-sources the underlay used at build time, then puts the workspace prefixes in front. AMENT_PREFIX_PATH now lists the overlay first and the underlay after it.",
-           "Step 6, ros2 run pkg_b node: packages are looked up in the ament resource index of each prefix, in AMENT_PREFIX_PATH order, and the first hit wins. So a package in the overlay with the same name as one in the underlay shadows the underlay version."]'>
+           "Step 6, ros2 run pkg_b node: packages are looked up in the ament resource index of each prefix, in AMENT_PREFIX_PATH order, and the first hit wins. So a package in the overlay with the same name as one in the underlay shadows the underlay version. Diagram (c) walks this lookup prefix by prefix."]'>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
@@ -392,20 +392,76 @@ domain 0, last slot:  p = 119 → 7400 + 10 + 238 = 7648, 7649
         <text x="640" y="162" class="mono">/opt/ros/jazzy</text>
         <text x="628" y="188" class="small" lang="zh-CN">overlay 在前，underlay 在后</text><text x="628" y="188" class="small" lang="en">overlay first, underlay after</text></g>
 
-      <g data-step="6"><rect class="box" x="615" y="230" width="265" height="170"/>
+      <g data-step="6"><rect class="box" x="615" y="230" width="265" height="110"/>
         <text x="628" y="252" class="mono">ros2 run pkg_b node</text>
-        <text x="628" y="274" class="small" lang="zh-CN">按顺序查各前缀的 ament 资源索引：</text><text x="628" y="274" class="small" lang="en">checks each prefix’s ament index in order:</text>
-        <text x="628" y="294" class="small">share/ament_index/resource_index/</text>
-        <text x="628" y="310" class="small">  packages/pkg_b</text>
-        <text x="628" y="334" class="small" lang="zh-CN">先找到的算数：overlay 遮住 underlay</text><text x="628" y="334" class="small" lang="en">first hit wins: overlay shadows underlay</text>
-        <text x="628" y="358" class="small" lang="zh-CN">改 C++ 或 package.xml 要重新构建</text><text x="628" y="358" class="small" lang="en">C++ or package.xml edits need a rebuild</text>
-        <text x="628" y="382" class="small" lang="zh-CN">在没 source overlay 的终端里构建</text><text x="628" y="382" class="small" lang="en">build where the overlay is not sourced</text>
-        <rect class="box" x="25" y="250" width="265" height="50"/>
-        <text x="38" y="280" class="mono">overlay: ~/ws/install</text>
-        <rect class="box" x="25" y="310" width="265" height="50"/>
-        <text x="38" y="340" class="mono">underlay: /opt/ros/jazzy</text>
-        <text x="38" y="384" class="small" lang="zh-CN">查找自上而下：先 overlay，后 underlay</text><text x="38" y="384" class="small" lang="en">lookup: overlay first, then underlay</text>
-        <path class="arrow" d="M300 275 L300 335"/></g>
+        <text x="628" y="274" class="small" lang="zh-CN">先找到的算数：查找过程见图解 (c)</text><text x="628" y="274" class="small" lang="en">first hit wins; see diagram (c)</text>
+        <text x="628" y="300" class="small" lang="zh-CN">改 C++ 或 package.xml 要重新构建</text><text x="628" y="300" class="small" lang="en">C++ or package.xml edits need a rebuild</text>
+        <text x="628" y="324" class="small" lang="zh-CN">在没 source overlay 的终端里构建</text><text x="628" y="324" class="small" lang="en">build where the overlay is not sourced</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) 查找一个包：沿 AMENT_PREFIX_PATH 逐个前缀找标记文件</h3><h3 lang="en">(c) Finding one package: the marker-file search down AMENT_PREFIX_PATH</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：在图解 (b) 的新终端里运行 ros2 pkg prefix pkg_a。左边是命令和 AMENT_PREFIX_PATH，右边是它列出的三个前缀，每个前缀下都有资源索引目录 share/ament_index/resource_index/packages/。某个前缀里装了某个包，就是这个目录里有一个以包名命名的空文件，叫标记文件。按播放跟着查找走一遍。",
+           "第 1 步，ros2 pkg prefix 调用 ament_index_python 的 get_package_prefix。它把 AMENT_PREFIX_PATH 按冒号拆成一个有序列表，只留下真实存在的路径：~/ws/install/pkg_b、~/ws/install/pkg_a、/opt/ros/jazzy。查找从列表顶端往下走。",
+           "第 2 步，前缀 1 是 ~/ws/install/pkg_b：有没有 packages/pkg_a 这个文件？这里只有 pkg_b，isfile 为假，转到下一个前缀。不列目录、不解析任何文件，每个前缀只做一次文件判断。",
+           "第 3 步，前缀 2 是 ~/ws/install/pkg_a：标记文件 packages/pkg_a 存在。函数立刻返回这个前缀，循环到此结束。",
+           "第 4 步，前缀 3 /opt/ros/jazzy 根本没有被看。假如 underlay 里也有一个叫 pkg_a 的包（这里是假设），它的标记文件就一直没人读：overlay 遮住 underlay 就是这样发生的，没有数据库，只有路径顺序。",
+           "第 5 步，命令打印 ~/ws/install/pkg_a，也就是第一个命中的前缀。Lab A 用 ros2 pkg prefix my_pkg 检查的就是这件事。"]'
+         data-captions-en='["The whole picture: ros2 pkg prefix pkg_a, run in the new terminal of diagram (b). On the left are the command and AMENT_PREFIX_PATH; on the right the three prefixes it lists, each with its resource index directory share/ament_index/resource_index/packages/. A package is installed in a prefix when that directory holds an empty file named after it, the marker file. Press Play to follow the search.",
+           "Step 1, ros2 pkg prefix calls get_package_prefix in ament_index_python. It splits AMENT_PREFIX_PATH on the colon into an ordered list and keeps only the paths that exist: ~/ws/install/pkg_b, ~/ws/install/pkg_a, /opt/ros/jazzy. The search walks this list from the top.",
+           "Step 2, prefix 1 is ~/ws/install/pkg_b: is there a file packages/pkg_a? Only pkg_b is there, so isfile is false and the search moves to the next prefix. Nothing is listed or parsed; each prefix costs one file test.",
+           "Step 3, prefix 2 is ~/ws/install/pkg_a: the marker file packages/pkg_a exists. The function returns this prefix at once, and the loop ends.",
+           "Step 4, prefix 3, /opt/ros/jazzy, is never looked at. If the underlay also held a package named pkg_a (a hypothetical here), its marker file would go unread: that is how an overlay shadows an underlay, with no database, only path order.",
+           "Step 5, the command prints ~/ws/install/pkg_a, the prefix of the first hit. Lab A checks exactly this with ros2 pkg prefix my_pkg."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="30" y="30" width="300" height="80"/>
+      <text x="44" y="56" class="mono">$ ros2 pkg prefix pkg_a</text>
+      <text x="44" y="80" class="small">ament_index_python</text>
+      <text x="44" y="98" class="small">get_package_prefix → get_resource</text>
+      <text x="380" y="22" class="small" lang="zh-CN">每个前缀下：share/ament_index/resource_index/packages/</text><text x="380" y="22" class="small" lang="en">under each prefix: share/ament_index/resource_index/packages/</text>
+      <text x="380" y="84" class="mono">1</text><text x="380" y="204" class="mono">2</text><text x="380" y="324" class="mono">3</text>
+      <rect class="box" x="400" y="40" width="300" height="100"/>
+      <text x="412" y="62" class="mono">~/ws/install/pkg_b</text>
+      <rect class="box" x="412" y="74" width="70" height="24"/><text x="420" y="91" class="mono">pkg_b</text>
+      <rect class="box" x="400" y="160" width="300" height="100"/>
+      <text x="412" y="182" class="mono">~/ws/install/pkg_a</text>
+      <rect class="box" x="412" y="194" width="70" height="24"/><text x="420" y="211" class="mono">pkg_a</text>
+      <rect class="box" x="400" y="280" width="300" height="100"/>
+      <text x="412" y="302" class="mono">/opt/ros/jazzy</text>
+      <text x="412" y="331" class="mono">rclcpp  …</text>
+      <rect class="box" x="520" y="314" width="70" height="24" style="stroke-dasharray: 4 3"/><text x="528" y="331" class="mono">pkg_a</text>
+      <text x="720" y="62" class="small" lang="zh-CN">标记文件：</text><text x="720" y="62" class="small" lang="en">marker file:</text>
+      <text x="720" y="80" class="small" lang="zh-CN">以包名命名的空文件</text><text x="720" y="80" class="small" lang="en">empty, named after the pkg</text>
+      <text x="720" y="98" class="small" lang="zh-CN">有它就算装了这个包</text><text x="720" y="98" class="small" lang="en">present = installed</text>
+
+      <!-- step 1: AMENT_PREFIX_PATH split into the ordered search list -->
+      <g data-step="1"><rect class="box" x="30" y="130" width="300" height="130"/>
+        <text x="44" y="152" class="small">AMENT_PREFIX_PATH</text>
+        <text x="44" y="174" class="small" lang="zh-CN">按冒号拆开，只留存在的路径：</text><text x="44" y="174" class="small" lang="en">split on colons, existing paths only:</text>
+        <text x="44" y="198" class="mono">1  ~/ws/install/pkg_b</text>
+        <text x="44" y="220" class="mono">2  ~/ws/install/pkg_a</text>
+        <text x="44" y="242" class="mono">3  /opt/ros/jazzy</text></g>
+      <!-- step 2: prefix 1 has no marker pkg_a -->
+      <g data-step="2">
+        <text x="412" y="122" style="fill: var(--ink-2)" lang="zh-CN">✕ 没有 packages/pkg_a → 下一个</text><text x="412" y="122" style="fill: var(--ink-2)" lang="en">✕ no packages/pkg_a → next prefix</text></g>
+      <!-- step 3: prefix 2 has the marker; return -->
+      <g data-step="3"><rect class="hl" x="410" y="192" width="74" height="28"/>
+        <text x="500" y="211" lang="zh-CN">✓ isfile 为真</text><text x="500" y="211" lang="en">✓ isfile is true</text>
+        <text x="412" y="244" lang="zh-CN">返回这个前缀，循环结束</text><text x="412" y="244" lang="en">return this prefix; the loop ends</text></g>
+      <!-- step 4: prefix 3 never opened -->
+      <g data-step="4"><text x="598" y="331" class="small" lang="zh-CN">假设的同名包</text><text x="598" y="331" class="small" lang="en">hypothetical</text>
+        <text x="412" y="368" style="fill: var(--ink-2)" lang="zh-CN">✕ 从未打开：被 overlay 遮住</text><text x="412" y="368" style="fill: var(--ink-2)" lang="en">✕ never opened: shadowed</text></g>
+      <!-- step 5: the printed prefix -->
+      <g data-step="5"><rect class="box" x="30" y="290" width="300" height="90"/>
+        <text x="44" y="314" class="small" lang="zh-CN">输出：第一个命中的前缀</text><text x="44" y="314" class="small" lang="en">output: the prefix of the first hit</text>
+        <text x="44" y="342" class="mono">~/ws/install/pkg_a</text>
+        <text x="44" y="366" class="small" lang="zh-CN">Lab A：ros2 pkg prefix my_pkg</text><text x="44" y="366" class="small" lang="en">Lab A: ros2 pkg prefix my_pkg</text></g>
     </svg>
   </div>
 

@@ -150,11 +150,11 @@ Undefined symbols for architecture arm64:
   <p lang="en">Further reading: the section Design Criteria in the chapter Partitioning and Synchronization Design of McKenney’s <em>Is Parallel Programming Hard</em>; the chapter on scheduling and work distribution in Herlihy et al., <em>The Art of Multiprocessor Programming</em>.</p>
 
   <h3 lang="zh-CN">3. reduction：每个线程一份，最后再加</h3><h3 lang="en">3. Reductions: one copy per thread, added at the end</h3>
-  <p lang="zh-CN"><code>reduction(+:sum)</code> 让每个线程拿到一份私有的 <code>sum</code>，初值是这个运算的单位元（加法是 0），循环里只改自己那份，循环结束时运行时把各份合起来再加回原变量。这正是 Phase 2 修数据竞争的第三种方法「每线程一份私有累加」，只是由编译器替你写。上面 <code>nm</code> 里的 <code>__kmpc_reduce_nowait</code> 就是合并那一步。可用的运算还有 <code>*</code>、<code>max</code>、<code>min</code>、<code>&amp;</code>、<code>|</code>、<code>^</code>、<code>&amp;&amp;</code>、<code>||</code>，也可以用 <code>declare reduction</code> 自定义。</p>
-  <p lang="en"><code>reduction(+:sum)</code> gives each thread a private <code>sum</code> initialised to the operator’s identity (0 for addition); the loop updates only its own copy, and at the end the runtime combines the copies and adds them back into the original variable. This is exactly Phase 2’s third fix for a data race, a private per-thread sum, written by the compiler for you. The <code>__kmpc_reduce_nowait</code> in the <code>nm</code> output above is that combining step. Other operators are <code>*</code>, <code>max</code>, <code>min</code>, <code>&amp;</code>, <code>|</code>, <code>^</code>, <code>&amp;&amp;</code> and <code>||</code>, and <code>declare reduction</code> defines your own.</p>
+  <p lang="zh-CN"><code>reduction(+:sum)</code> 让每个线程拿到一份私有的 <code>sum</code>，初值是这个运算的单位元（加法是 0），循环里只改自己那份，循环结束时运行时把各份合起来再加回原变量。这正是 Phase 2 修数据竞争的第三种方法「每线程一份私有累加」，只是由编译器替你写。上面 <code>nm</code> 里的 <code>__kmpc_reduce_nowait</code> 就是合并那一步。可用的运算还有 <code>*</code>、<code>max</code>、<code>min</code>、<code>&amp;</code>、<code>|</code>、<code>^</code>、<code>&amp;&amp;</code>、<code>||</code>，也可以用 <code>declare reduction</code> 自定义。图解 (c) 把私有副本、合并那一步和共享原子放在一起逐步对照。</p>
+  <p lang="en"><code>reduction(+:sum)</code> gives each thread a private <code>sum</code> initialised to the operator’s identity (0 for addition); the loop updates only its own copy, and at the end the runtime combines the copies and adds them back into the original variable. This is exactly Phase 2’s third fix for a data race, a private per-thread sum, written by the compiler for you. The <code>__kmpc_reduce_nowait</code> in the <code>nm</code> output above is that combining step. Other operators are <code>*</code>, <code>max</code>, <code>min</code>, <code>&amp;</code>, <code>|</code>, <code>^</code>, <code>&amp;&amp;</code> and <code>||</code>, and <code>declare reduction</code> defines your own. Diagram (c) steps through the private copies and the combining step side by side with a shared atomic.</p>
   <ul>
-    <li lang="zh-CN"><strong>为什么不用一个共享原子。</strong>每次加法都去抢同一条 cache line，Phase 2 已经量过它有多慢。reduction 让共享写只发生 T 次（T 是线程数），而不是 N 次。</li>
-    <li lang="en"><strong>Why not one shared atomic.</strong> Every addition would fight over the same cache line, and Phase 2 measured how slow that is. A reduction makes the shared write happen T times (T threads), not N times.</li>
+    <li lang="zh-CN"><strong>为什么不用一个共享原子。</strong>每次加法都去抢同一条 cache line，Phase 2 已经量过它有多慢。reduction 让共享写只发生 T 次（T 是线程数），而不是每次加法一次（Lab A 里是 N × N 次）。</li>
+    <li lang="en"><strong>Why not one shared atomic.</strong> Every addition would fight over the same cache line, and Phase 2 measured how slow that is. A reduction makes the shared write happen T times (T threads), rather than once per addition (N × N in Lab A).</li>
     <li lang="zh-CN"><strong>浮点数的结果可能和串行差最后几位。</strong>浮点加法不满足结合律，reduction 改变了相加的顺序，线程数或调度一变结果就可能变。要逐位一样，就得固定分块并按固定顺序合并。</li>
     <li lang="en"><strong>A floating-point result may differ from the serial one in the last bits.</strong> Floating-point addition is not associative, a reduction changes the order of additions, and a different thread count or schedule may change the result. Bit-for-bit equality needs fixed chunks combined in a fixed order.</li>
     <li lang="zh-CN"><strong>GCD 没有 reduction 子句。</strong>做法是给每个块一格私有的部分和数组，<code>dispatch_apply</code> 返回后在调用线程里串行加起来。数组的每一格最好各占一条 128 字节的 cache line，否则就是 Phase 0 的 false sharing。</li>
@@ -316,7 +316,7 @@ fib(42), c = 10:  F(35) - 1 = 9227465 - 1 = 9227464   1364 times as many tasks  
     <ul lang="zh-CN">
       <li>fork-join 要求在一个作用域里分出去的工作都在作用域结束前汇合，work T<sub>1</sub> 和 span T<sub>∞</sub> 给出上限 T<sub>P</sub> ≤ T<sub>1</sub>/P + T<sub>∞</sub>。</li>
       <li><code>schedule(static)</code> 进入循环时一次分完、开销最小，<code>dynamic</code> 和 <code>guided</code> 做完再领，能吸收迭代代价和核速度的不均。</li>
-      <li><code>reduction</code> 给每个线程一份私有副本，共享写只发生 T 次而不是 N 次，浮点结果可能和串行差最后几位。</li>
+      <li><code>reduction</code> 给每个线程一份私有副本，共享写只发生 T 次而不是每次加法一次（Lab A 里是 N × N 次），浮点结果可能和串行差最后几位。</li>
       <li>事先不知道有多少活时用 task，cutoff 把底下的小任务改回串行。</li>
       <li>work stealing 让主人从自己 deque 的尾部取、小偷从别人的头部偷，fib(42) 的 6764 个任务只偷了 146 到 179 次。</li>
       <li>块数取线程数的十倍上下、每块至少几十微秒；libc++ 的 <code>std::execution::par</code> 每 256 个元素才切一块，元素很贵时要自己选块数。</li>
@@ -324,7 +324,7 @@ fib(42), c = 10:  F(35) - 1 = 9227465 - 1 = 9227464   1364 times as many tasks  
     <ul lang="en">
       <li>Fork-join requires everything forked in a scope to join before the scope ends, and work T<sub>1</sub> and span T<sub>∞</sub> give the bound T<sub>P</sub> ≤ T<sub>1</sub>/P + T<sub>∞</sub>.</li>
       <li><code>schedule(static)</code> divides the loop once on entry at the lowest overhead, while <code>dynamic</code> and <code>guided</code> take more when done and absorb uneven iteration costs and core speeds.</li>
-      <li><code>reduction</code> gives each thread a private copy so that shared writes happen T times instead of N, and a floating-point result may differ from the serial one in the last bits.</li>
+      <li><code>reduction</code> gives each thread a private copy so that shared writes happen T times rather than once per addition (N × N in Lab A), and a floating-point result may differ from the serial one in the last bits.</li>
       <li>Use tasks when the amount of work is not known in advance, with a cutoff that turns the small tasks at the bottom back into serial code.</li>
       <li>Work stealing has the owner take from the tail of its own deque and thieves steal from the head of others, and fib(42)’s 6764 tasks needed only 146 to 179 steals.</li>
       <li>Aim for about ten times as many chunks as threads, each at least tens of microseconds; libc++’s <code>std::execution::par</code> cuts only one chunk per 256 elements, so choose the chunk count yourself when elements are expensive.</li>
@@ -514,6 +514,85 @@ fib(42), c = 10:  F(35) - 1 = 9227465 - 1 = 9227464   1364 times as many tasks  
         <text x="44" y="362" class="small" lang="zh-CN">串行：约 360 ms</text><text x="44" y="362" class="small" lang="en">serial: about 360 ms</text>
         <text x="44" y="386" class="small" lang="zh-CN">cutoff 25：6764 个任务，146–179 次偷，59–60 ms</text><text x="44" y="386" class="small" lang="en">cutoff 25: 6764 tasks, 146–179 steals, 59–60 ms</text>
         <text x="44" y="410" class="small" lang="zh-CN">cutoff 10：9227464 个任务，165–175 ms，开销压过了计算</text><text x="44" y="410" class="small" lang="en">cutoff 10: 9227464 tasks, 165–175 ms, overhead beats the work</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) reduction(+:sum)：4 份私有副本，最后合并一次；对照一个共享原子</h3><h3 lang="en">(c) reduction(+:sum): four private copies combined once, against one shared atomic</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：Lab A 的校验和循环 sum += C[i][j]，写在 #pragma omp parallel for reduction(+:sum) 下，这里画成 4 个线程（示意，Lab A 用 10 个）。左边是 reduction：每个线程一份私有副本，下面是原来的 sum；右边是同一个循环改用一个共享原子变量。按播放逐步看。",
+           "第 1 步，进入循环时每个线程拿到一份私有的 sum，初值是加法的单位元 0。原来的 sum 这时还没被碰。",
+           "第 2 步，4 个线程并行地往各自的副本里加。没写 schedule 时每个线程拿四分之一的行 i（libomp 默认 static），只把这些 C[i][j] 加进自己那份：没有共享写，也没有 cache line 在核之间来回搬。",
+           "第 3 步，循环结束时每个线程带着自己的副本调用 __kmpc_reduce_nowait，由运行时决定怎么合并：要么让线程在一把锁里、或用一次原子加，把自己那份加进原来的 sum；要么按树合并。选哪种看线程数等条件（本页读 libomp 源码得出，没有运行过）；用的是锁时，由 __kmpc_end_reduce_nowait 放开它。",
+           "第 4 步，原来的 sum 现在是总和，共享写只发生了 T = 4 次，每个线程一次，而不是每次加法一次。相加的顺序和串行循环不同，所以浮点数的总和可能和串行结果差最后几位。",
+           "第 5 步，对照共享原子：N × N 次加法每一次都是对同一个 sum 的原子加，它所在的 cache line 每写一次就在核之间搬一次，Phase 2 量过这有多慢。共享写是 N × N 次，而不是 4 次。"]'
+         data-captions-en='["The whole picture: the checksum loop of Lab A, sum += C[i][j], under #pragma omp parallel for reduction(+:sum), drawn here on 4 threads (a sketch; Lab A uses 10). On the left the reduction, one private copy per thread with the original sum below; on the right the same loop with one shared atomic sum instead. Press Play to step through.",
+           "Step 1, entering the loop each thread gets a private sum initialised to the identity of addition, 0. The original sum is not touched yet.",
+           "Step 2, the 4 threads add into their own copies in parallel. With no schedule clause each thread takes a quarter of the rows i (static is the libomp default) and adds those C[i][j] into its own copy only: no shared write, and no cache line moving between cores.",
+           "Step 3, at the end of the loop each thread calls __kmpc_reduce_nowait with its copy, and the runtime decides how to combine: either each thread adds its own copy into the original sum under a lock or with one atomic add, or the copies are combined as a tree. The choice depends on the thread count and other conditions (read from the libomp source, not run); when it used the lock, __kmpc_end_reduce_nowait releases it.",
+           "Step 4, the original sum now holds the total after T = 4 shared writes, one per thread rather than one per addition. The additions happened in a different order from the serial loop, so a floating-point total may differ from the serial one in the last bits.",
+           "Step 5, against that, a shared atomic: each of the N × N additions is an atomic add on the same sum, so its cache line moves between cores on every write, and Phase 2 measured how slow that is. N × N shared writes instead of 4."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="40" y="26" class="mono">reduction(+:sum)</text>
+      <text x="480" y="26" class="mono">#pragma omp atomic</text>
+      <line x1="450" y1="14" x2="450" y2="400" class="lane"/>
+      <rect class="box" x="40" y="44" width="100" height="34"/><text x="50" y="66" class="mono">T0: sum</text>
+      <rect class="box" x="40" y="92" width="100" height="34"/><text x="50" y="114" class="mono">T1: sum</text>
+      <rect class="box" x="40" y="140" width="100" height="34"/><text x="50" y="162" class="mono">T2: sum</text>
+      <rect class="box" x="40" y="188" width="100" height="34"/><text x="50" y="210" class="mono">T3: sum</text>
+      <rect class="box" x="40" y="298" width="310" height="56"/><text x="52" y="320" class="mono">sum</text>
+      <text x="52" y="342" class="small" lang="zh-CN">原来的变量</text><text x="52" y="342" class="small" lang="en">the original variable</text>
+      <rect class="box" x="480" y="44" width="70" height="34"/><text x="494" y="66" class="mono">T0</text>
+      <rect class="box" x="480" y="92" width="70" height="34"/><text x="494" y="114" class="mono">T1</text>
+      <rect class="box" x="480" y="140" width="70" height="34"/><text x="494" y="162" class="mono">T2</text>
+      <rect class="box" x="480" y="188" width="70" height="34"/><text x="494" y="210" class="mono">T3</text>
+      <rect class="box" x="650" y="110" width="150" height="56"/><text x="662" y="134" class="mono">sum</text>
+      <text x="662" y="154" class="small" lang="zh-CN">共享，原子加</text><text x="662" y="154" class="small" lang="en">shared, atomic add</text>
+      <!-- step 1: private copies start at 0 -->
+      <g data-step="1">
+        <text x="110" y="66" class="mono">= 0</text>
+        <text x="110" y="114" class="mono">= 0</text>
+        <text x="110" y="162" class="mono">= 0</text>
+        <text x="110" y="210" class="mono">= 0</text></g>
+      <!-- step 2: fill in parallel -->
+      <g data-step="2">
+        <rect class="box" x="146" y="44" width="204" height="34"/>
+        <text x="154" y="66" class="small" lang="zh-CN">+= C[i][j]，第 1 个四分之一的行</text><text x="154" y="66" class="small" lang="en">+= C[i][j], rows quarter 1</text>
+        <rect class="box" x="146" y="92" width="204" height="34"/>
+        <text x="154" y="114" class="small" lang="zh-CN">+= C[i][j]，第 2 个四分之一的行</text><text x="154" y="114" class="small" lang="en">+= C[i][j], rows quarter 2</text>
+        <rect class="box" x="146" y="140" width="204" height="34"/>
+        <text x="154" y="162" class="small" lang="zh-CN">+= C[i][j]，第 3 个四分之一的行</text><text x="154" y="162" class="small" lang="en">+= C[i][j], rows quarter 3</text>
+        <rect class="box" x="146" y="188" width="204" height="34"/>
+        <text x="154" y="210" class="small" lang="zh-CN">+= C[i][j]，第 4 个四分之一的行</text><text x="154" y="210" class="small" lang="en">+= C[i][j], rows quarter 4</text>
+        <text x="40" y="246" class="small" lang="zh-CN">只写自己的副本：没有共享写</text><text x="40" y="246" class="small" lang="en">own copy only: no shared write</text></g>
+      <!-- step 3: the runtime combines -->
+      <g data-step="3">
+        <path class="arrow" style="marker-end: none" d="M350 61 L364 61"/>
+        <path class="arrow" style="marker-end: none" d="M350 109 L364 109"/>
+        <path class="arrow" style="marker-end: none" d="M350 157 L364 157"/>
+        <path class="arrow" style="marker-end: none" d="M350 205 L364 205"/>
+        <path class="arrow" style="marker-end: none" d="M364 61 L364 324"/>
+        <path class="arrow" d="M364 324 L352 324"/>
+        <text x="40" y="268" class="mono">__kmpc_reduce_nowait</text>
+        <text x="40" y="286" class="small" lang="zh-CN">4 份并入 sum</text><text x="40" y="286" class="small" lang="en">the 4 copies go into sum</text></g>
+      <!-- step 4: T shared writes -->
+      <g data-step="4"><rect class="hl" x="40" y="298" width="310" height="56"/>
+        <text x="110" y="320" lang="zh-CN">= 总和</text><text x="110" y="320" lang="en">= the total</text>
+        <text x="40" y="376" lang="zh-CN">共享写：T = 4 次，每个线程一次</text><text x="40" y="376" lang="en">shared writes: T = 4, one per thread</text></g>
+      <!-- step 5: shared atomic, N x N writes -->
+      <g data-step="5">
+        <path class="arrow" d="M550 61 L648 124"/>
+        <path class="arrow" d="M550 109 L648 133"/>
+        <path class="arrow" d="M550 157 L648 143"/>
+        <path class="arrow" d="M550 205 L648 152"/>
+        <rect class="hl" x="650" y="110" width="150" height="56"/>
+        <text x="480" y="250" class="small" lang="zh-CN">每次加法都是对同一个 sum 的原子加</text><text x="480" y="250" class="small" lang="en">every addition is an atomic add on one sum</text>
+        <text x="480" y="270" class="small" lang="zh-CN">cache line 每写一次就搬一次</text><text x="480" y="270" class="small" lang="en">its cache line moves on every write</text>
+        <text x="480" y="376" lang="zh-CN">共享写：N × N 次</text><text x="480" y="376" lang="en">shared writes: N × N</text></g>
     </svg>
   </div>
 

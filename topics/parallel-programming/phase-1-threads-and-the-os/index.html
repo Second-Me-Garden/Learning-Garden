@@ -383,8 +383,8 @@ exit 0
   <ul>
     <li lang="zh-CN"><strong>互不等待的计算：几乎免费。</strong>10 个线程 0.44–0.49 s，100 个线程 0.44–0.45 s。调度器给每个线程整段的时间片，切换的直接代价分摊到几毫秒的计算里，看不出来。代价换了个地方：每个线程的完成时间被拉长到接近整个程序的时间，单个结果来得更晚。</li>
     <li lang="en"><strong>Independent computation: nearly free.</strong> 10 threads take 0.44–0.49 s and 100 threads 0.44–0.45 s. The scheduler gives each thread a whole time slice, and the direct cost of switching is spread over milliseconds of computation and disappears. The cost moves elsewhere: each thread’s completion is stretched to nearly the whole program’s run time, so any single result arrives later.</li>
-    <li lang="zh-CN"><strong>抢同一把自旋锁：慢几十倍。</strong>4 个线程 0.15 s，10 个线程 0.70 s，100 个线程 4.2–5.7 s。原因是持锁者被抢占（lock-holder preemption）：持锁的线程时间片到了被换下核，锁还攥在它手里；这时上核的其他线程只能空转，把各自的时间片烧完，直到持锁者重新被调度。线程越多，持锁者等回来的时间越长。CPU 时间约等于墙钟时间的 10 倍，说明 10 个核一直满载，几乎全在空转。</li>
-    <li lang="en"><strong>Contending for one spin lock: dozens of times slower.</strong> 4 threads take 0.15 s, 10 threads 0.70 s, and 100 threads 4.2–5.7 s. The cause is lock-holder preemption: the thread holding the lock runs out of time slice and is switched off its core while still holding the lock; the threads that come on can only spin and burn their own time slices until the holder is scheduled again. The more threads, the longer the holder waits to come back. CPU time is about 10 times the wall time, so all 10 cores were fully busy, almost all of it spinning.</li>
+    <li lang="zh-CN"><strong>抢同一把自旋锁：慢几十倍。</strong>4 个线程 0.15 s，10 个线程 0.70 s，100 个线程 4.2–5.7 s。原因是持锁者被抢占（lock-holder preemption）：持锁的线程时间片到了被换下核，锁还攥在它手里；这时上核的其他线程只能空转，把各自的时间片烧完，直到持锁者重新被调度。线程越多，持锁者等回来的时间越长。CPU 时间约等于墙钟时间的 10 倍，说明 10 个核一直满载，几乎全在空转。图解 (c) 沿时间轴一步步画出这个过程。</li>
+    <li lang="en"><strong>Contending for one spin lock: dozens of times slower.</strong> 4 threads take 0.15 s, 10 threads 0.70 s, and 100 threads 4.2–5.7 s. The cause is lock-holder preemption: the thread holding the lock runs out of time slice and is switched off its core while still holding the lock; the threads that come on can only spin and burn their own time slices until the holder is scheduled again. The more threads, the longer the holder waits to come back. CPU time is about 10 times the wall time, so all 10 cores were fully busy, almost all of it spinning. Diagram (c) draws this sequence step by step along a timeline.</li>
     <li lang="zh-CN"><strong>还有内存。</strong>每个线程至少占 512 KB 的栈地址空间、一页保护页，以及内核里的 Mach thread 和内核栈。100 个线程不算多；一万个线程在 64 位地址空间里也放得下，但每个线程碰过的栈页都是真实内存。</li>
     <li lang="en"><strong>There is memory too.</strong> Each thread takes at least 512 KB of stack address space, a guard page, and a Mach thread and kernel stack inside the kernel. 100 threads is not many; ten thousand would still fit in a 64-bit address space, but every stack page a thread has touched is real memory.</li>
   </ul>
@@ -642,6 +642,117 @@ compute T =  10 : wall 0.49 s      compute T = 100 : wall 0.44 s</pre>
         <text x="664" y="344" class="mono">request_stop()</text>
         <text x="664" y="364" class="mono">drain, then join()</text>
         <text x="664" y="384" class="small" lang="zh-CN">jthread 析构时自动做</text><text x="664" y="384" class="small" lang="en">done by ~jthread</text></g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) 持锁者被抢占：100 个线程、10 个核、一把自旋锁</h3><h3 lang="en">(c) Lock-holder preemption: 100 threads, 10 cores, one spin lock</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 420" data-interval="2600"
+         data-captions='["全图：Lab B 的 spin 模式，100 个线程跑在本机 10 个核上。前三行是核 1 到核 3，核 4 到核 10 和核 2、核 3 一样；下面是锁字和运行队列，任一时刻约有 90 个可运行线程在队列里等。时间从左往右，长度只是示意，本页没有给出时间片的数值。H 是持锁的线程。按播放逐步看。",
+           "第 1 步，H 在核 1 上持有这把 atomic_flag 锁，做锁里唯一的那次加法。其余 9 个核上的线程在 oversub.c:37 的 while 循环里空转：标志已被置位，每次 test_and_set 都失败。",
+           "第 2 步，H 的时间片用完了，锁还在它手里。调度器把它从核 1 换下（一次非自愿切换），放回运行队列；队列里的另一个线程上了核 1，同样只能空转。",
+           "第 3 步，现在 10 个核全在空转。唯一能清掉标志的线程不在核上，所以每个核上的每段时间片都在 oversub.c:37 烧到底。10 个核一直满载，CPU 时间就约为墙钟的 10 倍（10 个线程时已经是 9.6 倍）；抢占改变的不是这个比值，而是墙钟本身：墙钟 4.70 s 里花了 45.59 s 的 CPU 时间。",
+           "第 4 步，这些时间片用完，又一批空转的线程从队列上核，H 在其他可运行线程中间排队等。线程越多，它等回来的时间越长：非自愿切换从 10 个线程时的 1803 次涨到 100 个线程时的 18776 次。",
+           "第 5 步，H 重新被调度（这里画在核 3 上，只是示意），做完加法，以 release 顺序清掉标志。从第 1 步到现在，锁第一次空出来。",
+           "第 6 步，下一个 test_and_set 抢先的空转线程拿到锁，这个循环可能再来一遍。整次运行平均下来，100 个线程时每次加锁约 2.35 µs，10 个线程时 350 ns，1 个线程时约 5 ns；墙钟从 0.70 s 变成 4.70 s（10 个线程到 100 个线程）。"]'
+         data-captions-en='["The whole picture: Lab B in spin mode, 100 threads on the 10 cores of this Mac. The top three rows are cores 1 to 3, and cores 4 to 10 behave like cores 2 and 3; below are the lock word and the run queue, where about 90 runnable threads wait at any moment. Time runs left to right, and the lengths are only illustrative, because the page gives no time-slice figure. H is the thread holding the lock. Press Play to step through.",
+           "Step 1, H holds the atomic_flag lock on core 1 and does the one addition inside it. The threads on the other 9 cores spin in the while loop at oversub.c:37: the flag is set, so every test_and_set fails.",
+           "Step 2, the time slice of H runs out while it still holds the lock. The scheduler switches it off core 1 (an involuntary switch) and puts it back in the run queue; another thread from the queue takes core 1 and can only spin too.",
+           "Step 3, now all 10 cores spin. The only thread that can clear the flag is off its core, so every slice on every core burns to its end at oversub.c:37. With 10 cores always busy, CPU time is about 10 times the wall time, as it already was at 10 threads (9.6 times); what preemption changes is not this ratio but the wall time itself: 45.59 s of CPU time in 4.70 s of wall time.",
+           "Step 4, those slices end and another batch of spinners comes on from the queue, while H waits its turn among the other runnable threads. The more threads, the longer it waits to come back: involuntary switches rise from 1803 at 10 threads to 18776 at 100.",
+           "Step 5, H is scheduled again (drawn on core 3 here, only as an illustration), finishes its addition and clears the flag with release ordering. The lock is free for the first time since step 1.",
+           "Step 6, the next spinner whose test_and_set gets in first takes the lock, and the cycle can repeat. Averaged over the run, one acquisition costs about 2.35 µs at 100 threads, 350 ns at 10 threads and about 5 ns at 1; the wall time goes from 0.70 s to 4.70 s (from 10 threads to 100)."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="55" lang="zh-CN">核 1</text><text x="20" y="55" lang="en">core 1</text>
+      <text x="20" y="105" lang="zh-CN">核 2</text><text x="20" y="105" lang="en">core 2</text>
+      <text x="20" y="155" lang="zh-CN">核 3</text><text x="20" y="155" lang="en">core 3</text>
+      <text x="20" y="190" lang="zh-CN">核 4–10</text><text x="20" y="190" lang="en">cores 4–10</text>
+      <text x="20" y="206" class="small" lang="zh-CN">同核 2、3</text><text x="20" y="206" class="small" lang="en">as cores 2, 3</text>
+      <text x="20" y="254" lang="zh-CN">锁字</text><text x="20" y="254" lang="en">lock word</text>
+      <text x="20" y="314" lang="zh-CN">运行队列</text><text x="20" y="314" lang="en">run queue</text>
+      <line x1="105" y1="226" x2="880" y2="226" class="lane"/><line x1="105" y1="286" x2="880" y2="286" class="lane"/><line x1="105" y1="346" x2="880" y2="346" class="lane"/>
+      <path class="arrow" d="M110 372 L878 372"/>
+      <text x="110" y="394" class="small" lang="zh-CN">时间 →，长度只是示意</text><text x="110" y="394" class="small" lang="en">time →, lengths illustrative</text>
+      <text x="110" y="412" class="small" lang="zh-CN">H = 持锁者，W = 下一个持锁者</text><text x="110" y="412" class="small" lang="en">H = lock holder, W = next holder</text>
+      <!-- step 1 -->
+      <g data-step="1">
+        <rect class="box" x="113" y="36" width="164" height="28"/>
+        <rect class="hl" x="113" y="36" width="164" height="28"/>
+        <text x="120" y="55" lang="zh-CN">H 持锁</text><text x="120" y="55" lang="en">H holds lock</text>
+        <rect class="box" x="113" y="86" width="164" height="28"/>
+        <text x="120" y="105" class="small">spin</text>
+        <rect class="box" x="113" y="136" width="164" height="28"/>
+        <text x="120" y="155" class="small">spin</text>
+        <text x="120" y="196" class="small">spin × 7</text>
+        <text x="118" y="254" class="small" lang="zh-CN">H 持有</text><text x="118" y="254" class="small" lang="en">held by H</text>
+        <text x="118" y="314" class="small" lang="zh-CN">约 90 个在等</text><text x="118" y="314" class="small" lang="en">~90 waiting</text></g>
+      <!-- step 2 -->
+      <g data-step="2">
+        <rect class="box" x="283" y="36" width="94" height="28"/>
+        <text x="290" y="55" class="small">spin</text>
+        <rect class="box" x="283" y="86" width="94" height="28"/>
+        <text x="290" y="105" class="small">spin</text>
+        <rect class="box" x="283" y="136" width="94" height="28"/>
+        <text x="290" y="155" class="small">spin</text>
+        <text x="290" y="196" class="small">spin × 7</text>
+        <text x="288" y="254" class="small" lang="zh-CN">H 持有</text><text x="288" y="254" class="small" lang="en">held by H</text>
+        <text x="288" y="314" class="small" lang="zh-CN">H 排队</text><text x="288" y="314" class="small" lang="en">H queued</text>
+        <text x="288" y="332" class="small" lang="zh-CN">仍持锁</text><text x="288" y="332" class="small" lang="en">holds the lock</text>
+        <text x="288" y="30" class="small" style="fill: var(--ink-2)" lang="zh-CN">✕ H 被换下</text><text x="288" y="30" class="small" style="fill: var(--ink-2)" lang="en">✕ H switched out</text></g>
+      <!-- step 3 -->
+      <g data-step="3">
+        <rect class="box" x="383" y="36" width="174" height="28"/>
+        <text x="390" y="55" class="small">spin</text>
+        <rect class="box" x="383" y="86" width="174" height="28"/>
+        <text x="390" y="105" class="small">spin</text>
+        <rect class="box" x="383" y="136" width="174" height="28"/>
+        <text x="390" y="155" class="small">spin</text>
+        <text x="390" y="196" class="small">spin × 7</text>
+        <text x="388" y="254" class="small" lang="zh-CN">持有者不在核上</text><text x="388" y="254" class="small" lang="en">held, H off core</text>
+        <text x="388" y="314" class="small" lang="zh-CN">H 在等</text><text x="388" y="314" class="small" lang="en">H waits</text>
+        <text x="388" y="30" class="small" lang="zh-CN">10 个核全在空转</text><text x="388" y="30" class="small" lang="en">all 10 cores spinning</text>
+        <text x="388" y="214" class="small" lang="zh-CN">CPU 45.59 s / 墙钟 4.70 s</text><text x="388" y="214" class="small" lang="en">CPU 45.59 s / wall 4.70 s</text></g>
+      <!-- step 4 -->
+      <g data-step="4">
+        <rect class="box" x="563" y="36" width="114" height="28"/>
+        <text x="570" y="55" class="small">spin</text>
+        <rect class="box" x="563" y="86" width="114" height="28"/>
+        <text x="570" y="105" class="small">spin</text>
+        <rect class="box" x="563" y="136" width="114" height="28"/>
+        <text x="570" y="155" class="small">spin</text>
+        <text x="570" y="196" class="small">spin × 7</text>
+        <text x="568" y="254" class="small" lang="zh-CN">持有者不在核上</text><text x="568" y="254" class="small" lang="en">held, H off core</text>
+        <text x="568" y="314" class="small" lang="zh-CN">H 在等</text><text x="568" y="314" class="small" lang="en">H waits</text>
+        <text x="568" y="30" class="small" lang="zh-CN">非自愿切换 18776 次</text><text x="568" y="30" class="small" lang="en">18776 involuntary switches</text></g>
+      <!-- step 5 -->
+      <g data-step="5">
+        <rect class="box" x="683" y="36" width="94" height="28"/>
+        <text x="690" y="55" class="small">spin</text>
+        <rect class="box" x="683" y="86" width="94" height="28"/>
+        <text x="690" y="105" class="small">spin</text>
+        <rect class="box" x="683" y="136" width="94" height="28"/>
+        <rect class="hl" x="683" y="136" width="94" height="28"/>
+        <text x="690" y="155" lang="zh-CN">H 清除标志</text><text x="690" y="155" lang="en">H clears flag</text>
+        <text x="690" y="196" class="small">spin × 7</text>
+        <text x="688" y="254" class="small" lang="zh-CN">已清除：空闲</text><text x="688" y="254" class="small" lang="en">cleared: free</text>
+        <text x="688" y="314" class="small" lang="zh-CN">H 已出队</text><text x="688" y="314" class="small" lang="en">H left the queue</text></g>
+      <!-- step 6 -->
+      <g data-step="6">
+        <rect class="box" x="783" y="36" width="94" height="28"/>
+        <rect class="hl" x="783" y="36" width="94" height="28"/>
+        <text x="790" y="55" lang="zh-CN">W 拿到锁</text><text x="790" y="55" lang="en">W takes lock</text>
+        <rect class="box" x="783" y="86" width="94" height="28"/>
+        <text x="790" y="105" class="small">spin</text>
+        <rect class="box" x="783" y="136" width="94" height="28"/>
+        <text x="790" y="155" class="small">spin</text>
+        <text x="790" y="196" class="small">spin × 7</text>
+        <text x="788" y="254" class="small" lang="zh-CN">W 持有</text><text x="788" y="254" class="small" lang="en">held by W</text>
+        <text x="788" y="314" class="small" lang="zh-CN">约 90 个在等</text><text x="788" y="314" class="small" lang="en">~90 waiting</text>
+        <text x="788" y="272" class="small" lang="zh-CN">每次约 2.35 µs</text><text x="788" y="272" class="small" lang="en">about 2.35 µs each</text></g>
     </svg>
   </div>
 
@@ -922,8 +1033,8 @@ Sort by top of stack, same collapsed (when &gt;= 5):
           <li lang="en"><strong>The main thread</strong> sits in <code>pthread_join</code> at <code>oversub.c:56</code>, with <code>__ulock_wait</code> beneath it: that is where join sleeps in step 5 of concept 2. The single sample in <code>_pthread_deallocate</code> is the main thread having just joined one thread and reclaiming its <code>pthread_t</code>.</li>
           <li lang="zh-CN"><strong>每个工作线程</strong>的栈底都是 <code>thread_start → _pthread_start</code>（内核在概念 2 第 3 步给它设的起点），几乎所有样本都在 <code>oversub.c:37</code>，也就是 <code>while (atomic_flag_test_and_set…)</code> 那一行：线程在忙等，不是在干活。</li>
           <li lang="en"><strong>Every worker thread</strong> bottoms out in <code>thread_start → _pthread_start</code> (the starting point the kernel set in step 3 of concept 2), and almost all its samples are at <code>oversub.c:37</code>, the line <code>while (atomic_flag_test_and_set…)</code>: the thread is busy-waiting, not working.</li>
-          <li lang="zh-CN"><strong>样本数不等于 CPU 时间。</strong>每个线程都是 1302 个样本，因为 <code>sample</code> 每次把所有线程的栈都记一遍，不管线程当时在不在核上。100 个线程只有 10 个核，任一时刻至少 90 个在排队。要看谁真的在核上，用下一步的 <code>spindump</code>，它会标出线程是在运行还是被挂起。</li>
-          <li lang="en"><strong>Sample counts are not CPU time.</strong> Every thread has 1302 samples because <code>sample</code> records every thread’s stack each time, whether or not the thread is on a core. With 100 threads on 10 cores, at least 90 are queued at any moment. To see who is really on a core, use <code>spindump</code> in the next step, which marks whether a thread was running or suspended.</li>
+          <li lang="zh-CN"><strong>样本数不等于 CPU 时间。</strong>每个线程都是 1302 个样本，因为 <code>sample</code> 每次把所有线程的栈都记一遍，不管线程当时在不在核上。100 个线程只有 10 个核，任一时刻约 90 个在排队。要看谁真的在核上，用下一步的 <code>spindump</code>，它会标出线程是在运行还是被挂起。</li>
+          <li lang="en"><strong>Sample counts are not CPU time.</strong> Every thread has 1302 samples because <code>sample</code> records every thread’s stack each time, whether or not the thread is on a core. With 100 threads on 10 cores, about 90 are queued at any moment. To see who is really on a core, use <code>spindump</code> in the next step, which marks whether a thread was running or suspended.</li>
         </ul></li>
       <li><span lang="zh-CN"><code>spindump</code> 要 root，这一步由你自己在终端里运行，会提示输入密码。它同时采用户栈和内核栈：</span><span lang="en"><code>spindump</code> needs root, so you run this step yourself in a terminal, and it will ask for your password. It samples user and kernel stacks together:</span><pre data-lang="sh"># 未在实验机执行 · not run on the lab Mac (needs sudo)
 ./oversub 100 spin &amp;  sleep 1

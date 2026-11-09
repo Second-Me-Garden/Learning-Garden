@@ -127,7 +127,7 @@ Step 2:
   <p lang="zh-CN">延伸阅读：Raschka 第 4 章 4.3 节（带 GELU 激活的前馈网络）。书里是 GPT-2 的 GELU，没有讲 SwiGLU 的门控；门控形式以上面引用的源码为准。</p><p lang="en">Further reading: section 4.3 of chapter 4 of Raschka (a feed-forward network with GELU activations). The book has GPT-2’s GELU and does not cover SwiGLU’s gating; for the gated form, rely on the source cited above.</p>
 
   <h3 lang="zh-CN">4. RoPE + 写 KV 缓存</h3><h3 lang="en">4. RoPE + KV-cache write</h3>
-  <p lang="zh-CN">注意力之前，q 和 k 要按位置旋转（RoPE），然后旋转后的 k 和原样的 v 写进分页 KV 缓存里这个 token 的槽位。不融合时这是两个内核：RoPE 原地改 q 和 k，注意力后端再调 <code>token_to_kv_pool.set_kv_buffer</code> 把 k、v 拷进缓存（FlashInfer 后端的解码路径在 <code>layers/attention/flashinfer_backend.py</code> 第 1494–1504 行）。按 Qwen3-0.6B 一层一个 token 数：q 是 16 × 128 个元素（4 KiB），k、v 各 8 × 128（各 2 KiB）。RoPE 读写 q 和 k 共 12 KiB，写缓存读 k、v 再写两份共 8 KiB，合计 20 KiB；融合内核读 q、k、v，写回 q、k，再写 k、v 两份缓存，合计 18 KiB。省掉的是把旋转后的 k 再读一遍的 2 KiB 和一次发射（推断，按 <code>apply_rope_inplace_with_kvcache</code> 文档字符串说的读写对象数出：q 和 k 原地旋转，旋转后的 k 也存进 <code>k_cache</code>，原样的 v 存进 <code>v_cache</code>）。</p><p lang="en">Before attention, q and k are rotated by position (RoPE), and then the rotated k and the unchanged v are written into this token’s slot of the paged KV cache. Unfused, these are two kernels: RoPE modifies q and k in place, and the attention backend then calls <code>token_to_kv_pool.set_kv_buffer</code> to copy k and v into the cache (the decode path of the FlashInfer backend, lines 1494–1504 of <code>layers/attention/flashinfer_backend.py</code>). Per token per layer for Qwen3-0.6B: q is 16 × 128 elements (4 KiB), and k and v are 8 × 128 each (2 KiB each). RoPE reads and writes q and k, 12 KiB; the cache write reads k and v and writes two copies, 8 KiB; 20 KiB in all. The fused kernel reads q, k and v, writes q and k back, and writes the two cache copies, 18 KiB in all. What is saved is reading the rotated k a second time, 2 KiB, plus one launch (inference, counted from what the <code>apply_rope_inplace_with_kvcache</code> docstring says it reads and writes: q and k rotated in place, the rotated k also stored in <code>k_cache</code>, the original v stored in <code>v_cache</code>).</p>
+  <p lang="zh-CN">注意力之前，q 和 k 要按位置旋转（RoPE），然后旋转后的 k 和原样的 v 写进分页 KV 缓存里这个 token 的槽位。不融合时这是两个内核：RoPE 原地改 q 和 k，注意力后端再调 <code>token_to_kv_pool.set_kv_buffer</code> 把 k、v 拷进缓存（FlashInfer 后端的解码路径在 <code>layers/attention/flashinfer_backend.py</code> 第 1496–1507 行）。按 Qwen3-0.6B 一层一个 token 数：q 是 16 × 128 个元素（4 KiB），k、v 各 8 × 128（各 2 KiB）。RoPE 读写 q 和 k 共 12 KiB，写缓存读 k、v 再写两份共 8 KiB，合计 20 KiB；融合内核读 q、k、v，写回 q、k，再写 k、v 两份缓存，合计 18 KiB。省掉的是把旋转后的 k 再读一遍的 2 KiB 和一次发射（推断，按 <code>apply_rope_inplace_with_kvcache</code> 文档字符串说的读写对象数出：q 和 k 原地旋转，旋转后的 k 也存进 <code>k_cache</code>，原样的 v 存进 <code>v_cache</code>）。图解 (c) 把两条路的读写逐步画出来。</p><p lang="en">Before attention, q and k are rotated by position (RoPE), and then the rotated k and the unchanged v are written into this token’s slot of the paged KV cache. Unfused, these are two kernels: RoPE modifies q and k in place, and the attention backend then calls <code>token_to_kv_pool.set_kv_buffer</code> to copy k and v into the cache (the decode path of the FlashInfer backend, lines 1496–1507 of <code>layers/attention/flashinfer_backend.py</code>). Per token per layer for Qwen3-0.6B: q is 16 × 128 elements (4 KiB), and k and v are 8 × 128 each (2 KiB each). RoPE reads and writes q and k, 12 KiB; the cache write reads k and v and writes two copies, 8 KiB; 20 KiB in all. The fused kernel reads q, k and v, writes q and k back, and writes the two cache copies, 18 KiB in all. What is saved is reading the rotated k a second time, 2 KiB, plus one launch (inference, counted from what the <code>apply_rope_inplace_with_kvcache</code> docstring says it reads and writes: q and k rotated in place, the rotated k also stored in <code>k_cache</code>, the original v stored in <code>v_cache</code>). Diagram (c) steps through the reads and writes of both paths.</p>
   <p lang="zh-CN">代码路径：<code>layers/rotary_embedding/base.py</code> 的 <code>forward_cuda</code>（第 390–412 行）把可选的 <code>fused_set_kv_buffer_arg</code> 原样传给 <code>kernels/ops/attention/rope.py</code> 的 <code>apply_rope_with_cos_sin_cache_inplace</code>（第 183–225 行）；参数不为空时它调 <code>apply_rope_inplace_with_kvcache</code>（第 145–180 行），后者用 JIT 模块 <code>FusedRopeKernel::run_fused</code>（第 30–44 行，源码 <code>kernels/jit/csrc/elementwise/rope.cuh</code>）。谁会传这个参数，由 <code>models/utils.py</code> 的 <code>enable_fused_set_kv_buffer</code> 决定（第 286–303 行）：CUDA 上要求 KV 池是 BF16、不是 SWA 池、没有上下文并行。传它的模型有 <code>qwen3_moe.py</code>（第 736–749 行）和 <code>gpt_oss.py</code>（第 478–499 行），这时注意力那一侧会收到 <code>save_kv_cache=False</code>，不再写第二遍。稠密的 <code>qwen3.py</code> 第 183 行只调 <code>self.rotary_emb(positions, q, k)</code>，不传，所以 Qwen3-0.6B 在 v0.5.22 上不用这个融合（2026-11-01 在 <code>qwen3.py</code>、<code>qwen2.py</code>、<code>llama.py</code> 里检索 <code>fused_set_kv_buffer</code>，都没有）。</p><p lang="en">The code path: <code>forward_cuda</code> in <code>layers/rotary_embedding/base.py</code> (lines 390–412) passes the optional <code>fused_set_kv_buffer_arg</code> straight to <code>apply_rope_with_cos_sin_cache_inplace</code> in <code>kernels/ops/attention/rope.py</code> (lines 183–225); when it is present, that calls <code>apply_rope_inplace_with_kvcache</code> (lines 145–180), which uses the JIT module <code>FusedRopeKernel::run_fused</code> (lines 30–44, source <code>kernels/jit/csrc/elementwise/rope.cuh</code>). Who passes the argument is decided by <code>enable_fused_set_kv_buffer</code> in <code>models/utils.py</code> (lines 286–303): on CUDA it needs a BF16 KV pool, no SWA pool and no context parallelism. Models that pass it include <code>qwen3_moe.py</code> (lines 736–749) and <code>gpt_oss.py</code> (lines 478–499), and their attention call then gets <code>save_kv_cache=False</code>, so nothing is written twice. The dense <code>qwen3.py</code> only calls <code>self.rotary_emb(positions, q, k)</code> at line 183 and passes nothing, so Qwen3-0.6B does not use this fusion at v0.5.22 (searching <code>qwen3.py</code>, <code>qwen2.py</code> and <code>llama.py</code> for <code>fused_set_kv_buffer</code> on 2026-11-01 finds nothing).</p>
   <p lang="zh-CN">延伸阅读：参考书目里没有书讲 RoPE 内核（Raschka 的 GPT-2 用的是学到的位置嵌入）。这一概念以 <code>rope.py</code> 的文档字符串和 <code>models/utils.py</code> 为准，见资料。</p><p lang="en">Further reading: no book in the bibliography covers RoPE kernels (Raschka’s GPT-2 uses learned position embeddings). This concept rests on the docstrings of <code>rope.py</code> and on <code>models/utils.py</code>; see Resources.</p>
 
@@ -352,6 +352,85 @@ Step 2:
         <text x="32" y="414" lang="zh-CN">每轮最多读两遍整行（抽候选、数 pivot 之上），范围每轮至少减半，全在一个内核里</text><text x="32" y="414" lang="en">At most two reads of the row per round (draw, then count above the pivots); the range halves; one kernel</text>
         <text x="32" y="440" class="small" lang="zh-CN">对照：pytorch 后端先把 151936 个概率整行排序（sampler.py 第 813–815 行）</text><text x="32" y="440" class="small" lang="en">Compare: the pytorch backend first sorts all 151936 probabilities (sampler.py, lines 813–815)</text>
       </g>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) RoPE + 写 KV 缓存：两个内核对一个融合内核，每层每 token 的字节</h3><h3 lang="en">(c) RoPE + KV-cache write: two kernels against one fused kernel, bytes per token per layer</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 410" data-interval="2800"
+         data-captions='["全图：上半是不融合的两个内核，下半是一个融合内核，右边是每层每个 token 读写的字节。形状按 Qwen3-0.6B 数：q 是 16 × 128 个 BF16 元素，4 KiB；k 和 v 各 8 × 128，各 2 KiB。按播放逐步看。",
+           "1. 内核 1，RoPE：按位置原地旋转 q 和 k。读 q、k 共 6 KiB，写回 6 KiB，合计 12 KiB。不传融合参数时，rope.py 的 apply_rope_with_cos_sin_cache_inplace 走的就是这条只旋转的路。",
+           "2. 内核 2，注意力后端调 token_to_kv_pool.set_kv_buffer（FlashInfer 后端解码路径，flashinfer_backend.py 第 1496–1507 行）：读旋转后的 k′ 和 v 共 4 KiB，写进缓存槽位 4 KiB，合计 8 KiB。k′ 是内核 1 刚写回的，这里又读一遍。",
+           "3. 不融合合计 20 KiB，两次发射。",
+           "4. 融合内核 apply_rope_inplace_with_kvcache（rope.py 第 145–180 行，JIT 模块 FusedRopeKernel::run_fused）：读 q、k、v 共 8 KiB，原地写回旋转后的 q、k 共 6 KiB，再把旋转后的 k 写进 k_cache、原样的 v 写进 v_cache 共 4 KiB。旋转后的 k 还在寄存器里，不必再读。",
+           "5. 融合合计 18 KiB，一次发射。省下的是再读一遍 k′ 的 2 KiB 和一次发射。这笔账是本页按 apply_rope_inplace_with_kvcache 的文档字符串数出来的推断，没有测量。"]'
+         data-captions-en='["The whole picture: the upper half is the two unfused kernels, the lower half one fused kernel, and on the right the bytes read and written per token per layer. Shapes are counted for Qwen3-0.6B: q is 16 × 128 BF16 elements, 4 KiB; k and v are 8 × 128 each, 2 KiB each. Press Play to step through.",
+           "1. Kernel 1, RoPE: rotates q and k in place by position. It reads q and k, 6 KiB, and writes them back, 6 KiB, 12 KiB in all. Without the fused argument, apply_rope_with_cos_sin_cache_inplace in rope.py takes this rotate-only path.",
+           "2. Kernel 2, the attention backend calls token_to_kv_pool.set_kv_buffer (the decode path of the FlashInfer backend, flashinfer_backend.py, lines 1496–1507): it reads the rotated k′ and v, 4 KiB, and writes them into the cache slot, 4 KiB, 8 KiB in all. k′ was just written back by kernel 1, and here it is read again.",
+           "3. Unfused, 20 KiB in all, and two launches.",
+           "4. The fused kernel apply_rope_inplace_with_kvcache (rope.py, lines 145–180, JIT module FusedRopeKernel::run_fused): it reads q, k and v, 8 KiB, writes the rotated q and k back in place, 6 KiB, and writes the rotated k into k_cache and the unchanged v into v_cache, 4 KiB. The rotated k is still in registers, so nothing is read twice.",
+           "5. Fused, 18 KiB in all, and one launch. What is saved is the second read of k′, 2 KiB, plus one launch. This tally is an inference on this page counted from the docstring of apply_rope_inplace_with_kvcache, not a measurement."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="20" y="24" class="small" lang="zh-CN">不融合：两个内核</text><text x="20" y="24" class="small" lang="en">Unfused: two kernels</text>
+      <text x="690" y="24" class="small" lang="zh-CN">每层每 token 的字节</text><text x="690" y="24" class="small" lang="en">bytes per token per layer</text>
+      <path class="lane" d="M20 204 L880 204"/>
+      <text x="20" y="226" class="small" lang="zh-CN">融合：一个内核 apply_rope_inplace_with_kvcache</text><text x="20" y="226" class="small" lang="en">Fused: one kernel, apply_rope_inplace_with_kvcache</text>
+
+      <!-- step 1: kernel 1, RoPE in place -->
+      <g data-step="1">
+        <text x="20" y="50" class="small" lang="zh-CN">内核 1 · RoPE</text><text x="20" y="50" class="small" lang="en">kernel 1 · RoPE</text>
+        <rect class="box" x="20" y="62" width="96" height="30"/><text x="30" y="82" class="mono">q · 4 KiB</text>
+        <rect class="box" x="20" y="104" width="96" height="30"/><text x="30" y="124" class="mono">k · 2 KiB</text>
+        <path class="arrow" d="M120 77 L156 77" style="marker-start: url(#arr)"/>
+        <path class="arrow" d="M120 119 L156 119" style="marker-start: url(#arr)"/>
+        <rect class="box" x="160" y="62" width="150" height="72"/><text x="172" y="90" class="mono">RoPE</text>
+        <text x="172" y="114" class="small" lang="zh-CN">原地旋转 q、k</text><text x="172" y="114" class="small" lang="en">rotates q, k in place</text>
+        <text x="20" y="158" class="small" lang="zh-CN">读 q、k 6 KiB · 写回 6 KiB</text><text x="20" y="158" class="small" lang="en">reads q, k 6 KiB · writes back 6 KiB</text>
+        <text x="20" y="178" class="mono">= 12 KiB</text></g>
+      <!-- step 2: kernel 2, set_kv_buffer reads k again -->
+      <g data-step="2">
+        <text x="340" y="50" class="small" lang="zh-CN">内核 2 · 写缓存</text><text x="340" y="50" class="small" lang="en">kernel 2 · cache write</text>
+        <rect class="box" x="340" y="62" width="90" height="30"/><text x="348" y="82" class="mono">k′ · 2 KiB</text>
+        <rect class="box" x="340" y="104" width="90" height="30"/><text x="348" y="124" class="mono">v · 2 KiB</text>
+        <path class="arrow" d="M434 77 L456 77"/><path class="arrow" d="M434 119 L456 119"/>
+        <rect class="box" x="460" y="62" width="110" height="72"/><text x="468" y="90" class="mono">set_kv_buffer</text>
+        <text x="468" y="114" class="small" lang="zh-CN">注意力后端</text><text x="468" y="114" class="small" lang="en">attention backend</text>
+        <path class="arrow" d="M570 77 L586 77"/><path class="arrow" d="M570 119 L586 119"/>
+        <rect class="box" x="590" y="62" width="74" height="30"/><text x="598" y="82" class="mono">k_cache</text>
+        <rect class="box" x="590" y="104" width="74" height="30"/><text x="598" y="124" class="mono">v_cache</text>
+        <text x="340" y="158" class="small" lang="zh-CN">读 k′、v 4 KiB · 写缓存 4 KiB</text><text x="340" y="158" class="small" lang="en">reads k′, v 4 KiB · writes the cache 4 KiB</text>
+        <text x="340" y="178" class="small" lang="zh-CN">k′ 刚由内核 1 写回，又读一遍</text><text x="340" y="178" class="small" lang="en">k′ was just written by kernel 1, read again</text></g>
+      <!-- step 3: unfused tally -->
+      <g data-step="3">
+        <text x="690" y="70" class="mono">20 KiB</text>
+        <rect class="bar" x="690" y="80" width="180" height="14"/>
+        <text x="690" y="114" class="small" lang="zh-CN">合计 12 + 8 · 2 次发射</text><text x="690" y="114" class="small" lang="en">12 + 8 in all · 2 launches</text></g>
+      <!-- step 4: the fused kernel -->
+      <g data-step="4">
+        <rect class="box" x="12" y="246" width="78" height="26"/><text x="18" y="264" class="mono">q · 4 KiB</text>
+        <rect class="box" x="12" y="280" width="78" height="26"/><text x="18" y="298" class="mono">k · 2 KiB</text>
+        <rect class="box" x="12" y="314" width="78" height="26"/><text x="18" y="332" class="mono">v · 2 KiB</text>
+        <path class="arrow" d="M90 259 L106 259"/><path class="arrow" d="M90 293 L106 293"/><path class="arrow" d="M90 327 L106 327"/>
+        <rect class="box" x="110" y="246" width="124" height="94"/><text x="116" y="272" class="mono">FusedRopeKernel</text><text x="116" y="292" class="mono">::run_fused</text>
+        <text x="116" y="318" class="small" lang="zh-CN">在寄存器里旋转</text><text x="116" y="318" class="small" lang="en">rotates in registers</text>
+        <path class="arrow" d="M234 259 L262 257"/><path class="arrow" d="M234 293 L262 283"/><path class="arrow" d="M234 293 L262 309"/><path class="arrow" d="M234 327 L262 335"/>
+        <rect class="box" x="266" y="246" width="76" height="22"/><text x="274" y="262" class="mono">q</text>
+        <rect class="box" x="266" y="272" width="76" height="22"/><text x="274" y="288" class="mono">k</text>
+        <rect class="box" x="266" y="298" width="76" height="22"/><text x="274" y="314" class="mono">k_cache</text>
+        <rect class="box" x="266" y="324" width="76" height="22"/><text x="274" y="340" class="mono">v_cache</text>
+        <text x="20" y="370" class="small" lang="zh-CN">读 8 KiB · 写 6 + 4 = 10 KiB</text><text x="20" y="370" class="small" lang="en">reads 8 KiB · writes 6 + 4 = 10 KiB</text>
+        <text x="20" y="390" class="small" lang="zh-CN">旋转后的 k 同时写进 k 和 k_cache</text><text x="20" y="390" class="small" lang="en">the rotated k goes to k and k_cache at once</text></g>
+      <!-- step 5: fused tally -->
+      <g data-step="5">
+        <text x="690" y="270" class="mono">18 KiB</text>
+        <rect class="bar" x="690" y="280" width="162" height="14"/>
+        <text x="690" y="314" class="small" lang="zh-CN">合计 · 1 次发射</text><text x="690" y="314" class="small" lang="en">in all · 1 launch</text>
+        <text x="690" y="334" class="small" lang="zh-CN">省 2 KiB + 1 次发射</text><text x="690" y="334" class="small" lang="en">saves 2 KiB + 1 launch</text>
+        <text x="690" y="352" class="small" lang="zh-CN">（推断，没有测量）</text><text x="690" y="352" class="small" lang="en">(inference, not measured)</text></g>
     </svg>
   </div>
 

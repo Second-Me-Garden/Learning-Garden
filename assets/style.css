@@ -381,6 +381,9 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .diagram [data-step].on .box.linux { stroke: var(--linux); } .diagram [data-step].on .box.xnu { stroke: var(--xnu); } .diagram [data-step].on .box.ros { stroke: var(--ros); } .diagram [data-step].on .box.gz { stroke: var(--gz); } .diagram [data-step].on .box.par { stroke: var(--par); } .diagram [data-step].on .box.cuda { stroke: var(--cuda); } .diagram [data-step].on .box.metal { stroke: var(--metal); }
 .diagram [data-step].on .arrow { stroke: var(--accent); stroke-width: 2.4; }
 .diagram [data-step].on text { font-weight: 600; }
+/* A quantity bar (bytes, time): plain ink at rest, lit like a box when its step is on, so a bar never needs an .hl over it (Designer, 2026-11-06). */
+.diagram .bar { fill: var(--ink-3); opacity: .55; }
+.diagram [data-step].on .bar { fill: var(--accent); opacity: .9; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 55%, transparent)); }
 /* A highlight layer drawn over a static cell (a grid entry that is picked at one step): the cell itself keeps its plain look at every other step. */
 .diagram .hl { fill: none; stroke: none; rx: 6; }
 .diagram [data-step].on .hl { fill: color-mix(in srgb, var(--accent) 18%, transparent); stroke: var(--accent); stroke-width: 2; }

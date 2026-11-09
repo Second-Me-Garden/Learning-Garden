@@ -168,7 +168,7 @@
     <li lang="zh-CN"><strong>Nsight Compute</strong>（<code>ncu</code>）：一次只看一个内核，回答「它为什么慢」：带宽用了多少、停顿在哪。用 <code>-k regex:&lt;名字&gt;</code> 选内核，<code>--launch-skip</code> 和 <code>--launch-count</code> 跳过预热、只录一次，<code>--set full</code> 收全部分节（不写时只收 basic 集）。它会重放内核，比原来慢得多，所以只对已经从前三种工具里挑出来的那个内核用。</li>
     <li lang="en"><strong>Nsight Compute</strong> (<code>ncu</code>): one kernel at a time, answering “why is it slow”: how much bandwidth it uses and where it stalls. <code>-k regex:&lt;name&gt;</code> selects the kernel, <code>--launch-skip</code> and <code>--launch-count</code> skip the warm-up and record one launch, and <code>--set full</code> collects every section (without it only the basic set is collected). It replays the kernel and runs far slower, so use it only on the kernel the first three tools have already singled out.</li>
   </ul>
-  <p lang="zh-CN">把内核时间换算成端到端，用的是阿姆达尔定律：一个占整步比例 <code>f</code> 的部分快了 <code>s</code> 倍，整步只快 <code>1 / ((1 − f) + f / s)</code> 倍。32 的数法：OLMoE 16 层，每层 2 处归一化，第 0 层的输入归一化没有残差、不算，最后一个归一化带残差、算上，合计 32 处残差 + RMSNorm；Lab B 的替身每层直接跑 2 处，总数相同。替身里，这 32 处按批大小 1 的单独测量合计约 60–120 µs，占 17.3 ms 一步的约 0.4–0.7%（推断，按 Lab B 第一部分的中位数相乘）；就算它们快到零，整步也只快约 0.7%。所以作品项目要求报告先给出这个预测，再给出测量值。</p><p lang="en">Converting kernel time into end-to-end time is Amdahl’s law: if a part that takes a fraction <code>f</code> of the step becomes <code>s</code> times faster, the step becomes only <code>1 / ((1 − f) + f / s)</code> times faster. The 32 is counted this way: OLMoE has 16 layers with 2 norms each; layer 0’s input norm has no residual and is left out, and the final norm has one and is counted, giving 32 residual + RMSNorm sites; Lab B’s stand-in simply runs 2 per layer, the same total. In the stand-in, those 32 sites, measured alone at batch size 1, add up to about 60–120 µs, about 0.4–0.7% of a 17.3 ms step (inference, multiplying the medians of Lab B’s first part); even if they took no time at all, the step would be at most about 0.7% faster. That is why the capstone asks the report to give this prediction first and the measurement second.</p>
+  <p lang="zh-CN">把内核时间换算成端到端，用的是阿姆达尔定律：一个占整步比例 <code>f</code> 的部分快了 <code>s</code> 倍，整步只快 <code>1 / ((1 − f) + f / s)</code> 倍。32 的数法：OLMoE 16 层，每层 2 处归一化，第 0 层的输入归一化没有残差、不算，最后一个归一化带残差、算上，合计 32 处残差 + RMSNorm；Lab B 的替身每层直接跑 2 处，总数相同。替身里，这 32 处按批大小 1 的单独测量合计约 60–125 µs，占 17.3 ms 一步的约 0.4–0.7%（推断，按 Lab B 第一部分的中位数相乘）；就算它们快到零，整步也只快约 0.7%。所以作品项目要求报告先给出这个预测，再给出测量值。图解 (c) 把下面这组数字画成一条，逐步算一遍。</p><p lang="en">Converting kernel time into end-to-end time is Amdahl’s law: if a part that takes a fraction <code>f</code> of the step becomes <code>s</code> times faster, the step becomes only <code>1 / ((1 − f) + f / s)</code> times faster. The 32 is counted this way: OLMoE has 16 layers with 2 norms each; layer 0’s input norm has no residual and is left out, and the final norm has one and is counted, giving 32 residual + RMSNorm sites; Lab B’s stand-in simply runs 2 per layer, the same total. In the stand-in, those 32 sites, measured alone at batch size 1, add up to about 60–125 µs, about 0.4–0.7% of a 17.3 ms step (inference, multiplying the medians of Lab B’s first part); even if they took no time at all, the step would be at most about 0.7% faster. That is why the capstone asks the report to give this prediction first and the measurement second. Diagram (c) draws the numbers below as one bar and works through them step by step.</p>
   <div class="worked">
     <p lang="zh-CN">用 Lab B 第一次干净运行的原始输出把这条公式算一遍：批大小 1 时，不融合一处 3.84 µs，融合一处 2.05 µs；不融合时整步 17.278 ms，融合时 17.243 ms。假设每处归一化在步里花的时间和单独量时一样，这也是 Lab B 程序打印预测时用的假设。</p>
     <p lang="en">Run the formula on the raw output of Lab B’s first clean run: at batch size 1 one unfused site takes 3.84 µs and one fused site 2.05 µs; the whole step takes 17.278 ms with unfused norms and 17.243 ms with fused ones. Assume each norm site costs inside the step what it cost alone, the same assumption the Lab B program makes when it prints its prediction.</p>
@@ -331,7 +331,7 @@ measured   = 17.278 ms - 17.243 ms             = 0.035 ms (printed +34.7 us, 0.2
 
   <h3 lang="zh-CN">(b) 作品项目的闭环：运行时约束 → 内核 → 端到端测量</h3><h3 lang="en">(b) The capstone loop: a runtime constraint → a kernel → an end-to-end measurement</h3>
   <div class="diagram">
-    <svg data-diagram viewBox="0 0 900 440" data-interval="3000"
+    <svg data-diagram viewBox="0 0 900 320" data-interval="3000"
          data-captions='["全图：作品项目的一圈。从运行时给出的约束出发，写一个满足它的内核，先证明它对，再单独量它，最后放回引擎里量端到端，然后用剖析结果挑下一个目标。下面的数字来自 Lab B 在这台 Apple M5 上的实测。",
            "1. 约束：解码步，批大小 1 到 64，被捕获进 CUDA 图，BF16，OLMoE-1B-7B 的 hidden size 2048。内核必须用当前流、不分配显存、不做主机同步。",
            "2. 内核：融合的残差加法 + RMSNorm，一个线程块一行，注册成 torch.ops.capstone.fused_add_rmsnorm，和 sgl_kernel 的同名算子有相同的原地语义。",
@@ -401,10 +401,68 @@ measured   = 17.278 ms - 17.243 ms             = 0.035 ms (printed +34.7 us, 0.2
         <text x="32" y="286" class="small" lang="zh-CN">torch profiler · nsys · ncu</text><text x="32" y="286" class="small" lang="en">torch profiler · nsys · ncu</text>
         <path class="arrow flow" d="M150 200 L150 138"/>
       </g>
-      <rect class="box" x="20" y="330" width="860" height="94"/>
-      <text x="32" y="354" lang="zh-CN">阿姆达尔：一部分占整步的 f、快了 s 倍，整步快 1 / ((1 − f) + f / s) 倍</text><text x="32" y="354" lang="en">Amdahl: a part taking f of the step, made s times faster, speeds the step up 1 / ((1 − f) + f / s) times</text>
-      <text x="32" y="378" class="small" lang="zh-CN">f ≈ 0.4–0.7%，s ≈ 1.4–1.9：预测整步快约 0.1–0.3%；实测 0.14–0.24%</text><text x="32" y="378" class="small" lang="en">f ≈ 0.4–0.7%, s ≈ 1.4–1.9: predicts a step about 0.1–0.3% faster; measured 0.14–0.24%</text>
-      <text x="32" y="402" class="small" lang="zh-CN">先写预测，再写测量；两者对不上时，用剖析结果解释</text><text x="32" y="402" class="small" lang="en">Write the prediction first and the measurement second; when they disagree, explain it with the profile</text>
+    </svg>
+  </div>
+
+  <h3 lang="zh-CN">(c) 阿姆达尔定律画成一条：17.278 ms 的一步里 0.71% 的归一化</h3><h3 lang="en">(c) Amdahl’s law as one bar: the 0.71% of norms inside a 17.278 ms step</h3>
+  <div class="diagram">
+    <svg data-diagram viewBox="0 0 900 400" data-interval="3000"
+         data-captions='["全图：上面一条是 Lab B 解码步替身的一步，17.278 ms（不融合的归一化），按比例画，32 处归一化只是末尾很细的一条。下面的框把最后 165 µs 放大，每 µs 2 个单位；32 处归一化在图里合在一起画在末尾，实际上分散在 16 层里。所有数字来自 Lab B 在 Apple M5 上第一次干净运行的原始输出和概念 5 的算例。按播放逐步看。",
+           "1. 先求 f：批大小 1 时不融合一处 3.84 µs，32 处共 122.9 µs，占 17278 µs 的 0.71%。在整步的比例尺上，它只有 6 个单位宽。",
+           "2. 再求 s：融合一处 2.05 µs，算子单独快 3.84 / 2.05 = 1.87 倍，32 处缩成 65.6 µs。",
+           "3. 阿姆达尔定律的预测：1 / ((1 − 0.0071) + 0.0071 / 1.87) = 1.0033，即省 32 × 1.79 µs = 57.3 µs，占整步 0.33%，正是程序打印的 predicted from Part 1。这里假设每处归一化在步里花的时间和单独量时一样。",
+           "4. 测量：融合时整步 17.243 ms，比 17.278 ms 少 34.7 µs，即 0.20%，在预测之内。三次运行里批大小 1 的不融合中位数从 1.92 抖到 3.86 µs，所以预测本身是 17.6–57.8 µs 的范围，测到的 24.8–40.8 µs 都落在里面。",
+           "5. 上限：就算融合版快到不花时间，整步也最多快 1 / (1 − 0.0071) = 1.0072 倍，只省 122.9 µs，即 0.71%。其余 99.29% 的时间几乎全花在读 2.15 GB 权重上，不归归一化管。"]'
+         data-captions-en='["The whole picture: the bar on top is one step of the Lab B decode-step stand-in, 17.278 ms with unfused norms, drawn to scale; the 32 norm sites are a thin sliver at its end. The box below zooms into the last 165 µs at 2 units per µs; the diagram gathers the 32 norm sites at the end, though in the step they are spread over 16 layers. Every number comes from the raw output of the first clean Lab B run on the Apple M5 and the worked example of concept 5. Press Play to step through.",
+           "1. First find f: at batch size 1 one unfused site takes 3.84 µs, so 32 sites take 122.9 µs, 0.71% of 17278 µs. On the scale of the whole step it is only 6 units wide.",
+           "2. Then find s: one fused site takes 2.05 µs, so the op alone is 3.84 / 2.05 = 1.87 times as fast, and the 32 sites shrink to 65.6 µs.",
+           "3. The Amdahl prediction: 1 / ((1 − 0.0071) + 0.0071 / 1.87) = 1.0033, a saving of 32 × 1.79 µs = 57.3 µs, 0.33% of the step, exactly the predicted from Part 1 the program prints. It assumes each norm site costs inside the step what it cost alone.",
+           "4. The measurement: with fused norms the step takes 17.243 ms, 34.7 µs less than 17.278 ms, that is 0.20%, inside the prediction. Across the three runs the unfused median at batch size 1 jittered from 1.92 to 3.86 µs, so the prediction is itself a range, 17.6–57.8 µs, and the measured 24.8–40.8 µs all fall inside it.",
+           "5. The ceiling: even if the fused op took no time at all, the step would be at most 1 / (1 − 0.0071) = 1.0072 times as fast, a saving of only 122.9 µs, 0.71%. The other 99.29% goes almost entirely on reading 2.15 GB of weights and nothing done to the norms can save it."]'>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text x="30" y="22" class="small" lang="zh-CN">解码步替身，OLMoE 形状，批大小 1，16 层，32 处加法 + 归一化</text><text x="30" y="22" class="small" lang="en">the decode-step stand-in, OLMoE shapes, batch size 1, 16 layers, 32 add + norm sites</text>
+      <text x="30" y="40" class="small" lang="zh-CN"><tspan style="fill: var(--metal)">实验 B · M5 实测，2026-11-01，第一次干净运行</tspan></text><text x="30" y="40" class="small" lang="en"><tspan style="fill: var(--metal)">Lab B · measured on M5, 2026-11-01, first clean run</tspan></text>
+      <rect class="box" x="30" y="52" width="840" height="30"/><text x="42" y="72" class="mono">17.278 ms</text>
+      <text x="126" y="72" class="small" lang="zh-CN">一步，不融合的归一化，按比例画</text><text x="126" y="72" class="small" lang="en">one step, unfused norms, drawn to scale</text>
+      <text x="30" y="104" class="small" lang="zh-CN">其余 99.29%：几乎全是读 2.15 GB 权重</text><text x="30" y="104" class="small" lang="en">the other 99.29%: almost all reading 2.15 GB of weights</text>
+      <path class="lane" d="M862 82 L540 140 M870 82 L870 140"/>
+      <text x="30" y="200" class="small" lang="zh-CN">阿姆达尔定律：</text><text x="30" y="200" class="small" lang="en">Amdahl’s law:</text>
+      <text x="30" y="222" class="mono">speedup = 1 / ((1 − f) + f / s)</text>
+      <text x="30" y="246" class="small" lang="zh-CN">f：被加速部分占整步的比例</text><text x="30" y="246" class="small" lang="en">f: the fraction of the step that gets faster</text>
+      <text x="30" y="264" class="small" lang="zh-CN">s：这一部分快了多少倍</text><text x="30" y="264" class="small" lang="en">s: how many times faster that part becomes</text>
+      <rect class="lane" x="540" y="140" width="330" height="246"/>
+      <text x="548" y="158" class="small" lang="zh-CN">放大最后 165 µs，每 µs 2 个单位</text><text x="548" y="158" class="small" lang="en">zoom: the last 165 µs, 2 units per µs</text>
+      <text x="548" y="174" class="small" lang="zh-CN">32 处归一化合在一起画在末尾</text><text x="548" y="174" class="small" lang="en">the 32 norm sites gathered at the end</text>
+      <rect class="box" x="540" y="184" width="84" height="16" style="rx: 0"/>
+      <rect class="box" x="540" y="230" width="84" height="16" style="rx: 0"/>
+      <rect class="box" x="540" y="296" width="84" height="16" style="rx: 0"/>
+      <rect class="box" x="540" y="342" width="84" height="16" style="rx: 0"/>
+      <!-- step 1: f -->
+      <g data-step="1">
+        <rect class="bar" x="864" y="52" width="6" height="30"/>
+        <rect class="bar" x="624" y="184" width="246" height="16"/>
+        <text x="548" y="216" class="small" lang="zh-CN">32 × 3.84 µs = 122.9 µs，f = 0.71%</text><text x="548" y="216" class="small" lang="en">32 × 3.84 µs = 122.9 µs, f = 0.71%</text></g>
+      <!-- step 2: s -->
+      <g data-step="2">
+        <rect class="bar" x="624" y="230" width="131" height="16"/>
+        <text x="548" y="262" class="small" lang="zh-CN">融合：32 × 2.05 µs = 65.6 µs，s = 1.87</text><text x="548" y="262" class="small" lang="en">fused: 32 × 2.05 µs = 65.6 µs, s = 1.87</text></g>
+      <!-- step 3: predicted gap -->
+      <g data-step="3">
+        <rect class="lane" x="755" y="230" width="115" height="16"/><rect class="hl" x="755" y="230" width="115" height="16"/>
+        <text x="548" y="280" class="small" lang="zh-CN">预测省 57.3 µs，整步快 1.0033 倍</text><text x="548" y="280" class="small" lang="en">predicted: 57.3 µs saved, 1.0033×</text></g>
+      <!-- step 4: measured gap -->
+      <g data-step="4">
+        <rect class="bar" x="624" y="296" width="177" height="16"/>
+        <rect class="lane" x="801" y="296" width="69" height="16"/>
+        <text x="548" y="328" class="small" lang="zh-CN">实测省 34.7 µs（0.20%）</text><text x="548" y="328" class="small" lang="en">measured: 34.7 µs saved (0.20%)</text></g>
+      <!-- step 5: ceiling -->
+      <g data-step="5">
+        <rect class="lane" x="624" y="342" width="246" height="16"/><rect class="hl" x="624" y="342" width="246" height="16"/>
+        <text x="548" y="374" class="small" lang="zh-CN">上限：归一化为 0，最多省 122.9 µs，1.0072 倍</text><text x="548" y="374" class="small" lang="en">ceiling: norms at 0, at most 122.9 µs, 1.0072×</text></g>
     </svg>
   </div>
 
