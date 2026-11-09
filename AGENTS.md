@@ -42,3 +42,5 @@ This project uses the Shadow project-memory template.
 Prefer the smallest relevant verification command for the change. If no command exists yet, document what could not be verified and why.
 
 Ledger changes: `node scripts/check-task-status-reconciliation.mjs` (exit 0 means the record headers, `TASK_BOARD.md`, `TASK_INDEX.md`, and `DASHBOARD.md` agree). Its parser is maintained in Shadow (`docs/agent/templates/project-memory/scripts/`). If this project changes its task-record or table format, fix the parser there, not only here.
+
+Site changes: `node scripts/check-site.mjs`, then the browser checks in `docs/authoring/VERIFICATION.md` (leak scan against `main`, per-step diagram renders at 1440 and 390 px, page renders, the rail probe); read every render you produce before reporting.

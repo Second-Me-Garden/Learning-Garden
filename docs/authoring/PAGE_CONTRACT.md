@@ -146,5 +146,6 @@ A lit diagram step is a tint, a heavier stroke and a glow; a box with a topic co
 ## Before returning a page
 
 1. `node scripts/check-site.mjs` from the repo root must print `OK`.
-2. Render at least one page with headless Chrome at 1440 × 1000 and read the PNG: `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1440,1000 --virtual-time-budget=4000 --screenshot=/tmp/lg-shots/<name>.png "file:///<abs path>/index.html"`.
-3. Report: files written, the checker output, which pages were rendered, and every claim you were not sure of.
+2. Render what you changed and read the PNGs: every new or changed diagram with `sh scripts/render-diagram.sh <page> <0|1|2> all` (step 0 at 1440 px light and dark, each lit step at 390 px), and after a stylesheet or header change one page per topic with `sh scripts/render-page.sh <page>`. The scripts find Chrome on macOS or a `chromium` on Linux (`LG_BROWSER` overrides) and write under `.renders/`.
+3. `sh scripts/leak-scan.sh --against main <changed pages>`: no page may show more Chinese in English mode than `main`.
+4. Report: files written, the checker output, which pages were rendered, and every claim you were not sure of. The full list, with what to look for in a render, is `docs/authoring/VERIFICATION.md`.
