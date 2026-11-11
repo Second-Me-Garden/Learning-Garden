@@ -142,6 +142,7 @@ A lit diagram step is a tint, a heavier stroke and a glow; a box with a topic co
 - Version facts are pinned to the distribution named in the topic syllabus and dated; anything that may change is marked as checked on a date.
 - Bibliography entries are real books with author, title, edition, publisher and year, and the `span.lvl` names the chapters that match the page's concepts. Free online books get their URL.
 - Resources are primary sources first: official docs, source files, design articles; then one or two secondary ones with a level label.
+- A GitHub source link (`/blob/` or `/tree/`) names a tag or a commit, never `main` or `master`: a branch moves and the file or the line the lesson describes moves with it. Prefer the release tag the topic's syllabus pins; a repo without tags is linked at the commit that was read. The checker rejects a link on `main` or `master` (2026-11-11).
 
 ## Before returning a page
 

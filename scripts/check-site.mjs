@@ -81,6 +81,10 @@ for (const page of pages) {
   }
   // Circled numbers are banned everywhere (contract: Bilingual pairing).
   if (/[①-⑳]/.test(html)) problems.push(`${rel}: circled number glyph (U+2460–U+2473)`);
+  // Source links are pinned to a tag or commit, never a moving branch (contract: Resources).
+  for (const m of html.matchAll(/href="(https:\/\/github\.com\/[^"]+?\/(?:blob|tree)\/(?:main|master)\/[^"]*)"/g)) {
+    problems.push(`${rel}: GitHub source link on a moving branch, pin it to a tag or commit: ${m[1]}`);
+  }
 
   // data-step values must be within captions length
   for (const d of html.matchAll(/<svg[^>]*data-captions='([^']*)'[\s\S]*?<\/svg>/g)) {
