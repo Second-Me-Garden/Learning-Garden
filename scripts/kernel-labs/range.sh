@@ -27,6 +27,8 @@ for d in lab lab-fixed; do
 	make -s -C "$src" O="$build" ARCH=arm64 LLVM=1 M="$work/$d" modules
 done
 cp "$work"/lab/*.ko "$work"/lab/stress-*.sh "$work/share/"
+# A module that KCSAN instruments calls the __tsan_* hooks; none means it was built without KCSAN.
+[ "$flavour" = kcsan ] && echo "lg_stats.ko: $(llvm-nm "$work/lab/lg_stats.ko" | grep -c ' U __tsan_') __tsan_ hooks referenced"
 cp "$work"/lab-fixed/*.ko "$work/share/fixed/"
 
 fail=0
@@ -157,9 +159,9 @@ limit=600
 [ "$flavour" = kcsan ] && limit=1800
 if wanted stats; then
 	ticket stats "$limit" <<'EOF'
-dmesg | grep -i 'kcsan:'
 echo "=== insmod lg_stats"; insmod lg_stats.ko
 echo "=== stress"; ./stress-stats.sh
+echo "=== kcsan"; dmesg | grep -i -m 20 'kcsan'; head -n 30 /sys/kernel/debug/kcsan 2>/dev/null
 echo "=== done"
 EOF
 	expect stats 'stress-stats: packets'
