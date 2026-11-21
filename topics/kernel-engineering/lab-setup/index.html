@@ -346,6 +346,7 @@ exec /bin/sh</pre></li>
   apk add -q busybox-static cpio e2fsprogs &amp;&amp;
   mkdir -p /r/bin /r/sbin /r/usr/bin /r/usr/sbin /r/proc /r/sys /r/dev /r/mnt &amp;&amp;
   cp /bin/busybox.static /r/bin/busybox &amp;&amp;
+  ln -s busybox /r/bin/sh &amp;&amp;
   cp /lab/init /r/init &amp;&amp; chmod +x /r/init &amp;&amp;
   (cd /r &amp;&amp; find . | cpio -o -H newc | gzip &gt; /lab/initramfs.cpio.gz) &amp;&amp;
   truncate -s 2G /lab/disk.img &amp;&amp; mkfs.ext4 -q -F /lab/disk.img'

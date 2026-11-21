@@ -1,0 +1,86 @@
+From 45db4d2d91f63653221a29a79299dfceb0985e38 Mon Sep 17 00:00:00 2001
+From: Learning Garden <lab@example.org>
+Date: Sat, 21 Nov 2026 19:47:02 +0000
+Subject: [PATCH 3/4] lg_stats: serialise updates of the packet counters
+
+lg_stats_write() reads next_seq, copies the packet from user space and
+only then stores next_seq + 1. Nothing stops a second writer from
+reading the same next_seq in between, so two packets get one sequence
+number and one increment is lost. bytes and packets are updated with
+plain += and ++ and can lose updates the same way, only less often.
+
+With four writers sending 2000 packets each:
+
+  stress-stats: packets 8000 bytes 128000 next_seq 7893
+  stress-stats: expected packets 8000 bytes 128000 next_seq 8000
+
+Put every access to lg_st under one mutex. It has to be a mutex and not
+a spinlock, because copy_from_user() may sleep.
+
+Signed-off-by: Learning Garden <lab@example.org>
+---
+ lg_stats.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/lg_stats.c b/lg_stats.c
+index 3a1f004..dc30e56 100644
+--- a/lg_stats.c
++++ b/lg_stats.c
+@@ -6,11 +6,12 @@
+  * keeps a copy of the last packet, and counts packets and bytes. Reading
+  * the device prints the three counters.
+  *
+- * Learning Garden, Kernel Engineering, Practical 2. This module has one bug.
++ * Learning Garden, Kernel Engineering, Practical 2. Reference fix applied.
+  */
+ #include <linux/fs.h>
+ #include <linux/miscdevice.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/uaccess.h>
+ 
+ #define LG_PKT_MAX 256
+@@ -23,21 +24,28 @@ static struct {
+ 	u8 last[LG_PKT_MAX];
+ } lg_st;
+ 
++/* Protects every field of lg_st. A mutex: copy_from_user() may sleep. */
++static DEFINE_MUTEX(lg_st_lock);
++
+ static ssize_t lg_stats_write(struct file *file, const char __user *buf,
+ 			      size_t count, loff_t *ppos)
+ {
+ 	size_t n = min_t(size_t, count, LG_PKT_MAX);
+ 	u64 seq;
+ 
++	mutex_lock(&lg_st_lock);
+ 	seq = lg_st.next_seq;
+ 
+-	if (copy_from_user(lg_st.last, buf, n))
++	if (copy_from_user(lg_st.last, buf, n)) {
++		mutex_unlock(&lg_st_lock);
+ 		return -EFAULT;
++	}
+ 	lg_st.last_len = n;
+ 
+ 	lg_st.bytes += n;
+ 	lg_st.packets++;
+ 	lg_st.next_seq = seq + 1;
++	mutex_unlock(&lg_st_lock);
+ 
+ 	return count;
+ }
+@@ -48,8 +56,10 @@ static ssize_t lg_stats_read(struct file *file, char __user *buf,
+ 	char line[96];
+ 	int len;
+ 
++	mutex_lock(&lg_st_lock);
+ 	len = scnprintf(line, sizeof(line), "packets %llu bytes %llu next_seq %llu\n",
+ 			lg_st.packets, lg_st.bytes, lg_st.next_seq);
++	mutex_unlock(&lg_st_lock);
+ 	return simple_read_from_buffer(buf, count, ppos, line, len);
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,90 @@
+From aa6c1d34981ad040ffacace4a80e3b8183b37d83 Mon Sep 17 00:00:00 2001
+From: Learning Garden <lab@example.org>
+Date: Sat, 21 Nov 2026 19:47:02 +0000
+Subject: [PATCH 4/4] lg_fw: free the image when its header is rejected
+
+lg_fw_write() allocates a buffer for the image, copies it in and then
+checks the header. The two checks return -EINVAL without freeing the
+buffer, so every rejected image leaks its full size. With 1000 rejected
+images of 4096 bytes per round, unreclaimable slab memory never stops
+growing:
+
+  stress-fw: round 2, SUnreclaim grew 44072 kB since the start
+  stress-fw: round 3, SUnreclaim grew 53080 kB since the start
+  stress-fw: round 4, SUnreclaim grew 61324 kB since the start
+
+and kmemleak lists the buffers, each with lg_fw_write() in its
+backtrace:
+
+  unreferenced object 0xffff000012362000 (size 4096):
+    comm "dd", pid 80, jiffies 4294895445
+    backtrace (crc 0):
+      kmemleak_alloc+0x38/0x50
+      __kmalloc_noprof+0x2b8/0x5e0
+      lg_fw_write+0x54/0x208 [lg_fw]
+
+Send all three failure paths through one label that frees the buffer.
+
+Signed-off-by: Learning Garden <lab@example.org>
+---
+ lg_fw.c | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/lg_fw.c b/lg_fw.c
+index 2d0f1eb..fb6f309 100644
+--- a/lg_fw.c
++++ b/lg_fw.c
+@@ -6,7 +6,7 @@
+  * both little endian) followed by the payload. A valid image replaces the
+  * one in the slot. Reading the device prints the size of the image held.
+  *
+- * Learning Garden, Kernel Engineering, Practical 2. This module has one bug.
++ * Learning Garden, Kernel Engineering, Practical 2. Reference fix applied.
+  */
+ #include <linux/fs.h>
+ #include <linux/miscdevice.h>
+@@ -31,6 +31,7 @@ static ssize_t lg_fw_write(struct file *file, const char __user *buf,
+ 			   size_t count, loff_t *ppos)
+ {
+ 	struct lg_fw_hdr *hdr;
++	ssize_t ret;
+ 	void *blob;
+ 
+ 	if (count < sizeof(*hdr) || count > LG_FW_MAX)
+@@ -41,15 +42,16 @@ static ssize_t lg_fw_write(struct file *file, const char __user *buf,
+ 		return -ENOMEM;
+ 
+ 	if (copy_from_user(blob, buf, count)) {
+-		kfree(blob);
+-		return -EFAULT;
++		ret = -EFAULT;
++		goto err_free;
+ 	}
+ 
+ 	hdr = blob;
+-	if (le32_to_cpu(hdr->magic) != LG_FW_MAGIC)
+-		return -EINVAL;
+-	if (le32_to_cpu(hdr->len) != count - sizeof(*hdr))
+-		return -EINVAL;
++	if (le32_to_cpu(hdr->magic) != LG_FW_MAGIC ||
++	    le32_to_cpu(hdr->len) != count - sizeof(*hdr)) {
++		ret = -EINVAL;
++		goto err_free;
++	}
+ 
+ 	mutex_lock(&lg_fw_lock);
+ 	kfree(lg_fw_cur);
+@@ -58,6 +60,10 @@ static ssize_t lg_fw_write(struct file *file, const char __user *buf,
+ 	mutex_unlock(&lg_fw_lock);
+ 
+ 	return count;
++
++err_free:
++	kfree(blob);
++	return ret;
+ }
+ 
+ static ssize_t lg_fw_read(struct file *file, char __user *buf,
+-- 
+2.43.0
+

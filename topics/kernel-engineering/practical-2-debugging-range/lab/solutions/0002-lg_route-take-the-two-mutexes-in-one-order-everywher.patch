@@ -1,0 +1,71 @@
+From 1e8268cde8925e09d7a466f8208f744114a656cd Mon Sep 17 00:00:00 2001
+From: Learning Garden <lab@example.org>
+Date: Sat, 21 Nov 2026 19:47:02 +0000
+Subject: [PATCH 2/4] lg_route: take the two mutexes in one order everywhere
+
+lg_config_write() takes lg_cfg_lock and then lg_stats_lock.
+lg_stats_show() takes them the other way round. A writer and a reader
+that each hold their first lock wait for each other for ever; the
+stress script hangs and the hung-task detector reports both tasks, each
+blocked on a mutex that the other one holds:
+
+  INFO: task stress-route.sh:77 blocked for more than 21 seconds.
+  INFO: task cat:79 blocked for more than 21 seconds.
+
+lockdep reports the inversion the first time both orders have been
+seen, before any task is stuck:
+
+  WARNING: possible circular locking dependency detected
+  cat/79 is trying to acquire lock:
+   (lg_cfg_lock){+.+.}-{4:4}, at: lg_stats_show+0x4c/0xa4 [lg_route]
+  but task is already holding lock:
+   (lg_stats_lock){+.+.}-{4:4}, at: lg_stats_show+0x38/0xa4 [lg_route]
+
+Make lg_stats_show() take lg_cfg_lock first, as the writer does, and
+write the order down next to the lock definitions.
+
+Signed-off-by: Learning Garden <lab@example.org>
+---
+ lg_route.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/lg_route.c b/lg_route.c
+index d751cb2..4abb8dc 100644
+--- a/lg_route.c
++++ b/lg_route.c
+@@ -9,7 +9,7 @@
+  * Switching the table restarts the counters, and a stats line must show
+  * counters that belong to the table it names.
+  *
+- * Learning Garden, Kernel Engineering, Practical 2. This module has one bug.
++ * Learning Garden, Kernel Engineering, Practical 2. Reference fix applied.
+  */
+ #include <linux/debugfs.h>
+ #include <linux/delay.h>
+@@ -20,6 +20,7 @@
+ #include <linux/string.h>
+ #include <linux/uaccess.h>
+ 
++/* Lock order: lg_cfg_lock, then lg_stats_lock. */
+ static DEFINE_MUTEX(lg_cfg_lock);	/* protects lg_cfg_name, lg_cfg_gen */
+ static DEFINE_MUTEX(lg_stats_lock);	/* protects lg_hits, lg_misses */
+ 
+@@ -78,13 +79,13 @@ static ssize_t lg_lookup_write(struct file *file, const char __user *buf,
+ 
+ static int lg_stats_show(struct seq_file *m, void *v)
+ {
+-	mutex_lock(&lg_stats_lock);
+ 	/* The counters only mean something next to the table they count. */
+ 	mutex_lock(&lg_cfg_lock);
++	mutex_lock(&lg_stats_lock);
+ 	seq_printf(m, "table %s gen %u hits %llu misses %llu\n",
+ 		   lg_cfg_name, lg_cfg_gen, lg_hits, lg_misses);
+-	mutex_unlock(&lg_cfg_lock);
+ 	mutex_unlock(&lg_stats_lock);
++	mutex_unlock(&lg_cfg_lock);
+ 	return 0;
+ }
+ DEFINE_SHOW_ATTRIBUTE(lg_stats);
+-- 
+2.43.0
+

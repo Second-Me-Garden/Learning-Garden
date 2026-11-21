@@ -1,0 +1,60 @@
+From 5d5408a7552b392dc7897da24b7e62a779b14098 Mon Sep 17 00:00:00 2001
+From: Learning Garden <lab@example.org>
+Date: Sat, 21 Nov 2026 19:47:02 +0000
+Subject: [PATCH 1/4] lg_session: stop the fold work before freeing the session
+
+Each session embeds a delayed work item that re-arms itself every 20 ms.
+lg_session_release() frees the session while that work is still pending,
+so the timer wheel keeps a pointer into freed memory. KASAN reports it
+as soon as another timer is queued into the same bucket:
+
+  BUG: KASAN: slab-use-after-free in enqueue_timer+0x9c/0x630
+  Write of size 8 at addr ffff0000122aba50 by task stress-session./76
+  ...
+  Freed by task 76:
+   kfree+0x150/0x600
+   lg_session_release+0x94/0xd8 [lg_session]
+
+Without KASAN the same bug shows up later and elsewhere: list corruption
+in the timer code, a work function running on recycled memory, or a
+crash after rmmod when the work fires in unloaded code.
+
+Call cancel_delayed_work_sync() before the final fold and the kfree().
+The _sync variant matters: the work re-arms itself, and only the _sync
+variant both prevents the re-arm and waits for a running instance.
+
+Signed-off-by: Learning Garden <lab@example.org>
+---
+ lg_session.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/lg_session.c b/lg_session.c
+index 1197a53..1096e9e 100644
+--- a/lg_session.c
++++ b/lg_session.c
+@@ -6,7 +6,7 @@
+  * what the session has collected into the global total, so a write never
+  * touches the shared counter. Reading the device prints the total.
+  *
+- * Learning Garden, Kernel Engineering, Practical 2. This module has one bug.
++ * Learning Garden, Kernel Engineering, Practical 2. Reference fix applied.
+  */
+ #include <linux/atomic.h>
+ #include <linux/fs.h>
+@@ -76,6 +76,13 @@ static int lg_session_release(struct inode *inode, struct file *file)
+ {
+ 	struct lg_session *s = file->private_data;
+ 
++	/*
++	 * The fold work re-arms itself, so it is always pending or running
++	 * while the session exists. Stop it and wait for it before the
++	 * memory that holds its timer goes away.
++	 */
++	cancel_delayed_work_sync(&s->fold);
++
+ 	/* Whatever the last fold has not seen yet still counts. */
+ 	atomic64_add(atomic64_xchg(&s->pending, 0), &lg_total);
+ 	kfree(s);
+-- 
+2.43.0
+

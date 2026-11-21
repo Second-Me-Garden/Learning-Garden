@@ -79,10 +79,40 @@ for (const page of pages) {
       }
     }
   }
+  // Practical stages (contract: "Practical stage pages"): a second track of project pages. They are not
+  // lessons, so the lesson rules above do not apply; these are the mechanical parts of their own skeleton.
+  const practical = /\/practical-(\d+)-[^/]+\/index\.html$/.exec(page.split(path.sep).join('/'));
+  if (practical) {
+    const n = practical[1];
+    const diagrams = [...html.matchAll(/<svg[^>]*\bdata-diagram\b[^>]*>/g)];
+    if (diagrams.length < 1) problems.push(`${rel}: no svg[data-diagram]`);
+    for (const d of diagrams) {
+      if (!/data-captions=/.test(d[0])) problems.push(`${rel}: diagram without data-captions`);
+      if (!/data-captions-en=/.test(d[0])) problems.push(`${rel}: diagram without data-captions-en`);
+    }
+    for (const js of ['diagram', 'quiz', 'rail', 'code']) {
+      if (!new RegExp(`assets/${js}\\.js`).test(html)) problems.push(`${rel}: ${js}.js not loaded`);
+    }
+    if (!new RegExp(`<form class="quiz" data-quiz="[a-z0-9-]+/practical-${n}"`).test(html)) problems.push(`${rel}: quiz key must end in /practical-${n}`);
+    if (!html.includes(`实战 ${n} / `) || !html.includes(`Practical ${n} / `)) problems.push(`${rel}: p.meta must read "实战 ${n} / T" and "Practical ${n} / T"`);
+    const en = (html.match(/lang="en"/g) || []).length, zh = (html.match(/lang="zh-CN"/g) || []).length;
+    if (en < 20) problems.push(`${rel}: only ${en} lang="en" blocks`);
+    if (Math.abs(en - zh) > Math.max(6, zh * 0.15)) problems.push(`${rel}: lang="en" (${en}) and lang="zh-CN" (${zh}) counts differ`);
+    for (const h of ['任务', '交付物', '验收标准', '热身', '资料']) {
+      if (!html.includes(h)) problems.push(`${rel}: section "${h}" missing`);
+    }
+    // A hint is one <details class="hint"> whose summary holds the paired label; the container carries no lang.
+    for (const m of html.matchAll(/<details class="hint"[^>]*>\s*(<summary>[\s\S]*?<\/summary>)?/g)) {
+      if (/\blang=/.test(m[0].split('>')[0])) problems.push(`${rel}: details.hint must not carry lang (its children are paired)`);
+      if (!m[1] || !/lang="zh-CN"/.test(m[1]) || !/lang="en"/.test(m[1])) problems.push(`${rel}: details.hint needs a summary with a zh-CN and an en span`);
+    }
+  }
   // Circled numbers are banned everywhere (contract: Bilingual pairing).
   if (/[①-⑳]/.test(html)) problems.push(`${rel}: circled number glyph (U+2460–U+2473)`);
   // Source links are pinned to a tag or commit, never a moving branch (contract: Resources).
+  // The one exception is this repository itself: a page and the lab files it links are published together.
   for (const m of html.matchAll(/href="(https:\/\/github\.com\/[^"]+?\/(?:blob|tree)\/(?:main|master)\/[^"]*)"/g)) {
+    if (m[1].toLowerCase().startsWith('https://github.com/second-me-garden/learning-garden/')) continue;
     problems.push(`${rel}: GitHub source link on a moving branch, pin it to a tag or commit: ${m[1]}`);
   }
 

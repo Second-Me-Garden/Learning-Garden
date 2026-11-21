@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh-CN" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<link rel="icon" href="../../../assets/brand/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Practical 2 · The Debugging Range · Kernel Engineering</title>
+<link rel="stylesheet" href="../../../assets/style.css">
+<script src="../../../assets/theme.js"></script>
+<script src="../../../assets/lang.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="../../../index.html"><span class="mark" aria-hidden="true"><img src="../../../assets/brand/symbol.svg" alt=""></span><span class="wordmark">Learning Garden</span></a>
+    <a class="crumb" href="../index.html">Kernel Engineering</a>
+    <span class="crumb current" aria-current="page">Practical 2 · Debugging Range</span>
+    <span class="spacer"></span>
+    <button class="lang" type="button" title="Switch to English" aria-label="Switch to English">EN</button>
+    <button class="theme" type="button" title="切换明暗" aria-label="切换明暗">◐</button>
+  </header>
+
+  <p class="meta" lang="zh-CN">实战 2 / 8 · 约 3 周</p><p class="meta" lang="en">Practical 2 / 8 · about 3 weeks</p>
+  <h1>The Debugging Range <span class="en" lang="zh-CN">排错训练场：四张工单，KASAN、lockdep、kmemleak、KCSAN，以及事后分析</span><span class="en" lang="en">four tickets, KASAN, lockdep, kmemleak, KCSAN, and the post-mortem</span></h1>
+<p class="lede" lang="zh-CN">Phase 6 教过每种调试工具怎么开、输出长什么样。这一阶段反过来：给你四个埋了 bug 的内核模块，每个只附一张用户写的工单，上面只有症状。选哪种工具、看报告的哪一行、改哪里，都由你决定。内核岗位的面试几乎都会问「讲一个你查过的 bug」，这一阶段结束时你手里会有四个可以讲的。</p>
+<p class="lede" lang="en">Phase 6 showed how to switch each debugging tool on and what its output looks like. This stage turns that around: you get four kernel modules with planted bugs, each with nothing but a ticket written by a user that describes the symptom. Which tool to use, which line of the report matters and what to change are your decisions. Nearly every kernel interview asks you to “talk about a bug you tracked down”; at the end of this stage you have four to talk about.</p>
+
+  <h2 id="brief" lang="zh-CN">任务</h2><h2 id="brief-en" lang="en">The brief</h2>
+<div class="goals">
+<span lang="zh-CN">你接手了四个小驱动，每个都有一张未解决的工单。对每一张工单：</span><span lang="en">You have inherited four small drivers, each with one open ticket. For every ticket:</span>
+<ul>
+<li lang="zh-CN"><strong>复现</strong>：用附带的压力脚本，在带调试选项的内核上让问题稳定出现。</li>
+<li lang="en"><strong>Reproduce it</strong>: with the stress script that comes with the module, on a kernel built with the debugging options, until the problem shows up reliably.</li>
+<li lang="zh-CN"><strong>定位</strong>：选对工具，读懂它的报告，用一句话说出根因。</li>
+<li lang="en"><strong>Locate it</strong>: pick the right tool, read its report, and state the root cause in one sentence.</li>
+<li lang="zh-CN"><strong>修复并验证</strong>：改代码，重启虚拟机，压力脚本连续三次通过，工具不再报告，模块能干净卸载。</li>
+<li lang="en"><strong>Fix it and verify</strong>: change the code, reboot the VM, pass the stress script three times in a row with the tool silent, and unload the module cleanly.</li>
+<li lang="zh-CN"><strong>写下来</strong>：一个带说明的修复提交，加一页事后分析。</li>
+<li lang="en"><strong>Write it down</strong>: one fix commit with a proper message, and a one-page post-mortem.</li>
+</ul>
+</div>
+<table>
+<tr><th><span lang="zh-CN">工单</span><span lang="en">Ticket</span></th><th><span lang="zh-CN">模块</span><span lang="en">Module</span></th><th><span lang="zh-CN">用户报告的症状</span><span lang="en">The symptom the user reported</span></th></tr>
+<tr><td>1</td><td><code>lg_session</code></td><td><span lang="zh-CN">「跑统计脚本时内核打出一大串警告。脚本结束时总数是对的，但机器有时随后就没反应了。」</span><span lang="en">“The kernel prints a flood of warnings while the accounting script runs. The total at the end is right, but sometimes the machine stops responding afterwards.”</span></td></tr>
+<tr><td>2</td><td><code>lg_route</code></td><td><span lang="zh-CN">「一边切换路由表一边读统计，两个命令有时会一起卡住，再也不返回，<code>kill -9</code> 也杀不掉。」</span><span lang="en">“When one command switches routing tables while another reads the statistics, both sometimes hang for good, and not even <code>kill -9</code> removes them.”</span></td></tr>
+<tr><td>3</td><td><code>lg_stats</code></td><td><span lang="zh-CN">「四个进程各发 2000 个包，序号应该到 8000，实际总是少一些，每次少的数量还不一样。」</span><span lang="en">“Four processes send 2000 packets each. The sequence number should reach 8000; it always falls short, by a different amount every time.”</span></td></tr>
+<tr><td>4</td><td><code>lg_fw</code></td><td><span lang="zh-CN">「升级工具反复上传校验不过的镜像之后，机器的可用内存越来越少，重启才恢复。」</span><span lang="en">“After the update tool has uploaded many images that fail validation, the machine has less and less free memory until it is rebooted.”</span></td></tr>
+</table>
+<div class="note" lang="zh-CN">四个模块的源码和压力脚本在本仓库的 <a href="https://github.com/Second-Me-Garden/Learning-Garden/tree/main/topics/kernel-engineering/practical-2-debugging-range/lab">lab/</a> 目录里（<a href="lab/lg_session.c">lg_session.c</a>、<a href="lab/lg_route.c">lg_route.c</a>、<a href="lab/lg_stats.c">lg_stats.c</a>、<a href="lab/lg_fw.c">lg_fw.c</a>）。每个模块恰好有一个 bug。同一目录下的 <code>solutions/</code> 是参考修复，请在自己修完之后再打开。</div>
+<div class="note" lang="en">The source of the four modules and their stress scripts is in the <a href="https://github.com/Second-Me-Garden/Learning-Garden/tree/main/topics/kernel-engineering/practical-2-debugging-range/lab">lab/</a> directory of this repository (<a href="lab/lg_session.c">lg_session.c</a>, <a href="lab/lg_route.c">lg_route.c</a>, <a href="lab/lg_stats.c">lg_stats.c</a>, <a href="lab/lg_fw.c">lg_fw.c</a>). Each module has exactly one bug. The <code>solutions/</code> folder next to them holds the reference fixes; open it after you have written your own.</div>
+
+  <h2 id="deliver" lang="zh-CN">交付物与验收标准</h2><h2 id="deliver-en" lang="en">Deliverables and acceptance</h2>
+<p lang="zh-CN"><strong>交付物</strong>：一个 git 仓库，里面是四个修复提交（每张工单一个）和四份事后分析，按本页「怎么写」一节的模板。</p>
+<p lang="en"><strong>Deliverables</strong>: one git repository holding four fix commits (one per ticket) and four post-mortems that follow the template in “Writing it up” below.</p>
+<p lang="zh-CN"><strong>验收标准</strong>：每张工单都要满足下面六条。每一条都能由别人照着你的事后分析重做一遍来检查。</p>
+<p lang="en"><strong>Acceptance criteria</strong>: all six hold for every ticket. Each can be checked by someone else who repeats what your post-mortem says.</p>
+<ol>
+<li lang="zh-CN"><strong>复现过。</strong>事后分析里有你用的命令，以及<strong>你自己那次运行</strong>的工具报告或错误输出的关键几行。</li>
+<li lang="en"><strong>Reproduced.</strong> The post-mortem gives the commands you used and the key lines of the tool report or wrong output from <strong>your own run</strong>.</li>
+<li lang="zh-CN"><strong>根因是一句话。</strong>它说的是哪一段代码违反了哪一条规则，而不是症状。「机器卡死」是症状；「对象被释放时它里面的定时器还在排队」是根因。</li>
+<li lang="en"><strong>The root cause is one sentence.</strong> It names which code breaks which rule, not the symptom. “The machine hangs” is a symptom; “the object is freed while a timer inside it is still queued” is a root cause.</li>
+<li lang="zh-CN"><strong>修复后通过。</strong>在一次<strong>新启动</strong>的虚拟机里，压力脚本连续三次打印预期结果；<code>dmesg</code> 里没有 <code>BUG:</code>、<code>WARNING:</code>、<code>INFO: task</code>；工单 4 的 kmemleak 扫描结果里没有这个模块；<code>rmmod</code> 成功且之后没有新消息。</li>
+<li lang="en"><strong>It passes with the fix.</strong> In a <strong>freshly booted</strong> VM the stress script prints the expected result three times in a row; <code>dmesg</code> has no <code>BUG:</code>, <code>WARNING:</code> or <code>INFO: task</code>; for ticket 4 the kmemleak scan lists nothing from the module; <code>rmmod</code> succeeds and nothing new is logged after it.</li>
+<li lang="zh-CN"><strong>功能还在。</strong>修复不能靠删掉功能来过关：会话的字节数仍然汇总进总数，统计行里的计数仍然属于它旁边的表名，合法镜像仍然被接受。</li>
+<li lang="en"><strong>The feature is still there.</strong> A fix may not pass by deleting what the code does: session bytes still reach the total, the counters in a stats line still belong to the table named beside them, a valid image is still accepted.</li>
+<li lang="zh-CN"><strong>没有让工具闭嘴。</strong>不用 <code>data_race()</code>、<code>kmemleak_not_leak()</code>、<code>lockdep_off()</code> 之类的标注把报告压下去，也不靠加 <code>msleep()</code> 让问题变得难以触发。</li>
+<li lang="en"><strong>The tool was not silenced.</strong> No annotation such as <code>data_race()</code>, <code>kmemleak_not_leak()</code> or <code>lockdep_off()</code> to suppress the report, and no <code>msleep()</code> that only makes the problem harder to hit.</li>
+<li lang="zh-CN"><strong>提交合格。</strong>每个修复是一个提交，<code>checkpatch.pl --strict</code> 对它报告 0 errors、0 warnings；提交信息按实战 1 的规则写，并引用工具报告里最关键的几行。</li>
+<li lang="en"><strong>The commit is in shape.</strong> Each fix is one commit on which <code>checkpatch.pl --strict</code> reports 0 errors and 0 warnings; the message follows the rules of Practical 1 and quotes the lines of the tool report that matter most.</li>
+</ol>
+
+  <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
+<ul>
+<li lang="zh-CN">Phase 3（锁、竞态）、Phase 5（内核模块、misc 设备）、Phase 6（各种调试工具的入门）。</li>
+<li lang="en">Phase 3 (locks, races), Phase 5 (kernel modules, misc devices) and Phase 6 (a first look at each debugging tool).</li>
+<li lang="zh-CN">实战 1：提交信息的写法和 <code>checkpatch.pl</code>。</li>
+<li lang="en">Practical 1: how to write a commit message, and <code>checkpatch.pl</code>.</li>
+<li lang="zh-CN"><a href="../lab-setup/index.html">实验环境</a>里的 QEMU 虚拟机、共享目录和构建容器。本阶段所有 <code>insmod</code> 都在虚拟机里做。</li>
+<li lang="en">The QEMU VM, shared directory and build container of the <a href="../lab-setup/index.html">lab environment</a>. Every <code>insmod</code> in this stage happens in the VM.</li>
+<li lang="zh-CN">磁盘空间：调试内核的构建目录在本页的验证运行里占 4.3 GB。工单 3 用 KCSAN 时还要再编一个内核。</li>
+<li lang="en">Disk space: the build directory of the debug kernel took 4.3 GB in the run this page was checked with. Using KCSAN for ticket 3 needs a second kernel build.</li>
+</ul>
+
+  <h2 id="background" lang="zh-CN">背景知识</h2><h2 id="background-en" lang="en">Background</h2>
+<p lang="zh-CN">五个概念，每个只讲到够你完成任务为止。工具的行为按 v7.3.1 的内核文档和源码核对。</p>
+<p lang="en">Five concepts, each taken only as far as the task needs. How the tools behave was checked against the kernel documentation and source at v7.3.1.</p>
+<h3 lang="zh-CN">1. 先复现，再动手</h3><h3 lang="en">1. Reproduce before you touch anything</h3>
+<p lang="zh-CN">一个不能随手触发的 bug，你没法证明自己修好了它：改完之后它不出现，可能是修好了，也可能只是这次没碰上。所以第一步永远是把「偶尔出现」变成「每次都出现」。常用的办法有三种：<strong>加压</strong>（更多并发、更多次数，四个压力脚本都是这个思路）、<strong>开检查</strong>（让调试工具在错误发生的那一刻就报告，而不是等它造成后果）、<strong>缩小范围</strong>（只加载一个模块，只跑一个脚本）。</p>
+<p lang="en">A bug you cannot trigger at will is a bug you cannot prove fixed: when it stays away after your change, the change may have fixed it, or this run may simply have missed it. So the first step is always to turn “sometimes” into “every time”. There are three common ways: <strong>add load</strong> (more concurrency, more iterations; all four stress scripts work this way), <strong>switch on checks</strong> (so that a debugging tool reports the mistake at the moment it happens instead of when its consequences surface) and <strong>narrow the field</strong> (load one module, run one script).</p>
+<p lang="zh-CN">还有一条这一阶段特有的规矩：<strong>每张工单用一次新启动的虚拟机</strong>。KASAN 默认每次启动只报告第一处非法访问；任何一份 KASAN 或 lockdep 报告之后，内核都会关掉锁检查（日志里是 <code>Disabling lock debugging due to kernel taint</code> 或 <code>INFO: lockdep is turned off.</code>）。在一台已经报过错的机器上「没有新报告」什么也证明不了。热身的最后一步会让你亲眼看到这一点。</p>
+<p lang="en">One rule is specific to this stage: <strong>a freshly booted VM for every ticket</strong>. By default KASAN reports only the first invalid access of a boot, and after any KASAN or lockdep report the kernel turns lock checking off (the log says <code>Disabling lock debugging due to kernel taint</code> or <code>INFO: lockdep is turned off.</code>). “No new report” on a machine that has already reported once proves nothing. The last step of the warm-up lets you see this for yourself.</p>
+<h3 lang="zh-CN">2. 每种工具看得见什么</h3><h3 lang="en">2. What each tool can see</h3>
+<p lang="zh-CN">调试工具各管一类错误，对别的类别完全沉默。选错工具时，你会得到一份干净的日志和一个依然存在的 bug。</p>
+<p lang="en">Each debugging tool covers one class of mistake and is completely silent about the others. Pick the wrong one and you get a clean log and a bug that is still there.</p>
+<table>
+<tr><th><span lang="zh-CN">工具（配置项）</span><span lang="en">Tool (config option)</span></th><th><span lang="zh-CN">它报告什么</span><span lang="en">What it reports</span></th><th><span lang="zh-CN">它看不见什么</span><span lang="en">What it cannot see</span></th></tr>
+<tr><td>KASAN<br><code>CONFIG_KASAN</code></td><td><span lang="zh-CN">越界访问和释放后使用，在非法访问发生的那一条指令上报告，并给出访问、分配、释放三处的调用栈。</span><span lang="en">Out-of-bounds accesses and use-after-free, reported at the very instruction that makes the invalid access, with the stacks of the access, the allocation and the free.</span></td><td><span lang="zh-CN">访问合法内存时的竞态；只分配不释放的泄漏。</span><span lang="en">Races on memory that is valid to access; leaks, where memory is allocated and never freed.</span></td></tr>
+<tr><td>lockdep<br><code>CONFIG_PROVE_LOCKING</code></td><td><span lang="zh-CN">加锁顺序不一致。只要两种顺序都<strong>出现过</strong>就报告，不需要死锁真的发生。</span><span lang="en">Inconsistent lock ordering. It reports as soon as both orders have been <strong>seen</strong>; the deadlock does not have to happen.</span></td><td><span lang="zh-CN">根本没加锁的共享数据；从没执行到的代码路径。</span><span lang="en">Shared data that is not locked at all; code paths that never ran.</span></td></tr>
+<tr><td>kmemleak<br><code>CONFIG_DEBUG_KMEMLEAK</code></td><td><span lang="zh-CN">已分配、但扫描内存时找不到任何指针指向它的对象，附带分配时的调用栈。</span><span lang="en">Objects that are allocated but to which a scan of memory finds no pointer, with the stack of the allocation.</span></td><td><span lang="zh-CN">仍被某个指针指着、但再也不会用到的内存；谁该释放它（报告只有分配点）。</span><span lang="en">Memory that some pointer still refers to but nobody will use again; who should have freed it (the report gives only the allocation site).</span></td></tr>
+<tr><td>KCSAN<br><code>CONFIG_KCSAN</code></td><td><span lang="zh-CN">数据竞争：两个上下文同时访问同一块内存，至少一个是写，而且没有任何同步。报告给出相互竞争的两处访问。</span><span lang="en">Data races: two contexts access the same memory at the same time, at least one of them writes, and nothing synchronises them. The report gives both racing accesses.</span></td><td><span lang="zh-CN">它是抽样的，一次运行没报告不等于没有竞争；不能和 KASAN 编进同一个内核。</span><span lang="en">It samples, so one silent run does not mean there is no race; it cannot be built into the same kernel as KASAN.</span></td></tr>
+<tr><td><span lang="zh-CN">hung task 检测</span><span lang="en">Hung-task detector</span><br><code>CONFIG_DETECT_HUNG_TASK</code><br>SysRq <code>w</code></td><td><span lang="zh-CN">处于不可中断睡眠（D 状态）超过设定秒数的任务，以及它卡在哪个调用栈上。<code>echo w &gt; /proc/sysrq-trigger</code> 立刻列出所有这样的任务。</span><span lang="en">Tasks that have been in uninterruptible sleep (state D) for longer than the configured number of seconds, and the stack they are stuck in. <code>echo w &gt; /proc/sysrq-trigger</code> lists all such tasks at once.</span></td><td><span lang="zh-CN">为什么卡住。它告诉你谁在等，不告诉你顺序是怎么反的。</span><span lang="en">Why they are stuck. It tells you who is waiting, not how the order came to be inverted.</span></td></tr>
+</table>
+<p lang="zh-CN">两个容易漏掉的细节。kmemleak 的扫描线程默认每 10 分钟才跑一次，等不及就写 <code>echo scan &gt; /sys/kernel/debug/kmemleak</code>；而且分配不到 5 秒的对象不会被报告（<code>mm/kmemleak.c</code> 里的 <code>MSECS_MIN_AGE</code>），所以压力脚本结束后要等几秒再扫描。KCSAN 在 arm64 上要先打开 <code>CONFIG_EXPERT</code> 才能选中。</p>
+<p lang="en">Two details that are easy to miss. The kmemleak scanning thread runs only every 10 minutes by default; when you cannot wait, write <code>echo scan &gt; /sys/kernel/debug/kmemleak</code>. An object younger than 5 seconds is not reported (<code>MSECS_MIN_AGE</code> in <code>mm/kmemleak.c</code>), so wait a few seconds after the stress script before scanning. On arm64, KCSAN can only be selected once <code>CONFIG_EXPERT</code> is on.</p>
+<h3 lang="zh-CN">3. 怎样读一份报告</h3><h3 lang="en">3. How to read a report</h3>
+<p lang="zh-CN">四种工具的报告都很长，但结构相同，读的顺序也相同：</p>
+<p lang="en">The reports of all four tools are long, but they share one structure and are read in one order:</p>
+<ol>
+<li lang="zh-CN"><strong>标题行</strong>说的是错误的种类和发现它的位置，例如 <code>BUG: KASAN: slab-use-after-free in enqueue_timer+0x9c/0x630</code>。注意「发现它的位置」经常是内核的公共代码，不是出错的代码。</li>
+<li lang="en">The <strong>title line</strong> gives the kind of error and where it was detected, for example <code>BUG: KASAN: slab-use-after-free in enqueue_timer+0x9c/0x630</code>. Note that “where it was detected” is often common kernel code, not the code that is wrong.</li>
+<li lang="zh-CN"><strong>每个调用栈里，找第一个属于你的函数。</strong>模块里的函数后面带着方括号里的模块名，例如 <code>lg_fw_write+0x54/0x208 [lg_fw]</code>。它上面的几行是工具自己和内核公共代码，下面是系统调用入口。</li>
+<li lang="en"><strong>In every stack, find the first function that is yours.</strong> A function in a module carries the module name in brackets, for example <code>lg_fw_write+0x54/0x208 [lg_fw]</code>. The lines above it are the tool itself and common kernel code; the lines below are the system-call entry.</li>
+<li lang="zh-CN"><strong>把几个调用栈放在一起看。</strong>KASAN 的释放后使用报告有三个栈：谁访问、谁分配、谁释放。错的几乎总是「谁释放」和「谁访问」之间的关系，而不是其中某一个。lockdep 报告有两条依赖链，每条说明一种加锁顺序是在哪里出现的。</li>
+<li lang="en"><strong>Read the stacks together.</strong> A KASAN use-after-free report has three: who accessed, who allocated, who freed. What is wrong is almost always the relation between “who freed” and “who accessed”, not either one alone. A lockdep report has two dependency chains, each saying where one of the lock orders was taken.</li>
+<li lang="zh-CN"><strong>最后才看细节</strong>：地址、对象大小、偏移量、影子内存。它们用来核对你的猜测，而不是用来产生猜测。</li>
+<li lang="en"><strong>Details come last</strong>: addresses, object sizes, offsets, shadow memory. They serve to check your hypothesis, not to produce it.</li>
+</ol>
+<p lang="zh-CN"><code>函数名+0x偏移/0x长度</code> 可以换算成源码行号。对模块里位于 <code>.text</code> 段的函数，先查函数在 <code>.ko</code> 里的地址，加上偏移；调用栈里记的是返回地址，所以再减去一条指令的长度（arm64 上是 4）：</p>
+<p lang="en"><code>function+0xoffset/0xsize</code> can be turned into a source line. For a module function in the <code>.text</code> section, look up the address of the function inside the <code>.ko</code> and add the offset; a stack trace records return addresses, so subtract the length of one instruction (4 on arm64):</p>
+<pre data-lang="sh">llvm-nm lg_fw.ko | grep ' lg_fw_write'      # 00000000000000e8 t lg_fw_write
+# 0xe8 + 0x54 - 4 = 0x138
+llvm-addr2line -f -i -e lg_fw.ko 0x138</pre>
+<pre data-lang="text">_kmalloc_noprof
+/home/user/klab/linux/include/linux/slab.h:995
+lg_fw_write
+/home/user/klab/vm/lab-build/lg_fw.c:39</pre>
+<p lang="zh-CN">输出由内到外列出内联展开的每一层，最后一行是你的代码：<code>lg_fw.c</code> 第 39 行（路径是验证运行那台机器上的）。模块要带调试信息编译，arm64 的 <code>defconfig</code> 默认带。初始化函数在 <code>.init.text</code> 段，这个办法对它不适用。</p>
+<p lang="en">The output lists each level of inlining from the inside out, and its last line is your code: line 39 of <code>lg_fw.c</code> (the paths are those of the machine the checking run used). The module has to be built with debug information, which the arm64 <code>defconfig</code> enables. Init functions live in the <code>.init.text</code> section, and this method does not work for them.</p>
+<h3 lang="zh-CN">4. 修根因，不修症状</h3><h3 lang="en">4. Fix the cause, not the symptom</h3>
+<p lang="zh-CN">让报告消失的改法通常不止一种，其中只有一种是修复。判断的办法是先把根因写成<strong>一条被违反的规则</strong>，再看你的改动是否让这条规则重新成立：</p>
+<p lang="en">There is usually more than one change that makes a report go away, and only one of them is a fix. The test is to write the root cause down as <strong>a rule that was broken</strong>, and then ask whether your change makes that rule hold again:</p>
+<table>
+<tr><th><span lang="zh-CN">症状式的改法</span><span lang="en">A change that treats the symptom</span></th><th><span lang="zh-CN">为什么不是修复</span><span lang="en">Why it is not a fix</span></th><th><span lang="zh-CN">根因式的问法</span><span lang="en">The question that finds the cause</span></th></tr>
+<tr><td><span lang="zh-CN">在崩溃的那一行前面加一个空指针或标志位检查</span><span lang="en">Adding a NULL or flag check in front of the line that crashes</span></td><td><span lang="zh-CN">对象仍然在别人使用时被释放，检查和使用之间还有窗口。</span><span lang="en">The object is still freed while someone uses it; a window remains between the check and the use.</span></td><td><span lang="zh-CN">谁拥有这个对象？它必须活到什么时候？</span><span lang="en">Who owns this object? Until when must it stay alive?</span></td></tr>
+<tr><td><span lang="zh-CN">加 <code>msleep()</code>，或者减少并发</span><span lang="en">Adding an <code>msleep()</code>, or lowering the concurrency</span></td><td><span lang="zh-CN">竞争窗口变窄了，但还在。压力脚本过了，生产环境迟早碰上。</span><span lang="en">The race window is narrower and still there. The stress script passes; production hits it sooner or later.</span></td><td><span lang="zh-CN">这块数据由哪把锁保护？每一处访问都拿着它吗？</span><span lang="en">Which lock protects this data? Does every access hold it?</span></td></tr>
+<tr><td><span lang="zh-CN">把 <code>mutex_lock()</code> 换成 <code>mutex_trylock()</code>，失败就返回错误</span><span lang="en">Replacing <code>mutex_lock()</code> with <code>mutex_trylock()</code> and returning an error on failure</span></td><td><span lang="zh-CN">死锁变成了用户看到的随机失败。</span><span lang="en">The deadlock has become a random failure the user sees.</span></td><td><span lang="zh-CN">这几把锁的固定顺序是什么？写在哪里？</span><span lang="en">What is the one order of these locks? Where is it written down?</span></td></tr>
+<tr><td><span lang="zh-CN">用标注告诉工具「这不是 bug」</span><span lang="en">Telling the tool by annotation that “this is not a bug”</span></td><td><span lang="zh-CN">标注是给确实无害的情况用的，用在真 bug 上只是把它藏起来。</span><span lang="en">Annotations exist for cases that really are harmless; on a real bug they only hide it.</span></td><td><span lang="zh-CN">我能解释为什么这里出错也没有后果吗？</span><span lang="en">Can I explain why a wrong result here has no consequence?</span></td></tr>
+</table>
+<p lang="zh-CN">修完之后的验证也要对准根因：重跑的必须是<strong>当初能复现问题的同一个脚本</strong>，在一次新启动里，而且要跑不止一遍。</p>
+<p lang="en">Verification after the fix aims at the cause too: rerun <strong>the very script that reproduced the problem</strong>, in a fresh boot, and more than once.</p>
+<h3 lang="zh-CN">5. 事后分析</h3><h3 lang="en">5. The post-mortem</h3>
+<p lang="zh-CN">事后分析（post-mortem）是修完 bug 之后写给同事的一页纸。它回答五个问题：用户看到了什么，怎样复现，根因是什么，改了什么，怎样确认修好了。再加一个最有价值的问题：<strong>这个 bug 当初是怎样混进来、又为什么没有被更早发现的</strong>。它只谈代码和流程，不追究是谁写的。</p>
+<p lang="en">A post-mortem is the page you write for your colleagues once a bug is fixed. It answers five questions: what the user saw, how to reproduce it, what the root cause was, what was changed, and how the fix was confirmed. Then comes the most valuable one: <strong>how did this bug get in, and why was it not caught earlier</strong>. It is about code and process and never about who wrote the line.</p>
+<p lang="zh-CN">这页纸也是面试时「讲一个你查过的 bug」的底稿。面试官想听的正是这个顺序：症状，你排除了什么，决定性的证据是哪一行，修复为什么对。</p>
+<p lang="en">This page is also your script for “tell me about a bug you tracked down” in an interview. That order is what the interviewer wants to hear: the symptom, what you ruled out, which line was the decisive evidence, and why the fix is right.</p>
+
+  <h2 id="diagram" lang="zh-CN">动画图解</h2><h2 id="diagram-en" lang="en">Animated diagram</h2>
+<h3 lang="zh-CN">一张工单的排错回路</h3><h3 lang="en">The debugging loop for one ticket</h3>
+<div class="diagram">
+    <svg data-diagram viewBox="0 0 900 300" data-interval="2400"
+         data-captions='["一张工单从症状走到事后分析要经过八步。上面一行是找原因，下面一行是修和证明。验证不过就回到复现，而不是继续改。",
+           "第 1 步：工单。用户写的只有症状：卡死、数字不对、内存变少。症状出现的地方通常离出错的代码很远。",
+           "第 2 步：复现。用压力脚本在一次新启动的调试内核上让问题稳定出现。不能稳定复现的 bug 没法证明修好了。",
+           "第 3 步：选工具。内存访问错误找 KASAN，卡住找 lockdep 和 hung task 检测，内存变少找 kmemleak，数字不对找 KCSAN。",
+           "第 4 步：读报告。先看标题行，再在每个调用栈里找第一个属于你的函数，把访问、分配、释放几个栈放在一起看。",
+           "第 5 步：根因。把它写成一句话：哪段代码违反了哪条规则。写不出这句话，说明还没找到。",
+           "第 6 步：修复。改动要让那条规则重新成立，不是让报告消失。一个修复一个提交。",
+           "第 7 步：验证。重启，同一个压力脚本连跑三遍，工具保持安静，模块干净卸载。有一条不满足就回到第 2 步。",
+           "第 8 步：事后分析。一页纸：症状、复现、根因、修复、验证，以及这个 bug 当初为什么没被更早发现。"]'
+         data-captions-en='["One ticket takes eight steps from symptom to post-mortem. The top row finds the cause, the bottom row fixes and proves. When verification fails you go back to reproducing, not on to more changes.",
+           "Step 1: the ticket. The user wrote down a symptom only: a hang, a wrong number, shrinking memory. The symptom usually shows up far from the code that is wrong.",
+           "Step 2: reproduce. Use the stress script on a freshly booted debug kernel until the problem shows up reliably. A bug you cannot reproduce reliably cannot be proven fixed.",
+           "Step 3: pick the tool. Invalid memory accesses call for KASAN, hangs for lockdep and the hung-task detector, shrinking memory for kmemleak, wrong numbers for KCSAN.",
+           "Step 4: read the report. Title line first, then the first function of yours in every stack, then the access, allocation and free stacks side by side.",
+           "Step 5: root cause. Write it as one sentence: which code breaks which rule. If you cannot write the sentence, you have not found it yet.",
+           "Step 6: fix. The change must make that rule hold again, not make the report go away. One fix, one commit.",
+           "Step 7: verify. Reboot, run the same stress script three times, with the tool silent and the module unloading cleanly. If any of that fails, go back to step 2.",
+           "Step 8: post-mortem. One page: symptom, reproduction, root cause, fix, verification, and why the bug was not caught earlier."]'>
+      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink-3)"/></marker></defs>
+      <text x="20" y="28" class="small" lang="zh-CN">找原因</text><text x="20" y="28" class="small" lang="en">Finding the cause</text>
+      <text x="20" y="178" class="small" lang="zh-CN">修和证明</text><text x="20" y="178" class="small" lang="en">Fixing and proving</text>
+
+      <g data-step="1"><rect class="box" x="20" y="45" width="150" height="60"/><text x="30" y="69" lang="zh-CN">1 工单</text><text x="30" y="69" lang="en">1 Ticket</text><text x="30" y="91" class="small" lang="zh-CN">只有症状</text><text x="30" y="91" class="small" lang="en">a symptom only</text></g>
+      <g data-step="2"><rect class="box" x="197" y="45" width="150" height="60"/><text x="207" y="69" lang="zh-CN">2 复现</text><text x="207" y="69" lang="en">2 Reproduce</text><text x="207" y="91" class="small" lang="zh-CN">压力脚本 · 新启动</text><text x="207" y="91" class="small" lang="en">stress · fresh boot</text></g>
+      <path data-step="2" class="arrow" d="M170 75 L197 75"/>
+      <g data-step="3"><rect class="box" x="374" y="45" width="150" height="60"/><text x="384" y="69" lang="zh-CN">3 选工具</text><text x="384" y="69" lang="en">3 Pick the tool</text><text x="384" y="91" class="small">KASAN · lockdep · …</text></g>
+      <path data-step="3" class="arrow" d="M347 75 L374 75"/>
+      <g data-step="4"><rect class="box" x="551" y="45" width="150" height="60"/><text x="561" y="69" lang="zh-CN">4 读报告</text><text x="561" y="69" lang="en">4 Read the report</text><text x="561" y="91" class="small" lang="zh-CN">找你的第一个函数</text><text x="561" y="91" class="small" lang="en">your first function</text></g>
+      <path data-step="4" class="arrow" d="M524 75 L551 75"/>
+      <g data-step="5"><rect class="box" x="728" y="45" width="152" height="60"/><text x="738" y="69" lang="zh-CN">5 根因</text><text x="738" y="69" lang="en">5 Root cause</text><text x="738" y="91" class="small" lang="zh-CN">一句话，一条规则</text><text x="738" y="91" class="small" lang="en">one sentence, one rule</text></g>
+      <path data-step="5" class="arrow" d="M701 75 L728 75"/>
+
+      <g data-step="6"><rect class="box" x="728" y="195" width="152" height="60"/><text x="738" y="219" lang="zh-CN">6 修复</text><text x="738" y="219" lang="en">6 Fix</text><text x="738" y="241" class="small" lang="zh-CN">一个修复一个提交</text><text x="738" y="241" class="small" lang="en">one fix, one commit</text></g>
+      <path data-step="6" class="arrow" d="M804 105 L804 195"/>
+      <g data-step="7"><rect class="box" x="374" y="195" width="150" height="60"/><text x="384" y="219" lang="zh-CN">7 验证</text><text x="384" y="219" lang="en">7 Verify</text><text x="384" y="241" class="small" lang="zh-CN">重启 · 三遍 · 卸载</text><text x="384" y="241" class="small" lang="en">reboot · 3 runs · rmmod</text></g>
+      <path data-step="7" class="arrow" d="M728 225 L524 225"/>
+      <path data-step="7" class="arrow flow" d="M449 195 L449 150 L272 150 L272 105"/>
+      <text data-step="7" x="282" y="143" class="small" lang="zh-CN">没过：回到复现</text><text data-step="7" x="282" y="143" class="small" lang="en">failed: back to reproducing</text>
+      <g data-step="8"><rect class="box" x="20" y="195" width="150" height="60"/><text x="30" y="219" lang="zh-CN">8 事后分析</text><text x="30" y="219" lang="en">8 Post-mortem</text><text x="30" y="241" class="small" lang="zh-CN">一页纸</text><text x="30" y="241" class="small" lang="en">one page</text></g>
+      <path data-step="8" class="arrow" d="M374 225 L170 225"/>
+      <text data-step="8" x="230" y="217" class="small" lang="zh-CN">通过</text><text data-step="8" x="230" y="217" class="small" lang="en">passed</text>
+    </svg>
+  </div>
+
+  <h2 id="warmup" lang="zh-CN">热身</h2><h2 id="warmup-en" lang="en">Warm-up</h2>
+<p lang="zh-CN">热身做三件事：编一个带调试选项的内核，把实验模块编出来，然后读懂你的第一份 KASAN 报告。这份报告的原因你事先就知道：<a href="lab/lg_warm.c">lg_warm.c</a> 故意往 16 字节的缓冲区里写了第 17 个字节。</p>
+<p lang="en">The warm-up does three things: build a kernel with the debugging options, build the lab modules, and read your first KASAN report. You know its cause in advance: <a href="lab/lg_warm.c">lg_warm.c</a> writes a 17th byte into a 16-byte buffer on purpose.</p>
+<div class="note" lang="zh-CN">下面的输出来自 2026-11-21 的实际运行：Linux v7.3.1，Ubuntu clang 18.1.3，在一台 x86_64 Linux 机器上以 <code>LLVM=1 ARCH=arm64</code> 交叉编译，客体是 QEMU 8.2.2（纯软件模拟，<code>-M virt -cpu cortex-a72 -smp 2 -m 2G</code>）。地址、进程号和时间戳在你那里会不同，不同代码块的时间戳来自不同的启动；被删掉的行用 <code>...</code> 表示。</div>
+<div class="note" lang="en">The output below comes from actual runs on 2026-11-21: Linux v7.3.1, Ubuntu clang 18.1.3, cross-compiled with <code>LLVM=1 ARCH=arm64</code> on an x86_64 Linux machine, in a QEMU 8.2.2 guest (pure software emulation, <code>-M virt -cpu cortex-a72 -smp 2 -m 2G</code>). Addresses, process IDs and timestamps will differ for you, and the timestamps of different blocks come from different boots; removed lines are shown as <code>...</code>.</div>
+<div class="lab">
+<h3 lang="zh-CN">热身 · 调试内核和第一份 KASAN 报告</h3><h3 lang="en">Warm-up · A debug kernel and a first KASAN report</h3>
+<ol>
+<li><span lang="zh-CN">在你编内核的地方（Phase 0 的源码树，或实验环境的构建容器），给调试内核一个单独的输出目录，这样原来的内核不受影响。先生成默认配置，再打开调试选项：</span><span lang="en">Where you build the kernel (the Phase 0 tree, or the build container of the lab environment), give the debug kernel an output directory of its own, so that the kernel you already have is left alone. Generate the default configuration, then switch the debugging options on:</span>
+<pre data-lang="sh">cd linux                      # the v7.3.1 tree
+make LLVM=1 ARCH=arm64 O=../build-debug defconfig
+./scripts/config --file ../build-debug/.config \
+    -e NET_9P -e NET_9P_VIRTIO -e 9P_FS \
+    -e KASAN -e PROVE_LOCKING -e DEBUG_ATOMIC_SLEEP -e DEBUG_KMEMLEAK \
+    -e DETECT_HUNG_TASK -e DEBUG_LIST \
+    -e FTRACE -e FUNCTION_TRACER -e FUNCTION_GRAPH_TRACER \
+    -e GDB_SCRIPTS -d DEBUG_INFO_REDUCED
+make LLVM=1 ARCH=arm64 O=../build-debug olddefconfig
+grep -E 'CONFIG_(KASAN|KASAN_GENERIC|PROVE_LOCKING|DEBUG_KMEMLEAK|DETECT_HUNG_TASK|DEBUG_ATOMIC_SLEEP)=' \
+    ../build-debug/.config</pre>
+<pre data-lang="text">CONFIG_DEBUG_KMEMLEAK=y
+CONFIG_KASAN=y
+CONFIG_KASAN_GENERIC=y
+CONFIG_DETECT_HUNG_TASK=y
+CONFIG_PROVE_LOCKING=y
+CONFIG_DEBUG_ATOMIC_SLEEP=y</pre>
+<span lang="zh-CN">六行都必须是 <code>=y</code>。<code>olddefconfig</code> 会悄悄丢掉依赖不满足的选项，所以每次改完配置都要这样查一遍。</span><span lang="en">All six lines must say <code>=y</code>. <code>olddefconfig</code> silently drops an option whose dependencies are not met, so check like this after every configuration change.</span></li>
+<li><span lang="zh-CN">编译。只需要内核镜像和编外部模块所需的那部分：</span><span lang="en">Build. Only the kernel image and what out-of-tree modules need:</span>
+<pre data-lang="sh">make LLVM=1 ARCH=arm64 O=../build-debug -j"$(nproc)" Image
+make LLVM=1 ARCH=arm64 O=../build-debug modules_prepare
+cp ../build-debug/vmlinux.symvers ../build-debug/Module.symvers</pre>
+<span lang="zh-CN">最后一行的原因：外部模块要靠 <code>Module.symvers</code> 知道内核导出了哪些符号。只编 <code>Image</code> 时没有这个文件，内核自己导出的符号表 <code>vmlinux.symvers</code> 可以顶替它。这次验证运行里，<code>Image</code> 这一步在 4 核机器上用了 1111 秒，带 KASAN 的内核比普通内核编得慢。</span><span lang="en">The reason for the last line: an out-of-tree module learns which symbols the kernel exports from <code>Module.symvers</code>. A build of <code>Image</code> alone does not write that file, and <code>vmlinux.symvers</code>, the list of symbols the kernel itself exports, stands in for it. In the checking run the <code>Image</code> step took 1111 seconds on a 4-core machine; a kernel with KASAN builds more slowly than a plain one.</span></li>
+<li><span lang="zh-CN">取实验模块，放进一个自己的 git 仓库（之后每个修复是这个仓库里的一个提交），然后针对调试内核编译，把结果放进虚拟机的共享目录：</span><span lang="en">Fetch the lab modules and put them into a git repository of your own (each fix will be one commit in it), then build them against the debug kernel and put the result into the shared directory of the VM:</span>
+<pre data-lang="sh">git clone --depth 1 https://github.com/Second-Me-Garden/Learning-Garden.git
+cp -r Learning-Garden/topics/kernel-engineering/practical-2-debugging-range/lab ~/kernel-lab/range
+cd ~/kernel-lab/range
+rm -r solutions                       # no peeking; the folder stays in the clone
+git init -q &amp;&amp; git add . &amp;&amp; git commit -q -m "lab: the debugging range as handed out"
+
+make -C /path/to/linux O=/path/to/build-debug ARCH=arm64 LLVM=1 M="$PWD" modules
+cp *.ko stress-*.sh ~/kernel-lab/share/
+cp /path/to/build-debug/arch/arm64/boot/Image ~/kernel-lab/Image-debug</pre>
+<span lang="zh-CN">模块必须用<strong>它要加载进去的那个内核</strong>的构建目录来编。拿普通内核编出的 <code>.ko</code> 加载进调试内核会被拒绝，反过来也一样。</span><span lang="en">A module has to be built against the build directory of <strong>the very kernel it will be loaded into</strong>. A <code>.ko</code> built for the plain kernel is refused by the debug kernel, and the other way round.</span></li>
+<li><span lang="zh-CN">用调试内核启动虚拟机（<code>run-vm.sh</code> 从环境变量 <code>KERNEL</code> 读内核路径），在客体里确认三个工具都在：</span><span lang="en">Boot the VM with the debug kernel (<code>run-vm.sh</code> takes the kernel path from the environment variable <code>KERNEL</code>) and confirm in the guest that the three tools are present:</span>
+<pre data-lang="sh">cd ~/kernel-lab &amp;&amp; KERNEL=./Image-debug ./run-vm.sh
+# in the guest:
+mount -t debugfs none /sys/kernel/debug
+cd /mnt/share
+dmesg | grep -i -E 'KernelAddressSanitizer|kmemleak:|Lock dependency validator'</pre>
+<pre data-lang="text">[    0.000000] KernelAddressSanitizer initialized (generic)
+[    0.050254] Lock dependency validator: Copyright (c) 2006 Red Hat, Inc., Ingo Molnar
+[   11.195040] kmemleak: Kernel memory leak detector initialized (mem pool available: 15644)
+[   11.195782] kmemleak: Automatic memory scanning thread started</pre>
+<span lang="zh-CN">调试内核启动明显更慢：这次运行里，纯软件模拟下到出现 shell 用了大约 12 秒的客体时间。</span><span lang="en">A debug kernel boots visibly more slowly: in this run, under pure software emulation, the shell appeared after about 12 seconds of guest time.</span></li>
+<li><span lang="zh-CN">加载热身模块：</span><span lang="en">Load the warm-up module:</span>
+<pre data-lang="sh">insmod lg_warm.ko</pre>
+<pre data-lang="text">[   13.202814] BUG: KASAN: slab-out-of-bounds in init_module+0xb8/0xfa0 [lg_warm]
+[   13.203926] Write of size 1 at addr ffff000012229650 by task insmod/81
+[   13.203991]
+[   13.205015] CPU: 0 UID: 0 PID: 81 Comm: insmod Tainted: G           O        7.3.1 #1 PREEMPT
+[   13.205227] Tainted: [O]=OOT_MODULE
+[   13.205257] Hardware name: linux,dummy-virt (DT)
+[   13.205476] Call trace:
+[   13.205705]  show_stack+0x24/0x38 (C)
+[   13.206253]  dump_stack_lvl+0x40/0xa0
+[   13.206304]  print_report+0x174/0x720
+[   13.206335]  kasan_report+0xd8/0x138
+[   13.206360]  __asan_report_store1_noabort+0x20/0x30
+[   13.206385]  init_module+0xb8/0xfa0 [lg_warm]
+[   13.206439]  do_one_initcall+0x16c/0xa18
+[   13.206468]  do_init_module+0x1f8/0x618
+[   13.206496]  load_module+0x35b4/0x3a88
+[   13.206520]  __arm64_sys_finit_module+0x374/0x528
+...
+[   13.206934] Allocated by task 81:
+[   13.207087]  kasan_save_track+0x40/0x78
+[   13.207137]  kasan_save_alloc_info+0x44/0x58
+[   13.207161]  __kasan_kmalloc+0x84/0xa0
+[   13.207181]  __kmalloc_noprof+0x2e0/0x5e0
+[   13.207206]  init_module+0x30/0xfa0 [lg_warm]
+[   13.207234]  do_one_initcall+0x16c/0xa18
+...
+[   13.207524] The buggy address belongs to the object at ffff000012229640
+[   13.207524]  which belongs to the cache kmalloc-16 of size 16
+[   13.207618] The buggy address is located 0 bytes to the right of
+[   13.207618]  allocated 16-byte region [ffff000012229640, ffff000012229650)
+...
+[   13.209150] Memory state around the buggy address:
+[   13.209309]  ffff000012229500: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+[   13.209359]  ffff000012229580: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+[   13.209399] &gt;ffff000012229600: fc fc fc fc fc fc fc fc 00 00 fc fc 00 04 fc fc
+[   13.209431]                                                  ^
+[   13.209508]  ffff000012229680: 00 04 fc fc 00 06 fc fc 00 03 fc fc 00 03 fc fc
+[   13.209578]  ffff000012229700: 00 03 fc fc 00 03 fc fc 00 02 fc fc 00 04 fc fc
+[   13.209655] ==================================================================
+[   13.210116] Disabling lock debugging due to kernel taint
+[   13.210216] lg_warm: wrote 17 bytes into a 16-byte buffer</pre></li>
+<li><span lang="zh-CN">按背景 3 的顺序读这份报告，一共五处：</span><span lang="en">Read the report in the order of concept 3. There are five places to look:</span>
+<ul>
+<li lang="zh-CN"><strong>标题行</strong>：<code>slab-out-of-bounds</code> 是错误种类，越界访问了一个 slab 对象；<code>init_module+0xb8/0xfa0 [lg_warm]</code> 是发现它的位置。源码里函数叫 <code>lg_warm_init</code>，报告里却是 <code>init_module</code>，因为 <code>module_init()</code> 把你的初始化函数另起了这个固定的名字。下一行说是一次 1 字节的<strong>写</strong>。</li>
+<li lang="en">The <strong>title line</strong>: <code>slab-out-of-bounds</code> is the kind of error, an access beyond a slab object; <code>init_module+0xb8/0xfa0 [lg_warm]</code> is where it was detected. The function is called <code>lg_warm_init</code> in the source and <code>init_module</code> in the report, because <code>module_init()</code> gives your init function that fixed second name. The next line says it was a <strong>write</strong> of 1 byte.</li>
+<li lang="zh-CN"><strong>访问的调用栈</strong>：从上往下，前五行是 KASAN 自己在打印报告，第一个属于你的函数是 <code>init_module+0xb8</code>，再往下是加载模块的系统调用。</li>
+<li lang="en">The <strong>stack of the access</strong>: from the top, the first five lines are KASAN printing its report, the first function of yours is <code>init_module+0xb8</code>, and below it comes the system call that loads a module.</li>
+<li lang="zh-CN"><strong>分配的调用栈</strong>（<code>Allocated by task 81</code>）：同一个函数的 <code>+0x30</code> 处，也就是 <code>kmalloc()</code> 那一行。</li>
+<li lang="en">The <strong>stack of the allocation</strong> (<code>Allocated by task 81</code>): the same function at <code>+0x30</code>, which is the <code>kmalloc()</code> line.</li>
+<li lang="zh-CN"><strong>对象描述</strong>：出错地址在一个 16 字节区域 <code>[…640, …650)</code> 的右边 0 字节处，也就是紧挨着末尾的第一个字节。这正是 <code>name[len]</code>。</li>
+<li lang="en">The <strong>object description</strong>: the bad address lies 0 bytes to the right of a 16-byte region <code>[…640, …650)</code>, that is the first byte past its end. That is exactly <code>name[len]</code>.</li>
+<li lang="zh-CN"><strong>影子内存</strong>：每个影子字节描述 8 字节真实内存。<code>00</code> 表示这 8 字节都可以访问，<code>04</code> 表示只有前 4 字节可以，<code>fc</code> 是 slab 对象之间的隔离带（redzone）。<code>&gt;</code> 那一行里，<code>00 00</code> 是你的 16 字节，<code>^</code> 指着它后面的第一个 <code>fc</code>。</li>
+<li lang="en"><strong>Shadow memory</strong>: every shadow byte describes 8 bytes of real memory. <code>00</code> means all 8 may be accessed, <code>04</code> means only the first 4 may, and <code>fc</code> is the redzone between slab objects. In the line marked <code>&gt;</code>, <code>00 00</code> is your 16 bytes and the <code>^</code> points at the first <code>fc</code> after them.</li>
+</ul></li>
+<li><span lang="zh-CN">最后看一眼背景 1 里那条规矩的由来。不重启，把同一个模块卸掉再加载一次，然后数一数日志里有几份报告：</span><span lang="en">Finally, see where the rule from concept 1 comes from. Without rebooting, unload the same module and load it again, then count the reports in the log:</span>
+<pre data-lang="sh">rmmod lg_warm
+insmod lg_warm.ko
+dmesg | grep -c 'BUG: KASAN'
+dmesg | grep 'lg_warm:'</pre>
+<pre data-lang="text">1
+[   14.222114] lg_warm: loading out-of-tree module taints kernel.
+[   14.274371] lg_warm: wrote 17 bytes into a 16-byte buffer
+[   14.462535] lg_warm: wrote 17 bytes into a 16-byte buffer</pre>
+<span lang="zh-CN">模块越界写了两次，报告只有一份。第二次同样是 bug，KASAN 没有再说话。所以每张工单、每次验证修复，都要从一次新启动开始：用 <code>poweroff -f</code> 关掉客体，再启动。</span><span lang="en">The module wrote out of bounds twice and there is one report. The second write is just as much a bug, and KASAN said nothing more. This is why every ticket, and every verification of a fix, starts from a fresh boot: shut the guest down with <code>poweroff -f</code> and start it again.</span></li>
+</ol>
+</div>
+
+  <h2 id="assignment" lang="zh-CN">正式任务</h2><h2 id="assignment-en" lang="en">The assignment</h2>
+<p lang="zh-CN">四张工单，顺序随意。下面只给每张工单的复现命令和「修好」的样子；卡住时再一层一层展开提示。每张工单开始前先重启虚拟机，并在客体里执行 <code>mount -t debugfs none /sys/kernel/debug; cd /mnt/share</code>。</p>
+<p lang="en">Four tickets, in any order. Each comes with the command that reproduces it and with what “fixed” looks like; open the hints one level at a time when you are stuck. Reboot the VM before each ticket and run <code>mount -t debugfs none /sys/kernel/debug; cd /mnt/share</code> in the guest.</p>
+<p lang="zh-CN">每个修复的流程相同：在 <code>~/kernel-lab/range</code> 里改代码，重新编译并复制 <code>.ko</code>，重启客体，验证，然后提交。提交信息里加一行 <code>Fixes:</code>，指向你那个「as handed out」提交（12 位哈希加主题，格式见实战 1）。</p>
+<p lang="en">Every fix follows the same routine: change the code in <code>~/kernel-lab/range</code>, rebuild and copy the <code>.ko</code>, reboot the guest, verify, then commit. Add a <code>Fixes:</code> line to the message that points at your “as handed out” commit (12 characters of the hash plus the subject, in the format shown in Practical 1).</p>
+<h3 lang="zh-CN">工单 1 · lg_session：警告刷屏，有时机器没反应</h3><h3 lang="en">Ticket 1 · lg_session: a flood of warnings, sometimes a dead machine</h3>
+<p lang="zh-CN"><code>lg_session</code> 给每次 <code>open()</code> 建一个会话，写入的字节数先记在会话里，由一个每 20 毫秒运行一次的工作项汇总进全局总数。</p>
+<p lang="en"><code>lg_session</code> creates a session for every <code>open()</code>. Bytes written are first counted in the session, and a work item that runs every 20 milliseconds folds them into the global total.</p>
+<pre data-lang="sh">insmod lg_session.ko
+./stress-session.sh</pre>
+<p lang="zh-CN"><strong>修好的样子</strong>：脚本连跑三遍，每遍都打印 <code>stress-session: this run added 3200 bytes, expected 3200</code>，日志干净，<code>rmmod lg_session</code> 之后再等一秒也没有新消息。没修的模块在第一遍之后客体可能卡死，这时按 <code>Ctrl-A</code> 再按 <code>X</code> 退出 QEMU。</p>
+<p lang="en"><strong>Fixed looks like this</strong>: three runs of the script each print <code>stress-session: this run added 3200 bytes, expected 3200</code>, the log is clean, and a second after <code>rmmod lg_session</code> there is still nothing new. With the module as handed out, the guest may hang after the first run; if it does, leave QEMU with <code>Ctrl-A</code> then <code>X</code>.</p>
+<details class="hint">
+<summary><span lang="zh-CN">提示 1：从哪里看起</span><span lang="en">Hint 1: where to start</span></summary>
+<p lang="zh-CN">日志很长，但 KASAN 只报告一次，而且它在最前面。用 <code>dmesg | grep -n -m1 -A70 "BUG: KASAN"</code> 只看第一份报告，后面的几百条 <code>WARNING</code> 都是它的后果。</p>
+<p lang="en">The log is long, but KASAN reports once and its report comes first. <code>dmesg | grep -n -m1 -A70 "BUG: KASAN"</code> shows that first report alone; the hundreds of <code>WARNING</code>s after it are its consequences.</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">提示 2：三个调用栈怎么读</span><span lang="en">Hint 2: reading the three stacks</span></summary>
+<p lang="zh-CN">访问的栈顶在定时器代码里，那不是出错的地方。看 <code>Freed by</code> 这个栈里第一个属于模块的函数，再问：这个对象被释放的时候，内核里还有谁记着它的地址？</p>
+<p lang="en">The top of the access stack is in the timer code, and that is not where the mistake is. Look at the first module function in the <code>Freed by</code> stack, and ask: at the moment this object was freed, who else in the kernel still remembered its address?</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">提示 3：往哪个方向修</span><span lang="en">Hint 3: which way to fix it</span></summary>
+<p lang="zh-CN"><code>struct lg_session</code> 里嵌着一个会自己重新排队的 <code>delayed_work</code>。读 <code>kernel/workqueue.c</code> 里 <code>cancel_delayed_work()</code> 和 <code>cancel_delayed_work_sync()</code> 上方的注释，想清楚对一个会自己重新排队的工作项，两者的差别意味着什么。</p>
+<p lang="en"><code>struct lg_session</code> embeds a <code>delayed_work</code> that re-queues itself. Read the comments above <code>cancel_delayed_work()</code> and <code>cancel_delayed_work_sync()</code> in <code>kernel/workqueue.c</code> and work out what their difference means for a work item that re-queues itself.</p>
+</details>
+<h3 lang="zh-CN">工单 2 · lg_route：两个命令一起卡住</h3><h3 lang="en">Ticket 2 · lg_route: two commands hang together</h3>
+<p lang="zh-CN"><code>lg_route</code> 通过 debugfs 提供三个文件：写 <code>config</code> 切换路由表并把计数清零，写 <code>lookup</code> 记一次命中或未命中，读 <code>stats</code> 得到表名和计数。</p>
+<p lang="en"><code>lg_route</code> offers three files through debugfs: writing <code>config</code> switches the routing table and resets the counters, writing <code>lookup</code> counts a hit or a miss, and reading <code>stats</code> returns the table name and the counters.</p>
+<pre data-lang="sh">insmod lg_route.ko
+echo 20 &gt; /proc/sys/kernel/hung_task_timeout_secs     # default: 120
+./stress-route.sh &amp;</pre>
+<p lang="zh-CN"><strong>修好的样子</strong>：脚本连跑三遍，每遍都以 <code>stress-route: done</code> 结束，日志干净，<code>rmmod lg_route</code> 成功。脚本要放到后台跑：没修的模块会让它永远不返回，你需要 shell 来查看现场。</p>
+<p lang="en"><strong>Fixed looks like this</strong>: three runs of the script each end with <code>stress-route: done</code>, the log is clean, and <code>rmmod lg_route</code> succeeds. Run the script in the background: with the module as handed out it never returns, and you need the shell to look at the scene.</p>
+<details class="hint">
+<summary><span lang="zh-CN">提示 1：有两份证据</span><span lang="en">Hint 1: there are two pieces of evidence</span></summary>
+<p lang="zh-CN">lockdep 的报告在脚本刚开始时就出现了，早于任何任务卡住。大约半分钟之后，hung task 检测再报告一次。<code>echo w &gt; /proc/sysrq-trigger</code> 可以随时列出卡住的任务。先读 lockdep 那份。</p>
+<p lang="en">The lockdep report appears right at the start of the script, before any task is stuck. About half a minute later the hung-task detector reports as well. <code>echo w &gt; /proc/sysrq-trigger</code> lists the stuck tasks at any time. Read the lockdep report first.</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">提示 2：lockdep 报告怎么读</span><span lang="en">Hint 2: reading the lockdep report</span></summary>
+<p lang="zh-CN">报告分三段：当前任务<strong>想拿</strong>哪把锁、<strong>已经拿着</strong>哪把锁（各带一个函数名和偏移）；然后是 <code>-&gt; #1</code> 和 <code>-&gt; #0</code> 两条依赖链，说明相反的顺序是在哪个函数里出现的；最后的 <code>CPU0 / CPU1</code> 表格把死锁的过程画了出来。把两个函数名抄下来，去源码里对照它们加锁的顺序。</p>
+<p lang="en">The report has three parts: which lock the current task <strong>wants</strong> and which it <strong>already holds</strong> (each with a function name and an offset); then two dependency chains, <code>-&gt; #1</code> and <code>-&gt; #0</code>, that say in which function the opposite order was taken; and finally a <code>CPU0 / CPU1</code> table that draws the deadlock. Write the two function names down and compare the order in which each takes the locks in the source.</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">提示 3：往哪个方向修</span><span lang="en">Hint 3: which way to fix it</span></summary>
+<p lang="zh-CN">验收标准 4 说统计行里的计数必须属于它旁边的表名，所以 <code>lg_stats_show()</code> 仍然要同时拿着两把锁，不能改成先放一把再拿另一把。剩下的自由度只有一个：顺序。</p>
+<p lang="en">Acceptance criterion 4 says the counters in a stats line must belong to the table named beside them, so <code>lg_stats_show()</code> still has to hold both locks at once; dropping one before taking the other is not allowed. That leaves one degree of freedom: the order.</p>
+</details>
+<h3 lang="zh-CN">工单 3 · lg_stats：序号总是少一些</h3><h3 lang="en">Ticket 3 · lg_stats: the sequence number always falls short</h3>
+<p lang="zh-CN"><code>lg_stats</code> 把每次 <code>write()</code> 当作一个包：分配下一个序号，保存包的内容，并累计包数和字节数。</p>
+<p lang="en"><code>lg_stats</code> treats every <code>write()</code> as one packet: it hands out the next sequence number, keeps a copy of the packet and counts packets and bytes.</p>
+<pre data-lang="sh">insmod lg_stats.ko
+./stress-stats.sh</pre>
+<p lang="zh-CN"><strong>修好的样子</strong>：脚本连跑三遍，每遍都打印 <code>stress-stats: packets 8000 bytes 128000 next_seq 8000</code>，日志干净，<code>rmmod lg_stats</code> 成功。这张工单在调试内核上<strong>没有任何工具报告</strong>，只有错的数字；想让工具指出相互竞争的两处访问，需要另编一个 KCSAN 内核（提示 2）。</p>
+<p lang="en"><strong>Fixed looks like this</strong>: three runs of the script each print <code>stress-stats: packets 8000 bytes 128000 next_seq 8000</code>, the log is clean, and <code>rmmod lg_stats</code> succeeds. On the debug kernel this ticket produces <strong>no report from any tool</strong>, only wrong numbers; to have a tool name the two accesses that race you need a second kernel, built with KCSAN (hint 2).</p>
+<details class="hint">
+<summary><span lang="zh-CN">提示 1：不用工具能走多远</span><span lang="en">Hint 1: how far you get without a tool</span></summary>
+<p lang="zh-CN"><code>lg_stats_write()</code> 只有十几行。对每个被读或被写的共享变量问一句：两个进程同时执行到这一行会怎样？特别注意「读出来」和「写回去」之间隔着什么。</p>
+<p lang="en"><code>lg_stats_write()</code> is a dozen lines long. For every shared variable it reads or writes, ask: what happens when two processes reach this line at the same time? Pay special attention to what lies between a value being read and being written back.</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">提示 2：编一个 KCSAN 内核</span><span lang="en">Hint 2: building a KCSAN kernel</span></summary>
+<p lang="zh-CN">KCSAN 不能和 KASAN 编在一起，在 arm64 上还要先打开 <code>EXPERT</code>。用另一个输出目录，模块也要针对它重新编：</p>
+<p lang="en">KCSAN cannot be combined with KASAN, and on arm64 it needs <code>EXPERT</code> first. Use another output directory, and rebuild the modules against it as well:</p>
+<pre data-lang="sh">make LLVM=1 ARCH=arm64 O=../build-kcsan defconfig
+./scripts/config --file ../build-kcsan/.config \
+    -e NET_9P -e NET_9P_VIRTIO -e 9P_FS -e EXPERT -e KCSAN -e DETECT_HUNG_TASK
+make LLVM=1 ARCH=arm64 O=../build-kcsan olddefconfig
+grep 'CONFIG_KCSAN=' ../build-kcsan/.config          # must print CONFIG_KCSAN=y
+make LLVM=1 ARCH=arm64 O=../build-kcsan -j"$(nproc)" Image
+make LLVM=1 ARCH=arm64 O=../build-kcsan modules_prepare
+cp ../build-kcsan/vmlinux.symvers ../build-kcsan/Module.symvers</pre>
+<p lang="zh-CN">KCSAN 也会报告内核其他地方的竞争，所以只看标题里带 <code>lg_stats</code> 的那些：<code>dmesg | grep -A30 "KCSAN: data-race in lg_stats"</code>。KCSAN 是抽样检测，跑一遍压力脚本可能一份报告都没有，这时再跑几遍。</p>
+<p lang="en">KCSAN also reports races elsewhere in the kernel, so look only at the reports whose title names <code>lg_stats</code>: <code>dmesg | grep -A30 "KCSAN: data-race in lg_stats"</code>. KCSAN samples, so one run of the stress script may produce no report at all; run it a few more times then.</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">提示 3：往哪个方向修</span><span lang="en">Hint 3: which way to fix it</span></summary>
+<p lang="zh-CN">把三个计数器改成原子变量并不够：序号是先读出来、隔了一次 <code>copy_from_user()</code> 之后才写回去的，中间这一段也必须不被打断。另外，<code>copy_from_user()</code> 可能睡眠，这决定了你能用哪一种锁。</p>
+<p lang="en">Turning the three counters into atomics is not enough: the sequence number is read, and written back only after a <code>copy_from_user()</code>, and that whole stretch must not be interleaved either. Also, <code>copy_from_user()</code> may sleep, which decides what kind of lock you can use.</p>
+</details>
+<h3 lang="zh-CN">工单 4 · lg_fw：可用内存越来越少</h3><h3 lang="en">Ticket 4 · lg_fw: less and less free memory</h3>
+<p lang="zh-CN"><code>lg_fw</code> 是一个固件槽：一次 <code>write()</code> 是一个镜像，开头是 8 字节的头（魔数 <code>LGFW</code> 和载荷长度）。头校验通过的镜像替换槽里原有的那个。</p>
+<p lang="en"><code>lg_fw</code> is a firmware slot: one <code>write()</code> is one image, starting with an 8-byte header (the magic <code>LGFW</code> and the payload length). An image whose header passes validation replaces the one in the slot.</p>
+<pre data-lang="sh">insmod lg_fw.ko
+./stress-fw.sh
+sleep 6; echo scan &gt; /sys/kernel/debug/kmemleak
+sleep 2; echo scan &gt; /sys/kernel/debug/kmemleak
+grep -c lg_fw_write /sys/kernel/debug/kmemleak</pre>
+<p lang="zh-CN"><strong>修好的样子</strong>：脚本打印的 <code>SUnreclaim</code> 增量在第 2 到第 5 轮之间不再持续上升，最后一行是 <code>stress-fw: image size 16, expected 16</code>；两次扫描之后 <code>grep -c</code> 打印 <code>0</code>；日志干净，<code>rmmod lg_fw</code> 成功。脚本要启动五千次 <code>dd</code>，在纯软件模拟下需要几分钟。</p>
+<p lang="en"><strong>Fixed looks like this</strong>: the growth of <code>SUnreclaim</code> that the script prints no longer keeps rising from round 2 to round 5, and the last line is <code>stress-fw: image size 16, expected 16</code>; after the two scans <code>grep -c</code> prints <code>0</code>; the log is clean and <code>rmmod lg_fw</code> succeeds. The script starts <code>dd</code> five thousand times, which takes a few minutes under pure software emulation.</p>
+<details class="hint">
+<summary><span lang="zh-CN">提示 1：为什么要看五轮</span><span lang="en">Hint 1: why five rounds</span></summary>
+<p lang="zh-CN">第 1 轮的增量在修好之后也很大（验证运行里是 26 MB 左右），所以单看一个数字分不出好坏。要看的是趋势：没修时每一轮都再涨 8 MB 左右，修好之后第 2 轮起基本不动。</p>
+<p lang="en">The growth in round 1 is large even with the fix (about 26 MB in the checking run), so a single number does not tell good from bad. What counts is the trend: as handed out, every round adds another 8 MB or so; with the fix, the figure hardly moves from round 2 on.</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">提示 2：kmemleak 的报告怎么读</span><span lang="en">Hint 2: reading the kmemleak report</span></summary>
+<p lang="zh-CN"><code>head -n 20 /sys/kernel/debug/kmemleak</code>。每个条目是一个没有人再指向的对象：大小、分配它的进程、以及<strong>分配时</strong>的调用栈。栈里第一个属于模块的函数是分配点，不是 bug 所在：泄漏的 bug 是「某条路径上少了一次释放」，要你顺着分配点往下读代码去找。</p>
+<p lang="en"><code>head -n 20 /sys/kernel/debug/kmemleak</code>. Every entry is an object that nothing points to any more: its size, the process that allocated it, and the stack <strong>at the allocation</strong>. The first module function in that stack is the allocation site, not the bug: a leak is “a free that is missing on some path”, and you find it by reading the code downwards from the allocation.</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">提示 3：往哪个方向修</span><span lang="en">Hint 3: which way to fix it</span></summary>
+<p lang="zh-CN">从 <code>kmalloc()</code> 那一行开始，列出函数的每一个出口，逐个回答：从这里返回时，<code>blob</code> 归谁？内核里处理这种情况的惯用写法是把所有失败路径汇到一个 <code>goto</code> 标签。</p>
+<p lang="en">Starting at the <code>kmalloc()</code> line, list every exit of the function and answer for each: when the function returns here, who owns <code>blob</code>? The kernel idiom for this is to send all failure paths through one <code>goto</code> label.</p>
+</details>
+
+  <h2 id="writeup" lang="zh-CN">怎么写</h2><h2 id="writeup-en" lang="en">Writing it up</h2>
+<p lang="zh-CN">每张工单一份事后分析，一页以内，和修复提交放在同一个仓库里。按这个模板写：</p>
+<p lang="en">One post-mortem per ticket, a page at most, in the same repository as the fix commits. Use this template:</p>
+<pre data-lang="text" data-file="postmortem-lg_session.md"># Post-mortem: &lt;module&gt;: &lt;one-line summary of the bug&gt;
+
+Ticket:   &lt;what the user reported, in their words&gt;
+Fix:      &lt;commit hash&gt; &lt;subject line&gt;
+Kernel:   v7.3.1, arm64, &lt;config options that mattered&gt;
+
+## Symptom
+What could be observed from outside, and how often.
+
+## Reproduction
+The exact commands. How long until it shows. What "reproduced" looks like.
+
+## Investigation
+Which tool, and why that one. What I ruled out first.
+The decisive lines of the report (quoted), and what each of them told me.
+
+## Root cause
+One sentence: which code breaks which rule.
+Then the sequence of events that leads from that code to the symptom.
+
+## Fix
+What the commit changes and why this restores the rule.
+What I considered and rejected, and why.
+
+## Verification
+Fresh boot, stress script three times, tool output, rmmod. Quote the output.
+
+## How it got in, and how to catch it earlier
+Which review question, test or debug option would have caught this before a user did.</pre>
+<p lang="zh-CN">写「Investigation」一节时不要省略走错的路。「我先怀疑定时器代码，因为标题行写的是它；看到 Freed by 栈之后才回到自己的模块」这样的句子，正是读者和面试官最想看到的。</p>
+<p lang="en">Do not leave the wrong turns out of the “Investigation” section. A sentence like “I first suspected the timer code because the title line names it, and came back to my own module only when I saw the Freed-by stack” is exactly what a reader, or an interviewer, wants to see.</p>
+
+  <h2 id="solutions" lang="zh-CN">参考解法</h2><h2 id="solutions-en" lang="en">Reference solutions</h2>
+<p lang="zh-CN">先自己做完再展开。每张工单给出验证运行里的真实报告、根因、修复和修复后的输出。完整的补丁在 <a href="https://github.com/Second-Me-Garden/Learning-Garden/tree/main/topics/kernel-engineering/practical-2-debugging-range/lab/solutions">lab/solutions/</a>，用 <code>git am</code> 可以直接应用到你那个「as handed out」提交上。这些补丁是从另一个仓库导出的，所以没有 <code>Fixes:</code> 行；<code>checkpatch.pl --strict</code> 因此对第一个补丁给出一条警告（提交信息里引用了 <code>BUG: KASAN:</code> 却没有 <code>Fixes:</code>），加上这一行之后是 0 errors、0 warnings。</p>
+<p lang="en">Open these after you have done the work yourself. For each ticket there is the real report from the checking run, the root cause, the fix and the output with the fix. The full patches are in <a href="https://github.com/Second-Me-Garden/Learning-Garden/tree/main/topics/kernel-engineering/practical-2-debugging-range/lab/solutions">lab/solutions/</a>, and <code>git am</code> applies them on top of your “as handed out” commit. They were exported from a different repository and so carry no <code>Fixes:</code> line; <code>checkpatch.pl --strict</code> therefore gives one warning on the first patch (its message quotes <code>BUG: KASAN:</code> and has no <code>Fixes:</code>), and with that line added the result is 0 errors, 0 warnings.</p>
+<details class="hint">
+<summary><span lang="zh-CN">工单 1 的参考解法：lg_session</span><span lang="en">Reference solution for ticket 1: lg_session</span></summary>
+<p lang="zh-CN"><strong>报告</strong>（第一份，之后还有 200 条 <code>WARNING: kernel/workqueue.c:2432</code>，脚本照样算出正确的总数，随后是 <code>rcu: INFO: rcu_preempt detected stalls</code>，客体卡死）：</p>
+<p lang="en"><strong>The report</strong> (the first one; 200 lines of <code>WARNING: kernel/workqueue.c:2432</code> follow, the script still prints the right total, then comes <code>rcu: INFO: rcu_preempt detected stalls</code> and the guest hangs):</p>
+<pre data-lang="text">[   13.822546] BUG: KASAN: slab-use-after-free in enqueue_timer+0x9c/0x630
+[   13.823838] Write of size 8 at addr ffff0000122aba50 by task stress-session./76
+...
+[   13.825764] Call trace:
+...
+[   13.826512]  enqueue_timer+0x9c/0x630
+[   13.826548]  __mod_timer+0x838/0xac0
+[   13.826582]  add_timer_global+0x8c/0xc8
+[   13.826615]  __queue_delayed_work+0x1c8/0x260
+[   13.826656]  queue_delayed_work_on+0xa0/0x118
+[   13.826692]  lg_session_open+0x17c/0x1a8 [lg_session]
+[   13.827456]  misc_open+0x28c/0x2e0
+...
+[   13.828229] Allocated by task 76:
+...
+[   13.828626]  __kmalloc_cache_noprof+0x2a4/0x520
+[   13.828662]  lg_session_open+0x60/0x1a8 [lg_session]
+[   13.828705]  misc_open+0x28c/0x2e0
+...
+[   13.829259] Freed by task 76:
+...
+[   13.829408]  kfree+0x150/0x600
+[   13.829437]  lg_session_release+0x94/0xd8 [lg_session]
+[   13.829476]  __fput+0x2b0/0x600
+...
+[   13.829783] The buggy address belongs to the object at ffff0000122aba00
+[   13.829783]  which belongs to the cache kmalloc-192 of size 192
+[   13.829891] The buggy address is located 80 bytes inside of
+[   13.829891]  freed 192-byte region [ffff0000122aba00, ffff0000122abac0)
+...
+[   13.832811] Disabling lock debugging due to kernel taint
+[   13.834189] ------------[ cut here ]------------
+[   13.834554] WARNING: kernel/workqueue.c:2432 at __queue_work+0xafc/0x1060, CPU#1: stress-session./76</pre>
+<p lang="zh-CN"><strong>怎么读</strong>：被访问的是一个已经释放的 192 字节对象，分配它的是 <code>lg_session_open()</code>，释放它的是 <code>lg_session_release()</code>，所以它是一个会话。访问它的却是<strong>另一次</strong> <code>open()</code>：新会话把自己的定时器排进定时器轮，<code>enqueue_timer()</code> 往链表里已有的节点写了 8 字节，而那个节点是已释放会话里的定时器。也就是说，会话被释放时，它的定时器还挂在内核的链表上。</p>
+<p lang="en"><strong>Reading it</strong>: the object accessed is a freed 192-byte object that <code>lg_session_open()</code> allocated and <code>lg_session_release()</code> freed, so it is a session. The access comes from <strong>another</strong> <code>open()</code>: a new session queues its timer on the timer wheel, and <code>enqueue_timer()</code> writes 8 bytes into a node already on the list, which is the timer inside the freed session. In other words, the session was freed while its timer was still linked into a kernel list.</p>
+<p lang="zh-CN"><strong>标题行会变，Freed by 不变。</strong>同一个模块的另一次运行里，报告是这样的，客体也没有卡死：</p>
+<p lang="en"><strong>The title line varies; the Freed-by stack does not.</strong> In another run of the same module the report looked like this, and the guest did not hang:</p>
+<pre data-lang="text">[   12.901554] BUG: KASAN: slab-use-after-free in __run_timer_base+0x2c8/0x5a8
+[   12.902453] Write of size 8 at addr ffff00000eb78a50 by task swapper/1/0
+...
+[   12.904506]  __run_timer_base+0x2c8/0x5a8
+[   12.904590]  run_timer_softirq+0x44/0x78
+[   12.904652]  handle_softirqs+0x304/0xf50
+...
+[   12.906480] Freed by task 77:
+...
+[   12.906567]  kfree+0x150/0x600
+[   12.906586]  lg_session_release+0x94/0xd8 [lg_session]</pre>
+<p lang="zh-CN">这一次是已释放会话的定时器到期，定时器软中断在空闲任务的上下文里碰到了它。两次运行里发现问题的位置、任务、之后的表现都不同，分配和释放的调用栈却完全一样。这就是先读 <code>Freed by</code> 的原因。</p>
+<p lang="en">This time the timer of a freed session expired, and the timer softirq touched it in the context of the idle task. The place of detection, the task and what happened afterwards differ between the two runs; the allocation and free stacks are identical. That is the reason for reading <code>Freed by</code> first.</p>
+<p lang="zh-CN"><strong>根因</strong>：<code>lg_session_release()</code> 在释放会话之前没有停掉它里面那个会自己重新排队的 <code>delayed_work</code>。规则是：一个对象必须比它里面所有排着队的定时器和工作项活得更久。</p>
+<p lang="en"><strong>Root cause</strong>: <code>lg_session_release()</code> frees the session without stopping the self-re-queueing <code>delayed_work</code> inside it. The rule is: an object must outlive every timer and work item that is queued inside it.</p>
+<pre data-lang="diff" data-file="lg_session.c">@@ -76,6 +76,13 @@ static int lg_session_release(struct inode *inode, struct file *file)
+ {
+ 	struct lg_session *s = file-&gt;private_data;
+
++	/*
++	 * The fold work re-arms itself, so it is always pending or running
++	 * while the session exists. Stop it and wait for it before the
++	 * memory that holds its timer goes away.
++	 */
++	cancel_delayed_work_sync(&amp;s-&gt;fold);
++
+ 	/* Whatever the last fold has not seen yet still counts. */
+ 	atomic64_add(atomic64_xchg(&amp;s-&gt;pending, 0), &amp;lg_total);
+ 	kfree(s);</pre>
+<p lang="zh-CN"><strong>为什么必须是 <code>_sync</code></strong>：<code>cancel_delayed_work()</code> 的注释写明，它返回时回调函数可能仍在运行。这里的回调在结尾会把自己重新排队，于是取消之后工作项又回到了队列里，接着 <code>kfree()</code>，问题原样保留，只是更难碰上。<code>cancel_delayed_work_sync()</code> 会等回调结束，并保证它返回时工作项不在队列里。</p>
+<p lang="en"><strong>Why it has to be <code>_sync</code></strong>: the comment on <code>cancel_delayed_work()</code> says the callback may still be running when it returns. The callback here re-queues itself at its end, so after the cancel the work is back on the queue, the <code>kfree()</code> follows, and the bug is exactly as before, only harder to hit. <code>cancel_delayed_work_sync()</code> waits for the callback and guarantees that the work is not queued when it returns.</p>
+<p lang="zh-CN"><strong>修复后</strong>（新启动，连跑三遍，然后 <code>rmmod</code>；日志里没有 <code>BUG:</code>、<code>WARNING:</code>、<code>INFO: task</code>）：</p>
+<p lang="en"><strong>With the fix</strong> (fresh boot, three runs, then <code>rmmod</code>; no <code>BUG:</code>, <code>WARNING:</code> or <code>INFO: task</code> in the log):</p>
+<pre data-lang="text">stress-session: this run added 3200 bytes, expected 3200
+stress-session: this run added 3200 bytes, expected 3200
+stress-session: this run added 3200 bytes, expected 3200</pre>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">工单 2 的参考解法：lg_route</span><span lang="en">Reference solution for ticket 2: lg_route</span></summary>
+<p lang="zh-CN"><strong>lockdep 的报告</strong>（脚本开始后不到一秒）：</p>
+<p lang="en"><strong>The lockdep report</strong> (less than a second into the script):</p>
+<pre data-lang="text">[   13.105409] WARNING: possible circular locking dependency detected
+[   13.105967] 7.3.1 #1 Tainted: G           O
+[   13.106196] ------------------------------------------------------
+[   13.106337] cat/79 is trying to acquire lock:
+[   13.106468] ffff800008b32120 (lg_cfg_lock){+.+.}-{4:4}, at: lg_stats_show+0x4c/0xa4 [lg_route]
+[   13.108952]
+[   13.108952] but task is already holding lock:
+[   13.109090] ffff800008b32220 (lg_stats_lock){+.+.}-{4:4}, at: lg_stats_show+0x38/0xa4 [lg_route]
+[   13.109360]
+[   13.109360] which lock already depends on the new lock.
+...
+[   13.109495] the existing dependency chain (in reverse order) is:
+[   13.109665]
+[   13.109665] -&gt; #1 (lg_stats_lock){+.+.}-{4:4}:
+[   13.109949]        __mutex_lock+0x12c/0x1420
+[   13.110504]        mutex_lock_nested+0x30/0x48
+[   13.110634]        lg_config_write+0xf0/0x178 [lg_route]
+[   13.110751]        full_proxy_write+0x11c/0x1d8
+[   13.110853]        vfs_write+0x1dc/0x808
+...
+[   13.111820] -&gt; #0 (lg_cfg_lock){+.+.}-{4:4}:
+[   13.112004]        __lock_acquire+0x1810/0x3158
+[   13.112115]        lock_acquire+0x140/0x330
+[   13.112206]        __mutex_lock+0x12c/0x1420
+[   13.112295]        mutex_lock_nested+0x30/0x48
+[   13.112385]        lg_stats_show+0x4c/0xa4 [lg_route]
+[   13.112491]        seq_read_iter+0x350/0xa30
+...
+[   13.114079]  Possible unsafe locking scenario:
+[   13.114079]
+[   13.114192]        CPU0                    CPU1
+[   13.114279]        ----                    ----
+[   13.114366]   lock(lg_stats_lock);
+[   13.114512]                                lock(lg_cfg_lock);
+[   13.114694]                                lock(lg_stats_lock);
+[   13.114856]   lock(lg_cfg_lock);
+[   13.114973]
+[   13.114973]  *** DEADLOCK ***</pre>
+<p lang="zh-CN"><strong>怎么读</strong>：<code>cat</code> 在 <code>lg_stats_show()</code> 里拿着 <code>lg_stats_lock</code>，想再拿 <code>lg_cfg_lock</code>。依赖链 <code>#1</code> 说相反的顺序出现在 <code>lg_config_write()</code>：它先拿 <code>lg_cfg_lock</code>，再拿 <code>lg_stats_lock</code>。这时还没有任何任务卡住，lockdep 是从「两种顺序都出现过」推出来的。</p>
+<p lang="en"><strong>Reading it</strong>: <code>cat</code>, in <code>lg_stats_show()</code>, holds <code>lg_stats_lock</code> and wants <code>lg_cfg_lock</code>. Dependency chain <code>#1</code> says the opposite order was taken in <code>lg_config_write()</code>: <code>lg_cfg_lock</code> first, then <code>lg_stats_lock</code>. No task is stuck yet at this point; lockdep infers the problem from having seen both orders.</p>
+<p lang="zh-CN"><strong>大约 30 秒后，hung task 检测的报告</strong>（<code>hung_task_timeout_secs</code> 设成了 20）：</p>
+<p lang="en"><strong>About 30 seconds later, the report of the hung-task detector</strong> (with <code>hung_task_timeout_secs</code> set to 20):</p>
+<pre data-lang="text">[   44.299250] INFO: task stress-route.sh:77 blocked for more than 21 seconds.
+[   44.299629]       Tainted: G           O        7.3.1 #1
+[   44.299716] "echo 0 &gt; /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[   44.299970] task:stress-route.sh state:D stack:0     pid:77    tgid:77    ppid:76     task_flags:0x400040 flags:0x00000008
+[   44.300319] Call trace:
+[   44.300456]  __switch_to+0x31c/0x6b0 (T)
+[   44.300687]  __schedule+0x12bc/0x2df8
+[   44.300763]  schedule+0x188/0x320
+[   44.302072]  schedule_preempt_disabled+0x64/0x100
+[   44.302221]  __mutex_lock+0x4f8/0x1420
+[   44.302277]  mutex_lock_nested+0x30/0x48
+[   44.302351]  lg_config_write+0xf0/0x178 [lg_route]
+...
+[   44.303402] INFO: task stress-route.sh:77 is blocked on a mutex likely owned by task cat:79.
+[   44.303677] INFO: task cat:79 blocked for more than 21 seconds.
+...
+[   44.305812] INFO: task cat:79 is blocked on a mutex likely owned by task stress-route.sh:77.
+[   44.306025] INFO: lockdep is turned off.</pre>
+<p lang="zh-CN">两个任务各自卡在一把互斥锁上，而那把锁正被对方拿着。<code>echo w &gt; /proc/sysrq-trigger</code> 显示同样的两个任务，状态都是 <code>D</code>。</p>
+<p lang="en">Each of the two tasks is stuck on a mutex that the other one holds. <code>echo w &gt; /proc/sysrq-trigger</code> shows the same two tasks, both in state <code>D</code>.</p>
+<p lang="zh-CN"><strong>根因</strong>：<code>lg_config_write()</code> 和 <code>lg_stats_show()</code> 以相反的顺序获取同两把互斥锁。规则是：需要同时持有的几把锁，在所有代码路径上必须按同一个顺序获取。</p>
+<p lang="en"><strong>Root cause</strong>: <code>lg_config_write()</code> and <code>lg_stats_show()</code> take the same two mutexes in opposite orders. The rule is: locks that are held together must be taken in one order on every code path.</p>
+<pre data-lang="diff" data-file="lg_route.c">@@ -20,6 +20,7 @@
+ #include &lt;linux/string.h&gt;
+ #include &lt;linux/uaccess.h&gt;
+
++/* Lock order: lg_cfg_lock, then lg_stats_lock. */
+ static DEFINE_MUTEX(lg_cfg_lock);	/* protects lg_cfg_name, lg_cfg_gen */
+ static DEFINE_MUTEX(lg_stats_lock);	/* protects lg_hits, lg_misses */
+
+@@ -78,13 +79,13 @@ static ssize_t lg_lookup_write(struct file *file, const char __user *buf,
+
+ static int lg_stats_show(struct seq_file *m, void *v)
+ {
+-	mutex_lock(&amp;lg_stats_lock);
+ 	/* The counters only mean something next to the table they count. */
+ 	mutex_lock(&amp;lg_cfg_lock);
++	mutex_lock(&amp;lg_stats_lock);
+ 	seq_printf(m, "table %s gen %u hits %llu misses %llu\n",
+ 		   lg_cfg_name, lg_cfg_gen, lg_hits, lg_misses);
+-	mutex_unlock(&amp;lg_cfg_lock);
+ 	mutex_unlock(&amp;lg_stats_lock);
++	mutex_unlock(&amp;lg_cfg_lock);
+ 	return 0;
+ }</pre>
+<p lang="zh-CN">顺序写成了一行注释，放在锁的定义旁边：下一个要同时用这两把锁的人会先看到它。<strong>修复后</strong>，三遍都以 <code>stress-route: done</code> 结束，没有 lockdep 报告，也没有 hung task 报告。</p>
+<p lang="en">The order is now a one-line comment next to the lock definitions, where the next person who needs both locks sees it first. <strong>With the fix</strong>, all three runs end with <code>stress-route: done</code>, with no lockdep report and no hung-task report.</p>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">工单 3 的参考解法：lg_stats</span><span lang="en">Reference solution for ticket 3: lg_stats</span></summary>
+<p lang="zh-CN"><strong>症状</strong>（调试内核，两次不同的启动；KASAN、lockdep、kmemleak 都没有任何报告）：</p>
+<p lang="en"><strong>The symptom</strong> (debug kernel, two different boots; no report from KASAN, lockdep or kmemleak):</p>
+<pre data-lang="text">stress-stats: packets 8000 bytes 128000 next_seq 7893
+stress-stats: expected packets 8000 bytes 128000 next_seq 8000
+
+stress-stats: packets 7999 bytes 127984 next_seq 7824
+stress-stats: expected packets 8000 bytes 128000 next_seq 8000</pre>
+<p lang="zh-CN"><code>next_seq</code> 每次都少一百多；第二次连 <code>packets</code> 和 <code>bytes</code> 也各丢了一次更新。</p>
+<p lang="en"><code>next_seq</code> is short by more than a hundred each time; in the second run <code>packets</code> and <code>bytes</code> lost one update each as well.</p>
+<p lang="zh-CN"><strong>KCSAN 的报告</strong>（另一个内核，2026-11-21 在 GitHub 的构建机上编译和运行；启动时打印 <code>kcsan: enabled early</code>）：这一次启动里的第二份报告，以及压力脚本随后打印的结果：</p>
+<p lang="en"><strong>The KCSAN report</strong> (a second kernel, built and run on a GitHub build machine on 2026-11-21; it prints <code>kcsan: enabled early</code> at boot). This is the second report of that boot, followed by what the stress script then printed:</p>
+<pre data-lang="text">[    3.010646] ==================================================================
+[    3.010749] BUG: KCSAN: data-race in lg_stats_write [lg_stats] / lg_stats_write [lg_stats]
+[    3.010838]
+[    3.010862] read-write to 0xffff80007b052010 of 8 bytes by task 74 on cpu 0:
+[    3.010902]  lg_stats_write+0xec/0x154 [lg_stats]
+[    3.010967]  vfs_write+0x20c/0x60c
+[    3.011022]  ksys_write+0x9c/0x11c
+[    3.011076]  __arm64_sys_write+0x48/0x5c
+[    3.011131]  invoke_syscall+0x54/0x144
+[    3.011174]  el0_svc_common+0xcc/0x134
+[    3.011215]  do_el0_svc+0x30/0x40
+[    3.011255]  el0_svc+0x3c/0x98
+[    3.011302]  el0t_64_sync_handler+0x84/0x12c
+[    3.011353]  el0t_64_sync+0x198/0x19c
+[    3.011395]
+[    3.011416] read-write to 0xffff80007b052010 of 8 bytes by task 76 on cpu 1:
+[    3.011453]  lg_stats_write+0xec/0x154 [lg_stats]
+[    3.011522]  vfs_write+0x20c/0x60c
+[    3.011575]  ksys_write+0x9c/0x11c
+[    3.011627]  __arm64_sys_write+0x48/0x5c
+[    3.011682]  invoke_syscall+0x54/0x144
+[    3.011723]  el0_svc_common+0xcc/0x134
+[    3.011765]  do_el0_svc+0x30/0x40
+[    3.011804]  el0_svc+0x3c/0x98
+[    3.011850]  el0t_64_sync_handler+0x84/0x12c
+[    3.011900]  el0t_64_sync+0x198/0x19c
+[    3.011960]
+[    3.011983] value changed: 0x000000000001aaa0 -&gt; 0x000000000001aab0
+[    3.012024]
+[    3.012042] Reported by Kernel Concurrency Sanitizer on:
+[    3.012080] CPU: 1 UID: 0 PID: 76 Comm: stress-stats.sh Tainted: G           O        7.3.1 #1 PREEMPT
+[    3.012148] Tainted: [O]=OOT_MODULE
+[    3.012173] Hardware name: linux,dummy-virt (DT)
+[    3.012201] ==================================================================
+stress-stats: packets 7996 bytes 127040 next_seq 7841
+stress-stats: expected packets 8000 bytes 128000 next_seq 8000</pre>
+<p lang="zh-CN"><strong>怎样读</strong>：两段调用栈是相互竞争的两处访问。两边都是 <code>read-write … of 8 bytes</code>，都在 <code>lg_stats_write+0xec</code>，一个来自 cpu 0 上的任务 74，一个来自 cpu 1 上的任务 76：两个写入方同时在执行同一条语句。报告不给变量名，线索在 <code>value changed</code> 那一行：值从 <code>0x1aaa0</code> 变成 <code>0x1aab0</code>，多了 16，正好是一个包的长度，所以这是 <code>lg_st.bytes += n</code>。 用背景知识第 3 节的方法把偏移换算成源码行（对 KCSAN 内核编出来的 <code>lg_stats.ko</code> 做），得到 <code>lg_stats.c:38</code>，正是这一行。</p>
+<p lang="en"><strong>How to read it</strong>: the two stacks are the two accesses that race. Both are <code>read-write … of 8 bytes</code> at <code>lg_stats_write+0xec</code>, one by task 74 on cpu 0 and one by task 76 on cpu 1: two writers were in the same statement at the same time. The report names no variable; the clue is the <code>value changed</code> line. The value went from <code>0x1aaa0</code> to <code>0x1aab0</code>, which is 16 more, the length of one packet, so this is <code>lg_st.bytes += n</code>. Resolving the offset to a source line with the method of concept 3 (on the <code>lg_stats.ko</code> built for the KCSAN kernel) gives <code>lg_stats.c:38</code>, that very line.</p>
+<p lang="zh-CN">同一次启动里，不到 0.1 秒之前还有一份报告，两边都是 <code>write to 0xffff80007b052020 of 16 bytes</code>，位置是 <code>lg_stats_write+0xb8</code>。这个地址比上面那个高 0x10；在结构体里 <code>bytes</code> 的偏移是 0x10，<code>last</code> 的偏移是 0x20，而 16 字节正是一个包：两个写入方同时在往 <code>lg_st.last</code> 里复制数据。偏移换算出来是 <code>lg_stats.c:34</code>，就是 <code>copy_from_user()</code> 那一行。</p>
+<p lang="en">The same boot printed one more report less than 0.1 s earlier, with <code>write to 0xffff80007b052020 of 16 bytes</code> on both sides, at <code>lg_stats_write+0xb8</code>. That address is 0x10 above the first one; in the structure <code>bytes</code> sits at offset 0x10 and <code>last</code> at offset 0x20, and 16 bytes is one packet: two writers were copying into <code>lg_st.last</code> at the same time. The offset resolves to <code>lg_stats.c:34</code>, the <code>copy_from_user()</code> line.</p>
+<p lang="zh-CN">有两点要记住。第一，两份报告都没有提到丢得最多的 <code>next_seq</code>。KCSAN 只抽查一部分访问，这个内核启动时自己也打印了 <code>kcsan: non-strict mode configured - use CONFIG_KCSAN_STRICT=y to see all data races</code>。报告告诉你的是「这个结构体没有被保护」，不是一份完整的竞争清单。第二，没有报告不等于没有竞争：同一个内核在 GitHub 上的前一次运行里，脚本照样丢了更新（<code>packets 7941 bytes 127904 next_seq 7886</code>），KCSAN 却一份报告也没有打印。一遍没有报告时，把压力脚本再跑几遍。</p>
+<p lang="en">Two things to remember. First, neither report mentions <code>next_seq</code>, the counter that loses the most. KCSAN watches a sample of the accesses, and this kernel says so itself at boot: <code>kcsan: non-strict mode configured - use CONFIG_KCSAN_STRICT=y to see all data races</code>. What a report tells you is that this structure is unprotected; it is not a complete list of the races. Second, no report does not mean no race: in the previous run of the same kernel on GitHub the script lost updates all the same (<code>packets 7941 bytes 127904 next_seq 7886</code>) and KCSAN printed no report at all. When one run gives no report, run the stress script a few more times.</p>
+<p lang="zh-CN"><strong>根因</strong>：<code>lg_stats_write()</code> 不加任何锁就读写共享的 <code>lg_st</code>。<code>next_seq</code> 是先读出来，隔着一次 <code>copy_from_user()</code> 之后才写回 <code>seq + 1</code>，两个写入方读到同一个值，就只加了一次；<code>bytes += n</code> 和 <code>packets++</code> 同样是「读、改、写」三步，只是窗口小得多。规则是：一块共享数据的每一次访问都要拿着保护它的那把锁。</p>
+<p lang="en"><strong>Root cause</strong>: <code>lg_stats_write()</code> reads and writes the shared <code>lg_st</code> with no lock at all. <code>next_seq</code> is read, and <code>seq + 1</code> is written back only after a <code>copy_from_user()</code>; two writers that read the same value add one between them. <code>bytes += n</code> and <code>packets++</code> are read-modify-write sequences too, with a much smaller window. The rule is: every access to shared data holds the lock that protects it.</p>
+<pre data-lang="diff" data-file="lg_stats.c">@@ -23,21 +24,28 @@ static struct {
+ 	u8 last[LG_PKT_MAX];
+ } lg_st;
+
++/* Protects every field of lg_st. A mutex: copy_from_user() may sleep. */
++static DEFINE_MUTEX(lg_st_lock);
++
+ static ssize_t lg_stats_write(struct file *file, const char __user *buf,
+ 			      size_t count, loff_t *ppos)
+ {
+ 	size_t n = min_t(size_t, count, LG_PKT_MAX);
+ 	u64 seq;
+
++	mutex_lock(&amp;lg_st_lock);
+ 	seq = lg_st.next_seq;
+
+-	if (copy_from_user(lg_st.last, buf, n))
++	if (copy_from_user(lg_st.last, buf, n)) {
++		mutex_unlock(&amp;lg_st_lock);
+ 		return -EFAULT;
++	}
+ 	lg_st.last_len = n;
+
+ 	lg_st.bytes += n;
+ 	lg_st.packets++;
+ 	lg_st.next_seq = seq + 1;
++	mutex_unlock(&amp;lg_st_lock);
+
+ 	return count;
+ }</pre>
+<p lang="zh-CN">补丁还让 <code>lg_stats_read()</code> 在同一把锁下读三个计数器，这样打印出来的一行是自洽的。用互斥锁而不是自旋锁，因为临界区里的 <code>copy_from_user()</code> 可能睡眠，而拿着自旋锁不能睡眠（调试内核里的 <code>DEBUG_ATOMIC_SLEEP</code> 会报告这种错误）。<strong>修复后</strong>：</p>
+<p lang="en">The patch also makes <code>lg_stats_read()</code> read the three counters under the same lock, so that the line it prints is consistent. It is a mutex and not a spinlock because the <code>copy_from_user()</code> inside the critical section may sleep, and sleeping with a spinlock held is not allowed (<code>DEBUG_ATOMIC_SLEEP</code> in the debug kernel reports that mistake). <strong>With the fix</strong>:</p>
+<pre data-lang="text">stress-stats: packets 8000 bytes 128000 next_seq 8000
+stress-stats: expected packets 8000 bytes 128000 next_seq 8000</pre>
+</details>
+<details class="hint">
+<summary><span lang="zh-CN">工单 4 的参考解法：lg_fw</span><span lang="en">Reference solution for ticket 4: lg_fw</span></summary>
+<p lang="zh-CN"><strong>症状</strong>（压力脚本的输出）：</p>
+<p lang="en"><strong>The symptom</strong> (output of the stress script):</p>
+<pre data-lang="text">stress-fw: round 1, SUnreclaim grew 35164 kB since the start
+stress-fw: round 2, SUnreclaim grew 44072 kB since the start
+stress-fw: round 3, SUnreclaim grew 53080 kB since the start
+stress-fw: round 4, SUnreclaim grew 61324 kB since the start
+stress-fw: round 5, SUnreclaim grew 68556 kB since the start
+stress-fw: image size 16, expected 16</pre>
+<p lang="zh-CN"><strong>kmemleak</strong>（两次扫描的内核消息，然后是 <code>/sys/kernel/debug/kmemleak</code> 的第一个条目；<code>grep -c lg_fw_write</code> 数出 4994 个）：</p>
+<p lang="en"><strong>kmemleak</strong> (the kernel messages of the two scans, then the first entry of <code>/sys/kernel/debug/kmemleak</code>; <code>grep -c lg_fw_write</code> counts 4994):</p>
+<pre data-lang="text">[  172.420486] kmemleak: 2248 new suspected memory leaks (see /sys/kernel/debug/kmemleak)
+[  186.757170] kmemleak: 2746 new suspected memory leaks (see /sys/kernel/debug/kmemleak)
+unreferenced object 0xffff000012362000 (size 4096):
+  comm "dd", pid 80, jiffies 4294895445
+  hex dump (first 32 bytes):
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+  backtrace (crc 0):
+    kmemleak_alloc+0x38/0x50
+    __kmalloc_noprof+0x2b8/0x5e0
+    lg_fw_write+0x54/0x208 [lg_fw]
+    vfs_write+0x1dc/0x808
+    ksys_write+0xc4/0x168
+    __arm64_sys_write+0x84/0xa0
+...</pre>
+<p lang="zh-CN"><strong>怎么读</strong>：泄漏的对象都是 4096 字节，都由 <code>dd</code> 进程在 <code>lg_fw_write+0x54</code> 处分配，按背景 3 的办法换算是 <code>lg_fw.c</code> 第 39 行的 <code>kmalloc()</code>。脚本一共写了 5000 个坏镜像，kmemleak 找到 4994 个，数量级对得上：每个被拒绝的镜像泄漏一个缓冲区。从第 39 行往下读，两处头校验失败时直接 <code>return -EINVAL</code>，没有释放 <code>blob</code>。</p>
+<p lang="en"><strong>Reading it</strong>: every leaked object is 4096 bytes and was allocated by a <code>dd</code> process at <code>lg_fw_write+0x54</code>, which the method of concept 3 turns into the <code>kmalloc()</code> on line 39 of <code>lg_fw.c</code>. The script wrote 5000 bad images and kmemleak found 4994, which matches in magnitude: every rejected image leaks one buffer. Reading down from line 39, the two header checks <code>return -EINVAL</code> directly, without freeing <code>blob</code>.</p>
+<p lang="zh-CN"><strong>根因</strong>：<code>lg_fw_write()</code> 的两条校验失败路径没有释放已经分配的缓冲区。规则是：函数的每一个出口都要对它分配的东西有交代，要么释放，要么交给别人。</p>
+<p lang="en"><strong>Root cause</strong>: the two validation-failure paths of <code>lg_fw_write()</code> do not free the buffer that was allocated. The rule is: every exit of a function accounts for what the function allocated, by freeing it or by handing it to someone.</p>
+<pre data-lang="diff" data-file="lg_fw.c">@@ -41,15 +42,16 @@ static ssize_t lg_fw_write(struct file *file, const char __user *buf,
+ 		return -ENOMEM;
+
+ 	if (copy_from_user(blob, buf, count)) {
+-		kfree(blob);
+-		return -EFAULT;
++		ret = -EFAULT;
++		goto err_free;
+ 	}
+
+ 	hdr = blob;
+-	if (le32_to_cpu(hdr-&gt;magic) != LG_FW_MAGIC)
+-		return -EINVAL;
+-	if (le32_to_cpu(hdr-&gt;len) != count - sizeof(*hdr))
+-		return -EINVAL;
++	if (le32_to_cpu(hdr-&gt;magic) != LG_FW_MAGIC ||
++	    le32_to_cpu(hdr-&gt;len) != count - sizeof(*hdr)) {
++		ret = -EINVAL;
++		goto err_free;
++	}
+
+ 	mutex_lock(&amp;lg_fw_lock);
+ 	kfree(lg_fw_cur);
+@@ -58,6 +60,10 @@ static ssize_t lg_fw_write(struct file *file, const char __user *buf,
+ 	mutex_unlock(&amp;lg_fw_lock);
+
+ 	return count;
++
++err_free:
++	kfree(blob);
++	return ret;
+ }</pre>
+<p lang="zh-CN"><strong>修复后</strong>（<code>grep -c lg_fw_write</code> 打印 <code>0</code>）：</p>
+<p lang="en"><strong>With the fix</strong> (<code>grep -c lg_fw_write</code> prints <code>0</code>):</p>
+<pre data-lang="text">stress-fw: round 1, SUnreclaim grew 26180 kB since the start
+stress-fw: round 2, SUnreclaim grew 27388 kB since the start
+stress-fw: round 3, SUnreclaim grew 27916 kB since the start
+stress-fw: round 4, SUnreclaim grew 28020 kB since the start
+stress-fw: round 5, SUnreclaim grew 26940 kB since the start
+stress-fw: image size 16, expected 16</pre>
+<p lang="zh-CN">第 1 轮仍然涨了 26 MB 左右，之后停住。这部分增长在修复前后都有，不是模块泄漏的；这一页没有去查它的来源。</p>
+<p lang="en">Round 1 still grows by about 26 MB and then the figure stays put. That growth is there with and without the fix and is not leaked by the module; this page did not track down where it comes from.</p>
+</details>
+
+  <h2 id="quiz" lang="zh-CN">自测</h2><h2 id="quiz-en" lang="en">Self-check</h2>
+<form class="quiz" data-quiz="kernel/practical-2">
+  <div class="q" data-answer="b">
+    <p lang="zh-CN">1. 一份 KASAN 报告的标题是 <code>slab-use-after-free in enqueue_timer</code>，访问的调用栈最上面几行全是定时器和工作队列的内核代码。bug 最可能在哪里？</p><p lang="en">1. A KASAN report is titled <code>slab-use-after-free in enqueue_timer</code>, and the top of the access stack is all kernel timer and workqueue code. Where is the bug most likely to be?</p>
+    <label><input type="radio" name="q1" value="a"> <span lang="zh-CN">在 <code>kernel/time/timer.c</code> 里，因为报告点名的就是它</span><span lang="en">In <code>kernel/time/timer.c</code>, because that is what the report names</span></label>
+    <label><input type="radio" name="q1" value="b"> <span lang="zh-CN">在释放那个对象的代码里：它释放时，对象里的定时器还排着队</span><span lang="en">In the code that freed the object: it freed it while a timer inside it was still queued</span></label>
+    <label><input type="radio" name="q1" value="c"> <span lang="zh-CN">在 KASAN 里，这是误报</span><span lang="en">In KASAN; this is a false positive</span></label>
+    <div class="why" hidden><span lang="zh-CN">标题行给的是<strong>发现</strong>错误的位置。定时器代码只是照常遍历自己的链表，碰到了一块已经被释放的内存。要看 <code>Freed by</code> 栈里第一个属于你的函数，并问对象释放时还有谁记着它。</span><span lang="en">The title line gives the place where the error was <strong>detected</strong>. The timer code was walking its own list as usual and ran into memory that had been freed. Look at the first function of yours in the <code>Freed by</code> stack, and ask who still remembered the object when it was freed.</span></div>
+  </div>
+  <div class="q" data-answer="c">
+    <p lang="zh-CN">2. lockdep 打印了 <code>possible circular locking dependency detected</code>，但压力脚本正常跑完，没有任何任务卡住。应该怎么处理？</p><p lang="en">2. lockdep printed <code>possible circular locking dependency detected</code>, yet the stress script ran to its end and no task was stuck. What do you do?</p>
+    <label><input type="radio" name="q2" value="a"> <span lang="zh-CN">不用管，没有发生死锁</span><span lang="en">Nothing; no deadlock happened</span></label>
+    <label><input type="radio" name="q2" value="b"> <span lang="zh-CN">把 <code>hung_task_timeout_secs</code> 调大，免得以后误报</span><span lang="en">Raise <code>hung_task_timeout_secs</code> to avoid false alarms later</span></label>
+    <label><input type="radio" name="q2" value="c"> <span lang="zh-CN">当作 bug 来修：两种相反的加锁顺序都出现过了，死锁只差一次不巧的时序</span><span lang="en">Fix it as a bug: both lock orders have been seen, and the deadlock is one unlucky timing away</span></label>
+    <div class="why" hidden><span lang="zh-CN">lockdep 不需要死锁真的发生，它从观察到的加锁顺序推出死锁<strong>可能</strong>发生。这正是它的价值：在工单 2 里，它的报告比 hung task 检测早了大约 30 秒，也早于任何用户能看到的症状。</span><span lang="en">lockdep does not need the deadlock to happen; it infers from the lock orders it has observed that one <strong>can</strong> happen. That is its value: in ticket 2 its report came about 30 seconds before the hung-task detector, and before any symptom a user could see.</span></div>
+  </div>
+  <div class="q" data-answer="a">
+    <p lang="zh-CN">3. 你在一次已经打印过 KASAN 报告的启动里加载了修好的模块，压力脚本通过，没有新报告。这说明什么？</p><p lang="en">3. In a boot that has already printed a KASAN report, you load the fixed module; the stress script passes and there is no new report. What does that show?</p>
+    <label><input type="radio" name="q3" value="a"> <span lang="zh-CN">什么也说明不了，要重启后再验证</span><span lang="en">Nothing; verification has to be repeated after a reboot</span></label>
+    <label><input type="radio" name="q3" value="b"> <span lang="zh-CN">修复是对的，因为 KASAN 没有再报告</span><span lang="en">The fix is right, because KASAN did not report again</span></label>
+    <label><input type="radio" name="q3" value="c"> <span lang="zh-CN">只要 <code>rmmod</code> 成功，修复就是对的</span><span lang="en">The fix is right as long as <code>rmmod</code> succeeds</span></label>
+    <div class="why" hidden><span lang="zh-CN">KASAN 默认每次启动只报告第一处非法访问，而且第一份报告之后锁检查也被关掉了。热身的最后一步里，同一个越界写发生了两次，日志里只有一份报告。</span><span lang="en">By default KASAN reports only the first invalid access of a boot, and lock checking is switched off after that first report as well. In the last step of the warm-up the same out-of-bounds write happened twice, and the log held one report.</span></div>
+  </div>
+  <div class="q" data-answer="b">
+    <p lang="zh-CN">4. kmemleak 的一个条目里，调用栈的第一个模块函数是 <code>lg_fw_write+0x54</code>。这个位置是什么？</p><p lang="en">4. In a kmemleak entry, the first module function in the stack is <code>lg_fw_write+0x54</code>. What is that place?</p>
+    <label><input type="radio" name="q4" value="a"> <span lang="zh-CN">忘记调用 <code>kfree()</code> 的那一行</span><span lang="en">The line that forgot to call <code>kfree()</code></span></label>
+    <label><input type="radio" name="q4" value="b"> <span lang="zh-CN">分配这个对象的那一行；少掉的释放要顺着它往下读代码去找</span><span lang="en">The line that allocated the object; the missing free has to be found by reading the code downwards from it</span></label>
+    <label><input type="radio" name="q4" value="c"> <span lang="zh-CN">最后一次访问这个对象的那一行</span><span lang="en">The line that last accessed the object</span></label>
+    <div class="why" hidden><span lang="zh-CN">kmemleak 只记录分配时的调用栈。泄漏的 bug 是「某条路径上少了一次释放」，而少掉的代码不会出现在任何调用栈里，只能从分配点出发，逐个检查函数的出口。</span><span lang="en">kmemleak records the stack at the allocation and nothing else. A leak is “a free that is missing on some path”, and code that is missing appears in no stack; you start from the allocation site and check every exit of the function.</span></div>
+  </div>
+  <button type="submit"><span lang="zh-CN">检查答案</span><span lang="en">Check answers</span></button>
+  <div class="result"></div>
+</form>
+
+  <h2 id="resources" lang="zh-CN">资料</h2><h2 id="resources-en" lang="en">Resources</h2>
+<p lang="zh-CN">全部可以免费阅读。内核文档给的是固定在 v7.3.1 的源文件链接；<code>docs.kernel.org</code> 上的网页版跟随主线，可能比这里新（下列网页于 2026-11-21 核对可以打开）。</p>
+<p lang="en">All free to read. Kernel documents are linked as source files pinned at v7.3.1; the rendered versions on <code>docs.kernel.org</code> follow mainline and may be newer (the web pages below were checked to load on 2026-11-21).</p>
+  <ul class="res">
+    <li><a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/dev-tools/kasan.rst">dev-tools/kasan.rst</a> · <a href="https://docs.kernel.org/dev-tools/kasan.html">docs.kernel.org</a> <span class="lvl" lang="zh-CN">必读，KASAN 的报告格式、影子内存、<code>kasan_multi_shot</code>（背景 1、2，热身）</span><span class="lvl" lang="en">Required: the KASAN report format, shadow memory, <code>kasan_multi_shot</code> (concepts 1 and 2, warm-up)</span></li>
+    <li><a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/locking/lockdep-design.rst">locking/lockdep-design.rst</a> · <a href="https://docs.kernel.org/locking/lockdep-design.html">docs.kernel.org</a> <span class="lvl" lang="zh-CN">进阶，lockdep 怎样从加锁顺序证明死锁可能发生（工单 2）</span><span class="lvl" lang="en">Advanced: how lockdep proves from lock orders that a deadlock can happen (ticket 2)</span></li>
+    <li><a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/dev-tools/kmemleak.rst">dev-tools/kmemleak.rst</a> · <a href="https://docs.kernel.org/dev-tools/kmemleak.html">docs.kernel.org</a> <span class="lvl" lang="zh-CN">必读，kmemleak 的用法、扫描、误报与漏报（工单 4）</span><span class="lvl" lang="en">Required: using kmemleak, scanning, false positives and negatives (ticket 4)</span></li>
+    <li><a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/dev-tools/kcsan.rst">dev-tools/kcsan.rst</a> · <a href="https://docs.kernel.org/dev-tools/kcsan.html">docs.kernel.org</a> <span class="lvl" lang="zh-CN">进阶，KCSAN 的报告格式、抽样原理和可调参数（工单 3）</span><span class="lvl" lang="en">Advanced: the KCSAN report format, how it samples, and its tunables (ticket 3)</span></li>
+    <li><a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/admin-guide/sysrq.rst">admin-guide/sysrq.rst</a> · <a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/admin-guide/sysctl/kernel.rst">sysctl/kernel.rst</a> <span class="lvl" lang="zh-CN">查手册，SysRq 各个键的含义；<code>hung_task_timeout_secs</code> 等参数（工单 2）</span><span class="lvl" lang="en">Reference: what each SysRq key does; <code>hung_task_timeout_secs</code> and related settings (ticket 2)</span></li>
+    <li><a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/core-api/workqueue.rst">core-api/workqueue.rst</a> · <a href="https://github.com/gregkh/linux/blob/v7.3.1/kernel/workqueue.c">kernel/workqueue.c</a> <span class="lvl" lang="zh-CN">源码，工作队列的文档，以及 <code>cancel_delayed_work()</code> 和 <code>cancel_delayed_work_sync()</code> 上方的注释（工单 1）</span><span class="lvl" lang="en">Source: the workqueue documentation, and the comments above <code>cancel_delayed_work()</code> and <code>cancel_delayed_work_sync()</code> (ticket 1)</span></li>
+    <li><a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/process/debugging/driver_development_debugging_guide.rst">process/debugging/driver_development_debugging_guide.rst</a> · <a href="https://docs.kernel.org/process/debugging/index.html">docs.kernel.org</a> <span class="lvl" lang="zh-CN">入门，内核文档自己的驱动调试指南，按工具分节</span><span class="lvl" lang="en">Beginner: the kernel’s own guide to debugging drivers, one section per tool</span></li>
+    <li><a href="https://github.com/Second-Me-Garden/Learning-Garden/tree/main/topics/kernel-engineering/practical-2-debugging-range/lab">lab/</a> · <a href="https://github.com/Second-Me-Garden/Learning-Garden/tree/main/scripts/kernel-labs">scripts/kernel-labs/</a> <span class="lvl" lang="zh-CN">实战，本页的模块、压力脚本、参考补丁，以及自动构建内核并逐张工单验证的脚本</span><span class="lvl" lang="en">Hands-on: the modules, stress scripts and reference patches of this page, and the scripts that build the kernels and check every ticket automatically</span></li>
+  </ul>
+
+  <nav class="pn">
+    <a href="../practical-1-upstream-workflow/index.html"><span lang="zh-CN">← 实战 1 · 上游工作流和第一个补丁</span><span lang="en">← Practical 1 · Upstream Workflow &amp; First Patch</span></a>
+    <a href="../index.html"><span lang="zh-CN">回到 Kernel Engineering 总览（实战 3 筹备中）→</span><span lang="en">Back to the Kernel Engineering overview (Practical 3 is planned) →</span></a>
+  </nav>
+</div>
+<script src="../../../assets/diagram.js"></script>
+<script src="../../../assets/quiz.js"></script>
+<script src="../../../assets/rail.js" defer></script>
+<script src="../../../assets/code.js" defer></script>
+</body>
+</html>
