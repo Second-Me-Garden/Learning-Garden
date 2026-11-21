@@ -110,7 +110,9 @@ for (const page of pages) {
   // Circled numbers are banned everywhere (contract: Bilingual pairing).
   if (/[①-⑳]/.test(html)) problems.push(`${rel}: circled number glyph (U+2460–U+2473)`);
   // Source links are pinned to a tag or commit, never a moving branch (contract: Resources).
+  // The one exception is this repository itself: a page and the lab files it links are published together.
   for (const m of html.matchAll(/href="(https:\/\/github\.com\/[^"]+?\/(?:blob|tree)\/(?:main|master)\/[^"]*)"/g)) {
+    if (m[1].toLowerCase().startsWith('https://github.com/second-me-garden/learning-garden/')) continue;
     problems.push(`${rel}: GitHub source link on a moving branch, pin it to a tag or commit: ${m[1]}`);
   }
 

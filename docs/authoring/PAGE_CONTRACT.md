@@ -142,7 +142,19 @@ A lit diagram step is a tint, a heavier stroke and a glow; a box with a topic co
 - Version facts are pinned to the distribution named in the topic syllabus and dated; anything that may change is marked as checked on a date.
 - Bibliography entries are real books with author, title, edition, publisher and year, and the `span.lvl` names the chapters that match the page's concepts. Free online books get their URL.
 - Resources are primary sources first: official docs, source files, design articles; then one or two secondary ones with a level label.
-- A GitHub source link (`/blob/` or `/tree/`) names a tag or a commit, never `main` or `master`: a branch moves and the file or the line the lesson describes moves with it. Prefer the release tag the topic's syllabus pins; a repo without tags is linked at the commit that was read. The checker rejects a link on `main` or `master` (2026-11-11).
+- A GitHub source link (`/blob/` or `/tree/`) names a tag or a commit, never `main` or `master`: a branch moves and the file or the line the lesson describes moves with it. Prefer the release tag the topic's syllabus pins; a repo without tags is linked at the commit that was read. The checker rejects a link on `main` or `master` (2026-11-11). The one exception is this repository itself: a practical page links its own `lab/` folder on `main`, because the page and the lab are published together (2026-11-21).
+
+## Practical stage pages (2026-11-21)
+
+A practical stage is a second kind of page. It gives a task and acceptance criteria where a lesson gives an explanation; the plan for the kernel track is `docs/authoring/KERNEL_PRACTICAL_SYLLABUS.md`.
+
+- **Folder and keys**: `topics/<topic>/practical-N-<slug>/index.html`, quiz key `<topic>/practical-N`, and a `p.meta` that reads `实战 N / M · 约 X 周` and `Practical N / M · about X weeks`. The rail, the progress marks and the checker all key on these.
+- **Section order**: 任务 / The brief (`div.goals`), 交付物与验收标准 / Deliverables and acceptance, 前置 / Prerequisites, 背景知识 / Background (numbered `h3`, each concept only as far as the task needs), 动画图解 (one diagram), 热身 / Warm-up (`div.lab`, with real output), 正式任务 / The assignment (goals and constraints, no step-by-step commands), 怎么写 / Writing it up (a template), optionally 参考解法 / Reference solutions, 自测 (four questions), 资料, then `nav.pn`.
+- **Acceptance criteria** are numbered, and each one can be checked by someone else from what the learner hands in.
+- **Hints and solutions are folded**: `<details class="hint">` with no `lang` on the container, and a `<summary>` that holds a `zh-CN` span and an `en` span. Hints go from where to look to which way to fix; a reader who opens none still has everything the task needs.
+- **Output** from tools goes in `<pre data-lang="text">`. It is pasted from a real run and the page says once, next to the first block, which run: date, versions, machine. Cut lines are shown as `...`. A result that was not obtained is marked 未运行 / not run and is never written from memory.
+- **Steps that act in public** in the learner's name (sending mail to a list, replying to review) are marked 由学习者完成 / done by the learner. Nothing is sent on a learner's behalf.
+- **Lab code** lives in `lab/` next to the page and is checked by a script under `scripts/` that CI can run: the planted problem is reported and the reference fix is clean. Kernel code in a lab passes `scripts/checkpatch.pl --strict`.
 
 ## Before returning a page
 

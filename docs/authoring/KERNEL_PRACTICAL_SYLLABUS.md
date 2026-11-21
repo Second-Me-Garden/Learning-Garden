@@ -62,9 +62,9 @@ Eight stages, in order, about five to six months of spare time. The durations ar
 
 ### Practical 2 · The debugging range
 
-- **Task**: four kernel modules, each with one planted bug. The page gives the symptom and a stress script, not the cause. The learner finds each root cause with KASAN, lockdep, kmemleak, KCSAN, ftrace and gdb, and fixes it.
+- **Task**: four kernel modules, each with one planted bug. The page gives the symptom and a stress script, not the cause. The learner finds each root cause with KASAN, lockdep, the hung-task detector and SysRq, kmemleak and KCSAN, and fixes it.
 - **Work**: four post-mortems (symptom, reproduction, root cause, fix, verification).
-- **Done when**: each fixed module passes its stress script and the tool that reported the bug stays silent.
+- **Done when**: in a fresh boot each fixed module passes its stress script three times, the tool that reported the bug stays silent, and the module unloads cleanly.
 - **Modules** (`practical-2-debugging-range/lab/`): `lg_session` (a delayed work item outlives the object that embeds it), `lg_route` (two mutexes taken in opposite orders), `lg_stats` (counters updated without a lock), `lg_fw` (two error paths that do not free). The file names do not name the bug; the page's reference solutions do, behind a fold.
 - **Diagram**: the debugging loop, from symptom to verified fix.
 
@@ -104,6 +104,8 @@ A page states this once, next to the first block of output, and gives the date. 
 
 Long runs (a kernel build, a full suite) go on GitHub from a pushed branch (Founder, 2026-11-21); the first debug-kernel build of 2026-11-21 ran in the sandbox because it had started before that answer.
 
+The labs can be rerun without the author. `scripts/kernel-labs/build-kernel.sh` builds a lab kernel (`debug`: KASAN, lockdep, kmemleak; `kcsan`: KCSAN, which cannot share a kernel with KASAN), `make-initramfs.sh` builds the guest's user space, and `range.sh` builds the Practical 2 modules as handed out and with the reference fixes, boots one guest per ticket and checks that the planted bug is reported and that the fixed module is clean. `.github/workflows/kernel-labs.yml` runs all of that for both kernels when the lab code or these scripts change on a branch, or by hand; the built kernel is cached without its object files.
+
 ## Verification list
 
 Every claim a practical page makes about the tree is checked at the pin, by reading the file in a clone of the tag or by running the tool there. A new claim is added here with the file it rests on.
@@ -116,3 +118,14 @@ Every claim a practical page makes about the tree is checked at the pin, by read
 | Practical 1 | one week before a ping or resend; `RESEND`; interleaved replies; changelog below `---`; summary of 70 to 75 characters; imperative mood; `--base` | `Documentation/process/submitting-patches.rst` | v7.3.1 ✓ |
 | Practical 1 | AI assistance: `Assisted-by:`, no `Signed-off-by` from a tool, the assistant never sends; tool-generated content is disclosed | `Documentation/process/coding-assistants.rst`, `Documentation/process/generated-content.rst` | v7.3.1 ✓ |
 | Practical 1 | staging tree and list | `MAINTAINERS`, "STAGING SUBSYSTEM" | v7.3.1 ✓ |
+| Practical 2 | the debug options are all `=y` after `olddefconfig`: `KASAN`, `KASAN_GENERIC`, `PROVE_LOCKING`, `DEBUG_KMEMLEAK`, `DETECT_HUNG_TASK`, `DEBUG_ATOMIC_SLEEP` | `scripts/kernel-labs/build-kernel.sh debug`, then `.config` | v7.3.1 ✓ (build 1111 s, build directory 4.3 GB) |
+| Practical 2 | modules build against an `Image`-only tree after `modules_prepare` with `vmlinux.symvers` copied to `Module.symvers` | the lab modules built that way and loaded | v7.3.1 ✓ |
+| Practical 2 | KASAN reports only the first invalid access of a boot; a KASAN report turns lock debugging off | `Documentation/dev-tools/kasan.rst` (`kasan_multi_shot`); `lg_warm` loaded twice in one boot gives one report | v7.3.1 ✓ |
+| Practical 2 | `module_init()` aliases the init function to `init_module`, the name a report shows | `include/linux/module.h` | v7.3.1 ✓ |
+| Practical 2 | kmemleak scans every 10 minutes by default, `echo scan` forces a scan, objects younger than 5 s are not reported | `Documentation/dev-tools/kmemleak.rst`; `MSECS_MIN_AGE` is 5000 in `mm/kmemleak.c` (the document still says 1000) | v7.3.1 ✓ |
+| Practical 2 | KCSAN cannot be built with KASAN and needs `EXPERT` on arm64 | `lib/Kconfig.kcsan` (`depends on DEBUG_KERNEL && !KASAN`), `arch/arm64/Kconfig` (`select HAVE_ARCH_KCSAN if EXPERT`) | v7.3.1 ✓ |
+| Practical 2 | `cancel_delayed_work()` may return while the callback still runs; the `_sync` variant waits | comments above both functions in `kernel/workqueue.c` | v7.3.1 ✓ |
+| Practical 2 | the default hung-task timeout is 120 s | `CONFIG_DEFAULT_HUNG_TASK_TIMEOUT=120` in the built `.config`; `Documentation/admin-guide/sysctl/kernel.rst` | v7.3.1 ✓ |
+| Practical 2 | a stack-trace entry of a module function in `.text` maps to a line with `llvm-nm` and `llvm-addr2line` (address of the function, plus the offset, minus 4) | run on `lg_fw.ko`: `lg_fw_write+0x54` gives `lg_fw.c:39`; `scripts/faddr2line` fails with `LLVM=1` here (`unknown argument '--section=.text'`), so the page does not use it | clang 18.1.3 ✓ |
+| Practical 2 | every ticket as handed out is reported by its tool, and every module with its reference fix passes three runs with a clean log and unloads | `scripts/kernel-labs/range.sh debug`; logs quoted on the page | v7.3.1 ✓ (sandbox, 2026-11-21) |
+| Practical 2 | the lab modules and the reference patches pass `checkpatch.pl --strict`; patch 1 warns about a missing `Fixes:` tag until one is added | `scripts/checkpatch.pl --strict` on the files and the patches | v7.3.1 ✓ |
