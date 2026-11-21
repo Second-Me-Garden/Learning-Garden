@@ -42,11 +42,13 @@ jobs:
         run: |
           for f in scripts/kernel-labs/*.sh topics/kernel-engineering/practical-*/lab/*.sh; do sh -n "$f"; done
 
+      # ipxe-qemu holds the option ROM of the default virtio network card of the virt machine.
       - name: Install the toolchain and QEMU
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            clang lld llvm make flex bison bc libelf-dev libssl-dev cpio patch curl qemu-system-arm
+            clang lld llvm make flex bison bc libelf-dev libssl-dev cpio patch curl \
+            qemu-system-arm ipxe-qemu
           clang --version | head -n 1
           qemu-system-aarch64 --version | head -n 1
 
@@ -95,7 +97,8 @@ jobs:
             [ -f "$f" ] || continue
             echo "::group::$(basename "$f") ($(wc -l < "$f") lines)"
             # Everything from the first "===" marker on; a guest that hangs can print thousands of lines.
-            sed -n '/^===/,$p' "$f" | head -n 600
+            # A guest that never got that far shows the end of what it did print.
+            if grep -q '^===' "$f"; then sed -n '/^===/,$p' "$f" | head -n 600; else tail -n 40 "$f"; fi
             echo "::endgroup::"
           done
 
