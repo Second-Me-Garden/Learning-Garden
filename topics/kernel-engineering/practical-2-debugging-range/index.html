@@ -390,8 +390,8 @@ grep 'CONFIG_KCSAN=' ../build-kcsan/.config          # must print CONFIG_KCSAN=y
 make LLVM=1 ARCH=arm64 O=../build-kcsan -j"$(nproc)" Image
 make LLVM=1 ARCH=arm64 O=../build-kcsan modules_prepare
 cp ../build-kcsan/vmlinux.symvers ../build-kcsan/Module.symvers</pre>
-<p lang="zh-CN">KCSAN 也会报告内核其他地方的竞争，所以只看标题里带 <code>lg_stats</code> 的那些：<code>dmesg | grep -A30 "KCSAN: data-race in lg_stats"</code>。</p>
-<p lang="en">KCSAN also reports races elsewhere in the kernel, so look only at the reports whose title names <code>lg_stats</code>: <code>dmesg | grep -A30 "KCSAN: data-race in lg_stats"</code>.</p>
+<p lang="zh-CN">KCSAN 也会报告内核其他地方的竞争，所以只看标题里带 <code>lg_stats</code> 的那些：<code>dmesg | grep -A30 "KCSAN: data-race in lg_stats"</code>。KCSAN 是抽样检测，跑一遍压力脚本可能一份报告都没有，这时再跑几遍。</p>
+<p lang="en">KCSAN also reports races elsewhere in the kernel, so look only at the reports whose title names <code>lg_stats</code>: <code>dmesg | grep -A30 "KCSAN: data-race in lg_stats"</code>. KCSAN samples, so one run of the stress script may produce no report at all; run it a few more times then.</p>
 </details>
 <details class="hint">
 <summary><span lang="zh-CN">提示 3：往哪个方向修</span><span lang="en">Hint 3: which way to fix it</span></summary>
@@ -645,8 +645,50 @@ stress-stats: packets 7999 bytes 127984 next_seq 7824
 stress-stats: expected packets 8000 bytes 128000 next_seq 8000</pre>
 <p lang="zh-CN"><code>next_seq</code> 每次都少一百多；第二次连 <code>packets</code> 和 <code>bytes</code> 也各丢了一次更新。</p>
 <p lang="en"><code>next_seq</code> is short by more than a hundred each time; in the second run <code>packets</code> and <code>bytes</code> lost one update each as well.</p>
-<div class="note" lang="zh-CN">KCSAN 的报告：<strong>未运行</strong>。写这一页时 KCSAN 内核还没有跑出结果，所以这里不贴输出。</div>
-<div class="note" lang="en">The KCSAN report: <strong>not run</strong>. The KCSAN kernel had produced no result when this page was written, so no output is shown here.</div>
+<p lang="zh-CN"><strong>KCSAN 的报告</strong>（另一个内核，2026-11-21 在 GitHub 的构建机上编译和运行；启动时打印 <code>kcsan: enabled early</code>）：这一次启动里的第二份报告，以及压力脚本随后打印的结果：</p>
+<p lang="en"><strong>The KCSAN report</strong> (a second kernel, built and run on a GitHub build machine on 2026-11-21; it prints <code>kcsan: enabled early</code> at boot). This is the second report of that boot, followed by what the stress script then printed:</p>
+<pre data-lang="text">[    3.010646] ==================================================================
+[    3.010749] BUG: KCSAN: data-race in lg_stats_write [lg_stats] / lg_stats_write [lg_stats]
+[    3.010838]
+[    3.010862] read-write to 0xffff80007b052010 of 8 bytes by task 74 on cpu 0:
+[    3.010902]  lg_stats_write+0xec/0x154 [lg_stats]
+[    3.010967]  vfs_write+0x20c/0x60c
+[    3.011022]  ksys_write+0x9c/0x11c
+[    3.011076]  __arm64_sys_write+0x48/0x5c
+[    3.011131]  invoke_syscall+0x54/0x144
+[    3.011174]  el0_svc_common+0xcc/0x134
+[    3.011215]  do_el0_svc+0x30/0x40
+[    3.011255]  el0_svc+0x3c/0x98
+[    3.011302]  el0t_64_sync_handler+0x84/0x12c
+[    3.011353]  el0t_64_sync+0x198/0x19c
+[    3.011395]
+[    3.011416] read-write to 0xffff80007b052010 of 8 bytes by task 76 on cpu 1:
+[    3.011453]  lg_stats_write+0xec/0x154 [lg_stats]
+[    3.011522]  vfs_write+0x20c/0x60c
+[    3.011575]  ksys_write+0x9c/0x11c
+[    3.011627]  __arm64_sys_write+0x48/0x5c
+[    3.011682]  invoke_syscall+0x54/0x144
+[    3.011723]  el0_svc_common+0xcc/0x134
+[    3.011765]  do_el0_svc+0x30/0x40
+[    3.011804]  el0_svc+0x3c/0x98
+[    3.011850]  el0t_64_sync_handler+0x84/0x12c
+[    3.011900]  el0t_64_sync+0x198/0x19c
+[    3.011960]
+[    3.011983] value changed: 0x000000000001aaa0 -&gt; 0x000000000001aab0
+[    3.012024]
+[    3.012042] Reported by Kernel Concurrency Sanitizer on:
+[    3.012080] CPU: 1 UID: 0 PID: 76 Comm: stress-stats.sh Tainted: G           O        7.3.1 #1 PREEMPT
+[    3.012148] Tainted: [O]=OOT_MODULE
+[    3.012173] Hardware name: linux,dummy-virt (DT)
+[    3.012201] ==================================================================
+stress-stats: packets 7996 bytes 127040 next_seq 7841
+stress-stats: expected packets 8000 bytes 128000 next_seq 8000</pre>
+<p lang="zh-CN"><strong>怎样读</strong>：两段调用栈是相互竞争的两处访问。两边都是 <code>read-write … of 8 bytes</code>，都在 <code>lg_stats_write+0xec</code>，一个来自 cpu 0 上的任务 74，一个来自 cpu 1 上的任务 76：两个写入方同时在执行同一条语句。报告不给变量名，线索在 <code>value changed</code> 那一行：值从 <code>0x1aaa0</code> 变成 <code>0x1aab0</code>，多了 16，正好是一个包的长度，所以这是 <code>lg_st.bytes += n</code>。 用背景知识第 3 节的方法把偏移换算成源码行（对 KCSAN 内核编出来的 <code>lg_stats.ko</code> 做），得到 <code>lg_stats.c:38</code>，正是这一行。</p>
+<p lang="en"><strong>How to read it</strong>: the two stacks are the two accesses that race. Both are <code>read-write … of 8 bytes</code> at <code>lg_stats_write+0xec</code>, one by task 74 on cpu 0 and one by task 76 on cpu 1: two writers were in the same statement at the same time. The report names no variable; the clue is the <code>value changed</code> line. The value went from <code>0x1aaa0</code> to <code>0x1aab0</code>, which is 16 more, the length of one packet, so this is <code>lg_st.bytes += n</code>. Resolving the offset to a source line with the method of concept 3 (on the <code>lg_stats.ko</code> built for the KCSAN kernel) gives <code>lg_stats.c:38</code>, that very line.</p>
+<p lang="zh-CN">同一次启动里，不到 0.1 秒之前还有一份报告，两边都是 <code>write to 0xffff80007b052020 of 16 bytes</code>，位置是 <code>lg_stats_write+0xb8</code>。这个地址比上面那个高 0x10；在结构体里 <code>bytes</code> 的偏移是 0x10，<code>last</code> 的偏移是 0x20，而 16 字节正是一个包：两个写入方同时在往 <code>lg_st.last</code> 里复制数据。偏移换算出来是 <code>lg_stats.c:34</code>，就是 <code>copy_from_user()</code> 那一行。</p>
+<p lang="en">The same boot printed one more report less than 0.1 s earlier, with <code>write to 0xffff80007b052020 of 16 bytes</code> on both sides, at <code>lg_stats_write+0xb8</code>. That address is 0x10 above the first one; in the structure <code>bytes</code> sits at offset 0x10 and <code>last</code> at offset 0x20, and 16 bytes is one packet: two writers were copying into <code>lg_st.last</code> at the same time. The offset resolves to <code>lg_stats.c:34</code>, the <code>copy_from_user()</code> line.</p>
+<p lang="zh-CN">有两点要记住。第一，两份报告都没有提到丢得最多的 <code>next_seq</code>。KCSAN 只抽查一部分访问，这个内核启动时自己也打印了 <code>kcsan: non-strict mode configured - use CONFIG_KCSAN_STRICT=y to see all data races</code>。报告告诉你的是「这个结构体没有被保护」，不是一份完整的竞争清单。第二，没有报告不等于没有竞争：同一个内核在 GitHub 上的前一次运行里，脚本照样丢了更新（<code>packets 7941 bytes 127904 next_seq 7886</code>），KCSAN 却一份报告也没有打印。一遍没有报告时，把压力脚本再跑几遍。</p>
+<p lang="en">Two things to remember. First, neither report mentions <code>next_seq</code>, the counter that loses the most. KCSAN watches a sample of the accesses, and this kernel says so itself at boot: <code>kcsan: non-strict mode configured - use CONFIG_KCSAN_STRICT=y to see all data races</code>. What a report tells you is that this structure is unprotected; it is not a complete list of the races. Second, no report does not mean no race: in the previous run of the same kernel on GitHub the script lost updates all the same (<code>packets 7941 bytes 127904 next_seq 7886</code>) and KCSAN printed no report at all. When one run gives no report, run the stress script a few more times.</p>
 <p lang="zh-CN"><strong>根因</strong>：<code>lg_stats_write()</code> 不加任何锁就读写共享的 <code>lg_st</code>。<code>next_seq</code> 是先读出来，隔着一次 <code>copy_from_user()</code> 之后才写回 <code>seq + 1</code>，两个写入方读到同一个值，就只加了一次；<code>bytes += n</code> 和 <code>packets++</code> 同样是「读、改、写」三步，只是窗口小得多。规则是：一块共享数据的每一次访问都要拿着保护它的那把锁。</p>
 <p lang="en"><strong>Root cause</strong>: <code>lg_stats_write()</code> reads and writes the shared <code>lg_st</code> with no lock at all. <code>next_seq</code> is read, and <code>seq + 1</code> is written back only after a <code>copy_from_user()</code>; two writers that read the same value add one between them. <code>bytes += n</code> and <code>packets++</code> are read-modify-write sequences too, with a much smaller window. The rule is: every access to shared data holds the lock that protects it.</p>
 <pre data-lang="diff" data-file="lg_stats.c">@@ -23,21 +24,28 @@ static struct {
