@@ -2,7 +2,9 @@
  *
  * Built from the page's own markup, nothing invented:
  *   form.quiz[data-quiz="<topic>/phase-<n>"]   required; gives topic + phase number
+ *     (or "<topic>/practical-<n>" on a practical stage: a second track, numbered from 1)
  *   .meta  "Phase N / T · …"                    total phase count, shown verbatim
+ *     (a practical stage writes "实战 N / T" and "Practical N / T")
  *   header.top a.crumb[href]                    topic link + name
  *   h1                                          this page's title (first text node)
  *   h2[id]                                      section list (ids assigned if missing)
@@ -17,13 +19,17 @@
   function build() {
   const quiz = document.querySelector('form.quiz[data-quiz]');
   if (!quiz) return;
-  const m = /^(.+)\/phase-(\d+)$/.exec(quiz.dataset.quiz || '');
+  const m = /^(.+)\/(phase|practical)-(\d+)$/.exec(quiz.dataset.quiz || '');
   if (!m) return;
-  const topic = m[1], here = Number(m[2]);
+  const topic = m[1], kind = m[2], here = Number(m[3]);
   const cur0 = window.LG ? window.LG.lang() : 'zh-CN';
+  // Lessons are "Phase 0 … T-1"; practical stages are a second track, "实战 1 … T" / "Practical 1 … T".
+  const first = kind === 'phase' ? 0 : 1;
+  const word = kind === 'phase' ? 'Phase' : (cur0 === 'en' ? 'Practical' : '实战');
   const meta = document.querySelector('.meta[lang="' + cur0 + '"]') || document.querySelector('.meta:not([lang])') || document.querySelector('.meta');
-  const mt = meta && /Phase\s+\d+\s*\/\s*(\d+)/.exec(meta.textContent);
+  const mt = meta && /(?:Phase|Practical|实战)\s+\d+\s*\/\s*(\d+)/.exec(meta.textContent);
   const total = mt ? Number(mt[1]) : 9;
+  const last = first + total - 1;
   const crumb = document.querySelector('header.top a.crumb[href]');
   const h1 = document.querySelector('h1');
   const title = h1 ? (h1.childNodes[0] && h1.childNodes[0].textContent || h1.textContent).trim() : '';
@@ -34,11 +40,11 @@
       return !!(v && v.total > 0 && v.ok === v.total);
     } catch (_) { return false; }
   }
-  const states = [];
+  const states = [];   // indexed by phase or stage number
   let now = null;
-  for (let i = 0; i < total; i++) {
-    const d = done(topic + '/phase-' + i);
-    states.push(d ? 'done' : 'open');
+  for (let i = first; i <= last; i++) {
+    const d = done(topic + '/' + kind + '-' + i);
+    states[i] = d ? 'done' : 'open';
     if (!d && now === null) now = i;
   }
   const doneCount = states.filter(s => s === 'done').length;
@@ -46,7 +52,7 @@
   // prev/next links from the page's own nav, usable under file://
   const links = {};
   document.querySelectorAll('nav.pn a[href]').forEach(a => {
-    const pm = /phase-(\d+)-/.exec(a.getAttribute('href'));
+    const pm = new RegExp('(?:^|/)' + kind + '-(\\d+)-').exec(a.getAttribute('href'));
     if (pm) links[Number(pm[1])] = a.getAttribute('href');
   });
 
@@ -77,7 +83,7 @@
   const ol = document.createElement('ol');
   ol.className = 'rail-plots';
   const items = [];
-  for (let i = 0; i < total; i++) {
+  for (let i = first; i <= last; i++) {
     const li = document.createElement('li');
     if (states[i] === 'done') li.classList.add('done');
     if (i === now) li.classList.add('now');
@@ -87,11 +93,11 @@
     const dot = document.createElement('span'); dot.className = 'dot'; dot.setAttribute('aria-hidden', 'true');
     a.appendChild(dot);
     const label = document.createElement('span');
-    label.textContent = 'Phase ' + i + (i === here && title ? ' · ' + title : '');
+    label.textContent = word + ' ' + i + (i === here && title ? ' · ' + title : '');
     a.appendChild(label);
     const st = states[i] === 'done' ? T('done') : i === now ? T('now') : T('ahead');
-    a.setAttribute('aria-label', 'Phase ' + i + (cur0 === 'en' ? ', ' : '，') + st);
-    li.appendChild(a); ol.appendChild(li); items.push({ li, label, i });
+    a.setAttribute('aria-label', word + ' ' + i + (cur0 === 'en' ? ', ' : '，') + st);
+    li.appendChild(a); ol.appendChild(li); items[i] = { li, label, i };
   }
   panel.appendChild(ol);
   const count = document.createElement('p'); count.className = 'rail-count';
@@ -167,11 +173,11 @@
       if (!html) return;
       const doc = new DOMParser().parseFromString(html, 'text/html');
       doc.querySelectorAll('.phases li[data-phase]').forEach(li => {
-        const pm = /phase-(\d+)$/.exec(li.dataset.phase || '');
+        const pm = new RegExp('/' + kind + '-(\\d+)$').exec(li.dataset.phase || '');
         const a = li.querySelector('.t a[href]');
         if (!pm || !a) return;
         const i = Number(pm[1]); const it = items[i]; if (!it) return;
-        it.label.textContent = 'Phase ' + i + ' · ' + a.textContent.trim();
+        it.label.textContent = word + ' ' + i + ' · ' + a.textContent.trim();
         const el = it.li.firstChild;
         if (i !== here && el.tagName !== 'A') {
           const link = document.createElement('a'); link.href = new URL(a.getAttribute('href'), new URL(crumb.getAttribute('href'), location.href)).href;

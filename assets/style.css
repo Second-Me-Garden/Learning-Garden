@@ -395,6 +395,12 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 
 /* Lab + quiz */
 .lab ol { padding-left: 22px; }
+/* Practical stages (2026-11-21): a hint or a reference solution stays folded until the reader asks for it.
+   The summary holds a paired span, so its label follows the language switch like any other prose. */
+details.hint { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 14px; margin: 10px 0; max-width: none; }
+details.hint > summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+details.hint[open] > summary { margin-bottom: 8px; }
+.phases .st .planned { color: var(--ink-3); }
 .quiz { background: var(--surface); border-radius: 10px; padding: 16px 20px; }
 .quiz .q { margin: 10px 0 18px; }
 .quiz .q p { margin: 0 0 6px; font-weight: 600; }
