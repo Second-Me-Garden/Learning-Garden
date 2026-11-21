@@ -154,6 +154,7 @@ A practical stage is a second kind of page. It gives a task and acceptance crite
 - **Hints and solutions are folded**: `<details class="hint">` with no `lang` on the container, and a `<summary>` that holds a `zh-CN` span and an `en` span. Hints go from where to look to which way to fix; a reader who opens none still has everything the task needs.
 - **Output** from tools goes in `<pre data-lang="text">`. It is pasted from a real run and the page says once, next to the first block, which run: date, versions, machine. Cut lines are shown as `...`. A result that was not obtained is marked 未运行 / not run and is never written from memory.
 - **Steps that act in public** in the learner's name (sending mail to a list, replying to review) are marked 由学习者完成 / done by the learner. Nothing is sent on a learner's behalf.
+- **Posting in public is optional.** A stage that touches a public list or service has two finishing routes, and both count as done: a local route that stops before the sending, and a public route that really posts. No acceptance criterion may require the public route. Before the page offers it, the page says what becomes public for good (real name, e-mail address, the mail itself).
 - **Lab code** lives in `lab/` next to the page and is checked by a script under `scripts/` that CI can run: the planted problem is reported and the reference fix is clean. Kernel code in a lab passes `scripts/checkpatch.pl --strict`.
 
 ## Before returning a page

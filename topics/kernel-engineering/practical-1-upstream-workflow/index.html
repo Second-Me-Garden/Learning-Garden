@@ -23,31 +23,31 @@
 
   <p class="meta" lang="zh-CN">实战 1 / 8 · 约 2 周</p><p class="meta" lang="en">Practical 1 / 8 · about 2 weeks</p>
   <h1>Upstream Workflow &amp; First Patch <span class="en" lang="zh-CN">上游工作流和第一个补丁：checkpatch、get_maintainer、git send-email、评审与 v2</span><span class="en" lang="en">checkpatch, get_maintainer, git send-email, review and a v2</span></h1>
-<p class="lede" lang="zh-CN">前面九个阶段你一直在读别人的内核代码。这一阶段你要往里面放进一行自己的：找到一处真实的小缺陷，写成补丁，发到真实的邮件列表，并回应评审。改动可以只有一行，但整条流程必须是真的，因为招聘方点名要看的就是这条流程留下的公开记录。</p>
-<p class="lede" lang="en">For nine phases you have been reading other people’s kernel code. In this stage you put one line of your own into it: find a small real defect, turn it into a patch, post it to a real mailing list and answer the review. The change may be a single line, but the whole process has to be real, because the public record that process leaves is what employers ask to see.</p>
+<p class="lede" lang="zh-CN">前面九个阶段你一直在读别人的内核代码。这一阶段你要往里面放进一行自己的：找到一处真实的小缺陷，把它做成一个随时可以发给内核邮件列表的补丁，再走完评审和第二版。改动可以只有一行，但每一步都要按真实的流程来做。不把补丁发出去，这一阶段也算完成；发到公开列表由你自己决定，发了就多一条招聘方可以直接查到的公开记录。</p>
+<p class="lede" lang="en">For nine phases you have been reading other people’s kernel code. In this stage you put one line of your own into it: find a small real defect, turn it into a patch that is ready for a kernel mailing list, and take it through review and a second version. The change may be a single line, but every step follows the real process. The stage is complete without sending the patch anywhere; posting it to a public list is your decision, and doing so adds a public record that an employer can look up.</p>
 
   <h2 id="brief" lang="zh-CN">任务</h2><h2 id="brief-en" lang="en">The brief</h2>
 <div class="goals">
-<span lang="zh-CN">把一个真实的小改动发到真实的内核邮件列表，并回应至少一条评审意见。具体要做到：</span><span lang="en">Post one small real change to a real kernel mailing list and answer at least one review comment. In detail:</span>
+<span lang="zh-CN">把一个真实的小改动做成一个可以发给内核邮件列表的补丁，并让它经过一轮评审。具体要做到：</span><span lang="en">Turn one small real change into a patch that is ready for a kernel mailing list, and take it through one round of review. In detail:</span>
 <ul>
 <li lang="zh-CN">配好一个能发纯文本补丁的环境：<code>git send-email</code>，以及你的真实姓名和邮箱。</li>
 <li lang="en">Set up an environment that can send plain-text patches: <code>git send-email</code>, with your real name and e-mail address.</li>
 <li lang="zh-CN">在<strong>当前</strong>的开发树上找到一处真实的小缺陷：文档错误、kernel-doc 警告、或者 <code>drivers/staging</code> 里的清理。</li>
 <li lang="en">Find a small real defect in the <strong>current</strong> development tree: a documentation error, a kernel-doc warning, or a cleanup in <code>drivers/staging</code>.</li>
-<li lang="zh-CN">写补丁，编译它，用 <code>checkpatch.pl</code> 检查，用 <code>get_maintainer.pl</code> 找到收件人，然后发出去。</li>
-<li lang="en">Write the patch, build it, check it with <code>checkpatch.pl</code>, find the recipients with <code>get_maintainer.pl</code>, and send it.</li>
-<li lang="zh-CN">收到评审后逐段回复；如果对方要求修改，发出带改动说明的第二版。</li>
-<li lang="en">Reply to the review inline; if a change is requested, post a second version with a changelog.</li>
+<li lang="zh-CN">写补丁，编译它，用 <code>checkpatch.pl</code> 检查，用 <code>get_maintainer.pl</code> 找到收件人，然后先发给自己检查一遍。</li>
+<li lang="en">Write the patch, build it, check it with <code>checkpatch.pl</code>, find the recipients with <code>get_maintainer.pl</code>, and send it to yourself as a check.</li>
+<li lang="zh-CN">选一条路线收尾。<strong>本地路线</strong>：隔一天评审自己的补丁，把发现的问题改成第二版。<strong>公开路线</strong>：真的发到列表，逐段回复评审，对方要求修改时发出第二版。</li>
+<li lang="en">Finish by one of two routes. The <strong>local route</strong>: a day later, review your own patch and turn what you find into a second version. The <strong>public route</strong>: really send it to the list, reply to the review inline, and post a second version when one is asked for.</li>
 </ul>
 </div>
-<div class="note" lang="zh-CN">这一页不替你做任何一步。发信、回信这些步骤标着「由学习者完成」：它们会公开留下你的姓名和邮箱，必须由你本人来做。</div>
-<div class="note" lang="en">This page does none of it for you. Sending and replying are marked “done by the learner”: they put your name and address on public record, so they have to be your own act.</div>
+<div class="note" lang="zh-CN">两条路线都算完成这一阶段。公开路线会把你的真实姓名和邮箱永久留在公开的存档里，所以走不走由你本人决定，发信和回信也只能由你本人来做，页面上标着「由学习者完成」。这一页和任何辅助工具都不会替任何人发信。</div>
+<div class="note" lang="en">Either route completes the stage. The public route leaves your real name and e-mail address in a public archive for good, so taking it is your own decision, and the sending and replying are your own acts, marked “done by the learner”. Neither this page nor any assistant tool sends mail for anyone.</div>
 
   <h2 id="deliver" lang="zh-CN">交付物与验收标准</h2><h2 id="deliver-en" lang="en">Deliverables and acceptance</h2>
-<p lang="zh-CN"><strong>交付物</strong>：一个链接和半页说明。链接指向 <code>lore.kernel.org</code> 上你的补丁所在的讨论串；说明按本页「怎么写」一节的模板写。</p>
-<p lang="en"><strong>Deliverables</strong>: one link and half a page of notes. The link points at the thread on <code>lore.kernel.org</code> that holds your patch; the notes follow the template in “Writing it up” below.</p>
-<p lang="zh-CN"><strong>验收标准</strong>：下面六条都成立，这一阶段就算完成。每一条都能由别人对着你的链接检查。</p>
-<p lang="en"><strong>Acceptance criteria</strong>: the stage is done when all six hold. Each can be checked by someone else from your link.</p>
+<p lang="zh-CN"><strong>交付物</strong>：补丁文件和半页说明。补丁文件是 <code>git format-patch</code> 的输出（有第二版时两版都交）；说明按本页「怎么写」一节的模板写。走公开路线时再加一个链接，指向 <code>lore.kernel.org</code> 上你的补丁所在的讨论串。</p>
+<p lang="en"><strong>Deliverables</strong>: the patch file and half a page of notes. The patch file is the output of <code>git format-patch</code> (both versions when there is a second one); the notes follow the template in “Writing it up” below. On the public route, add one link: the thread on <code>lore.kernel.org</code> that holds your patch.</p>
+<p lang="zh-CN"><strong>验收标准</strong>：下面六条都成立，这一阶段就算完成。每一条都能由别人对着你交的东西检查。</p>
+<p lang="en"><strong>Acceptance criteria</strong>: the stage is done when all six hold. Each can be checked by someone else from what you hand in.</p>
 <ol>
 <li lang="zh-CN">补丁基于该子系统在 <code>MAINTAINERS</code> 里列出的开发树（<code>T:</code> 行），或者 linux-next；不是基于某个发行版内核或很旧的 tag。</li>
 <li lang="en">The patch is based on the development tree that <code>MAINTAINERS</code> lists for the subsystem (the <code>T:</code> line), or on linux-next; not on a distribution kernel or an old tag.</li>
@@ -55,15 +55,25 @@
 <li lang="en"><code>scripts/checkpatch.pl</code> reports 0 errors and 0 warnings on the patch file; if a warning remains, your notes say why.</li>
 <li lang="zh-CN">你编译过改动的文件，并且在说明里写了用的命令。</li>
 <li lang="en">You built the files you changed, and your notes give the command.</li>
-<li lang="zh-CN">收件人与 <code>scripts/get_maintainer.pl</code> 的输出一致：维护者在 To，邮件列表在 Cc。</li>
-<li lang="en">The recipients match the output of <code>scripts/get_maintainer.pl</code>: maintainers in To, lists in Cc.</li>
+<li lang="zh-CN">收件人与 <code>scripts/get_maintainer.pl</code> 的输出一致：维护者在 To，邮件列表在 Cc。走本地路线时，用 <code>git send-email --dry-run</code> 的输出来证明，这条命令不发出任何邮件。</li>
+<li lang="en">The recipients match the output of <code>scripts/get_maintainer.pl</code>: maintainers in To, lists in Cc. On the local route this is shown by the output of <code>git send-email --dry-run</code>, a command that sends nothing.</li>
 <li lang="zh-CN">主题行带有该目录 <code>git log</code> 里通用的前缀，正文用祈使语气写清改了什么、为什么改，末尾有你真实姓名的 <code>Signed-off-by:</code>。</li>
 <li lang="en">The subject carries the prefix that <code>git log</code> shows for that directory, the body says what changes and why in the imperative mood, and it ends with a <code>Signed-off-by:</code> in your real name.</li>
-<li lang="zh-CN">你逐段回复了至少一条评审意见。对方要求修改时，你发了 <code>[PATCH v2]</code>，并在 <code>---</code> 下面写了与上一版的差别。</li>
-<li lang="en">You answered at least one review comment inline. Where a change was asked for, you posted a <code>[PATCH v2]</code> with the differences from the previous version below the <code>---</code>.</li>
+<li lang="zh-CN">补丁经过了一轮评审。<strong>本地路线</strong>：至少隔一天，你对照前五条重读了自己的补丁，把发现写进了说明；有需要改的地方时，你做了 <code>[PATCH v2]</code>，并在 <code>---</code> 下面写了与上一版的差别。<strong>公开路线</strong>：你逐段回复了至少一条评审意见；对方要求修改时，你发了同样格式的 <code>[PATCH v2]</code>。</li>
+<li lang="en">The patch went through one round of review. <strong>Local route</strong>: at least a day later you reread your own patch against the first five criteria and wrote what you found into the notes; where something had to change, you made a <code>[PATCH v2]</code> with the differences from the previous version below the <code>---</code>. <strong>Public route</strong>: you answered at least one review comment inline, and where a change was asked for you posted a <code>[PATCH v2]</code> in the same form.</li>
 </ol>
-<div class="note" lang="zh-CN">补丁被合并当然更好，但不是验收条件：什么时候合并由维护者决定，不由你控制。发出去之后一个星期没有任何回复也是常见情况，这时按第 4 节的规则处理。</div>
-<div class="note" lang="en">Having the patch merged is welcome and is not a criterion: the maintainer decides when, not you. A week of silence after sending is common too; concept 4 says what to do then.</div>
+<div class="note" lang="zh-CN">走公开路线时，补丁被合并当然更好，但不是验收条件：什么时候合并由维护者决定，不由你控制。发出去之后一个星期没有任何回复也是常见情况，这时按第 4 节的规则处理。</div>
+<div class="note" lang="en">On the public route, having the patch merged is welcome and is not a criterion: the maintainer decides when, not you. A week of silence after sending is common too; concept 4 says what to do then.</div>
+<p lang="zh-CN"><strong>选公开路线之前，先知道三件事</strong>：</p>
+<p lang="en"><strong>Before you choose the public route, know three things</strong>:</p>
+<ul>
+<li lang="zh-CN">你的真实姓名和邮箱会随邮件永久留在 <code>lore.kernel.org</code> 的公开存档里，之后无法删除。内核不接受匿名贡献，<code>submitting-patches.rst</code> 的原话是 “using a known identity (sorry, no anonymous contributions.)”。</li>
+<li lang="en">Your real name and e-mail address stay with the mail in the public archive on <code>lore.kernel.org</code> for good and cannot be deleted later. The kernel takes no anonymous contributions; <code>submitting-patches.rst</code> says “using a known identity (sorry, no anonymous contributions.)”.</li>
+<li lang="zh-CN">邮件会到达真实的维护者和列表的所有订阅者，占用他们的时间。回复可能很直接，也可能一个星期都没有回复。</li>
+<li lang="en">The mail reaches real maintainers and every subscriber of the list, and takes their time. A reply may be blunt, and there may be none for a week.</li>
+<li lang="zh-CN">邮件发出后无法撤回。所以先把本地路线的检查全部做完，再决定发不发。</li>
+<li lang="en">A mail that has been sent cannot be recalled. So finish every check of the local route first, then decide whether to send.</li>
+</ul>
 
   <h2 id="prereq" lang="zh-CN">前置</h2><h2 id="prereq-en" lang="en">Prerequisites</h2>
 <ul>
@@ -73,8 +83,8 @@
 <li lang="en">The container from the lab environment that builds the kernel. This stage does not need the VM unless your change alters run-time behaviour.</li>
 <li lang="zh-CN">一份<strong>完整</strong>的内核克隆。前面的实验用 <code>--depth 1</code> 浅克隆，没有历史；这里你需要 <code>git log</code> 和 <code>git blame</code>。</li>
 <li lang="en">A <strong>full</strong> clone of the kernel. Earlier labs used a shallow <code>--depth 1</code> clone, which has no history; here you need <code>git log</code> and <code>git blame</code>.</li>
-<li lang="zh-CN">一个能通过 SMTP 发纯文本邮件的邮箱。内核文档的 <code>email-clients.rst</code> 逐个说明了常见邮件服务的坑。</li>
-<li lang="en">An e-mail account that can send plain text over SMTP. The kernel’s <code>email-clients.rst</code> goes through the pitfalls of the common mail services one by one.</li>
+<li lang="zh-CN">一个能通过 SMTP 发纯文本邮件的邮箱（发给自己检查格式时要用，两条路线都需要）。内核文档的 <code>email-clients.rst</code> 逐个说明了常见邮件服务的坑。</li>
+<li lang="en">An e-mail account that can send plain text over SMTP (used to mail the patch to yourself as a format check, on both routes). The kernel’s <code>email-clients.rst</code> goes through the pitfalls of the common mail services one by one.</li>
 </ul>
 
   <h2 id="background" lang="zh-CN">背景知识</h2><h2 id="background-en" lang="en">Background</h2>
@@ -179,8 +189,8 @@ diff --git a/drivers/staging/nvec/nvec.h b/drivers/staging/nvec/nvec.h
          data-captions='["一个补丁从你的机器出发，经过公开的邮件列表，进入维护者的树，最后到主线。左边三步在你手里，中间是公开的，右边由维护者决定。",
            "第 1 步：在维护者的开发树（MAINTAINERS 里的 T: 行）或 linux-next 上开分支并提交。基于旧 tag 的补丁常常打不上。",
            "第 2 步：git format-patch 把提交变成邮件文件；编译改过的文件，再让 checkpatch.pl 检查这个文件。",
-           "第 3 步：get_maintainer.pl 给出收件人，维护者放 To，邮件列表放 Cc，然后用 git send-email 发出。",
-           "第 4 步：邮件到达列表，被 lore.kernel.org 永久存档。这个存档链接就是本阶段的交付物。",
+           "第 3 步：get_maintainer.pl 给出收件人，维护者放 To，邮件列表放 Cc，然后用 git send-email 发出。本地路线在这里停下：只做 --dry-run，再发一份给自己。",
+           "第 4 步：邮件到达列表，被 lore.kernel.org 永久存档。走公开路线时，这个存档链接是交付物之一。",
            "第 5 步：评审者回信。你逐段回复，改完后发 [PATCH v2]，在 --- 下面写清与上一版的差别。这个循环可以走好几轮。",
            "第 6 步：维护者认可后把补丁收进自己的树，通常会回信告诉你。别人给的 Reviewed-by 也在这时被加上。",
            "第 7 步：子系统的树每天被合成 linux-next，它是下一个合并窗口结束后主线大致样子的快照。",
@@ -188,8 +198,8 @@ diff --git a/drivers/staging/nvec/nvec.h b/drivers/staging/nvec/nvec.h
          data-captions-en='["A patch leaves your machine, crosses the public mailing list, enters a maintainer tree and ends in mainline. The three steps on the left are yours, the middle is public, the right is up to the maintainer.",
            "Step 1: branch and commit on the development tree of the maintainer (the T: line in MAINTAINERS) or on linux-next. A patch based on an old tag often fails to apply.",
            "Step 2: git format-patch turns the commit into a mail file; build the files you changed, then let checkpatch.pl check that file.",
-           "Step 3: get_maintainer.pl gives the recipients, maintainers in To and lists in Cc, and git send-email sends it.",
-           "Step 4: the mail reaches the list and lore.kernel.org archives it for good. That archive link is the deliverable of this stage.",
+           "Step 3: get_maintainer.pl gives the recipients, maintainers in To and lists in Cc, and git send-email sends it. The local route stops here, with a --dry-run and a copy sent only to yourself.",
+           "Step 4: the mail reaches the list and lore.kernel.org archives it for good. On the public route that archive link is one of the deliverables.",
            "Step 5: reviewers reply. You answer inline, then post [PATCH v2] with the differences from the previous version below the --- line. The loop may run several times.",
            "Step 6: once satisfied, the maintainer applies the patch to their tree and usually replies to say so. Reviewed-by tags from others are added at this point.",
            "Step 7: the subsystem trees are merged every day into linux-next, a snapshot of what mainline should look like after the next merge window closes.",
@@ -349,8 +359,8 @@ v2-0001-staging-nvec-describe-the-gpiod-member-of-struct-.patch has no obvious s
 </div>
 
   <h2 id="assignment" lang="zh-CN">正式任务</h2><h2 id="assignment-en" lang="en">The assignment</h2>
-<p lang="zh-CN">现在换成真的。下面只有目标和约束，没有逐步命令；卡住时再展开提示。</p>
-<p lang="en">Now for real. What follows is goals and constraints, with no step-by-step commands; open a hint when you are stuck.</p>
+<p lang="zh-CN">现在换成你自己找的缺陷。下面只有目标和约束，没有逐步命令；卡住时再展开提示。前五步两条路线都一样，第六步选一条路线收尾。</p>
+<p lang="en">Now with a defect you find yourself. What follows is goals and constraints, with no step-by-step commands; open a hint when you are stuck. The first five steps are the same on both routes; step six finishes by one of them.</p>
 <ol>
 <li lang="zh-CN"><strong>选一棵当前的树。</strong>完整克隆 linux-next，或者你打算改的子系统在 <code>MAINTAINERS</code> 里 <code>T:</code> 行给出的树。staging 驱动的树是 <code>gregkh/staging.git</code>，列表是 <code>linux-staging@lists.linux.dev</code>。</li>
 <li lang="en"><strong>Pick a current tree.</strong> Make a full clone of linux-next, or of the tree that the <code>T:</code> line in <code>MAINTAINERS</code> gives for the subsystem you mean to change. For staging drivers the tree is <code>gregkh/staging.git</code> and the list is <code>linux-staging@lists.linux.dev</code>.</li>
@@ -360,10 +370,10 @@ v2-0001-staging-nvec-describe-the-gpiod-member-of-struct-.patch has no obvious s
 <li lang="en"><strong>Make sure nobody is already fixing it.</strong> Search <code>lore.kernel.org</code> for the file name and keywords. If a patch for the same spot has been posted, pick another target.</li>
 <li lang="zh-CN"><strong>写补丁并验证。</strong>一个补丁只做一件事。编译改到的文件；改动影响运行时行为时，在虚拟机里实际跑一次。</li>
 <li lang="en"><strong>Write the patch and verify it.</strong> One patch does one thing. Build the files you touched; if the change affects run-time behaviour, run it in the VM.</li>
-<li lang="zh-CN"><strong>发出去（由学习者完成）。</strong>先发给自己检查格式，再按 <code>get_maintainer.pl</code> 的输出发给维护者和列表。</li>
-<li lang="en"><strong>Send it (done by the learner).</strong> First to yourself to check the format, then to the maintainers and lists that <code>get_maintainer.pl</code> prints.</li>
-<li lang="zh-CN"><strong>跟进（由学习者完成）。</strong>在 lore 上找到你的讨论串，保存链接。回复评审；需要时发 v2。</li>
-<li lang="en"><strong>Follow up (done by the learner).</strong> Find your thread on lore and keep the link. Answer the review; post a v2 when needed.</li>
+<li lang="zh-CN"><strong>先发给自己。</strong>用 <code>get_maintainer.pl</code> 算出收件人并记下来，用 <code>git send-email --dry-run</code> 确认将要发出的内容，然后只发给自己，在邮箱里检查格式。</li>
+<li lang="en"><strong>Send it to yourself first.</strong> Work out the recipients with <code>get_maintainer.pl</code> and write them down, confirm with <code>git send-email --dry-run</code> what would go out, then mail it to yourself alone and check the format in your mailbox.</li>
+<li lang="zh-CN"><strong>选一条路线收尾。</strong>本地路线：至少隔一天，像评审别人的补丁那样对照验收标准重读它，把发现写下来，需要时做 v2。公开路线（由学习者完成）：按 <code>get_maintainer.pl</code> 的输出发给维护者和列表，在 lore 上找到你的讨论串并保存链接，回复评审，需要时发 v2。</li>
+<li lang="en"><strong>Finish by one route.</strong> Local route: at least a day later, reread the patch against the acceptance criteria as you would review someone else’s, write down what you find, and make a v2 when needed. Public route (done by the learner): send it to the maintainers and lists that <code>get_maintainer.pl</code> prints, find your thread on lore and keep the link, answer the review, and post a v2 when needed.</li>
 </ol>
 <details class="hint">
 <summary><span lang="zh-CN">提示：去哪里找第一个补丁</span><span lang="en">Hint: where to look for a first patch</span></summary>
@@ -411,7 +421,7 @@ git config --global sendemail.smtpUser       you@example.org</pre>
 </ul>
 </details>
 <details class="hint">
-<summary><span lang="zh-CN">提示：收到评审之后</span><span lang="en">Hint: after the review arrives</span></summary>
+<summary><span lang="zh-CN">提示：公开路线，收到评审之后</span><span lang="en">Hint: the public route, after the review arrives</span></summary>
 <ul>
 <li lang="zh-CN">一天之内回复，哪怕只是「收到，下一版改」。</li>
 <li lang="en">Answer within a day, even if only to say “thanks, will fix in the next version”.</li>
@@ -429,8 +439,9 @@ git config --global sendemail.smtpUser       you@example.org</pre>
 <p lang="en">Half a page of notes for your portfolio repository (Practical 8 gathers them into one page). Use these six headings, two or three sentences each:</p>
 <pre data-lang="text" data-file="first-patch.md"># First upstream patch: &lt;subject line of the patch&gt;
 
-Link:      https://lore.kernel.org/...          (the thread)
-Status:    posted / reviewed / applied to &lt;tree&gt; / in mainline since &lt;version&gt;
+Route:     local / public
+Link:      https://lore.kernel.org/...          (public route only: the thread)
+Status:    ready to send / posted / reviewed / applied to &lt;tree&gt; / in mainline since &lt;version&gt;
 
 ## The defect
 What was wrong, and how I knew it was wrong (not only which tool reported it).
@@ -442,7 +453,8 @@ The command, and what else I ruled out before picking this one.
 Build command, configuration, and the run-time test if there was one.
 
 ## Review
-Who commented, what they asked for, what I answered.
+Local route: what my own review a day later found, checked against the six criteria.
+Public route: who commented, what they asked for, what I answered.
 
 ## What changed between versions
 v1 -&gt; v2 -&gt; ...
