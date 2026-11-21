@@ -17,9 +17,10 @@ on:
 permissions:
   contents: read
 
+# A kernel build is too expensive to throw away: a newer push waits for the run in progress.
 concurrency:
   group: kernel-labs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   LINUX_TAG: v7.3.1
@@ -59,7 +60,7 @@ jobs:
       # and the host tools are all that booting and building out-of-tree modules need.
       - name: Restore the built kernel
         id: kernel
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.KLAB }}/build
           key: klab-${{ matrix.flavour }}-${{ env.LINUX_TAG }}-${{ runner.os }}-${{ hashFiles('scripts/kernel-labs/build-kernel.sh') }}
@@ -75,6 +76,14 @@ jobs:
           find "$KLAB/build" -type f \( -name '*.o' -o -name '*.a' -o -name '*.cmd' \) -not -path "$KLAB/build/scripts/*" -delete
           find "$KLAB/build" -maxdepth 1 -type f \( -name 'vmlinux' -o -name 'vmlinux.*' -o -name '.tmp_vmlinux*' \) -not -name vmlinux.symvers -delete
           du -sh "$KLAB/build"
+
+      # Saved right after the build, so that a failing ticket does not cost the next run a rebuild.
+      - name: Save the built kernel
+        if: steps.kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.KLAB }}/build
+          key: ${{ steps.kernel.outputs.cache-primary-key }}
 
       - name: Run the range
         run: sh scripts/kernel-labs/range.sh "${{ matrix.flavour }}" "$KLAB/linux" "$KLAB/build" "$KLAB/work"

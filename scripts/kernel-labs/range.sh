@@ -50,6 +50,11 @@ refute() {
 	if grep -q -e "$2" "$work/logs/$flavour-$1.txt"; then echo "FAIL $1: must not appear: $2"; fail=1
 	else echo "ok   $1: absent: $2"; fi
 }
+count() {
+	n=$(grep -c -e "$3" "$work/logs/$flavour-$1.txt" || true)
+	if [ "$n" = "$2" ]; then echo "ok   $1: $2 times: $3"
+	else echo "FAIL $1: expected $2 times, found $n: $3"; fail=1; fi
+}
 show() { grep -e "$2" "$work/logs/$flavour-$1.txt" || true; }
 clean() { refute "$1" 'BUG: '; refute "$1" 'WARNING: '; refute "$1" 'INFO: task'; }
 
@@ -82,8 +87,7 @@ echo "=== stress"; ./stress-session.sh; ./stress-session.sh; ./stress-session.sh
 echo "=== rmmod"; rmmod lg_session; sleep 1
 echo "=== done"
 EOF
-		expect fixed-session 'stress-session: total 3200, expected 3200'
-		expect fixed-session 'stress-session: total 9600'
+		count fixed-session 3 'stress-session: this run added 3200 bytes, expected 3200'
 		expect fixed-session '=== done'
 		clean fixed-session
 	fi
@@ -109,7 +113,7 @@ echo "=== stress"; ./stress-route.sh; ./stress-route.sh; ./stress-route.sh
 echo "=== rmmod"; rmmod lg_route
 echo "=== done"
 EOF
-		expect fixed-route 'stress-route: done'
+		count fixed-route 3 'stress-route: done'
 		expect fixed-route '=== done'
 		clean fixed-route
 	fi
@@ -167,11 +171,11 @@ fi
 if wanted fixed-stats; then
 	ticket fixed-stats "$limit" <<'EOF'
 echo "=== insmod fixed lg_stats"; insmod fixed/lg_stats.ko
-echo "=== stress"; ./stress-stats.sh
+echo "=== stress"; ./stress-stats.sh; ./stress-stats.sh; ./stress-stats.sh
 echo "=== rmmod"; rmmod lg_stats
 echo "=== done"
 EOF
-	expect fixed-stats 'stress-stats: packets 8000 bytes 128000 next_seq 8000'
+	count fixed-stats 3 'stress-stats: packets 8000 bytes 128000 next_seq 8000'
 	expect fixed-stats '=== done'
 	refute fixed-stats 'lg_stats_'
 	# KCSAN also reports races in the kernel itself, so on that kernel only the module is checked.
