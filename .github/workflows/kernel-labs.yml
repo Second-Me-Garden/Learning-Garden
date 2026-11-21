@@ -1,0 +1,99 @@
+name: kernel labs
+
+# Builds the two lab kernels of the kernel practical track (v7.3.1, arm64, clang) and runs every
+# ticket of the Practical 2 debugging range in QEMU: the planted bug must be reported by its tool
+# and the module with the reference fix must be clean. A kernel build takes about 20 minutes, so
+# this runs only when the lab code or the lab scripts change, or by hand.
+
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore: [main]
+    paths:
+      - 'topics/kernel-engineering/practical-*/lab/**'
+      - 'scripts/kernel-labs/**'
+      - '.github/workflows/kernel-labs.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-labs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LINUX_TAG: v7.3.1
+  KLAB: /home/runner/klab
+
+jobs:
+  range:
+    name: debugging range (${{ matrix.flavour }} kernel)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        flavour: [debug, kcsan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax-check the lab scripts
+        run: |
+          for f in scripts/kernel-labs/*.sh topics/kernel-engineering/practical-*/lab/*.sh; do sh -n "$f"; done
+
+      - name: Install the toolchain and QEMU
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            clang lld llvm make flex bison bc libelf-dev libssl-dev cpio patch curl qemu-system-arm
+          clang --version | head -n 1
+          qemu-system-aarch64 --version | head -n 1
+
+      - name: Fetch the kernel source
+        run: |
+          mkdir -p "$KLAB"
+          git clone -q --depth 1 --branch "$LINUX_TAG" https://github.com/gregkh/linux.git "$KLAB/linux"
+          git -C "$KLAB/linux" log -1 --format='%H %s'
+
+      # The build tree is kept between runs without its object files: the Image, the configuration
+      # and the host tools are all that booting and building out-of-tree modules need.
+      - name: Restore the built kernel
+        id: kernel
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.KLAB }}/build
+          key: klab-${{ matrix.flavour }}-${{ env.LINUX_TAG }}-${{ runner.os }}-${{ hashFiles('scripts/kernel-labs/build-kernel.sh') }}
+
+      - name: Build the kernel
+        if: steps.kernel.outputs.cache-hit != 'true'
+        run: |
+          start=$(date +%s)
+          sh scripts/kernel-labs/build-kernel.sh "${{ matrix.flavour }}" "$KLAB/linux" "$KLAB/build" > "$KLAB/build.log" 2>&1 \
+            || { tail -n 80 "$KLAB/build.log"; exit 1; }
+          echo "kernel build: $(( $(date +%s) - start )) s"
+          du -sh "$KLAB/build"
+          find "$KLAB/build" -type f \( -name '*.o' -o -name '*.a' -o -name '*.cmd' \) -not -path "$KLAB/build/scripts/*" -delete
+          find "$KLAB/build" -maxdepth 1 -type f \( -name 'vmlinux' -o -name 'vmlinux.*' -o -name '.tmp_vmlinux*' \) -not -name vmlinux.symvers -delete
+          du -sh "$KLAB/build"
+
+      - name: Run the range
+        run: sh scripts/kernel-labs/range.sh "${{ matrix.flavour }}" "$KLAB/linux" "$KLAB/build" "$KLAB/work"
+
+      - name: Show the guest logs
+        if: always()
+        run: |
+          for f in "$KLAB"/work/logs/*.txt; do
+            [ -f "$f" ] || continue
+            echo "::group::$(basename "$f") ($(wc -l < "$f") lines)"
+            # Everything from the first "===" marker on; a guest that hangs can print thousands of lines.
+            sed -n '/^===/,$p' "$f" | head -n 600
+            echo "::endgroup::"
+          done
+
+      - name: Keep the guest logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: range-logs-${{ matrix.flavour }}
+          path: ${{ env.KLAB }}/work/logs
+          if-no-files-found: ignore
