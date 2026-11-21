@@ -78,6 +78,17 @@ for (const page of pages) {
         if (/\blang=/.test(m[0])) problems.push(`${rel}: div.${m[1]} must not carry lang (its children are paired)`);
       }
     }
+    // Reading aids (contract: Reading aids). Optional per lesson; when present they follow the same container rule.
+    for (const m of html.matchAll(/<div class="(plain|terms|wider)"[^>]*>/g)) {
+      if (/\blang=/.test(m[0])) problems.push(`${rel}: div.${m[1]} must not carry lang (its children are paired)`);
+    }
+    const nPlain = (html.match(/<div class="plain"/g) || []).length;
+    const nConcepts = (html.match(/<h3 lang="zh-CN">\d+\./g) || []).length;
+    if (nPlain && nPlain !== nConcepts) problems.push(`${rel}: ${nPlain} div.plain for ${nConcepts} numbered concepts (one each, or none)`);
+    for (const k of ['terms', 'wider']) {
+      const n = (html.match(new RegExp(`<div class="${k}"`, 'g')) || []).length;
+      if (n > 1) problems.push(`${rel}: ${n} div.${k} (at most 1)`);
+    }
   }
   // Circled numbers are banned everywhere (contract: Bilingual pairing).
   if (/[①-⑳]/.test(html)) problems.push(`${rel}: circled number glyph (U+2460–U+2473)`);

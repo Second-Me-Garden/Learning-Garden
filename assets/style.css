@@ -334,6 +334,29 @@ body.hub { min-height: 100svh; background-color: var(--bg);
 .recap li + li { margin-top: 4px; }
 .recap > p > strong { font-size: 12.5px; letter-spacing: .02em; color: var(--accent); }
 .recap > ul + p { margin-top: 14px; }
+/* Reading aids (2026-11-21), same container rules as the devices above: paired children, label drawn here.
+   .plain — under a concept heading: the idea in everyday words, one analogy, no new terms.
+   .terms — after the prerequisites: the words the lesson leans on, one plain line each.
+   .wider — after the recap: neighbouring topics the lesson does not cover, each with a free source.
+   Shapes differ from the four above: plain = a soft accent tint, terms = a dashed card, wider = a dashed top rule. */
+.plain, .terms, .wider { max-width: none; margin: 12px 0 18px; }
+.plain { background: color-mix(in srgb, var(--accent) 9%, transparent); border-radius: var(--radius); padding: 10px 16px; }
+.terms { border: 1px dashed var(--box-line); border-radius: var(--radius); padding: 12px 18px 10px; font-size: 14.5px; }
+.wider { border-top: 2px dashed var(--accent); padding: 10px 0 0; margin-top: 22px; }
+.plain::before, .terms::before, .wider::before { display: block; font-size: 12.5px; font-weight: 700; letter-spacing: .02em; color: var(--accent); margin: 0 0 6px; }
+.plain::before { content: "大白话"; }
+.terms::before { content: "术语速查"; }
+.wider::before { content: "再往外一步"; }
+:root[data-lang="en"] .plain::before { content: "In plain words"; }
+:root[data-lang="en"] .terms::before { content: "Terms at a glance"; }
+:root[data-lang="en"] .wider::before { content: "Going wider"; }
+.plain > p, .terms > p, .wider > p { margin: 0 0 8px; }
+.plain > p:last-child, .terms > ul:last-child, .wider > ul:last-child { margin-bottom: 0; }
+.terms ul, .wider ul { margin: 4px 0 8px; padding-left: 20px; }
+.terms li + li { margin-top: 3px; }
+.wider li + li { margin-top: 8px; }
+@media (min-width: 900px) { .terms ul { columns: 2; column-gap: 36px; } .terms li { break-inside: avoid; } }
+@media (max-width: 600px) { .plain { padding: 9px 12px; } .terms { padding: 10px 12px 8px; } }
 
 .cmp { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 .cmp th, .cmp td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }

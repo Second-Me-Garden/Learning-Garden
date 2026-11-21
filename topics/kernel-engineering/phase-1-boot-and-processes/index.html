@@ -51,6 +51,43 @@
     <li lang="en">The gist of the AAPCS64 calling convention: <code>x0–x7</code> pass arguments, <code>x19–x28</code> are callee-saved (the callee is responsible for saving them).</li>
   </ul>
 
+  <div class="terms">
+    <p lang="zh-CN">这一课会反复用到下面这些词。先扫一遍，读到不认识的词再回来查。</p>
+    <p lang="en">This lesson uses the words below again and again. Skim them now, and come back when you meet one you do not know.</p>
+    <ul>
+      <li lang="zh-CN"><strong>bootloader（引导程序）</strong>：开机后最先运行的一小段程序。它只做一件事：把内核装进内存，再把 CPU 交给内核。</li>
+      <li lang="en"><strong>bootloader</strong>: The small program that runs first after power-on. It does one job: load the kernel into memory and hand the CPU to it.</li>
+      <li lang="zh-CN"><strong>MMU（内存管理单元）</strong>：CPU 里的一块硬件，负责把程序用的「虚拟地址」翻译成内存条上的「物理地址」。打开它之前，内核只能直接用物理地址。</li>
+      <li lang="en"><strong>MMU (memory management unit)</strong>: Hardware inside the CPU that translates the virtual addresses a program uses into physical addresses in RAM. Until it is turned on, the kernel can only use physical addresses.</li>
+      <li lang="zh-CN"><strong>PID</strong>：内核给每个进程编的号。PID 1 是第一个用户进程，其他用户进程都是它的后代。</li>
+      <li lang="en"><strong>PID</strong>: The number the kernel gives each process. PID 1 is the first user process, and every other user process descends from it.</li>
+      <li lang="zh-CN"><strong>内核线程（kernel thread）</strong>：只在内核里运行的线程，没有自己的用户程序，替内核做后台工作。</li>
+      <li lang="en"><strong>kernel thread</strong>: A thread that runs only inside the kernel. It has no user program of its own and does background work for the kernel.</li>
+      <li lang="zh-CN"><strong><code>task_struct</code></strong>：Linux 内核里记录一个线程全部信息的结构体，可以当成这个线程的档案。</li>
+      <li lang="en"><strong><code>task_struct</code></strong>: The structure in which the Linux kernel records everything about one thread. Think of it as that thread’s file.</li>
+      <li lang="zh-CN"><strong>地址空间（address space，Linux 里是 <code>mm</code>）</strong>：一个进程看得见的全部内存，加上说明「这些内存各自对应到哪里」的那套页表。</li>
+      <li lang="en"><strong>address space (<code>mm</code> on Linux)</strong>: All the memory one process can see, plus the page tables that say where each piece of it really lives.</li>
+      <li lang="zh-CN"><strong>写时复制（COW，copy-on-write）</strong>：复制内存时先不真的复制，双方共用同一份；谁先去改，才单独给谁复制那一页。</li>
+      <li lang="en"><strong>copy-on-write (COW)</strong>: Copying memory without really copying it: both sides share one copy, and a page is duplicated only when one side writes to it.</li>
+      <li lang="zh-CN"><strong>上下文（context）</strong>：一个线程暂停时必须记下来的东西，主要是 CPU 寄存器里的值，以及它的栈在哪。</li>
+      <li lang="en"><strong>context</strong>: What must be written down when a thread pauses: mainly the values in the CPU registers and where its stack is.</li>
+      <li lang="zh-CN"><strong>callee-saved 寄存器</strong>：调用约定规定「被调用的函数用过之后必须恢复原值」的那些寄存器，arm64 上主要是 <code>x19–x28</code>。</li>
+      <li lang="en"><strong>callee-saved registers</strong>: The registers that, by the calling convention, a called function must restore before it returns. On arm64 these are mainly <code>x19–x28</code>.</li>
+      <li lang="zh-CN"><strong>TLB 和 ASID</strong>：TLB 是 CPU 里的一张小表，缓存最近用过的「虚拟地址 → 物理地址」翻译结果。ASID 是贴在每个地址空间上的标签，让不同进程的缓存项可以同时留在 TLB 里。</li>
+      <li lang="en"><strong>TLB and ASID</strong>: The TLB is a small table in the CPU that caches recent virtual-to-physical translations. An ASID is a tag on each address space, so entries of different processes can stay in the TLB together.</li>
+      <li lang="zh-CN"><strong>运行队列（run queue）</strong>：每个 CPU 上的一份名单：现在就能运行、正在等 CPU 的线程。</li>
+      <li lang="en"><strong>run queue</strong>: A per-CPU list of the threads that could run right now and are waiting for the CPU.</li>
+      <li lang="zh-CN"><strong>时间片（slice）</strong>：一个线程一次最多连续运行多久。</li>
+      <li lang="en"><strong>slice</strong>: How long one thread may run in one go.</li>
+      <li lang="zh-CN"><strong><code>vruntime</code></strong>：按权重折算过的已运行时间。优先级高的线程权重大，同样运行 1 ms，<code>vruntime</code> 涨得更少。</li>
+      <li lang="en"><strong><code>vruntime</code></strong>: Run time scaled by weight. A higher-priority thread has a larger weight, so the same 1 ms of running adds less to its <code>vruntime</code>.</li>
+      <li lang="zh-CN"><strong>QoS</strong>：macOS 上程序告诉系统「这件事有多急」的等级，从用户正盯着看的界面操作一直到后台任务。</li>
+      <li lang="en"><strong>QoS</strong>: On macOS, the class a program uses to tell the system how urgent some work is, from the interface the user is watching down to background work.</li>
+      <li lang="zh-CN"><strong>Mach 和 BSD</strong>：XNU 内核的两层。Mach 管线程、内存和消息传递；BSD 层在它上面提供进程、文件、网络这些 Unix 接口。</li>
+      <li lang="en"><strong>Mach and BSD</strong>: The two layers of the XNU kernel. Mach handles threads, memory and message passing; the BSD layer on top provides the Unix interfaces: processes, files, networking.</li>
+    </ul>
+  </div>
+
   <h2 id="concepts" lang="zh-CN">核心概念</h2><h2 id="concepts-en" lang="en">Core concepts</h2>
 
   <div class="crux">
@@ -61,6 +98,10 @@
   </div>
 
   <h3 lang="zh-CN">1. Boot chain：从 bootloader 到 PID 1</h3><h3 lang="en">1. Boot chain: from the bootloader to PID 1</h3>
+  <div class="plain">
+    <p lang="zh-CN">把开机想成一家餐厅早上开门。保安（bootloader）只负责开门，把主厨（内核）请进厨房。主厨先合上电闸（打开 MMU），再按固定顺序把设备检查一遍（一长串初始化函数），最后雇来第一位经理（PID 1）。从这一刻起，招人和排班都归经理管，主厨留在后厨随叫随到。下面两段讲的就是 Linux 和 XNU 各自的开门流程，只是每一步都换成了真实的函数名。</p>
+    <p lang="en">Think of booting as a restaurant opening in the morning. The guard (the bootloader) only unlocks the door and lets the head chef (the kernel) into the kitchen. The chef first throws the main switch (turns the MMU on), then checks the equipment in a fixed order (a long run of initialisation functions), and finally hires the first manager (PID 1). From then on the manager does the hiring and the rota, and the chef stays in the kitchen, on call. The two lists below are that opening routine for Linux and for XNU, with each step replaced by its real function name.</p>
+  </div>
   <p lang="zh-CN"><strong>Linux arm64</strong>（规范见 <code>Documentation/arch/arm64/booting.rst</code>）：</p>
   <p lang="en"><strong>Linux arm64</strong> (specified in <code>Documentation/arch/arm64/booting.rst</code>):</p>
   <ol>
@@ -101,6 +142,10 @@
   <p lang="en">Further reading: <em>Understanding the Linux Kernel</em>, Appendix A, “System Startup” (x86 / 2.6 era); for XNU, the boot-related chapters of <em>Mac OS X Internals</em> (PowerPC / Intel era, same shape).</p>
 
   <h3 lang="zh-CN">2. 进程与线程模型</h3><h3 lang="en">2. The process and thread model</h3>
+  <div class="plain">
+    <p lang="zh-CN">进程像一套公寓，有自己的房间（内存）和钥匙（打开的文件）。线程是住在里面的人，真正干活的是人，不是房子。同一套公寓里的人共用所有房间，所以一个线程改了内存，同一进程的其他线程马上就能看到。Linux 只给「人」建档案，同住的人档案里写着同一套公寓。XNU 则给公寓、人和「户口」（PID 那一套）各建一份档案。</p>
+    <p lang="en">A process is like a flat: it has its own rooms (memory) and keys (open files). Threads are the people living in it, and it is the people who do the work, not the flat. People in one flat share every room, so when one thread changes memory, the other threads of that process see it at once. Linux keeps a file only for each person, and flatmates’ files name the same flat. XNU keeps one file for the flat, one for each person, and one for the household registration (the PID side of things).</p>
+  </div>
   <p lang="zh-CN"><strong>Linux</strong> 只有一种可调度实体：<code>struct task_struct</code>（<code>include/linux/sched.h</code>）。「进程」和「线程」的区别只在于创建时 <code>clone</code> 的 flags 共享了什么：</p>
   <p lang="en"><strong>Linux</strong> has only one schedulable entity: <code>struct task_struct</code> (<code>include/linux/sched.h</code>). The difference between a “process” and a “thread” is only what the <code>clone</code> flags shared at creation:</p>
   <ul>
@@ -129,6 +174,10 @@
   <p lang="en">Further reading: <em>Linux Kernel Development</em>, Chapter 3, “Process Management”; <em>Understanding the Linux Kernel</em>, Chapter 3, “Processes” (including process switching).</p>
 
   <h3 lang="zh-CN">3. 上下文切换</h3><h3 lang="en">3. Context switch</h3>
+  <div class="plain">
+    <p lang="zh-CN">想象图书馆里只有一张书桌（CPU），很多人轮流用。轮到你离开时，你在书里夹一张书签，记下读到哪一页、笔记本放在哪（保存寄存器和栈的位置）。下一个人坐下，翻到自己的书签接着读。只要书签记得全，你回来时完全感觉不到书桌被别人用过。上下文切换就是这张书签。这一节讲三件事：书签上记什么，书签放在哪，以及什么时候连书架（页表）也一起换。</p>
+    <p lang="en">Picture a library with a single desk (the CPU) that many people take turns at. When your turn ends you slip a bookmark into your book, noting the page you reached and where your notebook is (saving the registers and where the stack is). The next person sits down, opens at their own bookmark and reads on. If the bookmark is complete, you cannot tell on your return that anyone else used the desk. A context switch is that bookmark. This concept covers three things: what goes on the bookmark, where the bookmark is kept, and when the bookshelf (the page tables) is swapped as well.</p>
+  </div>
   <p lang="zh-CN">切换总发生在<strong>内核态</strong>，并且对被切走的线程来说只是「调用了一个函数，很久以后它返回了」。因为是函数调用，按 AAPCS64 只需保存 callee-saved 寄存器（<code>x19–x28</code>、<code>fp</code>=<code>x29</code>、<code>lr</code>=<code>x30</code>、<code>sp</code>）；用户态的全部寄存器早在异常入口就存进了内核栈上的 <code>pt_regs</code> / saved state（Phase 0）。</p>
   <p lang="en">A switch always happens in <strong>kernel mode</strong>, and to the thread being switched out it is just “I called a function, and much later it returned”. Because it is a function call, AAPCS64 only requires saving the callee-saved registers (<code>x19–x28</code>, <code>fp</code>=<code>x29</code>, <code>lr</code>=<code>x30</code>, <code>sp</code>); all user-mode registers were already saved into <code>pt_regs</code> / saved state on the kernel stack at exception entry (Phase 0).</p>
   <div class="worked">
@@ -163,6 +212,10 @@ ldp x19,x20 / ... / x29,x9 ; ldr lr ; mov sp, x9 ; msr sp_el0, x1 ; ret</pre>
   </ul>
 
   <h3 lang="zh-CN">4. 调度：选下一个是谁</h3><h3 lang="en">4. Scheduling: who runs next</h3>
+  <div class="plain">
+    <p lang="zh-CN">只有一个窗口（CPU），很多人在排队，调度器就是决定「下一位是谁」的人。最简单的公平规则是：到目前为止谁被服务得最少，就先服务谁，这是 CFS。EEVDF 多加一步：先把已经多占了的人排除，再在剩下的人里挑截止时间最早的，于是每次只要一小段时间的人能更快轮到。XNU 的思路不同：先按事情有多急把人分进几条队（QoS），再决定这一轮先看哪条队。</p>
+    <p lang="en">There is one counter (the CPU) and a queue of people, and the scheduler is whoever decides who is next. The simplest fair rule is to serve whoever has been served least so far: that is CFS. EEVDF adds a step: first rule out anyone who has already had more than their share, then among the rest pick the one whose deadline comes first, so someone who asks for only a short turn each time gets served sooner. XNU thinks differently: it first sorts people into several queues by how urgent their business is (QoS), then decides which queue to look at this round.</p>
+  </div>
   <p lang="zh-CN"><strong>Linux</strong> 用调度类分层（<code>stop</code> → <code>deadline</code> → <code>rt</code> → <code>fair</code> → <code>idle</code>），普通任务都在 fair 类（<code>kernel/sched/fair.c</code>）。优先级数值 0–139：0–99 实时，100–139 对应 nice −20…19。</p>
   <p lang="en"><strong>Linux</strong> layers scheduling classes (<code>stop</code> → <code>deadline</code> → <code>rt</code> → <code>fair</code> → <code>idle</code>); ordinary tasks are all in the fair class (<code>kernel/sched/fair.c</code>). Priority values run 0–139: 0–99 are real-time, 100–139 correspond to nice −20…19.</p>
   <ul>
@@ -201,6 +254,10 @@ ldp x19,x20 / ... / x29,x9 ; ldr lr ; mov sp, x9 ; msr sp_el0, x1 ; ret</pre>
   <p lang="en">Further reading: <em>Linux Kernel Development</em>, Chapter 4, “Process Scheduling” (CFS era); <em>Operating Systems: Three Easy Pieces</em>, Chapters 7–10 (introduction to scheduling, MLFQ, proportional share, multiprocessor scheduling).</p>
 
   <h3 lang="zh-CN">5. <code>ps</code>/<code>top</code> 看到的 vs 内核持有的</h3><h3 lang="en">5. What <code>ps</code>/<code>top</code> show vs what the kernel holds</h3>
+  <div class="plain">
+    <p lang="zh-CN"><code>ps</code> 和 <code>top</code> 像汽车的仪表盘：上面只有时速、油量这几个数，而发动机里还有上百个传感器读数。内核记着每个线程的完整账目，这些工具只挑其中一部分，换算成人容易读的样子再显示出来。所以仪表盘上的名字和数字，常常和内核里的对不上。这一节就是两边的对照。</p>
+    <p lang="en"><code>ps</code> and <code>top</code> are like a car’s dashboard: it shows speed, fuel and a few other numbers, while the engine has a hundred more sensor readings. The kernel keeps full accounts for every thread, and these tools pick a part of them and convert it into something easy to read. That is why the names and numbers on the dashboard often do not match the ones inside the kernel. This concept lines the two up.</p>
+  </div>
   <ul>
     <li lang="zh-CN">Linux 的 <code>ps</code>/<code>top</code> 只是读 <code>/proc</code>：<code>/proc/&lt;pid&gt;/stat</code>、<code>status</code>，线程在 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/</code>。显示的 PID 是 tgid；<code>ps -L</code> 的 LWP 才是每个 task 的 ID。</li>
     <li lang="en">On Linux, <code>ps</code>/<code>top</code> just read <code>/proc</code>: <code>/proc/&lt;pid&gt;/stat</code>, <code>status</code>, with threads under <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/</code>. The PID shown is the tgid; the LWP in <code>ps -L</code> is each task’s own ID.</li>
@@ -238,6 +295,25 @@ ldp x19,x20 / ... / x29,x9 ; ldr lr ; mov sp, x9 ; msr sp_el0, x1 ; ret</pre>
       <li>Myth: on a context switch the kernel saves every user-mode register. → Fact: the user registers were already saved into <code>pt_regs</code> at exception entry; the switch function itself saves only 13 callee-saved registers.</li>
       <li>Myth: on Linux a thread is a different, lighter kernel object than a process. → Fact: both are <code>task_struct</code>; a thread has merely shared the <code>mm</code> and the fd table through flags such as <code>CLONE_VM</code>.</li>
       <li>Myth: a lower-nice task always runs first and a higher-nice task waits until it is done. → Fact: nice only sets the weight, that is the share; a nice 5 task next to a nice 0 task still gets about 25 % of the CPU, and which runs next depends on lag and the virtual deadline.</li>
+    </ul>
+  </div>
+
+  <div class="wider">
+    <p lang="zh-CN">这一课只讲了一个 CPU 上怎样轮流运行普通线程。下面几个话题紧挨着它，真实系统里天天碰到。每条先用几句话说清它是什么，再给一个可以免费阅读的出处。</p>
+    <p lang="en">This lesson covered only how ordinary threads take turns on one CPU. The topics below sit right next to it and turn up daily on real systems. Each gets a few sentences on what it is, then a source that is free to read.</p>
+    <ul>
+      <li lang="zh-CN"><strong>进程怎么结束：僵尸和孤儿</strong>。进程退出后不会马上消失。它的退出码要等父进程用 <code>wait()</code> 取走，在那之前它是「僵尸」（内核里的状态叫 <code>EXIT_ZOMBIE</code>）：不再运行，大部分资源已经释放，只留着内核里的档案。如果父进程先退出，子进程成了孤儿，内核会给它另找一个「收养者」，通常是 PID 1，由它负责最后的回收。出处：<a href="https://github.com/gregkh/linux/blob/v7.3.1/kernel/exit.c"><code>kernel/exit.c</code></a>（<code>release_task()</code>、<code>find_child_reaper()</code>）。</li>
+      <li lang="en"><strong>How a process ends: zombies and orphans.</strong> A process does not vanish the moment it exits. Its exit code waits for the parent to collect it with <code>wait()</code>, and until then it is a zombie (the kernel state is <code>EXIT_ZOMBIE</code>): it no longer runs, most of its resources are freed, and only its record in the kernel remains. If the parent exits first, the child is an orphan and the kernel finds it a new reaper, usually PID 1, which does the final clean-up. Source: <a href="https://github.com/gregkh/linux/blob/v7.3.1/kernel/exit.c"><code>kernel/exit.c</code></a> (<code>release_task()</code>, <code>find_child_reaper()</code>).</li>
+      <li lang="zh-CN"><strong>多核：每个 CPU 一条队，再做负载均衡</strong>。这一课的图只画了一条运行队列。真实机器上每个 CPU 各有一条，内核定期在 CPU 之间搬任务，把忙的和闲的拉平。搬动的范围按「调度域」一层层划分，一个域的意思就是「在这些 CPU 之间均衡负载」。大小核的机器上还要多算一步：每个核的算力（capacity）不一样。出处：<a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/scheduler/sched-domains.rst">sched-domains.rst</a>、<a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/scheduler/sched-capacity.rst">sched-capacity.rst</a>。</li>
+      <li lang="en"><strong>More than one core: a queue per CPU, then load balancing.</strong> The diagrams in this lesson draw a single run queue. A real machine has one per CPU, and the kernel periodically moves tasks between CPUs to even out the busy ones and the idle ones. How far a task may move is organised into nested scheduling domains; a domain simply means “balance load among these CPUs”. On a machine with big and little cores there is one more step: each core has a different capacity. Sources: <a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/scheduler/sched-domains.rst">sched-domains.rst</a>, <a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/scheduler/sched-capacity.rst">sched-capacity.rst</a>.</li>
+      <li lang="zh-CN"><strong>实时任务：<code>SCHED_FIFO</code>、<code>SCHED_RR</code> 和 <code>SCHED_DEADLINE</code></strong>。普通任务按公平来分 CPU。音频、机器人控制这类任务要的不是公平，而是「到点必须跑」。<code>SCHED_FIFO</code> 和 <code>SCHED_RR</code> 用固定优先级，高的永远先跑。<code>SCHED_DEADLINE</code> 让任务自己声明三个数：每个周期要跑多久、最晚何时跑完、周期多长；内核按最早截止时间优先（EDF）来排，再用一个叫 CBS 的机制防止某个任务超用、拖累别人。出处：<a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/scheduler/sched-deadline.rst">sched-deadline.rst</a>。</li>
+      <li lang="en"><strong>Real-time tasks: <code>SCHED_FIFO</code>, <code>SCHED_RR</code> and <code>SCHED_DEADLINE</code>.</strong> Ordinary tasks share the CPU fairly. Audio or robot control does not want fairness; it wants to run on time, every time. <code>SCHED_FIFO</code> and <code>SCHED_RR</code> use fixed priorities, and the higher one always runs first. With <code>SCHED_DEADLINE</code> a task declares three numbers: how long it must run in each period, by when, and how long the period is; the kernel orders such tasks by earliest deadline first (EDF) and uses a mechanism called CBS so that one task overrunning cannot hurt the others. Source: <a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/scheduler/sched-deadline.rst">sched-deadline.rst</a>.</li>
+      <li lang="zh-CN"><strong>给一组进程限额：cgroup 和 namespace，容器的地基</strong>。调度器照顾的不只是单个线程。cgroup v2 把进程组织成一棵树，可以给每一组设 CPU 份额（<code>cpu.weight</code>）和上限（<code>cpu.max</code>）。namespace 则让一组进程看到自己独立的一套 PID 编号、网络和挂载点，创建时用的是 <code>clone()</code> 的 <code>CLONE_NEWPID</code>、<code>CLONE_NEWNET</code> 这些标志。Docker 这类容器就是这两样东西的组合。出处：<a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/admin-guide/cgroup-v2.rst">cgroup-v2.rst</a>、<a href="https://github.com/gregkh/linux/blob/v7.3.1/include/uapi/linux/sched.h"><code>include/uapi/linux/sched.h</code></a>。</li>
+      <li lang="en"><strong>Limits for a group of processes: cgroups and namespaces, the ground containers stand on.</strong> The scheduler looks after more than single threads. cgroup v2 arranges processes in a tree, and each group can be given a CPU share (<code>cpu.weight</code>) and a ceiling (<code>cpu.max</code>). A namespace gives a group of processes its own view of PID numbers, the network and the mount points; it is created with <code>clone()</code> flags such as <code>CLONE_NEWPID</code> and <code>CLONE_NEWNET</code>. A container such as Docker is these two things combined. Sources: <a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/admin-guide/cgroup-v2.rst">cgroup-v2.rst</a>, <a href="https://github.com/gregkh/linux/blob/v7.3.1/include/uapi/linux/sched.h"><code>include/uapi/linux/sched.h</code></a>.</li>
+      <li lang="zh-CN"><strong>用 BPF 自己写调度器：sched_ext</strong>。想换调度策略，不一定要改内核源码。sched_ext 是一个调度类，它的行为由一组 BPF 程序定义，可以随时打开和关掉；文档写明，不管这个 BPF 调度器做了什么，系统的完整性都有保证。它是拿概念 4 里的想法做实验的最低门槛。出处：<a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/scheduler/sched-ext.rst">sched-ext.rst</a>。</li>
+      <li lang="en"><strong>Writing your own scheduler in BPF: sched_ext.</strong> Changing the scheduling policy no longer has to mean changing kernel source. sched_ext is a scheduling class whose behaviour is defined by a set of BPF programs, and it can be switched on and off at any time; its documentation states that system integrity is maintained whatever the BPF scheduler does. It is the cheapest way to experiment with the ideas of concept 4. Source: <a href="https://github.com/gregkh/linux/blob/v7.3.1/Documentation/scheduler/sched-ext.rst">sched-ext.rst</a>.</li>
+      <li lang="zh-CN"><strong>macOS 上的线程常常不是你创建的：workqueue</strong>。在 macOS 上，程序通常把任务交给 GCD 的队列，而不是自己开线程。此刻给这个进程开几个线程，由内核里的 workqueue 决定：有线程阻塞了就补，闲久了就收回。所以在 <code>ps -M</code> 里看到的线程数会自己涨落。出处：<a href="https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.121.6/bsd/pthread/pthread_workqueue.c"><code>bsd/pthread/pthread_workqueue.c</code></a>；并行编程专题的 <a href="../../parallel-programming/phase-1-threads-and-the-os/index.html">Phase 1</a> 实测了它。</li>
+      <li lang="en"><strong>On macOS the threads are often not ones you created: the workqueue.</strong> On macOS a program usually hands work to GCD queues instead of starting threads itself. How many threads the process has at this moment is decided by the workqueue in the kernel: it adds threads when some block and takes them back when they sit idle. That is why the thread count in <code>ps -M</code> rises and falls on its own. Source: <a href="https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.121.6/bsd/pthread/pthread_workqueue.c"><code>bsd/pthread/pthread_workqueue.c</code></a>; <a href="../../parallel-programming/phase-1-threads-and-the-os/index.html">Phase 1</a> of the Parallel Programming topic measures it.</li>
     </ul>
   </div>
 
