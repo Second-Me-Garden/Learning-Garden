@@ -155,19 +155,38 @@ fi
 
 # The stats ticket runs on both kernels: the debug kernel shows the symptom (lost updates),
 # the KCSAN kernel names the two accesses that race. A KCSAN kernel is several times slower.
+# KCSAN watches a sample of the accesses, so one run of the stress script may pass without a
+# report (the first run on GitHub did): on that kernel the script is repeated, five times at most.
 limit=600
 [ "$flavour" = kcsan ] && limit=1800
 if wanted stats; then
 	ticket stats "$limit" <<'EOF'
 echo "=== insmod lg_stats"; insmod lg_stats.ko
-echo "=== stress"; ./stress-stats.sh
-echo "=== kcsan"; dmesg | grep -i -m 20 'kcsan'; head -n 30 /sys/kernel/debug/kcsan 2>/dev/null
+echo "=== stress"
+n=0
+while :; do
+	n=$((n + 1))
+	./stress-stats.sh
+	[ -e /sys/kernel/debug/kcsan ] || break
+	dmesg | grep -q 'BUG: KCSAN: data-race in lg_stats_' && break
+	[ "$n" -lt 5 ] || break
+done
+echo "=== stress runs: $n"
+echo "=== kcsan"; dmesg | grep -m 5 'kcsan:'
 echo "=== done"
 EOF
 	expect stats 'stress-stats: packets'
 	show stats 'stress-stats:'
+	show stats '=== stress runs:'
 	if [ "$flavour" = kcsan ]; then
 		expect stats 'BUG: KCSAN: data-race in lg_stats_'
+		# The source line of each access a report names. A frame is a return address: the
+		# call into KCSAN that stands for the access is the instruction before it.
+		base=$(llvm-nm "$work/lab/lg_stats.ko" | awk '$3 == "lg_stats_write" { print $1 }')
+		for off in $(grep -o 'lg_stats_write+0x[0-9a-f]*' "$work/logs/kcsan-stats.txt" | sort -u | sed 's/.*+//'); do
+			addr=$(printf '0x%x' $((0x$base + off - 4)))
+			echo "lg_stats_write+$off is $(llvm-addr2line -i -e "$work/lab/lg_stats.ko" "$addr" | sed 's|.*/||' | tr '\n' ' ')"
+		done
 	fi
 fi
 if wanted fixed-stats; then
